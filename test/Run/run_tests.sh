@@ -3,6 +3,10 @@
 # + clang + the matlab runtime, runs the executable, and compares stdout to
 # the matching .stdout file. Failure if stdout differs or exit is non-zero.
 #
+# The runtime is compiled ONCE into objects up front and linked per fixture
+# (it used to be recompiled from source for every fixture — ~15 large TUs each
+# time — which dominated the lane's wall time; this is a ~10-40x speedup).
+#
 # Usage: run_tests.sh <path-to-matlabc>
 set -u
 
@@ -40,6 +44,41 @@ RUNTIME_SRCS=(
 CXX="${CXX:-${CLANG}++}"
 TESTDIR="$(cd "$(dirname "$0")" && pwd)"
 
+# --- Precompile the runtime once -------------------------------------------
+OBJDIR="$(mktemp -d -t mlc-rt.XXXXXX)"
+trap 'rm -rf "$OBJDIR"' EXIT
+RUNTIME_OBJS=()
+for src in "${RUNTIME_SRCS[@]}"; do
+  obj="$OBJDIR/$(basename "${src%.cpp}").o"
+  if ! "$CXX" -DMATLAB_LLVM_WITH_PLOT=1 -I"$ROOT/runtime" -c "$src" -o "$obj" 2>/dev/null; then
+    echo "FATAL: failed to compile runtime TU $src" >&2
+    exit 2
+  fi
+  RUNTIME_OBJS+=( "$obj" )
+done
+
+# Cairo plot runtime — precompiled once iff cairo is available; the per-fixture
+# link adds these objects + libs only for `.requires-plot` tests.
+PLOT_OK=0
+PLOT_OBJS=()
+PLOT_LIBS=()
+if command -v pkg-config >/dev/null 2>&1 && \
+   pkg-config --exists cairo cairo-svg cairo-pdf 2>/dev/null; then
+  # shellcheck disable=SC2207
+  _plot_cflags=( $(pkg-config --cflags cairo cairo-svg cairo-pdf) )
+  # shellcheck disable=SC2207
+  PLOT_LIBS=( $(pkg-config --libs cairo cairo-svg cairo-pdf) )
+  PLOT_OK=1
+  for src in c_api cairo_render colormap contour figure; do
+    obj="$OBJDIR/plot_$src.o"
+    if ! "$CXX" -DMATLAB_LLVM_WITH_PLOT=1 -I"$ROOT/runtime" \
+           "${_plot_cflags[@]}" -c "$ROOT/runtime/plot/$src.cpp" -o "$obj" 2>/dev/null; then
+      PLOT_OK=0; break
+    fi
+    PLOT_OBJS+=( "$obj" )
+  done
+fi
+
 pass=0; fail=0
 
 for m in "$TESTDIR"/*.m; do
@@ -56,32 +95,17 @@ for m in "$TESTDIR"/*.m; do
     fail=$((fail+1))
     rm -f "$tmpll" "$tmpbin"; continue
   fi
-  # Per-test opt-in for the Cairo plot runtime.  When a
-  # `<name>.requires-plot` marker exists, also link runtime/plot/*.cpp
-  # and the cairo pkg-config libs.  Without it the test gets a
-  # plot-free link line (smaller, no Cairo dep), matching the rest of
-  # the harness.  If the marker is present but pkg-config can't find
-  # cairo, SKIP the test rather than fail.
-  plot_srcs=()
-  plot_cflags=()
+  # Per-test opt-in for the Cairo plot runtime (precompiled objects above).
+  # If the marker is present but cairo isn't available, SKIP rather than fail.
+  plot_objs=()
   plot_libs=()
   if [[ -e "${m%.m}.requires-plot" ]]; then
-    if ! command -v pkg-config >/dev/null 2>&1 || \
-       ! pkg-config --exists cairo cairo-svg cairo-pdf 2>/dev/null; then
+    if [[ "$PLOT_OK" != 1 ]]; then
       echo "SKIP $base (requires-plot, no cairo)"
       rm -f "$tmpll" "$tmpbin"; continue
     fi
-    plot_srcs=(
-      "$ROOT/runtime/plot/c_api.cpp"
-      "$ROOT/runtime/plot/cairo_render.cpp"
-      "$ROOT/runtime/plot/colormap.cpp"
-      "$ROOT/runtime/plot/contour.cpp"
-      "$ROOT/runtime/plot/figure.cpp"
-    )
-    # shellcheck disable=SC2207
-    plot_cflags=( $(pkg-config --cflags cairo cairo-svg cairo-pdf) )
-    # shellcheck disable=SC2207
-    plot_libs=( $(pkg-config --libs cairo cairo-svg cairo-pdf) )
+    plot_objs=( "${PLOT_OBJS[@]}" )
+    plot_libs=( "${PLOT_LIBS[@]}" )
   fi
   # Per-test opt-in for the Symbolic Math Toolbox (SymPP).  A
   # `<name>.requires-sym` marker links the prebuilt WITH_SYM runtime object
@@ -115,11 +139,10 @@ for m in "$TESTDIR"/*.m; do
     sym_libs+=( -lgmp -lmpfr )
   fi
   if ! "$CXX" -DMATLAB_LLVM_WITH_PLOT=1 -Wno-override-module "$tmpll" \
-              "${RUNTIME_SRCS[@]}" \
-              ${plot_srcs[@]+"${plot_srcs[@]}"} \
+              "${RUNTIME_OBJS[@]}" \
+              ${plot_objs[@]+"${plot_objs[@]}"} \
               ${sym_objs[@]+"${sym_objs[@]}"} \
               -I"$ROOT/runtime" \
-              ${plot_cflags[@]+"${plot_cflags[@]}"} \
               ${plot_libs[@]+"${plot_libs[@]}"} \
               ${sym_libs[@]+"${sym_libs[@]}"} \
               -o "$tmpbin" 2>/dev/null; then
