@@ -54,6 +54,24 @@ In scope (subsets shipped, covered by dedicated docs):
   lossless PNG `imwrite`; filtering; geometric; morphology; segmentation +
   `regionprops`; transforms/quality/colour/deblur — the `rice_grains`
   headline is closed).
+  A seventeenth — Curve Fitting
+  ([`curve_fitting_toolbox_roadmap.md`](curve_fitting_toolbox_roadmap.md)) —
+  is complete (all 6 tiers: `fit(x,y,'polyN')` → `cfit` + `feval`/`gof`;
+  nonlinear `exp`/`power`/`gauss`/`sin`/`fourier` library via hand-coded
+  Levenberg-Marquardt + `fitoptions` + robust IRLS; custom `fittype`
+  equations + `confint`/`differentiate`/`integrate`; interpolant fits +
+  `smooth`/`csaps`; polynomial surfaces → `sfit`; ppform `spline`/`pchip` +
+  `fnval`/`fnder`/`fnint`).
+  An eighteenth — Wavelet
+  ([`wavelet_toolbox_roadmap.md`](wavelet_toolbox_roadmap.md)) — is complete
+  (all 6 tiers, matrix lane over the shipped `conv`/`fft`: `wfilters`/`dwt`/
+  `wavedec`/`waverec` with exact perfect reconstruction across the
+  `haar`/`db`/`sym`/`coif` catalogue; denoising `wthresh`/`thselect`/
+  `wnoisest`/`wdenoise`/`measerr`; FFT-domain `cwt`/`icwt`/`wcoherence`;
+  undecimated `modwt`/`modwtmra` + 2-D `dwt2`/`wavedec2`; wavelet packets
+  `wpdec`/`wprec`/`besttree`; special topics `emd`/`vmd`/`ewt`/
+  `matchingPursuit` + `waveletScattering`→`fitcsvm` — the `denoise_signal`
+  headline (SNR +21 dB) is closed).
   Apps / Live Editor / GUIs / Simulink integration for each are
   individually carved out — see the per-toolbox roadmap.
 - **Core-compiler roadmap (not a toolbox):**

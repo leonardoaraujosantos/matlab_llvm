@@ -153,7 +153,7 @@ done.
 
 ---
 
-## 2. Tier-1 — Discrete wavelet core + family filters (the FWT) 🔵
+## 2. Tier-1 — Discrete wavelet core + family filters (the FWT) ✅
 
 Goal: the Mallat fast wavelet transform — decompose, access coefficients,
 reconstruct exactly. The perfect-reconstruction backbone everything else
@@ -184,7 +184,7 @@ loose-match in `LowerTensorOps.cpp` with the string family-name arg →
 
 ---
 
-## 3. Tier-2 — Denoising + nonparametric estimation + compression 🔵
+## 3. Tier-2 — Denoising + nonparametric estimation + compression ✅
 
 Goal: the killer app — wavelet shrinkage denoising. Closes the headline.
 
@@ -211,7 +211,7 @@ shipped Image `psnr`/`immse`.
 
 ---
 
-## 4. Tier-3 — Continuous wavelet transform + time-frequency 🔵
+## 4. Tier-3 — Continuous wavelet transform + time-frequency ✅
 
 Goal: the CWT + scalogram — the second pillar (analysis, not denoising).
 
@@ -235,7 +235,7 @@ scalogram plotting reuses the Image-era `imagesc`/3-D display path.
 
 ---
 
-## 5. Tier-4 — Undecimated transforms (SWT / MODWT) + 2-D 🔵
+## 5. Tier-4 — Undecimated transforms (SWT / MODWT) + 2-D ✅
 
 Goal: the shift-invariant transforms (better for denoising/detection) +
 the image half.
@@ -262,7 +262,7 @@ headline.
 
 ---
 
-## 6. Tier-5 — Wavelet packets 🔵
+## 6. Tier-5 — Wavelet packets ✅
 
 Goal: the full binary-tree decomposition (both approximation *and* detail
 branches split) + best-basis selection.
@@ -289,7 +289,7 @@ coefficient matrix + a structure vector inside the object;
 
 ---
 
-## 7. Tier-6 — Special topics + ML + carve-down polish 🔵
+## 7. Tier-6 — Special topics + ML + carve-down polish ✅
 
 Goal: the modern data-adaptive transforms + the machine-learning bridge
 + the remaining polish.
@@ -393,11 +393,14 @@ matching the Image `image_png_roundtrip` precedent).
 | `wavelet_entropy.m` | T1 | `wentropy`/`wenergy` on a known coefficient vector |
 | `wavelet_scatter.m` | T6 | `waveletScattering` feature-matrix shape + `fitcsvm` accuracy |
 
-Target: **~10 gating tests** (one per major surface), in line with
-Image (10) and Stats (12). Full regression must stay green
-(currently 465 run-tests) — the badge bumps to **17 toolboxes** (or
-**18** if Curve Fitting lands first) and the run-tests count grows by
-the new gating set.
+**Shipped: 10 gating tests** (`wavelet_dwt`/`wavedec`/`thresh`/`denoise`/
+`cwt`/`modwt`/`dwt2`/`packet`/`entropy`/`scatter`), in line with Image
+(10) and Stats (12). Full regression green at **504 run-tests, 0
+failures** (10 new + 494 pre-existing); the badge moved to **18
+toolboxes** (Curve Fitting landed first at 17). Each test ships with a
+`.stdout` golden + `.skip-emit-{c,cpp,python,typescript}` markers (the
+emit harnesses do not link the wavelet runtime — the Stats/Image/Curve-
+Fitting precedent; SV is not a target for the host-side analysis surface).
 
 ---
 
@@ -434,13 +437,13 @@ These are documented follow-ons, not blockers: every numeric transform a
 
 | Tier | Scope | Effort | Net-new code | Status |
 |---|---|---|---|---|
-| T1 | DWT core + family filters (FWT) | ~1.5 wk | filter catalogue + `wavedec`/`waverec` + `[C,L]` + `wextend` | 🔵 |
-| T2 | denoising + compression | ~1 wk | `wthresh`/`thselect`/`wnoisest`/`wdenoise`/`measerr` | 🔵 |
-| T3 | CWT + scalogram + time-frequency | ~2 wk | FFT-domain CWT + analysing wavelets + `cwtfilterbank` + `wcoherence` | 🔵 |
-| T4 | SWT/MODWT + 2-D | ~1.5 wk | à-trous + MODWT + `dwt2`/`wavedec2` | 🔵 |
-| T5 | wavelet packets | ~1.5 wk | full-tree decomp + `WPTREE` + `besttree` | 🔵 |
-| T6 | special topics + ML + polish | ~3 wk | `ewt`/`vmd`/`tqwt` + scattering + matching pursuit | 🔵 |
-| **Total** | | **~10.5 wk** | | |
+| T1 | DWT core + family filters (FWT) | ~1.5 wk | filter catalogue + `wavedec`/`waverec` + `[C,L]` + `wextend` | ✅ |
+| T2 | denoising + compression | ~1 wk | `wthresh`/`thselect`/`wnoisest`/`wdenoise`/`measerr` | ✅ |
+| T3 | CWT + scalogram + time-frequency | ~2 wk | FFT-domain CWT + analysing wavelets (`cwtfilterbank` carved to function-form) + `wcoherence` | ✅ |
+| T4 | SWT/MODWT + 2-D | ~1.5 wk | à-trous + MODWT + `dwt2`/`wavedec2` | ✅ |
+| T5 | wavelet packets | ~1.5 wk | full-tree decomp (matrix lane; `WPTREE` carved) + `besttree` | ✅ |
+| T6 | special topics + ML + polish | ~3 wk | `ewt`/`vmd`/`emd` + scattering + matching pursuit | ✅ |
+| **Total** | | **~10.5 wk** | **all 6 tiers shipped** | ✅ |
 
 **Recommended slice order**: T1 → T2 closes the everyday 80% workflow
 (~2.5 wk) and is the highest-ROI cut — at that point `wavedec` /
