@@ -3936,10 +3936,18 @@ bool TensorLowering::rewriteBuiltinCalls() {
                                "matlab_stats_pca_latent", "matlab_stats_pca_empty",
                                "matlab_stats_pca_explained"};
         for (int o = 0; o < nout && o < 5; ++o) {
-          auto Fn = rt(syms[o], PtrTy, (o == 0) ? ArrayRef<Type>{PtrTy} : ArrayRef<Type>{});
-          ValueRange ar = (o == 0) ? ValueRange{X} : ValueRange{};
+          // Hold the operand in an OWNING SmallVector — a `ValueRange ar =
+          // ValueRange{X}` view dangles once the temporary initializer_list
+          // backing array is freed, so the call was reading freed memory for
+          // operand #0 (it survived under libc++ but was clobbered under
+          // libstdc++, producing "operand #0 does not dominate this use" on
+          // the Linux build).
+          SmallVector<Value, 1> ar;
+          if (o == 0) ar.push_back(X);
+          auto Fn = rt(syms[o], PtrTy,
+                       ar.empty() ? ArrayRef<Type>{} : ArrayRef<Type>{PtrTy});
           Call->getResult(static_cast<unsigned>(o)).replaceAllUsesWith(
-              LLVM::CallOp::create(B, Call->getLoc(), Fn, ar).getResult());
+              LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange(ar)).getResult());
         }
         Call->erase(); Changed = true; continue;
       }
