@@ -37,8 +37,10 @@
 #include <string.h>
 
 #include <algorithm>
+#include <array>
 #include <complex>
 #include <string>
+#include <utility>
 #include <vector>
 
 /* shipped helpers reused. */
