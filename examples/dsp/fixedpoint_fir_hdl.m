@@ -42,6 +42,7 @@ disp(y);
 function r = fir_filter_fi(x)
     %#codegen
     % hdl: port(x, fi, signed, 16, 12)
+    % cocotb: latency(1)
     h = fi([1, 2, 3, 4, 3, 2, 1], 1, 16, 0);
     persistent delay_line;
     if isempty(delay_line)
