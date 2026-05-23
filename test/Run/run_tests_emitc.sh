@@ -57,6 +57,23 @@ RUNTIME_COMM="$ROOT/runtime/toolbox/comm/runtime_comm.cpp"
 RUNTIME_PROP="$ROOT/runtime/toolbox/prop/runtime_prop.cpp"
 TESTDIR="$(cd "$(dirname "$0")" && pwd)"
 
+# Precompile the runtime TUs once (they used to be recompiled per fixture,
+# which dominated this lane's wall time). The emitted source still compiles
+# per fixture — only the fixed runtime objects are cached and linked in. The
+# strict WFLAGS are applied here too, so a runtime warning still fails the
+# strict lanes.
+OBJDIR="$(mktemp -d -t mlc-emitc.XXXXXX)"
+trap 'rm -rf "$OBJDIR"' EXIT
+RUNTIME_OBJS=()
+for src in "$RUNTIME_MAIN" "$RUNTIME_DEBUG" "$RUNTIME_COMPLEX" "$RUNTIME_COMM" "$RUNTIME_PROP"; do
+  obj="$OBJDIR/$(basename "${src%.cpp}").o"
+  if ! "$CXX" "${WFLAGS[@]}" "-I$ROOT/runtime" -x c++ -c "$src" -o "$obj" 2>/dev/null; then
+    echo "FATAL: failed to compile runtime TU $src" >&2
+    exit 2
+  fi
+  RUNTIME_OBJS+=( "$obj" )
+done
+
 pass=0; fail=0
 
 for m in "$TESTDIR"/*.m; do
@@ -90,24 +107,18 @@ for m in "$TESTDIR"/*.m; do
   # the link line with $CXX in both modes, forcing the input language
   # explicitly with -x.
   cc_err="$(mktemp -t mlc.XXXXXX).err"
-  if [[ "$MODE" == cpp ]]; then
-    if ! "$CXX" "${WFLAGS[@]}" "-I$ROOT/runtime" -x c++ "$tmpsrc" \
-           -x c++ "$RUNTIME_MAIN" "$RUNTIME_DEBUG" "$RUNTIME_COMPLEX" "$RUNTIME_COMM" "$RUNTIME_PROP" \
-           -o "$tmpbin" -lm -lpthread 2>"$cc_err"; then
-      echo "FAIL $base: $LABEL compile failed"
-      [[ "$STRICT" == "1" ]] && sed 's/^/  /' "$cc_err" | head -5
-      fail=$((fail+1))
-      rm -f "$tmpsrc" "$tmpbin" "$cc_err"; continue
-    fi
-  else
-    if ! "$CXX" "${WFLAGS[@]}" "-I$ROOT/runtime" -x c "$tmpsrc" \
-           -x c++ "$RUNTIME_MAIN" "$RUNTIME_DEBUG" "$RUNTIME_COMPLEX" "$RUNTIME_COMM" "$RUNTIME_PROP" \
-           -o "$tmpbin" -lm -lpthread 2>"$cc_err"; then
-      echo "FAIL $base: $LABEL compile failed"
-      [[ "$STRICT" == "1" ]] && sed 's/^/  /' "$cc_err" | head -5
-      fail=$((fail+1))
-      rm -f "$tmpsrc" "$tmpbin" "$cc_err"; continue
-    fi
+  # The emitted file is C (MODE=c) or C++ (MODE=cpp); the runtime objects are
+  # already compiled. Compile the emitted source and link the cached objects.
+  xlang=c++; [[ "$MODE" == c ]] && xlang=c
+  # `-x none` after the emitted source resets language detection so the
+  # prebuilt .o objects are treated as objects (not as `-x $xlang` source).
+  if ! "$CXX" "${WFLAGS[@]}" "-I$ROOT/runtime" -x "$xlang" "$tmpsrc" \
+         -x none "${RUNTIME_OBJS[@]}" \
+         -o "$tmpbin" -lm -lpthread 2>"$cc_err"; then
+    echo "FAIL $base: $LABEL compile failed"
+    [[ "$STRICT" == "1" ]] && sed 's/^/  /' "$cc_err" | head -5
+    fail=$((fail+1))
+    rm -f "$tmpsrc" "$tmpbin" "$cc_err"; continue
   fi
   rm -f "$cc_err"
 
