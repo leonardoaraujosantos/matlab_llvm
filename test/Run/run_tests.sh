@@ -17,7 +17,20 @@ if [[ -z "$MATLABC" || ! -x "$MATLABC" ]]; then
 fi
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-CLANG="${CLANG:-/opt/homebrew/opt/llvm/bin/clang}"
+# CLANG default: Homebrew LLVM on macOS, system clang elsewhere (Linux/CI).
+# The hardcoded Homebrew path does not exist on the Linux CI runner.
+if [[ -z "${CLANG:-}" ]]; then
+  if [[ -x /opt/homebrew/opt/llvm/bin/clang ]]; then
+    CLANG=/opt/homebrew/opt/llvm/bin/clang
+  else
+    CLANG=clang
+  fi
+fi
+# The runtime is a C++20 project (CMAKE_CXX_STANDARD 20).  Compile the
+# runtime TUs with the same standard the cmake build uses — under the
+# compiler default (gnu++17) libstdc++ does not transitively pull in
+# <string>/<cstdio>, so the runtime fails to compile on Linux.
+CXXSTD="${CXXSTD:--std=c++20}"
 # Runtime is C++ since Phase 3 of docs/port_runtime_2_cpp.md — drive the
 # link line with clang++ so the .cpp is compiled as C++.
 # Post-2026-05 reorganization: core runtime stays at runtime/ top
@@ -51,8 +64,9 @@ trap 'rm -rf "$OBJDIR"' EXIT
 RUNTIME_OBJS=()
 for src in "${RUNTIME_SRCS[@]}"; do
   obj="$OBJDIR/$(basename "${src%.cpp}").o"
-  if ! "$CXX" -DMATLAB_LLVM_WITH_PLOT=1 -I"$ROOT/runtime" -c "$src" -o "$obj" 2>/dev/null; then
+  if ! "$CXX" $CXXSTD -DMATLAB_LLVM_WITH_PLOT=1 -I"$ROOT/runtime" -c "$src" -o "$obj" 2>"$OBJDIR/cc.err"; then
     echo "FATAL: failed to compile runtime TU $src" >&2
+    cat "$OBJDIR/cc.err" >&2
     exit 2
   fi
   RUNTIME_OBJS+=( "$obj" )

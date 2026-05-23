@@ -769,7 +769,16 @@ if(MATLAB_LLVM_WITH_MLIR)
   # CPU starvation occasionally pushes individual scenarios past
   # their timeout. Pinning this test to serial costs ~30 s but
   # removes the flake.
-  set_tests_properties(debug-dap-tests PROPERTIES RUN_SERIAL TRUE)
+  #
+  # MATLABC_DAP_MIN_TIMEOUT raises the per-call timeout floor in
+  # dap_client.py: several REPL scenarios pass tight 5 s waits tuned for
+  # a warm dev machine, but the first JIT-backed `evaluate` (LLVM codegen
+  # warmup) can exceed that on a cold/slower CI runner — surfacing as
+  # spurious "timeout waiting for event" failures.  A 30 s floor only
+  # moves the failure deadline out; passing tests still return promptly.
+  set_tests_properties(debug-dap-tests PROPERTIES
+    RUN_SERIAL TRUE
+    ENVIRONMENT "MATLABC_DAP_MIN_TIMEOUT=30")
   # JIT/static parity: every shape that the static -emit-* paths
   # accept must also compile cleanly through `matlabc -dap` (which
   # JITs via mlir::ExecutionEngine + DebugMode mirror calls). Covers

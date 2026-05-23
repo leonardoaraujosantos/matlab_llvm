@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <map>
 #include <set>
 #include <sstream>
 #include <unordered_map>
@@ -82,8 +83,11 @@ struct ChartLayout {
   // "no substate active" / "uninitialised region".
   std::unordered_map<std::string, int> StateCode;
   // Region id → its variable name (`r_<region>`). For chart-root the
-  // id is "chart_root".
-  std::unordered_map<std::string, std::string> RegionVar;
+  // id is "chart_root".  Ordered (std::map) so the `persistent r_*`
+  // declarations emit in a deterministic order — an unordered_map's
+  // iteration order differs between libc++ (macOS) and libstdc++
+  // (Linux), which made the emitted-MATLAB goldens platform-dependent.
+  std::map<std::string, std::string> RegionVar;
   // For each OR parent (and chart-root): the list of substate ids in
   // declaration order. Indices match the order; we don't rely on
   // numeric ordering since `StateCode` is global.
@@ -94,8 +98,10 @@ struct ChartLayout {
   std::unordered_map<std::string, std::string> Initial;
 
   // Symbol classification — used by the action rewriter to decide
-  // which prefix to give a bare identifier.
-  std::unordered_set<std::string> Locals;
+  // which prefix to give a bare identifier.  `Locals` is ordered
+  // (std::set) so the `persistent l_*` declarations emit deterministically
+  // across libc++/libstdc++ (see RegionVar above).
+  std::set<std::string> Locals;
   std::unordered_set<std::string> Events;
   // Name of the chart-scoped `in()` helper. Emitted as a local
   // function; the rewriter calls it from action bodies so matlabc's

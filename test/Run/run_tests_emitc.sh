@@ -22,6 +22,11 @@ MODE="${MODE:-c}"
 STRICT="${STRICT:-0}"
 CC="${CC:-cc}"
 CXX="${CXX:-c++}"
+# The runtime is a C++20 project (CMAKE_CXX_STANDARD 20); compile its TUs with
+# that standard so libstdc++ pulls in <string>/<cstdio> (the compiler default
+# gnu++17 leaves them incomplete on Linux).  The emitted source side keeps the
+# default standard (it only includes the public headers).
+CXXSTD="${CXXSTD:--std=c++20}"
 
 # In strict mode: treat warnings as errors, but exempt categories that are
 # inherent to the emitter's output shape (one C local per SSA value, so
@@ -67,8 +72,9 @@ trap 'rm -rf "$OBJDIR"' EXIT
 RUNTIME_OBJS=()
 for src in "$RUNTIME_MAIN" "$RUNTIME_DEBUG" "$RUNTIME_COMPLEX" "$RUNTIME_COMM" "$RUNTIME_PROP"; do
   obj="$OBJDIR/$(basename "${src%.cpp}").o"
-  if ! "$CXX" "${WFLAGS[@]}" "-I$ROOT/runtime" -x c++ -c "$src" -o "$obj" 2>/dev/null; then
+  if ! "$CXX" $CXXSTD "${WFLAGS[@]}" "-I$ROOT/runtime" -x c++ -c "$src" -o "$obj" 2>"$OBJDIR/cc.err"; then
     echo "FATAL: failed to compile runtime TU $src" >&2
+    cat "$OBJDIR/cc.err" >&2
     exit 2
   fi
   RUNTIME_OBJS+=( "$obj" )

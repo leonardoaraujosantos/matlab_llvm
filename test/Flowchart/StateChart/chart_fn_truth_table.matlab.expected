@@ -14,9 +14,9 @@ function out_open = gate_tick(in_lit, in_ready, ev_step)
   persistent tick_count;
   persistent r_chart_root;
   persistent t_active;
+  persistent l_lit;
   persistent l_open;
   persistent l_ready;
-  persistent l_lit;
   if isempty(init_done)
     init_done = 0;
     tick_count = 0;

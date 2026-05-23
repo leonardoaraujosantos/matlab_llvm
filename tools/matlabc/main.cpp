@@ -9773,6 +9773,10 @@ static std::string renderCocotbMakefile(const std::string &Stem,
   M += "TOPLEVEL_LANG ?= verilog\n";
   M += "SIM           ?= verilator\n";
   M += "EXTRA_ARGS    += --trace --trace-structs\n";
+  // The emitted SV relies on Verilog's implicit width extension in
+  // mixed-width arithmetic (e.g. acc + x); Verilator 5.x escalates that to a
+  // fatal WIDTHEXPAND/WIDTHTRUNC lint, so silence the width-style warnings.
+  M += "EXTRA_ARGS    += -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC\n";
   M += "VERILOG_SOURCES = $(PWD)/" + Stem + ".sv\n";
   M += "TOPLEVEL = " + DutName + "\n";
   M += "MODULE   = test_" + Stem + "\n";
@@ -10160,6 +10164,9 @@ static int emitCocotbHarnessForDiagram(const char *Self,
   MF += "TOPLEVEL_LANG ?= verilog\n";
   MF += "SIM           ?= verilator\n";
   MF += "EXTRA_ARGS    += --trace --trace-structs\n";
+  // Silence Verilator 5.x's fatal width-style lint (the emitted SV uses
+  // Verilog's implicit width extension in mixed-width arithmetic).
+  MF += "EXTRA_ARGS    += -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC\n";
   MF += "VERILOG_SOURCES =";
   for (const auto &D : DutCtxs) MF += " $(PWD)/" + D.DutStem + ".sv";
   if (MultiDut) MF += " $(PWD)/" + WrapperModule + ".sv";

@@ -159,7 +159,7 @@ tester += '  return 0;\n}\n'
 open(cpp, 'w').write(src + tester)
 PY
   local bin="$SCRATCH/${name}_cpp"
-  if ! clang++ -O2 -o "$bin" "$cpp" 2> "$SCRATCH/build.err"; then
+  if ! clang++ -std=c++20 -O2 -o "$bin" "$cpp" 2> "$SCRATCH/build.err"; then
     fail=$((fail+1)); fails+=("$name (cpp build)")
     sed 's/^/  /' "$SCRATCH/build.err" >&2
     return

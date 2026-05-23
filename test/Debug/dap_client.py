@@ -22,6 +22,16 @@ import threading
 import time
 
 
+# Per-call timeout floor (seconds).  Individual scenarios pass tight
+# timeouts (e.g. 5.0 s) tuned for a warm dev machine; on a cold or
+# CPU-loaded CI runner the first JIT-backed `evaluate` (LLVM codegen
+# warmup) can exceed those, surfacing as spurious "timeout waiting for
+# event" failures.  CI sets MATLABC_DAP_MIN_TIMEOUT to raise the floor
+# without changing local behaviour — a passing test still returns as
+# soon as the event arrives; only the failure deadline moves out.
+_TIMEOUT_FLOOR = float(os.environ.get("MATLABC_DAP_MIN_TIMEOUT", "0"))
+
+
 class DapError(RuntimeError):
     pass
 
@@ -125,6 +135,7 @@ class DapClient:
     # --- request / event API -------------------------------------------------
 
     def request(self, command, arguments=None, timeout=30.0):
+        timeout = max(timeout, _TIMEOUT_FLOOR)
         with self._lock:
             seq = self._next_seq
             self._next_seq += 1
@@ -168,6 +179,7 @@ class DapClient:
         If `predicate` is given, drains events from the queue until one
         satisfies it. Useful for filtering 'output' events to a specific
         category, etc."""
+        timeout = max(timeout, _TIMEOUT_FLOOR)
         deadline = time.monotonic() + timeout
         with self._event_cv:
             while True:
