@@ -943,6 +943,37 @@ Expr *Parser::parseUnary() {
   return parsePostfix(parsePrimary());
 }
 
+/* Package-qualified System Object constructors.  MATLAB writes
+ * `dsp.FIRFilter(...)`; the compiler ships the classdef under the flat
+ * name `dsp_FIRFilter` (a classdef name cannot contain a dot).  When the
+ * reserved `dsp` package is followed by a known System-Object class
+ * short-name, parsePostfix folds `dsp.Foo` into a single NameExpr named
+ * `dsp_Foo`, so the rest of the pipeline (constructor dispatch +
+ * PinnedClass + the `obj(x)`->step sugar) treats it as an ordinary class.
+ * An unknown field — or a `dsp` that is actually a bound variable — is
+ * left as a normal FieldAccess. */
+static bool isDspSysObjClass(std::string_view Pkg, std::string_view Field) {
+  if (Pkg != "dsp" && Pkg != "dsphdl") return false;
+  /* `dsphdl.*` is the cycle-accurate hardware counterpart of `dsp.*` —
+   * same name list (Tier-7/8 SimulationSurface), folded to dsphdl_<X>. */
+  static const std::string_view Names[] = {
+    "FIRFilter", "IIRFilter", "BiquadFilter", "SOSFilter", "Delay",
+    "LMSFilter", "RLSFilter",
+    "FIRDecimator", "FIRInterpolator", "CICDecimator", "CICInterpolator",
+    "SampleRateConverter", "Channelizer", "ChannelSynthesizer",
+    /* Tier-5 — sources, sliding stats, detectors, spectral, buffering. */
+    "SineWave", "NCO", "Chirp",
+    "MovingAverage", "MovingRMS", "MovingMaximum", "MovingStandardDeviation",
+    "PeakFinder", "DCBlocker", "ZeroCrossingDetector",
+    "SpectrumEstimator", "AsyncBuffer",
+    /* Tier-6 — linalg + polish filter SOs. */
+    "LevinsonSolver", "NotchPeakFilter", "LowpassFilter", "HighpassFilter",
+  };
+  for (auto N : Names)
+    if (N == Field) return true;
+  return false;
+}
+
 Expr *Parser::parsePostfix(Expr *LHS) {
   while (true) {
     if (at(TokenKind::l_paren)) {
@@ -983,6 +1014,21 @@ Expr *Parser::parsePostfix(Expr *LHS) {
         D->Range.End = cur().Loc;
         LHS = D;
       } else if (at(TokenKind::identifier)) {
+        /* Fold `dsp.FIRFilter` -> NameExpr `dsp_FIRFilter` (package
+         * System-Object constructor) before building a FieldAccess. */
+        if (auto *BN = dynamic_cast<NameExpr *>(LHS)) {
+          if (isDspSysObjClass(BN->Name, cur().Text)) {
+            std::string Flat = std::string(BN->Name) + "_" +
+                               std::string(cur().Text);
+            ++Idx;  // consume the field identifier
+            auto *N = Ctx.make<NameExpr>();
+            N->Name = Ctx.intern(Flat);
+            N->Range.Begin = LHS->Range.Begin;
+            N->Range.End = cur().Loc;
+            LHS = N;
+            continue;
+          }
+        }
         auto *F = Ctx.make<FieldAccess>();
         F->Base = LHS;
         F->Field = take().Text;

@@ -87,6 +87,7 @@ RUNTIME_SRCS=(
   "$ROOT/runtime/toolbox/images/runtime_images.cpp"
   "$ROOT/runtime/toolbox/curvefit/runtime_curvefit.cpp"
   "$ROOT/runtime/toolbox/wavelet/runtime_wavelet.cpp"
+  "$ROOT/runtime/toolbox/dsp/runtime_dsp.cpp"
   "$ROOT/runtime/toolbox/stateflow/runtime_mstateflow.cpp"
 )
 

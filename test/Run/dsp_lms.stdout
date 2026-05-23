@@ -1,0 +1,4 @@
+noise rms before = 1.130
+LMS residual     = 0.260
+RLS residual     = 0.198
+LMS lead tap     = 0.958

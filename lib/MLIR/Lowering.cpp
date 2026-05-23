@@ -2762,6 +2762,11 @@ void Lowerer::lowerStmt(const Stmt &St) {
                     CN == "besself") &&
                    A.LHS.size() == 2)
             Rtys.assign(A.LHS.size(), PtrTy);
+          /* [b, a] = iirnotch(w0, bw) / iirpeak(w0, bw) — both real row
+           * vectors (DSP Tier-2 second-order designers). */
+          else if ((CN == "iirnotch" || CN == "iirpeak") &&
+                   A.LHS.size() == 2)
+            Rtys.assign(A.LHS.size(), PtrTy);
           /* [n, Wn] = buttord/cheb1ord(Wp, Ws, Rp, Rs) — both scalar
            * f64 (n is integer-valued but stored as double, matching
            * MATLAB's idiom). */

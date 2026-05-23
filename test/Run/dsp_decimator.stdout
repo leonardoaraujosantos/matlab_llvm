@@ -1,0 +1,5 @@
+lengths in=128 framed=32 whole=32
+frame-vs-whole maxdiff 0.000000
+interp out=128 (expected 128)
+rateconv 3/2 in=100 out=150
+cic decim out=32 sum=16.34

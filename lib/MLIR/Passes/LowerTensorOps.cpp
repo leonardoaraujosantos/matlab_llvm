@@ -3331,6 +3331,27 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Changed = true;
       continue;
     }
+    /* [b, a] = iirnotch(w0, bw) / iirpeak(w0, bw) — DSP Tier-2 second-order
+     * notch / peak biquad designers. Two f64 args, two ptr results;
+     * splits into matlab_dsp_<name>_{b,a} (besself-style). */
+    if (NA && NA.getValue().getSExtValue() == 2 &&
+        (Name == "iirnotch" || Name == "iirpeak") &&
+        Call->getNumOperands() == 2 && Call->getNumResults() == 2 &&
+        Call->getOperand(0).getType() == F64 &&
+        Call->getOperand(1).getType() == F64) {
+      B.setInsertionPoint(Call);
+      std::string Fbn = "matlab_dsp_" + Name.str() + "_b";
+      std::string Fan = "matlab_dsp_" + Name.str() + "_a";
+      auto Fb = rt(Fbn, PtrTy, {F64, F64});
+      auto Fa = rt(Fan, PtrTy, {F64, F64});
+      auto Cb = LLVM::CallOp::create(B, Call->getLoc(), Fb, Call->getOperands());
+      auto Ca = LLVM::CallOp::create(B, Call->getLoc(), Fa, Call->getOperands());
+      Call->getResult(0).replaceAllUsesWith(Cb.getResult());
+      Call->getResult(1).replaceAllUsesWith(Ca.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
     /* [n, Wn] = buttord(Wp, Ws, Rp, Rs) / cheb1ord(...). 4 f64 args,
      * 2 f64 results. Splits into matlab_<name>_n / _Wn. */
     if (NA && NA.getValue().getSExtValue() == 2 &&
@@ -5063,6 +5084,60 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"matlab_ident_getcov",   "matlab_ident_getcov",   PtrTy, {PtrTy}},
         {"matlab_ident_getpvec",  "matlab_ident_getpvec",  PtrTy, {PtrTy}},
         {"matlab_ident_setpvec",  "matlab_ident_setpvec",  PtrTy, {PtrTy, PtrTy}},
+        /* ===== DSP System Toolbox =====
+         * System-Object step/lifecycle entries.  The classdef method body
+         * forwards the receiver `obj` (PtrTy) + the input frame (PtrTy
+         * matrix); the runtime reads/writes the object's coefficient +
+         * state properties and returns the output frame (PtrTy). */
+        /* Tier-1 — core filters. */
+        {"matlab_dsp_iir_step",    "matlab_dsp_iir_step",    PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dsp_sos_step",    "matlab_dsp_sos_step",    PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dsp_delay_step",  "matlab_dsp_delay_step",  PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dsp_reset",       "matlab_dsp_reset",       PtrTy, {PtrTy}},
+        {"matlab_dsp_init_state",  "matlab_dsp_init_state",  PtrTy, {PtrTy}},
+        {"matlab_dsp_get_state",   "matlab_dsp_get_state",   PtrTy, {PtrTy}},
+        /* Tier-3 — adaptive filters. */
+        {"matlab_dsp_lms_step",    "matlab_dsp_lms_step",    PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_dsp_rls_step",    "matlab_dsp_rls_step",    PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_dsp_get_weights", "matlab_dsp_get_weights", PtrTy, {PtrTy}},
+        /* Tier-4 — multirate + filter banks. */
+        {"matlab_dsp_firdecim_step",   "matlab_dsp_firdecim_step",   PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dsp_firinterp_step",  "matlab_dsp_firinterp_step",  PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dsp_cicdecim_step",   "matlab_dsp_cicdecim_step",   PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dsp_cicinterp_step",  "matlab_dsp_cicinterp_step",  PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dsp_rateconv_step",   "matlab_dsp_rateconv_step",   PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dsp_channelizer_step","matlab_dsp_channelizer_step",PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dsp_synthesizer_step","matlab_dsp_synthesizer_step",PtrTy, {PtrTy, PtrTy}},
+        /* Tier-5 — sources / sliding stats / detectors / spectral / buffering. */
+        {"matlab_dsp_sine_step",      "matlab_dsp_sine_step",      PtrTy, {PtrTy}},
+        {"matlab_dsp_nco_step",       "matlab_dsp_nco_step",       PtrTy, {PtrTy}},
+        {"matlab_dsp_chirp_step",     "matlab_dsp_chirp_step",     PtrTy, {PtrTy}},
+        {"matlab_dsp_movavg_step",    "matlab_dsp_movavg_step",    PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dsp_movrms_step",    "matlab_dsp_movrms_step",    PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dsp_movmax_step",    "matlab_dsp_movmax_step",    PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dsp_movmin_step",    "matlab_dsp_movmin_step",    PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dsp_movstd_step",    "matlab_dsp_movstd_step",    PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dsp_peakfind_step",  "matlab_dsp_peakfind_step",  PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dsp_dcblock_step",   "matlab_dsp_dcblock_step",   PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dsp_zcd_step",       "matlab_dsp_zcd_step",       PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dsp_spectest_step",  "matlab_dsp_spectest_step",  PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dsp_asyncbuf_write", "matlab_dsp_asyncbuf_write", PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dsp_asyncbuf_read",  "matlab_dsp_asyncbuf_read",  PtrTy, {PtrTy, F64}},
+        /* Tier-6 — linalg + polish filter SOs. */
+        {"matlab_dsp_levinson_step",  "matlab_dsp_levinson_step",  PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dsp_notchpeak_step", "matlab_dsp_notchpeak_step", PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dsp_lowpass_step",   "matlab_dsp_lowpass_step",   PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dsp_highpass_step",  "matlab_dsp_highpass_step",  PtrTy, {PtrTy, PtrTy}},
+        /* Tier-7 / Tier-8 — dsphdl.* simulation step entries + CORDIC. */
+        {"matlab_dsphdl_fir_step",      "matlab_dsphdl_fir_step",      PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dsphdl_biquad_step",   "matlab_dsphdl_biquad_step",   PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dsphdl_sine_step",     "matlab_dsphdl_sine_step",     PtrTy, {PtrTy}},
+        {"matlab_dsphdl_nco_step",      "matlab_dsphdl_nco_step",      PtrTy, {PtrTy}},
+        {"matlab_dsphdl_firdecim_step", "matlab_dsphdl_firdecim_step", PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dsphdl_cicdecim_step", "matlab_dsphdl_cicdecim_step", PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dsphdl_latency",       "matlab_dsphdl_latency",       F64,  {PtrTy}},
+        {"matlab_dsp_cordic_atan2",     "matlab_dsp_cordic_atan2",     PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dsp_cordic_sqrt",      "matlab_dsp_cordic_sqrt",      PtrTy, {PtrTy}},
         /* ===== Curve Fitting Toolbox Tier-1 =====
          * fit/feval/coeffvalues/gof/output/disp all take the cfit object
          * (PtrTy) as the first operand; the model-tag string ('polyN')
@@ -5814,6 +5889,18 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"sos2tf",     "matlab_sos2tf_b",   1, "p"},
       /* §2.2 FIR design + Savitzky-Golay. */
       {"fir1",       "matlab_fir1",       1, "ff"},
+      /* DSP Tier-2 — equiripple / least-squares FIR design (single-return
+       * b = the L=order+1 symmetric taps); notch/peak single-return num. */
+      {"firpm",      "matlab_dsp_firpm",  1, "fpp"},
+      {"firls",      "matlab_dsp_firls",  1, "fpp"},
+      {"iirnotch",   "matlab_dsp_iirnotch_b", 1, "ff"},
+      {"iirpeak",    "matlab_dsp_iirpeak_b",  1, "ff"},
+      /* DSP Tier-5 — buffer(x,n) / buffer(x,n,p) frame segmenter. */
+      {"buffer",     "matlab_dsp_buffer2", 1, "pf"},
+      {"buffer",     "matlab_dsp_buffer",  1, "pff"},
+      /* DSP HDL Tier-8 — element-wise CORDIC math (function-form). */
+      {"cordic_atan2", "matlab_dsp_cordic_atan2", 1, "pp"},
+      {"cordic_sqrt",  "matlab_dsp_cordic_sqrt",  1, "p"},
       {"sgolay",     "matlab_sgolay",     1, "ff"},
       {"sgolayfilt", "matlab_sgolayfilt", 1, "pff"},
       /* §2.5 close-the-loop filter helpers. */

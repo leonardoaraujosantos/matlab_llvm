@@ -1,0 +1,6 @@
+hw vs sim maxdiff = 0.000000
+hw FIR latency    = 1
+hw NCO peak       = 0.951  latency = 4
+hw CIC out len    = 32   latency = 8
+cordic atan2: 0.000 1.571 3.142 -1.571
+cordic sqrt:  0 1 2 3 4

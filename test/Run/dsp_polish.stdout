@@ -1,0 +1,4 @@
+levinson n=4 a1=1.000
+notch reject=0.0000 passband=0.996
+lp tail=0.996 (keeps 0.1pi, suppresses 0.4pi)
+hp tail=0.955 (keeps 0.4pi, suppresses 0.1pi)

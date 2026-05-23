@@ -1,0 +1,4 @@
+firpm dc=1.000 nyq=-0.055 taps=21
+firls dc=0.986 nyq=-0.012 taps=21
+firpm sym -0.0380=-0.0380  -0.0085=-0.0085
+notch reject=0.0000 passband=0.994
