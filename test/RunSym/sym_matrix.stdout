@@ -1,5 +1,5 @@
-b*a
-b + a
+a*b
+a + b
 Matrix([
   [a, 0],
   [1, b]
