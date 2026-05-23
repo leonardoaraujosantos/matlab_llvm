@@ -2349,6 +2349,7 @@ static std::string buildReplPrelude(const std::string &Src) {
     {false, "dsp.MovingAverage",           "dsp_classdefs.m"},
     {false, "dsp.MovingRMS",               "dsp_classdefs.m"},
     {false, "dsp.MovingMaximum",           "dsp_classdefs.m"},
+    {false, "dsp.MovingMinimum",           "dsp_classdefs.m"},
     {false, "dsp.MovingStandardDeviation", "dsp_classdefs.m"},
     {false, "dsp.PeakFinder",              "dsp_classdefs.m"},
     {false, "dsp.DCBlocker",               "dsp_classdefs.m"},
@@ -2361,6 +2362,7 @@ static std::string buildReplPrelude(const std::string &Src) {
     {false, "dsp_MovingAverage",           "dsp_classdefs.m"},
     {false, "dsp_MovingRMS",               "dsp_classdefs.m"},
     {false, "dsp_MovingMaximum",           "dsp_classdefs.m"},
+    {false, "dsp_MovingMinimum",           "dsp_classdefs.m"},
     {false, "dsp_MovingStandardDeviation", "dsp_classdefs.m"},
     {false, "dsp_PeakFinder",              "dsp_classdefs.m"},
     {false, "dsp_DCBlocker",               "dsp_classdefs.m"},
@@ -11238,7 +11240,8 @@ int main(int Argc, char **Argv) {
       /* DSP Tier-5 — sources / stats / detectors / spectral / buffering. */
       "dsp.SineWave", "dsp.NCO", "dsp.Chirp",
       "dsp.MovingAverage", "dsp.MovingRMS", "dsp.MovingMaximum",
-      "dsp.MovingStandardDeviation", "dsp.PeakFinder", "dsp.DCBlocker",
+      "dsp.MovingMinimum", "dsp.MovingStandardDeviation",
+      "dsp.PeakFinder", "dsp.DCBlocker",
       "dsp.ZeroCrossingDetector", "dsp.SpectrumEstimator", "dsp.AsyncBuffer",
       /* DSP Tier-6 — linalg + polish filter SOs. */
       "dsp.LevinsonSolver", "dsp.NotchPeakFilter",

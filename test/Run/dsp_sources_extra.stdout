@@ -1,0 +1,4 @@
+nco n=100 peak=1.000 trough=-1.000
+chirp n=100 peak=0.999
+movmin tail=-1.000 (sine trough -1)
+movstd tail=0.738 (sine std ~ 0.7)

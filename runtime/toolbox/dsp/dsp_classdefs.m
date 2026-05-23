@@ -623,6 +623,35 @@ classdef dsp_MovingMaximum < handle
     end
 end
 
+classdef dsp_MovingMinimum < handle
+    properties
+        WindowLength
+        Window
+        WriteIdx
+        IsLocked
+    end
+    methods
+        function obj = dsp_MovingMinimum(a, b)
+            obj.IsLocked = 0;
+            obj.WindowLength = 8;
+            obj.Window = 0;
+            obj.WriteIdx = 0;
+            if nargin == 1
+                obj.WindowLength = a;
+            elseif nargin == 2
+                obj.WindowLength = b;
+            end
+        end
+        function y = step(obj, x)
+            y = matlab_dsp_movmin_step(obj, x);
+        end
+        function reset(obj)
+            matlab_dsp_reset(obj);
+            obj.WriteIdx = 0;
+        end
+    end
+end
+
 classdef dsp_MovingStandardDeviation < handle
     properties
         WindowLength

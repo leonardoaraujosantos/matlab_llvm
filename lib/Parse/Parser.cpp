@@ -963,7 +963,8 @@ static bool isDspSysObjClass(std::string_view Pkg, std::string_view Field) {
     "SampleRateConverter", "Channelizer", "ChannelSynthesizer",
     /* Tier-5 — sources, sliding stats, detectors, spectral, buffering. */
     "SineWave", "NCO", "Chirp",
-    "MovingAverage", "MovingRMS", "MovingMaximum", "MovingStandardDeviation",
+    "MovingAverage", "MovingRMS", "MovingMaximum", "MovingMinimum",
+    "MovingStandardDeviation",
     "PeakFinder", "DCBlocker", "ZeroCrossingDetector",
     "SpectrumEstimator", "AsyncBuffer",
     /* Tier-6 — linalg + polish filter SOs. */
