@@ -139,10 +139,20 @@ for m in "$TESTDIR"/*.m; do
     if [[ -z "$symdir" && -e "$ROOT/build/CMakeCache.txt" ]]; then
       symdir="$(sed -n 's/^SymPP_DIR[^=]*=//p' "$ROOT/build/CMakeCache.txt" | head -1)"
     fi
+    # libsympp lives under the SymPP build tree (`<dir>/src`) OR, when
+    # SymPP was installed, under the prefix's lib dir.  SYMPP_DIR points at
+    # the CMake config dir, which is `<dir>/src` for a build tree but
+    # `<prefix>/lib/cmake/SymPP` for an install — so the prefix lib is two
+    # levels up.  Probe all of these (plus SYMPP_PREFIX) so the lane runs
+    # against either layout.
     symlibdir=""
-    for sub in src lib lib64; do
-      if compgen -G "$symdir/$sub/libsympp.*" >/dev/null 2>&1; then
-        symlibdir="$symdir/$sub"; break
+    for cand in \
+        "$symdir/src" "$symdir/lib" "$symdir/lib64" \
+        "$symdir/../.." "$symdir/../../lib" "$symdir/../../lib64" \
+        "${SYMPP_PREFIX:-/tmp/sympp_install}/lib" \
+        "${SYMPP_PREFIX:-/tmp/sympp_install}/lib64"; do
+      if compgen -G "$cand/libsympp.*" >/dev/null 2>&1; then
+        symlibdir="$(cd "$cand" && pwd)"; break
       fi
     done
     if [[ ! -e "$symo" || -z "$symlibdir" ]]; then
