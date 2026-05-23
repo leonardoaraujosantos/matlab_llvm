@@ -48,7 +48,15 @@ RUNTIME_SRCS=(
   "$RUNTIME_DIR/toolbox/stateflow/runtime_mstateflow.cpp"
 )
 
-CLANG="${CLANG:-/opt/homebrew/opt/llvm/bin/clang}"
+# CLANG default: Homebrew LLVM on macOS, system clang elsewhere (Linux/CI).
+# The hardcoded Homebrew path does not exist on the Linux CI runner.
+if [[ -z "${CLANG:-}" ]]; then
+  if [[ -x /opt/homebrew/opt/llvm/bin/clang ]]; then
+    CLANG=/opt/homebrew/opt/llvm/bin/clang
+  else
+    CLANG=clang
+  fi
+fi
 
 if [[ $# -lt 1 ]]; then
   echo "usage: $0 <input.m> [output]" >&2

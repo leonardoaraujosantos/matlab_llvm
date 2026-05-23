@@ -21,8 +21,8 @@ function out_gear = transmission_tick(in_speed, in_throttle, ev_step)
   persistent t_second;
   persistent t_third;
   persistent l_gear;
-  persistent l_throttle;
   persistent l_speed;
+  persistent l_throttle;
   if isempty(init_done)
     init_done = 0;
     tick_count = 0;

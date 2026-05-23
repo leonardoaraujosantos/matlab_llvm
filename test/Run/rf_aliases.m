@@ -1,7 +1,7 @@
 % MathWorks-faithful lowercase aliases.  These should produce
 % byte-identical results to the long-form names.
 
-data = sparameters("/Users/leonardoaraujo/work/matlab_llvm/test/Run/fixtures/rf/test_amp.s2p");
+data = sparameters("fixtures/rf/test_amp.s2p");
 disp(data.NumPorts);
 S11 = tsS11(data); S12 = tsS12(data);
 S21 = tsS21(data); S22 = tsS22(data);

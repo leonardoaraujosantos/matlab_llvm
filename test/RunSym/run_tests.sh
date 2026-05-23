@@ -27,9 +27,22 @@ if [[ ! -e "$SYMPP_PREFIX/include/sympp/sympp.hpp" ]]; then
 fi
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-CLANG="${CLANG:-/opt/homebrew/opt/llvm/bin/clang}"
+# CLANG default: Homebrew LLVM on macOS, system clang elsewhere (Linux/CI).
+if [[ -z "${CLANG:-}" ]]; then
+  if [[ -x /opt/homebrew/opt/llvm/bin/clang ]]; then
+    CLANG=/opt/homebrew/opt/llvm/bin/clang
+  else
+    CLANG=clang
+  fi
+fi
 CXX="${CXX:-${CLANG}++}"
 TESTDIR="$(cd "$(dirname "$0")" && pwd)"
+# GMP / MPFR live under Homebrew on macOS; on Linux (apt libgmp-dev /
+# libmpfr-dev) they are on the default include/lib search path.
+GMP_FLAGS=()
+if [[ -d /opt/homebrew/include ]]; then
+  GMP_FLAGS=(-I/opt/homebrew/include -L/opt/homebrew/lib)
+fi
 
 # Runtime — shares matlab_runtime.cpp / runtime_debug.cpp / runtime_complex.cpp
 # with test/Run plus runtime_sym.cpp for the sym entry points.
@@ -58,9 +71,9 @@ for m in "$TESTDIR"/*.m; do
   fi
   if ! "$CXX" -std=c++20 -DMATLAB_LLVM_WITH_SYM=1 \
         "$tmpcpp" "${RUNTIME_SRCS[@]}" \
-        -I"$ROOT/runtime" -I"$SYMPP_PREFIX/include" -I/opt/homebrew/include \
+        -I"$ROOT/runtime" -I"$SYMPP_PREFIX/include" \
         -L"$SYMPP_PREFIX/lib" -lsympp \
-        -L/opt/homebrew/lib -lgmp -lmpfr -lgmpxx \
+        "${GMP_FLAGS[@]}" -lgmp -lmpfr -lgmpxx \
         -Wl,-rpath,"$SYMPP_PREFIX/lib" \
         -o "$tmpbin" 2>/tmp/mlcsym.err; then
     echo "FAIL $base: clang link failed"

@@ -16,9 +16,9 @@ function out_dispense = vending_tick(in_coin, ev_insertCoin, ev_select)
   persistent r_chart_root;
   persistent t_have;
   persistent t_idle;
+  persistent l_coin;
   persistent l_credit;
   persistent l_dispense;
-  persistent l_coin;
   if isempty(init_done)
     init_done = 0;
     tick_count = 0;

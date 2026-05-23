@@ -63,14 +63,19 @@ for m in "$TESTDIR"/*.m; do
     rm -f "$tmpsrc"; continue
   fi
 
-  got="$(PYTHONPATH="$RUNTIME_DIR" "$PY" "$tmpsrc" 2>/dev/null)" || {
+  # Run from TESTDIR so test-relative fixture paths resolve regardless of
+  # the harness CWD (build/ under ctest, repo root locally).
+  got="$(cd "$TESTDIR" && PYTHONPATH="$RUNTIME_DIR" "$PY" "$tmpsrc" 2>/dev/null)" || {
     echo "FAIL $base: python3 non-zero exit"
     fail=$((fail+1))
     rm -f "$tmpsrc"; continue
   }
 
+  # Tolerance-aware compare (numdiff.py): numeric tokens within a relative
+  # tolerance, text exact — absorbs last-digit libm divergence (macOS vs Linux).
+  ND=(python3 "$ROOT/test/Run/numdiff.py")
   if [[ -e "${m%.m}.sorted" ]]; then
-    if diff -u <(sort "$exp") <(printf '%s\n' "$got" | sort) >/dev/null; then
+    if "${ND[@]}" <(sort "$exp") <(printf '%s\n' "$got" | sort) >/dev/null; then
       pass=$((pass+1))
     else
       if [[ "$UPDATE" == "1" ]]; then
@@ -82,7 +87,7 @@ for m in "$TESTDIR"/*.m; do
         echo "FAIL $base: stdout mismatch (sorted)"
       fi
     fi
-  elif diff -u "$exp" <(printf '%s\n' "$got") >/dev/null; then
+  elif "${ND[@]}" "$exp" <(printf '%s\n' "$got") >/dev/null; then
     pass=$((pass+1))
   else
     if [[ "$UPDATE" == "1" ]]; then

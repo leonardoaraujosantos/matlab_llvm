@@ -112,12 +112,38 @@ jobs:
       - name: Set up LLVM 22 + build deps + verilator/cocotb
         uses: ./.github/actions/setup-llvm
         with:
-          extra-apt-packages: verilator iverilog gtkwave python3-venv
+          # libgmp-dev / libmpfr-dev are SymPP's transitive deps (needed both
+          # to build SymPP and to link matlabc against libsympp).
+          extra-apt-packages: verilator iverilog gtkwave python3-venv libgmp-dev libmpfr-dev
 
       - name: Install cocotb (Python)
         run: |
           python3 -m pip install --user --upgrade pip
-          python3 -m pip install --user 'cocotb>=1.9,<2.0' cocotb-bus pytest
+          # numpy is imported by the emitted matlab_runtime.py (emit-python +
+          # cocotb co-sim lanes); without it those lanes fail at import time.
+          python3 -m pip install --user 'cocotb>=1.9,<2.0' cocotb-bus pytest numpy
+
+      # Build the Symbolic Math Toolbox backend (SymPP) so the symbolic lanes
+      # (run-tests-sym + sym_basic) actually run instead of skipping.  Cached
+      # by SYMPP_REF — bump the key suffix to pull a newer SymPP.
+      - name: Restore SymPP
+        id: sympp-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/sympp_install
+          key: sympp-${{ runner.os }}-${{ runner.arch }}-v1
+      - name: Build SymPP (if not cached)
+        if: steps.sympp-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euxo pipefail
+          git clone --depth 1 https://github.com/leonardoaraujosantos/SymPP /tmp/SymPP
+          # -DSYMPP_BUILD_TESTS=OFF skips the Catch2 FetchContent (a slow
+          # network fetch we don't need — matlabc only links libsympp).
+          cmake -S /tmp/SymPP -B /tmp/SymPP/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DSYMPP_BUILD_TESTS=OFF
+          cmake --build /tmp/SymPP/build -j"$(nproc)"
+          cmake --install /tmp/SymPP/build --prefix /tmp/sympp_install
+          test -f /tmp/sympp_install/lib/cmake/SymPP/SymPPConfig.cmake
 
       - name: Restore ccache
         uses: actions/cache@v4
@@ -137,6 +163,8 @@ jobs:
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DMATLAB_LLVM_WITH_MLIR=ON \
             -DMATLAB_LLVM_WITH_PLOT=ON \
+            -DMATLAB_LLVM_WITH_SYM=ON \
+            -DSymPP_DIR=/tmp/sympp_install/lib/cmake/SymPP \
             -DLLVM_DIR="$LLVM_DIR" \
             -DMLIR_DIR="$MLIR_DIR"
 
@@ -183,7 +211,8 @@ jobs:
         run: |
           python3 -m pip install --user --upgrade pip
           # cocotb pin avoids drift if upstream lands a breaking release.
-          python3 -m pip install --user 'cocotb>=1.9,<2.0' cocotb-bus pytest
+          # numpy is imported by the emitted matlab_runtime.py (cocotb + emit-python).
+          python3 -m pip install --user 'cocotb>=1.9,<2.0' cocotb-bus pytest numpy
 
       - name: Tool versions (sanity)
         run: |

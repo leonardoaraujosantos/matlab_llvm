@@ -18,8 +18,8 @@ function [out_bell, out_lamp] = alarm_tick(ev_intruder, ev_all_clear, ev_test)
   persistent r_chart_root;
   persistent t_alarming;
   persistent t_armed;
-  persistent l_lamp;
   persistent l_bell;
+  persistent l_lamp;
   if isempty(init_done)
     init_done = 0;
     tick_count = 0;

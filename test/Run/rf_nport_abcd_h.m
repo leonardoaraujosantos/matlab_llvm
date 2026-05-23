@@ -4,7 +4,7 @@
 % block matrices are 1×1 — equivalent to the scalar 2-port form
 % (matches sparamS2abcd / sparamS2h closed-form values).
 
-data = touchstoneRead("/Users/leonardoaraujo/work/matlab_llvm/test/Run/fixtures/rf/test_amp.s2p");
+data = touchstoneRead("fixtures/rf/test_amp.s2p");
 
 ab = sparamS2abcdN(data);
 disp(ab.NumPorts);            % 2

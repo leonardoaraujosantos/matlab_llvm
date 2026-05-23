@@ -20,8 +20,8 @@ function [out_room_key, out_wake_up] = hotel_check_in_tick(ev_arrived, ev_paid, 
   persistent t_in_room;
   persistent t_lobby;
   persistent t_registering;
-  persistent l_wake_up;
   persistent l_room_key;
+  persistent l_wake_up;
   if isempty(init_done)
     init_done = 0;
     tick_count = 0;

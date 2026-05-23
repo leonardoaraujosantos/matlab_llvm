@@ -7162,6 +7162,13 @@ int runDap(const std::string &CLIPath) {
   }
   close(Pipe[1]);
   DebuggeeOutFd = Pipe[0];
+  /* The captured stdout is now a pipe, not a tty.  glibc (Linux)
+   * full-buffers a non-tty stdout, so JIT'd `disp()` / `fprintf` output
+   * would sit in the 4 KB buffer and never reach the DAP reader until a
+   * fill or process exit — the REPL `evaluate` output events time out on
+   * Linux (macOS libc flushes more eagerly, so it passed locally).  Force
+   * line-buffering so each printed line surfaces to the pipe promptly. */
+  setvbuf(stdout, nullptr, _IOLBF, 0);
 
   /* Same redirect for stderr. The DAP server's own diagnostics still
    * need an unredirected stderr — std::cerr lines emitted before
@@ -9773,6 +9780,10 @@ static std::string renderCocotbMakefile(const std::string &Stem,
   M += "TOPLEVEL_LANG ?= verilog\n";
   M += "SIM           ?= verilator\n";
   M += "EXTRA_ARGS    += --trace --trace-structs\n";
+  // The emitted SV relies on Verilog's implicit width extension in
+  // mixed-width arithmetic (e.g. acc + x); Verilator 5.x escalates that to a
+  // fatal WIDTHEXPAND/WIDTHTRUNC lint, so silence the width-style warnings.
+  M += "EXTRA_ARGS    += -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC\n";
   M += "VERILOG_SOURCES = $(PWD)/" + Stem + ".sv\n";
   M += "TOPLEVEL = " + DutName + "\n";
   M += "MODULE   = test_" + Stem + "\n";
@@ -10160,6 +10171,9 @@ static int emitCocotbHarnessForDiagram(const char *Self,
   MF += "TOPLEVEL_LANG ?= verilog\n";
   MF += "SIM           ?= verilator\n";
   MF += "EXTRA_ARGS    += --trace --trace-structs\n";
+  // Silence Verilator 5.x's fatal width-style lint (the emitted SV uses
+  // Verilog's implicit width extension in mixed-width arithmetic).
+  MF += "EXTRA_ARGS    += -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC\n";
   MF += "VERILOG_SOURCES =";
   for (const auto &D : DutCtxs) MF += " $(PWD)/" + D.DutStem + ".sv";
   if (MultiDut) MF += " $(PWD)/" + WrapperModule + ".sv";

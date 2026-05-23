@@ -20,9 +20,9 @@ end
 function [out_heat, out_fan_cmd] = heater_tick(in_temp, in_setpoint, ev_tick)
   persistent init_done;
   persistent tick_count;
+  persistent r_chart_root;
   persistent r_fan;
   persistent r_thermo;
-  persistent r_chart_root;
   persistent t_ctrl;
   persistent t_fan;
   persistent t_idle;
@@ -37,9 +37,9 @@ function [out_heat, out_fan_cmd] = heater_tick(in_temp, in_setpoint, ev_tick)
   if isempty(init_done)
     init_done = 0;
     tick_count = 0;
+    r_chart_root = 0;
     r_fan = 0;
     r_thermo = 0;
-    r_chart_root = 0;
     t_ctrl = 0;
     t_fan = 0;
     t_idle = 0;

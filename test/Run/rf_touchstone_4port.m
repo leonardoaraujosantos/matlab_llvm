@@ -6,7 +6,7 @@
 % detection, the row-major S layout decoding, and the tsSij()
 % generic getter.
 
-data = touchstoneRead("/Users/leonardoaraujo/work/matlab_llvm/test/Run/fixtures/rf/diff_pair.s4p");
+data = touchstoneRead("fixtures/rf/diff_pair.s4p");
 disp(data.NumPorts);     % 4
 disp(data.Z0);            % 50
 

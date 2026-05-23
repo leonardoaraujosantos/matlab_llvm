@@ -2,7 +2,7 @@
 % write it back, re-read.  Final values should be byte-identical
 % modulo MA-format printing precision.
 
-data = touchstoneRead("/Users/leonardoaraujo/work/matlab_llvm/test/Run/fixtures/rf/test_amp.s2p");
+data = touchstoneRead("fixtures/rf/test_amp.s2p");
 ok = touchstoneWrite("/tmp/_rt.s2p", data);
 disp(ok);                       % 1 (success)
 

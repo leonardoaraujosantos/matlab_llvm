@@ -22,6 +22,11 @@ MODE="${MODE:-c}"
 STRICT="${STRICT:-0}"
 CC="${CC:-cc}"
 CXX="${CXX:-c++}"
+# The runtime is a C++20 project (CMAKE_CXX_STANDARD 20); compile its TUs with
+# that standard so libstdc++ pulls in <string>/<cstdio> (the compiler default
+# gnu++17 leaves them incomplete on Linux).  The emitted source side keeps the
+# default standard (it only includes the public headers).
+CXXSTD="${CXXSTD:--std=c++20}"
 
 # In strict mode: treat warnings as errors, but exempt categories that are
 # inherent to the emitter's output shape (one C local per SSA value, so
@@ -32,7 +37,11 @@ if [[ "$STRICT" == "1" ]]; then
   WFLAGS=(-Wall -Wextra -Werror
           -Wno-unused-variable -Wno-unused-but-set-variable
           -Wno-unused-parameter -Wno-unused-function
-          -Wno-parentheses-equality)
+          -Wno-parentheses-equality
+          # Designated-initializer structs (e.g. matlab_dbg_state) omit
+          # zero-defaulted trailing fields on purpose; clang's -Wextra flags
+          # this under libstdc++ but it is not a real defect.
+          -Wno-missing-field-initializers)
   LABEL_SUFFIX=" strict"
 else
   WFLAGS=(-w)
@@ -67,8 +76,9 @@ trap 'rm -rf "$OBJDIR"' EXIT
 RUNTIME_OBJS=()
 for src in "$RUNTIME_MAIN" "$RUNTIME_DEBUG" "$RUNTIME_COMPLEX" "$RUNTIME_COMM" "$RUNTIME_PROP"; do
   obj="$OBJDIR/$(basename "${src%.cpp}").o"
-  if ! "$CXX" "${WFLAGS[@]}" "-I$ROOT/runtime" -x c++ -c "$src" -o "$obj" 2>/dev/null; then
+  if ! "$CXX" $CXXSTD "${WFLAGS[@]}" "-I$ROOT/runtime" -x c++ -c "$src" -o "$obj" 2>"$OBJDIR/cc.err"; then
     echo "FATAL: failed to compile runtime TU $src" >&2
+    cat "$OBJDIR/cc.err" >&2
     exit 2
   fi
   RUNTIME_OBJS+=( "$obj" )
@@ -122,26 +132,32 @@ for m in "$TESTDIR"/*.m; do
   fi
   rm -f "$cc_err"
 
-  got="$("$tmpbin")" || {
+  # Run from TESTDIR so fixtures referenced by a test-relative path resolve
+  # regardless of the harness CWD (build/ under ctest, repo root locally).
+  got="$(cd "$TESTDIR" && "$tmpbin")" || {
     echo "FAIL $base: non-zero exit"
     fail=$((fail+1))
     rm -f "$tmpsrc" "$tmpbin"; continue
   }
 
+  # Tolerance-aware compare (numdiff.py): numeric tokens within a relative
+  # tolerance, text exact — absorbs last-digit libm divergence (macOS vs
+  # Linux) in the disp-printed goldens.
+  ND=(python3 "$ROOT/test/Run/numdiff.py")
   if [[ -e "${m%.m}.sorted" ]]; then
-    if diff -u <(sort "$exp") <(printf '%s\n' "$got" | sort) >/dev/null; then
+    if "${ND[@]}" <(sort "$exp") <(printf '%s\n' "$got" | sort) >/dev/null; then
       pass=$((pass+1))
     else
       fail=$((fail+1))
       echo "FAIL $base: stdout mismatch (sorted)"
-      diff -u <(sort "$exp") <(printf '%s\n' "$got" | sort) | sed 's/^/  /'
+      "${ND[@]}" <(sort "$exp") <(printf '%s\n' "$got" | sort) | sed 's/^/  /'
     fi
-  elif diff -u "$exp" <(printf '%s\n' "$got") >/dev/null; then
+  elif "${ND[@]}" "$exp" <(printf '%s\n' "$got") >/dev/null; then
     pass=$((pass+1))
   else
     fail=$((fail+1))
     echo "FAIL $base: stdout mismatch"
-    diff -u "$exp" <(printf '%s\n' "$got") | sed 's/^/  /'
+    "${ND[@]}" "$exp" <(printf '%s\n' "$got") | sed 's/^/  /'
   fi
   rm -f "$tmpsrc" "$tmpbin"
 done

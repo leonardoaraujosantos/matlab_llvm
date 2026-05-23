@@ -17,7 +17,20 @@ if [[ -z "$MATLABC" || ! -x "$MATLABC" ]]; then
 fi
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-CLANG="${CLANG:-/opt/homebrew/opt/llvm/bin/clang}"
+# CLANG default: Homebrew LLVM on macOS, system clang elsewhere (Linux/CI).
+# The hardcoded Homebrew path does not exist on the Linux CI runner.
+if [[ -z "${CLANG:-}" ]]; then
+  if [[ -x /opt/homebrew/opt/llvm/bin/clang ]]; then
+    CLANG=/opt/homebrew/opt/llvm/bin/clang
+  else
+    CLANG=clang
+  fi
+fi
+# The runtime is a C++20 project (CMAKE_CXX_STANDARD 20).  Compile the
+# runtime TUs with the same standard the cmake build uses — under the
+# compiler default (gnu++17) libstdc++ does not transitively pull in
+# <string>/<cstdio>, so the runtime fails to compile on Linux.
+CXXSTD="${CXXSTD:--std=c++20}"
 # Runtime is C++ since Phase 3 of docs/port_runtime_2_cpp.md — drive the
 # link line with clang++ so the .cpp is compiled as C++.
 # Post-2026-05 reorganization: core runtime stays at runtime/ top
@@ -52,8 +65,9 @@ trap 'rm -rf "$OBJDIR"' EXIT
 RUNTIME_OBJS=()
 for src in "${RUNTIME_SRCS[@]}"; do
   obj="$OBJDIR/$(basename "${src%.cpp}").o"
-  if ! "$CXX" -DMATLAB_LLVM_WITH_PLOT=1 -I"$ROOT/runtime" -c "$src" -o "$obj" 2>/dev/null; then
+  if ! "$CXX" $CXXSTD -DMATLAB_LLVM_WITH_PLOT=1 -I"$ROOT/runtime" -c "$src" -o "$obj" 2>"$OBJDIR/cc.err"; then
     echo "FATAL: failed to compile runtime TU $src" >&2
+    cat "$OBJDIR/cc.err" >&2
     exit 2
   fi
   RUNTIME_OBJS+=( "$obj" )
@@ -92,10 +106,12 @@ for m in "$TESTDIR"/*.m; do
   tmpll="$(mktemp -t mlc.XXXXXX).ll"
   tmpbin="$(mktemp -t mlc.XXXXXX).out"
 
-  if ! "$MATLABC" -emit-llvm "$m" > "$tmpll" 2>/dev/null; then
+  if ! "$MATLABC" -emit-llvm "$m" > "$tmpll" 2>"$tmpll.err"; then
     echo "FAIL $base: matlabc -emit-llvm errored"
+    sed 's/^/  /' "$tmpll.err" | head -8
+    rm -f "$tmpll.err"
     fail=$((fail+1))
-    rm -f "$tmpll" "$tmpbin"; continue
+    rm -f "$tmpll" "$tmpll.err" "$tmpbin"; continue
   fi
   # Per-test opt-in for the Cairo plot runtime (precompiled objects above).
   # If the marker is present but cairo isn't available, SKIP rather than fail.
@@ -104,7 +120,7 @@ for m in "$TESTDIR"/*.m; do
   if [[ -e "${m%.m}.requires-plot" ]]; then
     if [[ "$PLOT_OK" != 1 ]]; then
       echo "SKIP $base (requires-plot, no cairo)"
-      rm -f "$tmpll" "$tmpbin"; continue
+      rm -f "$tmpll" "$tmpll.err" "$tmpbin"; continue
     fi
     plot_objs=( "${PLOT_OBJS[@]}" )
     plot_libs=( "${PLOT_LIBS[@]}" )
@@ -123,15 +139,25 @@ for m in "$TESTDIR"/*.m; do
     if [[ -z "$symdir" && -e "$ROOT/build/CMakeCache.txt" ]]; then
       symdir="$(sed -n 's/^SymPP_DIR[^=]*=//p' "$ROOT/build/CMakeCache.txt" | head -1)"
     fi
+    # libsympp lives under the SymPP build tree (`<dir>/src`) OR, when
+    # SymPP was installed, under the prefix's lib dir.  SYMPP_DIR points at
+    # the CMake config dir, which is `<dir>/src` for a build tree but
+    # `<prefix>/lib/cmake/SymPP` for an install — so the prefix lib is two
+    # levels up.  Probe all of these (plus SYMPP_PREFIX) so the lane runs
+    # against either layout.
     symlibdir=""
-    for sub in src lib lib64; do
-      if compgen -G "$symdir/$sub/libsympp.*" >/dev/null 2>&1; then
-        symlibdir="$symdir/$sub"; break
+    for cand in \
+        "$symdir/src" "$symdir/lib" "$symdir/lib64" \
+        "$symdir/../.." "$symdir/../../lib" "$symdir/../../lib64" \
+        "${SYMPP_PREFIX:-/tmp/sympp_install}/lib" \
+        "${SYMPP_PREFIX:-/tmp/sympp_install}/lib64"; do
+      if compgen -G "$cand/libsympp.*" >/dev/null 2>&1; then
+        symlibdir="$(cd "$cand" && pwd)"; break
       fi
     done
     if [[ ! -e "$symo" || -z "$symlibdir" ]]; then
       echo "SKIP $base (requires-sym, no SymPP build)"
-      rm -f "$tmpll" "$tmpbin"; continue
+      rm -f "$tmpll" "$tmpll.err" "$tmpbin"; continue
     fi
     sym_objs=( "$symo" )
     sym_libs=( -L"$symlibdir" -lsympp -Wl,-rpath,"$symlibdir" )
@@ -150,32 +176,39 @@ for m in "$TESTDIR"/*.m; do
               -o "$tmpbin" 2>/dev/null; then
     echo "FAIL $base: clang link failed"
     fail=$((fail+1))
-    rm -f "$tmpll" "$tmpbin"; continue
+    rm -f "$tmpll" "$tmpll.err" "$tmpbin"; continue
   fi
-  got="$("$tmpbin")" || {
+  # Run from TESTDIR so a fixture referenced by a path relative to the test
+  # directory (e.g. fixtures/rf/test_amp.s2p) resolves on every platform —
+  # the harness CWD differs (build/ under ctest, repo root locally).
+  got="$(cd "$TESTDIR" && "$tmpbin")" || {
     echo "FAIL $base: non-zero exit"
     fail=$((fail+1))
-    rm -f "$tmpll" "$tmpbin"; continue
+    rm -f "$tmpll" "$tmpll.err" "$tmpbin"; continue
   }
   # If a .sorted file exists alongside the .m, compare against the expected
   # output after sorting both sides (useful for parfor where iteration
   # order is nondeterministic).
+  # Comparison is tolerance-aware (numdiff.py): numeric tokens match within
+  # a relative tolerance, text exactly — absorbs last-digit libm divergence
+  # between macOS (libc++) and Linux (libstdc++) in the disp-printed goldens.
+  ND=(python3 "$ROOT/test/Run/numdiff.py")
   if [[ -e "${m%.m}.sorted" ]]; then
-    if diff -u <(sort "$exp") <(printf '%s\n' "$got" | sort) >/dev/null; then
+    if "${ND[@]}" <(sort "$exp") <(printf '%s\n' "$got" | sort) >/dev/null; then
       pass=$((pass+1))
     else
       fail=$((fail+1))
       echo "FAIL $base: stdout mismatch (sorted)"
-      diff -u <(sort "$exp") <(printf '%s\n' "$got" | sort) | sed 's/^/  /'
+      "${ND[@]}" <(sort "$exp") <(printf '%s\n' "$got" | sort) | sed 's/^/  /'
     fi
-  elif diff -u "$exp" <(printf '%s\n' "$got") >/dev/null; then
+  elif "${ND[@]}" "$exp" <(printf '%s\n' "$got") >/dev/null; then
     pass=$((pass+1))
   else
     fail=$((fail+1))
     echo "FAIL $base: stdout mismatch"
-    diff -u "$exp" <(printf '%s\n' "$got") | sed 's/^/  /'
+    "${ND[@]}" "$exp" <(printf '%s\n' "$got") | sed 's/^/  /'
   fi
-  rm -f "$tmpll" "$tmpbin"
+  rm -f "$tmpll" "$tmpll.err" "$tmpbin"
 done
 
 echo "----"

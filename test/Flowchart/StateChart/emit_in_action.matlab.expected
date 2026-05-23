@@ -18,8 +18,8 @@ function out_overheat = watchdog_tick(ev_tick, ev_fault, ev_shutdown)
   persistent t_halted;
   persistent t_normal;
   persistent t_warned;
-  persistent l_warnings;
   persistent l_overheat;
+  persistent l_warnings;
   if isempty(init_done)
     init_done = 0;
     tick_count = 0;

@@ -21,8 +21,8 @@ function out_dest = router_tick(in_mode, in_val, ev_tick)
   persistent t_ignore;
   persistent t_near;
   persistent l_dest;
-  persistent l_val;
   persistent l_mode;
+  persistent l_val;
   if isempty(init_done)
     init_done = 0;
     tick_count = 0;

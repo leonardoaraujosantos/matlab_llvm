@@ -21,10 +21,10 @@ function [out_red, out_yellow, out_green] = traffic_light_tick(ev_step)
   persistent t_S_green;
   persistent t_S_red;
   persistent t_S_yellow;
-  persistent l_timer;
   persistent l_green;
-  persistent l_yellow;
   persistent l_red;
+  persistent l_timer;
+  persistent l_yellow;
   if isempty(init_done)
     init_done = 0;
     tick_count = 0;
