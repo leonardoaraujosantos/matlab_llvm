@@ -848,47 +848,49 @@ if(MATLAB_LLVM_WITH_MLIR)
   endif()
 endif()
 
-# --- Test timeouts + heavy-lane serialization (fail-fast, no thrash) --------
-# Two problems this guards against:
-#   1. Hangs: the flowchart simulate-dap / cocotb lanes spawn external simulator
-#      / DAP subprocesses that wait on I/O and can never exit in a headless
-#      environment (observed: a 31-minute hang of the full gate, plus a stale
-#      `--sim-dap` process). Bound every lane with a 300 s fail-fast cap.
-#   2. Thrash / starvation: many lanes are CPU-bound — the run-tests* lanes
-#      compile every fixture, and the SV/cocotb/Verilog-A lanes run
-#      Verilator / yosys / iverilog / cocotb / ADMS per fixture. Run
-#      concurrently under `-j` they thrash, and a fast lane can be *starved*
-#      past its timeout (run-tests runs ~5 s alone but timed out at 900 s while
-#      Verilator/yosys lanes hogged the CPU). Put ALL the CPU-heavy lanes under
-#      one shared RESOURCE_LOCK so ctest runs at most one at a time (each then
-#      runs at native speed; the light lanes fill the gaps), with a generous
-#      finite TIMEOUT so a genuinely stuck job is still bounded.
-set(_mlc_heavy_lanes
-    # execute / source-emit lanes (recompile the runtime per fixture)
-    run-tests
-    run-tests-emit-c run-tests-emit-cpp
-    run-tests-emit-c-strict run-tests-emit-cpp-strict
-    run-tests-emit-python run-tests-emit-typescript
-    run-tests-sym
-    # external-toolchain lanes (Verilator / yosys / iverilog / cocotb / ADMS)
-    cocotb-tests
-    flowchart-emit-chart-cocotb flowchart-emit-diagram-cocotb
-    flowchart-emit-subsystem-sv-verilator
-    flowchart-emit-subsystem-sv-cosim
-    flowchart-emit-subsystem-sv-yosys
-    run-emit-va-admslint run-emit-va-cosim
-    emit-sv-tests)
-foreach(_mlc_h IN LISTS _mlc_heavy_lanes)
-  if(TEST ${_mlc_h})
-    set_tests_properties(${_mlc_h} PROPERTIES
-      RESOURCE_LOCK mlc_cpu_heavy
-      TIMEOUT 900)
+# --- Test timeouts (tiered: bound hangs without false-failing slow lanes) ----
+# Lanes fall into distinct categories with very different runtimes, so a flat
+# timeout is wrong (a 300 s cap false-times-out the slow execute lanes; a
+# generous cap lets a hung DAP lane freeze the gate). Four tiers:
+#
+#   A. DAP / sim-dap lanes — drive `matlabc --sim-dap`, which waits on DAP
+#      stdin and can hang forever in a headless run (this caused the original
+#      31-min freeze, plus a 7-day-old stale process).  TIGHT 300 s fail-fast.
+#   B. run-tests* execute / source-emit lanes — recompile the whole runtime per
+#      fixture (no ccache on the script path), so they are very slow (~tens of
+#      minutes on CI) but always TERMINATE.  Generous 5400 s + a shared
+#      RESOURCE_LOCK so they serialize instead of thrashing under `-j`
+#      (run-tests-emit-c measured ~67 s alone vs ~663 s contended).
+#   C. external-toolchain lanes — Verilator / yosys / iverilog / cocotb / ADMS
+#      per fixture; CPU-heavy but terminate.  1800 s + the same RESOURCE_LOCK.
+#   D. everything else (light) — 1800 s default; only catches an accidental
+#      hang, never false-fails (these run in well under a minute).
+foreach(_t flowchart-simulate-dap-tests flowchart-simulate-dap-block-tests
+           flowchart-simulate-dap-breakpoint-tests flowchart-simulate-dap-chart-tests
+           flowchart-dap-tests debug-dap-tests debug-dap-jit-userfn-tests)
+  if(TEST ${_t})
+    set_tests_properties(${_t} PROPERTIES TIMEOUT 300)
+  endif()
+endforeach()
+foreach(_t run-tests run-tests-emit-c run-tests-emit-cpp
+           run-tests-emit-c-strict run-tests-emit-cpp-strict
+           run-tests-emit-python run-tests-emit-typescript run-tests-sym)
+  if(TEST ${_t})
+    set_tests_properties(${_t} PROPERTIES RESOURCE_LOCK mlc_cpu_heavy TIMEOUT 5400)
+  endif()
+endforeach()
+foreach(_t cocotb-tests flowchart-emit-chart-cocotb flowchart-emit-diagram-cocotb
+           flowchart-emit-subsystem-sv-verilator flowchart-emit-subsystem-sv-cosim
+           flowchart-emit-subsystem-sv-yosys run-emit-va-admslint run-emit-va-cosim
+           emit-sv-tests)
+  if(TEST ${_t})
+    set_tests_properties(${_t} PROPERTIES RESOURCE_LOCK mlc_cpu_heavy TIMEOUT 1800)
   endif()
 endforeach()
 get_property(_mlc_all_tests DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" PROPERTY TESTS)
 foreach(_mlc_t IN LISTS _mlc_all_tests)
   get_test_property(${_mlc_t} TIMEOUT _mlc_existing)
   if(NOT _mlc_existing)
-    set_tests_properties(${_mlc_t} PROPERTIES TIMEOUT 300)
+    set_tests_properties(${_mlc_t} PROPERTIES TIMEOUT 1800)
   endif()
 endforeach()
