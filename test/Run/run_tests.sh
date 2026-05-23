@@ -173,20 +173,24 @@ for m in "$TESTDIR"/*.m; do
   # If a .sorted file exists alongside the .m, compare against the expected
   # output after sorting both sides (useful for parfor where iteration
   # order is nondeterministic).
+  # Comparison is tolerance-aware (numdiff.py): numeric tokens match within
+  # a relative tolerance, text exactly — absorbs last-digit libm divergence
+  # between macOS (libc++) and Linux (libstdc++) in the disp-printed goldens.
+  ND=(python3 "$ROOT/test/Run/numdiff.py")
   if [[ -e "${m%.m}.sorted" ]]; then
-    if diff -u <(sort "$exp") <(printf '%s\n' "$got" | sort) >/dev/null; then
+    if "${ND[@]}" <(sort "$exp") <(printf '%s\n' "$got" | sort) >/dev/null; then
       pass=$((pass+1))
     else
       fail=$((fail+1))
       echo "FAIL $base: stdout mismatch (sorted)"
-      diff -u <(sort "$exp") <(printf '%s\n' "$got" | sort) | sed 's/^/  /'
+      "${ND[@]}" <(sort "$exp") <(printf '%s\n' "$got" | sort) | sed 's/^/  /'
     fi
-  elif diff -u "$exp" <(printf '%s\n' "$got") >/dev/null; then
+  elif "${ND[@]}" "$exp" <(printf '%s\n' "$got") >/dev/null; then
     pass=$((pass+1))
   else
     fail=$((fail+1))
     echo "FAIL $base: stdout mismatch"
-    diff -u "$exp" <(printf '%s\n' "$got") | sed 's/^/  /'
+    "${ND[@]}" "$exp" <(printf '%s\n' "$got") | sed 's/^/  /'
   fi
   rm -f "$tmpll" "$tmpbin"
 done
