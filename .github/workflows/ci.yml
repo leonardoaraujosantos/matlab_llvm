@@ -96,9 +96,9 @@ jobs:
   # labelled `full-ci` / dispatched manually.
   # -------------------------------------------------------------------------
   full:
-    name: Full (run-tests + emit-c + emit-cpp)
+    name: Full (complete ctest gate)
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 150
     if: >-
       github.event_name == 'push' ||
       github.event_name == 'schedule' ||
@@ -109,8 +109,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up LLVM 22 + build deps
+      - name: Set up LLVM 22 + build deps + verilator/cocotb
         uses: ./.github/actions/setup-llvm
+        with:
+          extra-apt-packages: verilator iverilog gtkwave python3-venv
+
+      - name: Install cocotb (Python)
+        run: |
+          python3 -m pip install --user --upgrade pip
+          python3 -m pip install --user 'cocotb>=1.9,<2.0' cocotb-bus pytest
 
       - name: Restore ccache
         uses: actions/cache@v4
@@ -136,14 +143,14 @@ jobs:
       - name: Build
         run: cmake --build build -j
 
-      - name: Run-tests (build-and-run every .m fixture)
-        run: ctest --test-dir build --output-on-failure -R '^run-tests$'
-
-      - name: Emit-C lane
-        run: ctest --test-dir build --output-on-failure -R '^run-tests-emit-c$'
-
-      - name: Emit-Cpp lane
-        run: ctest --test-dir build --output-on-failure -R '^run-tests-emit-cpp$'
+      - name: Complete test gate (every ctest lane)
+        # Runs ALL registered lanes — execute (run-tests) + every source
+        # emitter (emit-c/cpp/python/typescript + strict) + the SystemVerilog
+        # goldens + cocotb/Verilator co-sim + flowchart/DAP/REPL. The
+        # CPU-bound lanes share a RESOURCE_LOCK so they serialize instead of
+        # thrashing, and every lane has a fail-fast TIMEOUT (see CMakeLists.txt),
+        # so running with -j and a hung external sim are both safe.
+        run: ctest --test-dir build --output-on-failure -j $(nproc)
 
       - name: ccache stats
         if: always()
