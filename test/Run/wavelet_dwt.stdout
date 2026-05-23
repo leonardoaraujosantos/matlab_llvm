@@ -1,0 +1,5 @@
+idwt PR ok: 0
+cA len: 32
+db4 sum(Lo_D): 1.4142
+db4 sum(Lo_D^2): 1.0000
+db4 filter len: 8

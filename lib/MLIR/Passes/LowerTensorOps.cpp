@@ -3035,6 +3035,97 @@ bool TensorLowering::rewriteBuiltinCalls() {
         continue;
       }
     }
+
+    /* ===== Wavelet Toolbox multi-return builtins ======================
+     * Each output is an independent runtime call sharing the *coerced*
+     * operands.  A const_char family/option arg is materialised into a
+     * matlab_string* (the pde_table path, hoisted here); f64 stays f64;
+     * tensor/ptr is bridged to llvm.ptr.  The runtime entry signature is
+     * inferred from the coerced operand types, so a per-name table only
+     * needs the operand count and the ordered output runtime names. */
+    {
+      struct WMR { StringRef name; unsigned nops; SmallVector<StringRef, 4> outs; };
+      static const WMR wmret[] = {
+        {"wfilters", 1, {"matlab_wavelet_wf_lod", "matlab_wavelet_wf_hid",
+                         "matlab_wavelet_wf_lor", "matlab_wavelet_wf_hir"}},
+        {"dwt",      2, {"matlab_wavelet_dwt_cA", "matlab_wavelet_dwt_cD"}},
+        {"wavedec",  3, {"matlab_wavelet_wavedec_C", "matlab_wavelet_wavedec_L"}},
+        {"wnoise",   3, {"matlab_wavelet_wnoise_x3", "matlab_wavelet_wnoise_xn3"}},
+        {"cwt",      2, {"matlab_wavelet_cwt_mag", "matlab_wavelet_cwt_f"}},
+        {"dwt2",     2, {"matlab_wavelet_dwt2_cA", "matlab_wavelet_dwt2_cH",
+                         "matlab_wavelet_dwt2_cV", "matlab_wavelet_dwt2_cD"}},
+        {"wavedec2", 3, {"matlab_wavelet_wavedec2_C", "matlab_wavelet_wavedec2_S"}},
+      };
+      bool wmatched = false;
+      for (const auto &E : wmret) {
+        if (Name != E.name) continue;
+        if (Call->getNumOperands() != E.nops) continue;
+        if (Call->getNumResults() == 0 ||
+            Call->getNumResults() > E.outs.size()) continue;
+        /* coerce each operand once. */
+        bool ok = true;
+        SmallVector<Value, 4> coerced;
+        SmallVector<Type, 4> sig;
+        SmallVector<Operation *, 2> deadLits;
+        B.setInsertionPoint(Call);
+        for (unsigned k = 0; k < E.nops; ++k) {
+          Value V = Call->getOperand(k);
+          Operation *Def = V.getDefiningOp();
+          if (isMatlabOp(Def, "matlab.const_char")) {
+            auto VA = Def->getAttrOfType<StringAttr>("value");
+            if (!VA) { ok = false; break; }
+            StringRef Text = VA.getValue();
+            LLVM::GlobalOp Found;
+            for (auto G : Mod.getOps<LLVM::GlobalOp>()) {
+              if (!G.getConstant()) continue;
+              auto At = mlir::dyn_cast_or_null<StringAttr>(G.getValueAttr());
+              if (At && At.getValue() == Text) { Found = G; break; }
+            }
+            if (!Found) {
+              OpBuilder::InsertionGuard IG(B);
+              B.setInsertionPointToStart(Mod.getBody());
+              auto ArrayTy = LLVM::LLVMArrayType::get(
+                  IntegerType::get(Ctx, 8), static_cast<unsigned>(Text.size()));
+              unsigned N = 0; std::string SymName;
+              do { SymName = ("__matlab_str_w" + std::to_string(N++)); }
+              while (Mod.lookupSymbol(SymName));
+              Found = LLVM::GlobalOp::create(B, Mod.getLoc(), ArrayTy, true,
+                  LLVM::Linkage::Internal, SymName, StringAttr::get(Ctx, Text));
+            }
+            Value Addr = LLVM::AddressOfOp::create(B, Call->getLoc(), PtrTy,
+                                                   Found.getSymName());
+            Value LenV = LLVM::ConstantOp::create(B, Call->getLoc(), I64,
+                B.getI64IntegerAttr(static_cast<int64_t>(Text.size())));
+            auto FnS = rt("matlab_string_from_literal", PtrTy, {PtrTy, I64});
+            coerced.push_back(LLVM::CallOp::create(B, Call->getLoc(), FnS,
+                                  ValueRange{Addr, LenV}).getResult());
+            sig.push_back(PtrTy);
+            deadLits.push_back(Def);
+          } else if (V.getType() == F64) {
+            coerced.push_back(V); sig.push_back(F64);
+          } else if (V.getType() == PtrTy || isTensorLike(V.getType())) {
+            if (V.getType() != PtrTy) {
+              auto Cast = mlir::UnrealizedConversionCastOp::create(
+                  B, Call->getLoc(), PtrTy, V);
+              coerced.push_back(Cast.getResult(0));
+            } else coerced.push_back(V);
+            sig.push_back(PtrTy);
+          } else { ok = false; break; }
+        }
+        if (!ok) continue;
+        for (unsigned r = 0; r < Call->getNumResults(); ++r) {
+          auto Fn = rt(E.outs[r], PtrTy, sig);
+          auto Cr = LLVM::CallOp::create(B, Call->getLoc(), Fn, coerced);
+          Call->getResult(r).replaceAllUsesWith(Cr.getResult());
+        }
+        Call->erase();
+        for (Operation *D : deadLits) if (D->use_empty()) D->erase();
+        Changed = true; wmatched = true;
+        break;
+      }
+      if (wmatched) continue;
+    }
+
     /* [X, Y] = meshgrid(x[, y]) / ndgrid(x[, y]): two ptr results, one
      * or two ptr inputs. Mirror the single-arg form (meshgrid(x) ==
      * meshgrid(x, x)) when only one operand was supplied — the runtime
@@ -5002,6 +5093,67 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"matlab_curvefit_fnint_init",  "matlab_curvefit_fnint_init",  PtrTy, {PtrTy, PtrTy}},
         {"fnval", "matlab_curvefit_fnval", PtrTy, {PtrTy, PtrTy}},
         {"fnbrk", "matlab_curvefit_fnbrk", PtrTy, {PtrTy, PtrTy}},
+        /* ===== Wavelet Toolbox single-return builtins =====
+         * Family / option strings (const_char) coerce to matlab_string*
+         * via the WantTy==PtrTy + const_char path; scalar level/threshold
+         * args stay f64; matrices/coefficient vectors bridge to llvm.ptr. */
+        /* Tier-1 */
+        {"idwt",    "matlab_wavelet_idwt",    PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"waverec", "matlab_wavelet_waverec", PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"appcoef", "matlab_wavelet_appcoef", PtrTy, {PtrTy, PtrTy, PtrTy, F64}},
+        {"detcoef", "matlab_wavelet_detcoef", PtrTy, {PtrTy, PtrTy, F64}},
+        {"wrcoef",  "matlab_wavelet_wrcoef",  PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, F64}},
+        {"upcoef",  "matlab_wavelet_upcoef",  PtrTy, {PtrTy, PtrTy, PtrTy, F64}},
+        {"qmf",     "matlab_wavelet_qmf",     PtrTy, {PtrTy}},
+        {"wmaxlev", "matlab_wavelet_wmaxlev", F64,   {PtrTy, PtrTy}},
+        {"wextend", "matlab_wavelet_wextend", PtrTy, {PtrTy, PtrTy, PtrTy, F64}},
+        {"wkeep",   "matlab_wavelet_wkeep",   PtrTy, {PtrTy, F64}},
+        {"centfrq", "matlab_wavelet_centfrq", F64,   {PtrTy}},
+        {"wentropy","matlab_wavelet_wentropy",F64,   {PtrTy, PtrTy}},
+        {"wenergy", "matlab_wavelet_wenergy", PtrTy, {PtrTy, PtrTy}},
+        {"dwtmode", "matlab_wavelet_dwtmode", PtrTy, {PtrTy}},
+        /* Tier-2 */
+        {"wthresh", "matlab_wavelet_wthresh", PtrTy, {PtrTy, PtrTy, F64}},
+        {"thselect","matlab_wavelet_thselect",F64,   {PtrTy, PtrTy}},
+        {"wnoisest","matlab_wavelet_wnoisest3",F64,  {PtrTy, PtrTy, F64}},
+        {"wnoisest","matlab_wavelet_wnoisest1",F64,  {PtrTy}},
+        {"wnoise",  "matlab_wavelet_wnoise_x", PtrTy, {F64, F64}},
+        {"wden",    "matlab_wavelet_wden",    PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, F64, PtrTy}},
+        {"wdenoise","matlab_wavelet_wdenoise3",PtrTy,{PtrTy, F64, PtrTy}},
+        {"wdenoise","matlab_wavelet_wdenoise2",PtrTy,{PtrTy, F64}},
+        {"wcompress","matlab_wavelet_wcompress",PtrTy,{PtrTy, F64, PtrTy}},
+        {"measerr", "matlab_wavelet_measerr", F64,   {PtrTy, PtrTy}},
+        /* Tier-3 */
+        {"icwt",    "matlab_wavelet_icwt",    PtrTy, {PtrTy}},
+        {"scal2frq","matlab_wavelet_scal2frq",PtrTy, {PtrTy, PtrTy, F64}},
+        {"freq2scal","matlab_wavelet_freq2scal",PtrTy,{PtrTy, PtrTy, F64}},
+        {"wcoherence","matlab_wavelet_wcoherence",PtrTy,{PtrTy, PtrTy}},
+        /* Tier-4 */
+        {"modwt",   "matlab_wavelet_modwt3",  PtrTy, {PtrTy, PtrTy, F64}},
+        {"modwt",   "matlab_wavelet_modwt2",  PtrTy, {PtrTy, PtrTy}},
+        {"imodwt",  "matlab_wavelet_imodwt2", PtrTy, {PtrTy, PtrTy}},
+        {"imodwt",  "matlab_wavelet_imodwt1", PtrTy, {PtrTy}},
+        {"modwtmra","matlab_wavelet_modwtmra2",PtrTy,{PtrTy, PtrTy}},
+        {"modwtmra","matlab_wavelet_modwtmra1",PtrTy,{PtrTy}},
+        {"modwtvar","matlab_wavelet_modwtvar",PtrTy, {PtrTy}},
+        {"swt",     "matlab_wavelet_swt",     PtrTy, {PtrTy, F64, PtrTy}},
+        {"iswt",    "matlab_wavelet_iswt",    PtrTy, {PtrTy, PtrTy}},
+        {"idwt2",   "matlab_wavelet_idwt2",   PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy}},
+        {"waverec2","matlab_wavelet_waverec2",PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"wcodemat","matlab_wavelet_wcodemat2",PtrTy,{PtrTy, F64}},
+        {"wcodemat","matlab_wavelet_wcodemat1",PtrTy,{PtrTy}},
+        /* Tier-5/6 */
+        {"ewt",     "matlab_wavelet_ewt",     PtrTy, {PtrTy, F64}},
+        {"vmd",     "matlab_wavelet_vmd",     PtrTy, {PtrTy, F64}},
+        {"emd",     "matlab_wavelet_emd",     PtrTy, {PtrTy, F64}},
+        {"matchingPursuit", "matlab_wavelet_omp", PtrTy, {PtrTy, PtrTy, F64}},
+        {"waveletScattering", "matlab_wavelet_scatter", PtrTy, {PtrTy}},
+        {"featureMatrix",     "matlab_wavelet_scatter", PtrTy, {PtrTy}},
+        {"wpdec",   "matlab_wavelet_wpdec",   PtrTy, {PtrTy, F64, PtrTy}},
+        {"wprec",   "matlab_wavelet_wprec",   PtrTy, {PtrTy, PtrTy}},
+        {"wpcoef",  "matlab_wavelet_wpcoef",  PtrTy, {PtrTy, F64}},
+        {"besttree","matlab_wavelet_besttree",PtrTy, {PtrTy}},
+        {"wenergy", "matlab_wavelet_wenergy_wp", PtrTy, {PtrTy}},
       };
       bool matched = false;
       for (const auto &E : pde_table) {

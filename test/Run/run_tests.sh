@@ -53,6 +53,7 @@ RUNTIME_SRCS=(
   "$ROOT/runtime/toolbox/stats/runtime_stats.cpp"
   "$ROOT/runtime/toolbox/images/runtime_images.cpp"
   "$ROOT/runtime/toolbox/curvefit/runtime_curvefit.cpp"
+  "$ROOT/runtime/toolbox/wavelet/runtime_wavelet.cpp"
   "$ROOT/runtime/toolbox/stateflow/runtime_mstateflow.cpp"
 )
 CXX="${CXX:-${CLANG}++}"
