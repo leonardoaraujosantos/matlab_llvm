@@ -20,6 +20,14 @@ The recipe mirrors `test/Run/run_tests.sh`: the runtime is compiled once into
 objects, then each example is `matlabc -emit-llvm` → `clang++`-linked → run from
 its own directory under a timeout.
 
+## Coverage guarantee
+
+Every `.m` under `examples/` (recursively) produces exactly one result line
+(`OK`/`EMIT`/`LINK`/`RUNTIME`/`TIMEOUT`/`SKIP`/`SKIPSYM`). The script asserts
+`#result-lines == #.m-files` and aborts if any example is silently dropped, so
+"we run all the examples" stays true. The report prints the reconciliation
+(`Total = in-scope (run) + skipped`).
+
 ## Scope
 
 `SKIP` (never a failure) covers paths that are not standalone LLVM-execute

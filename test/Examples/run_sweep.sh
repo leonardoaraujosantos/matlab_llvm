@@ -191,7 +191,11 @@ while IFS= read -r m; do
     printf 'SKIP\t%s\n' "$rel" >>"$ALL"; continue
   fi
   if needs_sym "$m" && [[ $SYM_OK != 1 ]]; then
-    printf 'SKIP\t%s\n' "$rel" >>"$ALL"; continue
+    # Symbolic example but no linkable SymPP in this environment — out of
+    # scope here, not a failure.  Tracked separately so the report makes it
+    # obvious whether the sym examples actually ran (they should, when SymPP
+    # is built — see the nightly CI job).
+    printf 'SKIPSYM\t%s\n' "$rel" >>"$ALL"; continue
   fi
 
   tmpll="$WORK/x.ll"; tmpbin="$WORK/x.out"; rm -f "$tmpll" "$tmpbin"
@@ -235,6 +239,17 @@ while IFS= read -r m; do
   fi
 done < <(find "$EXDIR" -name '*.m' | sort)
 
+# --- coverage assertion -----------------------------------------------------
+# Every .m under examples/ must produce exactly one status line; otherwise an
+# example was silently dropped (e.g. a code path that 'continue'd without
+# recording a result).  Fail loudly so "we run all the examples" stays true.
+n_lines=$(grep -c . "$ALL" 2>/dev/null || echo 0)
+n_found=$(find "$EXDIR" -name '*.m' | wc -l | tr -d ' ')
+if [[ "$n_lines" -ne "$n_found" || "$count_total" -ne "$n_found" ]]; then
+  echo "FATAL: coverage mismatch — found $n_found .m files, swept $count_total, recorded $n_lines result lines." >&2
+  exit 2
+fi
+
 # --- tally ------------------------------------------------------------------
 n_ok=$(awk -F'\t' '$1=="OK"{c++} END{print c+0}' "$ALL")
 n_emit=$(awk -F'\t' '$1=="EMIT"{c++} END{print c+0}' "$ALL")
@@ -242,10 +257,11 @@ n_link=$(awk -F'\t' '$1=="LINK"{c++} END{print c+0}' "$ALL")
 n_rt=$(awk -F'\t' '$1=="RUNTIME"{c++} END{print c+0}' "$ALL")
 n_to=$(awk -F'\t' '$1=="TIMEOUT"{c++} END{print c+0}' "$ALL")
 n_skip=$(awk -F'\t' '$1=="SKIP"{c++} END{print c+0}' "$ALL")
+n_skipsym=$(awk -F'\t' '$1=="SKIPSYM"{c++} END{print c+0}' "$ALL")
 n_inscope=$(( n_ok + n_emit + n_link + n_rt + n_to ))
 
-# Current non-SKIP failures, sorted.
-awk -F'\t' '$1!="OK" && $1!="SKIP"{print $2}' "$ALL" | sort >"$WORK/fail.txt"
+# Current failures (non-OK, non-SKIP*), sorted.
+awk -F'\t' '$1!="OK" && $1!="SKIP" && $1!="SKIPSYM"{print $2}' "$ALL" | sort >"$WORK/fail.txt"
 
 # Baseline -> bare paths: strip inline/full-line comments (the writer aligns a
 # "# STATUS" note onto each entry for readers) and trailing whitespace, drop
@@ -270,7 +286,7 @@ if [[ "$MODE" == update ]]; then
     echo "# Out-of-scope dirs (hdl/ mflow/ mflowlink/ stateflow/) are SKIPped, not listed."
     echo "# Regenerated: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo
-    awk -F'\t' '$1!="OK" && $1!="SKIP"{printf "%-50s # %s\n", $2, $1}' "$ALL" | sort
+    awk -F'\t' '$1!="OK" && $1!="SKIP" && $1!="SKIPSYM"{printf "%-50s # %s\n", $2, $1}' "$ALL" | sort
   } >"$BASELINE"
   echo "Wrote baseline: $BASELINE ($(grep -cvE '^[[:space:]]*(#|$)' "$BASELINE") entries)"
 fi
@@ -279,6 +295,8 @@ fi
 print_report() {
   echo "## Examples sweep — $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo
+  echo "Total examples: $n_found  =  $n_inscope in-scope (run)  +  $(( n_skip + n_skipsym )) skipped"
+  echo
   echo "| Result | Count |"
   echo "|---|---|"
   echo "| **OK** (compile + link + run, exit 0) | **$n_ok / $n_inscope** |"
@@ -286,7 +304,8 @@ print_report() {
   echo "| LINK (undefined symbols) | $n_link |"
   echo "| RUNTIME (non-zero exit) | $n_rt |"
   echo "| TIMEOUT | $n_to |"
-  echo "| SKIP (out of LLVM-execute scope) | $n_skip |"
+  echo "| SKIP (HDL / flowchart — own CI lanes) | $n_skip |"
+  echo "| SKIP (symbolic — no linkable SymPP here) | $n_skipsym |"
   echo
   echo "Baseline known-failures: $(wc -l <"$WORK/base.txt" | tr -d ' ')   ·   Regressions: $n_reg   ·   Stale baseline entries: $n_stale"
   if [[ "$n_reg" -gt 0 ]]; then
