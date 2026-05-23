@@ -83,10 +83,18 @@ through the Cairo backend), [`feature_status.md`](feature_status.md).
   alone (~2.5 wk) close the 80% denoising/MRA workflow** — the single
   most common reason anyone reaches for this toolbox.
 - **Status legend**: ✅ shipped · 🟡 partial · 🔵 not started.
-  **Everything below is 🔵 not started** — clean slate. There is no
-  `dwt` / `cwt` / `wavedec` / `wthresh` / `modwt` / `wpdec` in the
-  runtime today; the deep shipped Signal base (`conv`, `filter`,
-  `upfirdn`, `downsample`, `fft`) is what makes the DWT/CWT cheap.
+  **UPDATE (shipped): all 6 tier cores are now ✅** in
+  [`runtime/toolbox/wavelet/runtime_wavelet.cpp`](../runtime/toolbox/wavelet/runtime_wavelet.cpp)
+  (~1.8 kLOC, matrix lane — no classdef). The DWT uses an orthonormal
+  *circular* two-channel filter bank whose synthesis is the exact analysis
+  transpose, so perfect reconstruction holds for the whole orthogonal
+  family catalogue (`haar`/`db1`–`db9`/`sym4`–`sym8`/`coif1`–`coif5`),
+  validated by a PR loop test. 10 gating tests (`test/Run/wavelet_*.m`),
+  9 examples (`examples/wavelet/`). Carve-downs (function-form shipped
+  instead of the classdef descriptors): `cwtfilterbank` / `WPTREE` /
+  `waveletScattering` objects, true entropy best-basis pruning,
+  `wsst`/`wsstridge`, biorthogonal (`bior`/`rbio`) + `dmey` families,
+  `wavefun` cascade plotting, dual-tree/shearlet/3-D DWT, `lwt` lifting.
 - **Wavelet families are hard-coded filter tables**: `wfilters('db4')`
   returns the four decomposition/reconstruction filters from a baked-in
   coefficient catalogue (Haar / `db1`–`db10` / `sym2`–`sym8` /
