@@ -56,6 +56,9 @@ expanded from 4 to 8 fixtures (`test/RunSym/`).
 
 ## 3. OPEN BUG — `stats_t4_cluster` MLIR dominance failure on Linux
 
+> Tracked as GitHub issue
+> [#13](https://github.com/leonardoaraujosantos/matlab_llvm/issues/13).
+
 ### Symptom
 
 `run-tests` lane, Linux only:
