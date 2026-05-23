@@ -3,7 +3,7 @@
 % Reads fixtures/rf/test_amp.s2p (2 freqs, MA format, 50 Ω
 % reference) and verifies the parsed cube.
 
-data = touchstoneRead("/Users/leonardoaraujo/work/matlab_llvm/test/Run/fixtures/rf/test_amp.s2p");
+data = touchstoneRead("fixtures/rf/test_amp.s2p");
 disp(data.Z0);                       % 50
 disp(data.NumPorts);                 % 2
 

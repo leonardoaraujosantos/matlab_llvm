@@ -2,7 +2,7 @@
 % verify Y_11 = 0.01962 (= 0.9812/50 from the closed-form matrix
 % algebra Y = (1/z0)·(I+S)⁻¹·(I−S)).
 
-data = touchstoneRead("/Users/leonardoaraujo/work/matlab_llvm/test/Run/fixtures/rf/test_amp.s2p");
+data = touchstoneRead("fixtures/rf/test_amp.s2p");
 y = sparamS2yN(data);
 disp(y.NumPorts);             % 2
 disp(tsYij(y, 1, 1));         % 0.01962 (freq 1), 0.01636 (freq 2)

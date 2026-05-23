@@ -1,7 +1,7 @@
 % newref — re-reference S to a new impedance.
 % Sanity check: round-trip 50 → 75 → 50 should recover the original S.
 
-data = touchstoneRead("/Users/leonardoaraujo/work/matlab_llvm/test/Run/fixtures/rf/test_amp.s2p");
+data = touchstoneRead("fixtures/rf/test_amp.s2p");
 S11_orig = tsS11(data);
 disp(S11_orig);                  % [0.2; 0.3]
 

@@ -3,7 +3,7 @@
 % sub-network).  With matched terminations at the dropped ports
 % (1.5 Ω = z0), the sub-block IS the original S(:, :, [1 2]).
 
-data = touchstoneRead("/Users/leonardoaraujo/work/matlab_llvm/test/Run/fixtures/rf/diff_pair.s4p");
+data = touchstoneRead("fixtures/rf/diff_pair.s4p");
 sub = snp2smp(data, [1; 2], 2);
 disp(sub.NumPorts);            % 2
 disp(sub.Z0);                  % 50

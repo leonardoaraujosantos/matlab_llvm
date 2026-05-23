@@ -3,7 +3,7 @@
 % S → G → S and S → T → S should reproduce the original S to numerical
 % precision for any well-conditioned 2-port.
 
-data = touchstoneRead("/Users/leonardoaraujo/work/matlab_llvm/test/Run/fixtures/rf/test_amp.s2p");
+data = touchstoneRead("fixtures/rf/test_amp.s2p");
 S11 = tsS11(data); S12 = tsS12(data);
 S21 = tsS21(data); S22 = tsS22(data);
 

@@ -132,7 +132,9 @@ for m in "$TESTDIR"/*.m; do
   fi
   rm -f "$cc_err"
 
-  got="$("$tmpbin")" || {
+  # Run from TESTDIR so fixtures referenced by a test-relative path resolve
+  # regardless of the harness CWD (build/ under ctest, repo root locally).
+  got="$(cd "$TESTDIR" && "$tmpbin")" || {
     echo "FAIL $base: non-zero exit"
     fail=$((fail+1))
     rm -f "$tmpsrc" "$tmpbin"; continue

@@ -63,7 +63,9 @@ for m in "$TESTDIR"/*.m; do
     rm -f "$tmpsrc"; continue
   fi
 
-  got="$(PYTHONPATH="$RUNTIME_DIR" "$PY" "$tmpsrc" 2>/dev/null)" || {
+  # Run from TESTDIR so test-relative fixture paths resolve regardless of
+  # the harness CWD (build/ under ctest, repo root locally).
+  got="$(cd "$TESTDIR" && PYTHONPATH="$RUNTIME_DIR" "$PY" "$tmpsrc" 2>/dev/null)" || {
     echo "FAIL $base: python3 non-zero exit"
     fail=$((fail+1))
     rm -f "$tmpsrc"; continue

@@ -4,7 +4,7 @@
 %   ABCD: A=0.335, B=13.25, C=0.0028, D=0.26
 %   H:    h11=50.96, h12=0.1923, h21=-3.846, h22=0.01077
 
-data = touchstoneRead("/Users/leonardoaraujo/work/matlab_llvm/test/Run/fixtures/rf/test_amp.s2p");
+data = touchstoneRead("fixtures/rf/test_amp.s2p");
 S11 = tsS11(data); S12 = tsS12(data);
 S21 = tsS21(data); S22 = tsS22(data);
 

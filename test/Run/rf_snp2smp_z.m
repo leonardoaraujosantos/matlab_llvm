@@ -5,7 +5,7 @@
 % 4-port fixture diff_pair.s4p and verify both forms agree for
 % z_term = [50; 50] at the dropped ports.
 
-data = touchstoneRead("/Users/leonardoaraujo/work/matlab_llvm/test/Run/fixtures/rf/diff_pair.s4p");
+data = touchstoneRead("fixtures/rf/diff_pair.s4p");
 ports_kept = [1; 2];
 z_term = [50.0; 50.0];   % matched terminations on dropped ports {3, 4}.
 

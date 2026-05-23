@@ -3,7 +3,7 @@
 % inverse.  With the native complex LU swap, these should still produce
 % the same numerical results as the 2N × 2N real-equivalent path.
 
-data = touchstoneRead("/Users/leonardoaraujo/work/matlab_llvm/test/Run/fixtures/rf/test_amp.s2p");
+data = touchstoneRead("fixtures/rf/test_amp.s2p");
 S11 = tsS11(data); S12 = tsS12(data);
 S21 = tsS21(data); S22 = tsS22(data);
 
@@ -17,6 +17,6 @@ d50 = newref(d75, 50.0);
 disp(tsS11(d50));                 % must match the original (0.2, 0.3)
 
 % snp2smpZ with non-z0 termination (uses complex LU once per freq).
-data4 = touchstoneRead("/Users/leonardoaraujo/work/matlab_llvm/test/Run/fixtures/rf/diff_pair.s4p");
+data4 = touchstoneRead("fixtures/rf/diff_pair.s4p");
 sub = snp2smpZ(data4, [1; 2], [100.0; 100.0], 2);
 disp(tsS11(sub));                 % matches pre-LU output

@@ -15,7 +15,7 @@
 % as test_amp.s2p but laid out differently — the parser should pick
 % them up via the [Two-Port Order] hint.
 
-data = touchstoneRead("/Users/leonardoaraujo/work/matlab_llvm/test/Run/fixtures/rf/v2_amp.ts");
+data = touchstoneRead("fixtures/rf/v2_amp.ts");
 disp(data.NumPorts);     % 2 (from [Number of Ports])
 disp(data.Z0);            % 50 (from [Reference])
 disp(tsS11(data));        % 0.2 / 0.3 — same as test_amp.s2p

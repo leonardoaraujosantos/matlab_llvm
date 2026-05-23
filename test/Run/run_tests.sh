@@ -165,7 +165,10 @@ for m in "$TESTDIR"/*.m; do
     fail=$((fail+1))
     rm -f "$tmpll" "$tmpbin"; continue
   fi
-  got="$("$tmpbin")" || {
+  # Run from TESTDIR so a fixture referenced by a path relative to the test
+  # directory (e.g. fixtures/rf/test_amp.s2p) resolves on every platform —
+  # the harness CWD differs (build/ under ctest, repo root locally).
+  got="$(cd "$TESTDIR" && "$tmpbin")" || {
     echo "FAIL $base: non-zero exit"
     fail=$((fail+1))
     rm -f "$tmpll" "$tmpbin"; continue
