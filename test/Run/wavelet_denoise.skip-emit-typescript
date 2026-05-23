@@ -1,0 +1,1 @@
+wavelet toolbox uses the wavelet runtime + complex CWT path, which the emit-* harnesses do not link (matches the Stats/Image/Curve-Fitting precedent).

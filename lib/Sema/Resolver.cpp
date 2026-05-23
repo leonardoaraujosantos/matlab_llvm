@@ -242,6 +242,31 @@ void Resolver::registerBuiltins() {
     "matlab_curvefit_spline_init", "matlab_curvefit_ppmak_init",
     "matlab_curvefit_fnval", "matlab_curvefit_fnder_init",
     "matlab_curvefit_fnint_init", "matlab_curvefit_fnbrk",
+    /* ===== Wavelet Toolbox ===== *
+     * Only the USER-facing names are registered.  Every mapping to a
+     * runtime symbol goes through the pde_table (keyed by these names,
+     * which also performs the const_char→matlab_string coercion) or the
+     * wavelet multi-return dispatch — registering a `matlab_wavelet_*`
+     * alias here would hijack the user name before the pde_table runs
+     * (the curve-fit `smooth` precedent). */
+    /* Tier-1 */
+    "dwt", "idwt", "wavedec", "waverec", "wfilters",
+    "appcoef", "detcoef", "wrcoef", "upcoef", "upwlev",
+    "wextend", "wkeep", "wmaxlev", "dwtmode", "qmf",
+    "wentropy", "wenergy", "centfrq", "wavefun", "waveinfo",
+    /* Tier-2 */
+    "wthresh", "thselect", "wnoisest", "wnoise", "ddencmp",
+    "wden", "wdencmp", "wdenoise", "wcompress", "measerr", "wpdencmp",
+    /* Tier-3 */
+    "cwt", "icwt", "scal2frq", "freq2scal", "wcoherence",
+    /* Tier-4 */
+    "swt", "iswt", "modwt", "imodwt", "modwtmra", "modwtvar",
+    "dwt2", "idwt2", "wavedec2", "waverec2", "appcoef2", "detcoef2",
+    "wrcoef2", "wcodemat",
+    /* Tier-5/6 */
+    "wpdec", "wprec", "wpcoef", "wprcoef", "besttree", "bestlevt",
+    "ewt", "vmd", "emd", "tqwt", "itqwt", "matchingPursuit",
+    "waveletScattering", "featureMatrix",
     /* MPC Tier-4 §5.4 — standalone active-set QP solver. */
     "matlab_mpc_active_set",
     /* MPC Tier-4 §5.1/5.2/5.3 — explicit MPC. */
