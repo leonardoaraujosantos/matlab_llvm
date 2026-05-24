@@ -98,8 +98,11 @@ jobs:
 
   # -------------------------------------------------------------------------
   # FULL — heavy end-to-end lanes (~45 min wall time, plus the LLVM
-  # build on first miss).  Runs on push to main, scheduled, or PR
-  # labelled `full-ci` / dispatched manually.
+  # build on first miss).  Runs on EVERY push (PR included) + schedule
+  # + manual dispatch.  PRs get the same coverage as push-to-main so
+  # regressions are caught before merge.  Concurrency cancellation
+  # (top of file) discards superseded in-flight runs when a PR is
+  # rebased / force-pushed, bounding minute spend.
   # -------------------------------------------------------------------------
   full:
     name: Full (complete ctest gate)
@@ -107,9 +110,8 @@ jobs:
     timeout-minutes: 150
     if: >-
       github.event_name == 'push' ||
+      github.event_name == 'pull_request' ||
       github.event_name == 'schedule' ||
-      (github.event_name == 'pull_request' &&
-       contains(github.event.pull_request.labels.*.name, 'full-ci')) ||
       (github.event_name == 'workflow_dispatch' &&
        inputs.run-full == true)
     steps:
