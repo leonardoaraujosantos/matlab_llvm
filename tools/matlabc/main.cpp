@@ -72,6 +72,7 @@
 #include <unistd.h>
 #endif
 #include "matlab/Sema/Resolver.h"
+#include "matlab/Sema/RewriteDspSoForSv.h"
 #include "matlab/Sema/SemaDumper.h"
 #include "matlab/Sema/Scope.h"
 #include "matlab/Sema/Type.h"
@@ -11416,6 +11417,45 @@ int main(int Argc, char **Argv) {
       return "dsphdl_classdefs.m";
     return std::string();
   };
+  /* DSP System-Object -> flat-fi source rewrite for the
+   * -emit-systemverilog pipeline (Category-1 v1 of LowerDspSystemObjects).
+   *
+   * When the user writes a synthesizable dsp.FIRFilter SO + step
+   * pattern inside a `%#codegen` function, rewrite the source to the
+   * flat fi-array + persistent shift-register + MAC equivalent BEFORE
+   * the prelude scan runs.  After the rewrite, the source no longer
+   * mentions `dsp.FIRFilter`, so the prelude detection skips
+   * dsp_classdefs.m and the SV pipeline never sees the SO machinery
+   * (matlab_obj_* / matlab_dsp_iir_step et al. — those are
+   * non-synthesizable and would fail HWLegalize).
+   *
+   * Bails (no-op) for any non-matching shape; the SV pipeline then
+   * fires its normal "no synthesizable form" error, which is the right
+   * failure mode for non-canonical inputs.  See
+   * docs/dsp_so_to_sv_bridge.md for the full design + the eventual
+   * MLIR-pass form. */
+  if (Opts.Mode == Options::Mode::EmitSystemVerilog ||
+      Opts.Mode == Options::Mode::CheckSynthesizable ||
+      Opts.Mode == Options::Mode::EmitCocotb ||
+      Opts.Mode == Options::Mode::EmitHardwareReport) {
+    std::ifstream InSrc(Opts.InputPath);
+    if (InSrc) {
+      std::ostringstream Buf;
+      Buf << InSrc.rdbuf();
+      std::string Rewritten = matlab::sema::rewriteDspSoForSv(Buf.str());
+      if (!Rewritten.empty()) {
+        char Tmpl[] = "/tmp/matlabc-dsp-so-rewrite-XXXXXX.m";
+        int Fd = mkstemps(Tmpl, 2);
+        if (Fd >= 0) {
+          ssize_t W = ::write(Fd, Rewritten.data(),
+                              static_cast<size_t>(Rewritten.size()));
+          ::close(Fd);
+          if (W == static_cast<ssize_t>(Rewritten.size()))
+            Opts.InputPath = Tmpl;  /* downstream sees the rewritten source */
+        }
+      }
+    }
+  }
   for (const std::string &Cls : userMentionsExtClasses(Opts.InputPath)) {
     std::string Leaf = extClassLeaf(Cls);
     std::string SelfStr(Argv[0]);

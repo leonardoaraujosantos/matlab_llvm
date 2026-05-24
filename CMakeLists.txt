@@ -171,6 +171,7 @@ add_library(MatlabSema STATIC
   lib/Sema/Resolver.cpp
   lib/Sema/TypeInference.cpp
   lib/Sema/SemaDumper.cpp
+  lib/Sema/RewriteDspSoForSv.cpp
 )
 target_link_libraries(MatlabSema PUBLIC MatlabAST MatlabBasic)
 
