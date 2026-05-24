@@ -96,12 +96,43 @@ bool lowerForOp(Operation *ForOp) {
   Value BreakSlot;
   if (ForOp->getNumOperands() == 2) BreakSlot = ForOp->getOperand(1);
 
+  /* Matrix-iterate form: `for n = M` where M is a 1-D static-shape
+   * tensor.  MATLAB iterates `n` over each column of M; for a row
+   * vector each column is a scalar and the frontend types BB.arg(0)
+   * as the element type.  Synthesise a 1-based scf.while of length N
+   * and substitute BB.arg(0) with a 1-indexed matlab.subscript pull
+   * from M on each iteration.  LowerTensorOps converts the subscript
+   * to the matrix runtime entry on its later pass.
+   *
+   * Scope (v1, issue #23): 1-D ranked tensor with static shape and
+   * scalar element type.  Covers the issue's `for n = [128 256 512]`
+   * pattern and the GPU benchmark fixture.  2-D matrix-column
+   * iteration (block arg becomes a column slice) is a follow-on. */
   Value Start, Step, End;
-  if (!extractRange(Iter, Start, Step, End, B, L)) return false;
+  bool MatrixIter = false;
+  int64_t MatrixIterN = 0;
+  Type MatrixIterElemTy;
+  if (!extractRange(Iter, Start, Step, End, B, L)) {
+    auto T = mlir::dyn_cast<RankedTensorType>(Iter.getType());
+    if (!T || !T.hasStaticShape() || T.getShape().size() != 1)
+      return false;
+    MatrixIterElemTy = T.getElementType();
+    /* Only support scalar element types — block arg must match. */
+    if (BB.getArgument(0).getType() != MatrixIterElemTy) return false;
+    MatrixIterN = T.getShape()[0];
+    if (MatrixIterN <= 0) return false;
+    MatrixIter = true;
+    /* Drive the inner scf.while with a 1-based f64 index matching
+     * MATLAB's `1..N` convention so subscript(M, IV) is correct. */
+    Start = arith::ConstantOp::create(B, L, B.getF64FloatAttr(1.0));
+    End   = arith::ConstantOp::create(
+        B, L, B.getF64FloatAttr((double)MatrixIterN));
+    Step  = arith::ConstantOp::create(B, L, B.getF64FloatAttr(1.0));
+  }
   /* Remember the matlab.range producer so we can erase it below if its
    * only user was this matlab.for. Leaving it in place would cause
    * LowerTensorOps to emit a dead matlab_range() runtime call. */
-  Operation *RangeProducer = Iter.getDefiningOp();
+  Operation *RangeProducer = MatrixIter ? nullptr : Iter.getDefiningOp();
 
   /* scf.while carrying one f64 induction value (%iv). */
   auto W = scf::WhileOp::create(B, L, TypeRange{F64}, ValueRange{Start});
@@ -146,9 +177,24 @@ bool lowerForOp(Operation *ForOp) {
 
     /* Clone each op from the original matlab.for body, mapping its block
      * argument (the original induction value) to the new scf IV.
-     * matlab.yield at the end is replaced by arith.addf (step) + scf.yield. */
+     * matlab.yield at the end is replaced by arith.addf (step) + scf.yield.
+     *
+     * Matrix-iter form: BB.arg(0) is the per-iteration element of M,
+     * not the index — emit matlab.subscript(M, IV) (1-based) and bind
+     * the result to BB.arg(0) instead of IV.  matlab.subscript stays in
+     * MATLAB dialect; LowerTensorOps converts it to a runtime call on
+     * a later pass once M's tensor type has been lowered to ptr. */
     IRMapping Map;
-    Map.map(BB.getArgument(0), IV);
+    if (MatrixIter) {
+      OperationState SS(L, "matlab.subscript");
+      SS.addOperands(ValueRange{Iter, IV});
+      SS.addTypes(TypeRange{MatrixIterElemTy});
+      SS.addAttribute("nindices", B.getI64IntegerAttr(1));
+      Operation *SubOp = B.create(SS);
+      Map.map(BB.getArgument(0), SubOp->getResult(0));
+    } else {
+      Map.map(BB.getArgument(0), IV);
+    }
     for (Operation &Op : BB) {
       if (isMatlabOp(&Op, "matlab.yield")) continue;
       B.clone(Op, Map);
