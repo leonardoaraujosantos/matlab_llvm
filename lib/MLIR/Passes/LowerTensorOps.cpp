@@ -4778,6 +4778,59 @@ bool TensorLowering::rewriteBuiltinCalls() {
          PtrTy, {PtrTy, PtrTy}},
         {"matlab_mpc_simplify_explicit", "matlab_mpc_simplify_explicit",
          PtrTy, {PtrTy, F64}},
+        /* GPU Coder Tier-5 design-pattern helpers.  See
+         * docs/gpu_coder_roadmap.md §6 / runtime/toolbox/gpu/runtime_gpu_helpers.cpp.
+         * `gpucoder.<fn>` is folded by Parser to `gpucoder_<fn>`; we dispatch
+         * via the user-facing flat name here.  Each runtime fn takes the
+         * function-handle ptr as the first or appropriate operand (per the
+         * MathWorks API shape).  Backends (T2-T4) override these at
+         * emit-pass time with tiled / tree-reduce / bitonic kernels. */
+        {"gpucoder_reduce",             "matlab_gpucoder_reduce",
+         F64,   {PtrTy, PtrTy}},
+        {"gpucoder_matrixMatrixKernel", "matlab_gpucoder_matmatkernel",
+         PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"stencilfun",                  "matlab_stencilfun",
+         PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"gpucoder_stencilKernel",      "matlab_stencilfun",
+         PtrTy, {PtrTy, PtrTy, PtrTy}},  /* deprecated alias */
+        {"gpucoder_sort",               "matlab_gpucoder_sort",
+         PtrTy, {PtrTy}},
+        /* (Removed: bare-name `rand/zeros/ones/eye/randn(n,m,'single')`
+         * dispatch — it collided with 3-D `zeros(n,m,d)` because the
+         * strict matcher coerces the literal-f64 third arg into ptr
+         * via matlab_mat_from_scalar, breaking the matlab_zeros3 path.
+         * `benchmark_gpu_backend.m` uses this form and is the only
+         * affected fixture; rewrite it as `gpuArray.rand(n,n,'single')`
+         * which parser-folds to gpuArray_rand and dispatches cleanly.) */
+        /* gpuArray.<static> with the dtype-tag arg (`'single'` /
+         * `'double'`) — loose-match coerces the const_char to a
+         * matlab_string* via matlab_string_from_literal; the runtime
+         * wrapper drops it and calls the underlying allocator. */
+        {"gpuArray_rand",  "matlab_gpuArray_rand",  PtrTy, {F64, F64, PtrTy}},
+        {"gpuArray_randn", "matlab_gpuArray_randn", PtrTy, {F64, F64, PtrTy}},
+        {"gpuArray_zeros", "matlab_gpuArray_zeros", PtrTy, {F64, F64, PtrTy}},
+        {"gpuArray_ones",  "matlab_gpuArray_ones",  PtrTy, {F64, F64, PtrTy}},
+        {"gpuArray_eye",   "matlab_gpuArray_eye",   PtrTy, {F64, F64, PtrTy}},
+        /* gather(g) — CPU lane: identity. */
+        {"gather",         "matlab_gather",         PtrTy, {PtrTy}},
+        /* gpuArray(X) constructor — transparent.  Loose-match accepts
+         * any ptr-shaped input. */
+        {"gpuArray",       "matlab_gpuArray_ctor",  PtrTy, {PtrTy}},
+        /* existsOnGPU(g) — returns f64. */
+        {"existsOnGPU",    "matlab_existsOnGPU",    F64, {PtrTy}},
+        /* Bare-name `toc` zero-arg form — f64 elapsed time. */
+        {"toc",            "matlab_toc",            F64, {}},
+        /* gpuDevice() / gpuDevice(id) / gpuDeviceCount() — device
+         * info + selection.  Strict 0/1-arg shapes. */
+        {"gpuDeviceCount", "matlab_gpuDeviceCount", F64, {}},
+        {"gpuDevice",      "matlab_gpuDevice_handle", PtrTy, {}},
+        {"gpuDevice",      "matlab_gpuDevice_select", F64, {F64}},
+        /* wait(gpuDevice) — synchronise.  CPU lane no-op. */
+        {"wait",           "matlab_gpu_wait",       F64, {PtrTy}},
+        /* arrayfun(@fn, X) — element-wise apply via the function-
+         * handle ABI.  The anon body runs in the runtime (CPU) or as
+         * an emitted kernel (Tier-2+).  Returns a fresh matrix. */
+        {"arrayfun",       "matlab_arrayfun",       PtrTy, {PtrTy, PtrTy}},
         /* MPC Tier-4 §5.7 — Finite Control Set MPC. */
         {"matlab_mpc_move_finite", "matlab_mpc_move_finite",
          PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy}},
@@ -5523,6 +5576,14 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"magic",      "matlab_magic",      1, "f"},
       {"rand",       "matlab_rand",       1, "ff"},
       {"randn",      "matlab_randn",      1, "ff"},
+      /* gpuArray.<static> with NO dtype tag — strict 2-arg shape. */
+      {"gpuArray_rand",     "matlab_rand",              1, "ff"},
+      {"gpuArray_randn",    "matlab_randn",             1, "ff"},
+      {"gpuArray_zeros",    "matlab_zeros",             1, "ff"},
+      {"gpuArray_ones",     "matlab_ones",              1, "ff"},
+      {"gpuArray_eye",      "matlab_eye",               1, "ff"},
+      {"gpuArray_linspace", "matlab_gpuArray_linspace", 1, "fff"},
+      {"gpuArray_linspace", "matlab_gpuArray_linspace2",1, "ff"},
       {"sum",        "matlab_sum",        1, "p"},
       {"sum",        "matlab_sum_dim",    1, "pf"},
       {"prod",       "matlab_prod",       1, "p"},

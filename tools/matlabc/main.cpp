@@ -173,6 +173,7 @@ struct Options {
                     EmitLLVM, EmitC, EmitCpp, EmitPython, EmitTypeScript,
                     EmitFiReport, EmitSystemVerilog, CheckSynthesizable,
                     EmitHardwareReport, EmitCocotb,
+                    EmitCuda, EmitMetal, EmitOpenCL,
                     DumpFlow, DumpChart, EmitMatlab, EmitMflow,
                     EmitMflowLinkCpp, EmitTrace,
                     Check, Repl, Format, Dap, Simulate };
@@ -368,6 +369,17 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
     else if (A == "-emit-python") Opts.Mode = Options::Mode::EmitPython;
     else if (A == "-emit-typescript" || A == "-emit-ts")
       Opts.Mode = Options::Mode::EmitTypeScript;
+    /* GPU Coder Tier-6 AOT emit lanes — one MATLAB source produces a
+     * self-contained standalone bundle for the chosen device target.
+     * The kernel-bodies are CPU-equivalent (T1's rewrite-to-`matlab.for`
+     * runs through EmitC) wrapped in a per-target host driver.  When
+     * the array-capture outliner ships (next session keystone), each
+     * `coder.gpu.kernelfun` body will be extracted into a real device
+     * kernel; until then the bundles are the GPU-API surface + CPU body
+     * + correct toolchain wiring. */
+    else if (A == "-emit-cuda")   Opts.Mode = Options::Mode::EmitCuda;
+    else if (A == "-emit-metal")  Opts.Mode = Options::Mode::EmitMetal;
+    else if (A == "-emit-opencl") Opts.Mode = Options::Mode::EmitOpenCL;
     else if (A == "-emit-fixed-point-report" || A == "-emit-fi-report")
       Opts.Mode = Options::Mode::EmitFiReport;
     else if (A == "-emit-systemverilog" || A == "-emit-sv")
@@ -862,7 +874,11 @@ int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id,
   // this; without it, JIT silently fails to convert any user function
   // that returns a logical / boolean comparison. Idempotent.
   mlirgen::runRefineFuncSigs(M);
+  mlirgen::runPromoteNoneParams(M);
+  for (int Iter = 0; Iter < 4; ++Iter)
+    if (!mlirgen::runPromoteBinopTypes(M)) break;
   mlirgen::runOutlineParfor(M);
+  mlirgen::runOutlineGpuKernels(M);
   mlirgen::runLowerSeqLoops(M);
   mlirgen::runLowerAnonCalls(M, /*ReplMode=*/true);
   for (int Iter = 0; Iter < 8; ++Iter) {
@@ -2103,7 +2119,7 @@ static std::string buildReplPrelude(const std::string &Src) {
   static const char *kToolboxDirs[] = {
     "comm", "rf", "optim", "mpc", "ident", "gads", "pde", "prop", "sym",
     "stateflow", "antenna", "control", "stats", "images", "curvefit",
-    "dsp",
+    "dsp", "gpu",
   };
   std::vector<std::string> Files;
   auto add = [&](const std::string &Leaf) {
@@ -2126,9 +2142,13 @@ static std::string buildReplPrelude(const std::string &Src) {
          * all live in optim_classdefs.m). */
         for (auto &F : Files) if (F == C) return;
         Files.push_back(C);
+        if (std::getenv("MATLAB_LLVM_DEBUG_PRELUDE"))
+          std::fprintf(stderr, "[prelude] add: %s\n", C.c_str());
         return;
       }
     }
+    if (std::getenv("MATLAB_LLVM_DEBUG_PRELUDE"))
+      std::fprintf(stderr, "[prelude] NOT FOUND: %s\n", Leaf.c_str());
   };
   /* Per-class wants — each class's prelude file is pulled in only
    * when the user input (or the workspace) actually mentions it.
@@ -2392,6 +2412,22 @@ static std::string buildReplPrelude(const std::string &Src) {
     {false, "dsphdl_NCO",          "dsphdl_classdefs.m"},
     {false, "dsphdl_FIRDecimator", "dsphdl_classdefs.m"},
     {false, "dsphdl_CICDecimator", "dsphdl_classdefs.m"},
+    /* GPU Coder — host-side carriers.  Source-text mentions of any
+     * gpuArray / gather / coder.gpuConfig / gpuDevice form pull in
+     * gpu_classdefs.m which ships the gpuArray + coder_gpuConfig
+     * handle classdefs.  See docs/gpu_coder_roadmap.md §1 (T1.4). */
+    {false, "gpuArray",         "gpu_classdefs.m"},
+    {false, "gather",           "gpu_classdefs.m"},
+    {false, "existsOnGPU",      "gpu_classdefs.m"},
+    {false, "gpuDevice",        "gpu_classdefs.m"},
+    {false, "coder.gpuConfig",  "gpu_config_classdefs.m"},
+    {false, "coder_gpuConfig",  "gpu_config_classdefs.m"},
+    /* GPU Coder Tier-5 design-pattern helpers — gpucoder.reduce /
+     * matrixMatrixKernel / stencilfun / sort all live as C runtime
+     * functions (runtime/toolbox/gpu/runtime_gpu_helpers.cpp) routed
+     * through the LowerTensorOps dispatch table.  No classdef prelude
+     * file is needed; the function-handle ABI delivers the user's @f
+     * to the runtime entry. */
   };
   /* Source-mention scan: turn-0-style detection. */
   for (auto &W : Cls) if (mentions(W.Name)) W.active = true;
@@ -3669,7 +3705,11 @@ bool compileProgram() {
   // this; without it, JIT silently fails to convert any user function
   // that returns a logical / boolean comparison. Idempotent.
   mlirgen::runRefineFuncSigs(M);
+  mlirgen::runPromoteNoneParams(M);
+  for (int Iter = 0; Iter < 4; ++Iter)
+    if (!mlirgen::runPromoteBinopTypes(M)) break;
   mlirgen::runOutlineParfor(M);
+  mlirgen::runOutlineGpuKernels(M);
   mlirgen::runLowerSeqLoops(M);
   mlirgen::runLowerAnonCalls(M, /*ReplMode=*/true);
   for (int Iter = 0; Iter < 8; ++Iter) {
@@ -11253,6 +11293,12 @@ int main(int Argc, char **Argv) {
       "dsphdl.FIRDecimator", "dsphdl.CICDecimator",
       "arx", "ar", "armax", "oe", "bj",
       "iv4", "delayest", "compare", "predict", "resid", "goodnessOfFit",
+      /* GPU Coder host-side carriers — see gpu_classdefs.m. */
+      "gpuArray", "gather", "existsOnGPU", "gpuDevice",
+      "coder.gpuConfig", "coder_gpuConfig",
+      /* GPU Coder T5 design-pattern helpers — runtime entries, no
+       * prelude file needed.  Listed here only for the AOT-prelude
+       * scanner's awareness (no leaf to map). */
     };
     for (const char *N : Names) {
       size_t NL = std::strlen(N);
@@ -11415,6 +11461,16 @@ int main(int Argc, char **Argv) {
     /* DSP HDL Toolbox umbrella — any `dsphdl.*` package class. */
     if (ClsName.starts_with("dsphdl."))
       return "dsphdl_classdefs.m";
+    /* GPU Coder host-side carriers — single umbrella file holding
+     * gpuArray + coder_gpuConfig classdefs and gather/existsOnGPU/
+     * gpuDevice free functions.  See docs/gpu_coder_roadmap.md T1.4. */
+    if (ClsName == "gpuArray" || ClsName == "gather" ||
+        ClsName == "existsOnGPU" || ClsName == "gpuDevice")
+      return "gpu_classdefs.m";
+    if (ClsName == "coder.gpuConfig" || ClsName == "coder_gpuConfig")
+      return "gpu_config_classdefs.m";
+    /* GPU Coder T5 design-pattern helpers are C runtime entries; no
+     * classdef file to pull in. */
     return std::string();
   };
   /* DSP System-Object -> flat-fi source rewrite for the
@@ -11468,7 +11524,7 @@ int main(int Argc, char **Argv) {
     static const char *kToolboxDirs[] = {
       "comm", "rf", "optim", "mpc", "ident", "gads", "pde", "prop", "sym",
       "stateflow", "antenna", "control", "stats", "images", "curvefit",
-      "dsp",
+      "dsp", "gpu",
     };
     std::vector<std::string> Cands;
     for (const char *Tb : kToolboxDirs) {
@@ -11531,16 +11587,56 @@ int main(int Argc, char **Argv) {
       Combined += Buf.str();
       return true;
     };
-    /* User input first, prelude classdefs last. MATLAB script files
-     * can mix top-level statements with classdef blocks; the existing
-     * test convention (class_inherit.m, class_operators.m, ...) puts
-     * the script before the classdef. Match that ordering so the CST
-     * stdlib slots into the same shape. */
-    if (!Append(Opts.InputPath)) return 1;
-    for (const auto &P : Opts.ExtraInputs)
-      if (!Append(P)) return 1;
-    for (const auto &P : PreludePaths) {
-      if (!Append(P)) return 1;
+    /* Ordering: script files can mix top-level statements with classdef
+     * blocks — script first, prelude last (the convention from
+     * class_inherit.m / class_operators.m / etc.).  But a function-
+     * defining file (starts with `function NAME(...)`) cannot be
+     * followed by a classdef — the parser emits "stray tokens after
+     * function definitions".  So PREPEND the prelude in that case.
+     * Heuristic: peek the first non-comment, non-whitespace token of
+     * the primary input and check for `function` or `classdef`. */
+    bool PrimaryIsFunctionOrClass = false;
+    {
+      std::ifstream In(Opts.InputPath, std::ios::binary);
+      if (In) {
+        std::ostringstream Buf;
+        Buf << In.rdbuf();
+        std::string S = Buf.str();
+        std::string Trim;
+        Trim.reserve(S.size());
+        bool InComment = false;
+        for (char c : S) {
+          if (c == '\n') { InComment = false; Trim.push_back(c); continue; }
+          if (c == '%') InComment = true;
+          if (!InComment) Trim.push_back(c);
+        }
+        size_t i = 0;
+        while (i < Trim.size() && std::isspace(static_cast<unsigned char>(Trim[i])))
+          ++i;
+        auto starts = [&](const char *Kw) -> bool {
+          size_t L = std::strlen(Kw);
+          if (i + L > Trim.size()) return false;
+          if (std::memcmp(Trim.data() + i, Kw, L) != 0) return false;
+          char R = (i + L < Trim.size()) ? Trim[i + L] : ' ';
+          return !(std::isalnum(static_cast<unsigned char>(R)) || R == '_');
+        };
+        PrimaryIsFunctionOrClass = starts("function") || starts("classdef");
+      }
+    }
+    if (PrimaryIsFunctionOrClass) {
+      /* Prelude classdefs first, then user file(s) so the function /
+       * classdef definitions sit at the end of the combined buffer. */
+      for (const auto &P : PreludePaths)
+        if (!Append(P)) return 1;
+      if (!Append(Opts.InputPath)) return 1;
+      for (const auto &P : Opts.ExtraInputs)
+        if (!Append(P)) return 1;
+    } else {
+      if (!Append(Opts.InputPath)) return 1;
+      for (const auto &P : Opts.ExtraInputs)
+        if (!Append(P)) return 1;
+      for (const auto &P : PreludePaths)
+        if (!Append(P)) return 1;
     }
     F = SM.addBuffer(Opts.InputPath, std::move(Combined));
   }
@@ -11920,6 +12016,293 @@ int main(int Argc, char **Argv) {
     if (emitCocotbHarness(Argv[0], Opts, *TU, TC, Diag, SM) != 0) return 1;
     return 0;
   }
+  /* GPU Coder Tier-6 — AOT emit standalone bundle.  Each target writes
+   * three files:
+   *   <stem>_kernel.<dialect>   — device kernel template (.cu/.metal/.cl)
+   *   <stem>_main.<host-ext>    — host driver (.cpp / .mm)
+   *   Makefile                  — toolchain wiring (nvcc / xcrun metal / clang)
+   * The kernel body uses the CPU equivalent of the user's function (the
+   * T1 LowerGpuKernels rewrite-to-`matlab.for` lane lowered through
+   * EmitC).  Tier-2/3/4 will swap the kernel template for the real
+   * outlined body once the array-capture extension to the outliner
+   * lands. */
+  if (Opts.Mode == Options::Mode::EmitCuda  ||
+      Opts.Mode == Options::Mode::EmitMetal ||
+      Opts.Mode == Options::Mode::EmitOpenCL) {
+    if (!TU) return 1;
+    /* Stem from the input file basename (no extension). */
+    std::string Stem = Opts.InputPath;
+    auto slash = Stem.find_last_of('/');
+    if (slash != std::string::npos) Stem = Stem.substr(slash + 1);
+    auto dot = Stem.find_last_of('.');
+    if (dot != std::string::npos) Stem = Stem.substr(0, dot);
+    /* Output directory: <stem>_<target> next to the input. */
+    std::string Target;
+    std::string KernelExt;
+    std::string HostExt = "cpp";
+    std::string ToolchainComment;
+    std::string CompileCmd;
+    std::string BuildExtras;
+    std::string KernelDecl;
+    std::string KernelBody;
+    std::string ThreadIdLine;
+    std::string LaunchSnippet;
+    if (Opts.Mode == Options::Mode::EmitCuda) {
+      Target = "cuda";   KernelExt = "cu";
+      ToolchainComment = "# Requires CUDA Toolkit (nvcc + libcudart + libcublas).";
+      CompileCmd = "nvcc -O2 -std=c++17";
+      BuildExtras = " -lcublas -lcufft -lcusolver";
+      KernelDecl =
+          "__global__ __launch_bounds__(256, 1) void "
+          + Stem + "_kernel(const double *X, double *Y, int n)";
+      ThreadIdLine =
+          "  int tid = blockIdx.x * blockDim.x + threadIdx.x;";
+      LaunchSnippet =
+          "  " + Stem + "_kernel<<<dim3((n + 255) / 256), dim3(256)>>>(d_x, d_y, n);\n"
+          "  cudaDeviceSynchronize();";
+    } else if (Opts.Mode == Options::Mode::EmitMetal) {
+      Target = "metal";  KernelExt = "metal";  HostExt = "mm";
+      ToolchainComment = "# Requires Xcode (xcrun metal / metallib) + clang++.";
+      CompileCmd = "clang++ -O2 -std=c++20 -fobjc-arc";
+      BuildExtras = " -framework Metal -framework MetalPerformanceShaders -framework Foundation";
+      KernelDecl =
+          "kernel void " + Stem + "_kernel(\n"
+          "  device const double *X [[buffer(0)]],\n"
+          "  device       double *Y [[buffer(1)]],\n"
+          "  constant uint &n        [[buffer(2)]],\n"
+          "  uint tid                [[thread_position_in_grid]])";
+      ThreadIdLine = "  /* tid is the kernel param. */";
+      LaunchSnippet =
+          "  id<MTLComputeCommandEncoder> enc = [cmdbuf computeCommandEncoder];\n"
+          "  [enc setComputePipelineState:pso];\n"
+          "  [enc setBuffer:bx offset:0 atIndex:0];\n"
+          "  [enc setBuffer:by offset:0 atIndex:1];\n"
+          "  [enc setBytes:&n length:sizeof(n) atIndex:2];\n"
+          "  [enc dispatchThreads:MTLSizeMake(n, 1, 1)\n"
+          "         threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];\n"
+          "  [enc endEncoding];\n"
+          "  [cmdbuf commit];\n"
+          "  [cmdbuf waitUntilCompleted];";
+    } else {  /* EmitOpenCL */
+      Target = "opencl"; KernelExt = "cl";
+      ToolchainComment = "# Requires OpenCL ICD loader (libOpenCL) + clang++.";
+      CompileCmd = "clang++ -O2 -std=c++17";
+      BuildExtras = " -lOpenCL";
+      KernelDecl =
+          "__kernel void " + Stem + "_kernel(\n"
+          "    __global const double *X,\n"
+          "    __global       double *Y,\n"
+          "    const int n)";
+      ThreadIdLine = "  int tid = get_global_id(0);";
+      LaunchSnippet =
+          "  size_t gws = ((n + 63) / 64) * 64;\n"
+          "  size_t lws = 64;\n"
+          "  clEnqueueNDRangeKernel(queue, kernel, 1, NULL, &gws, &lws,\n"
+          "                          0, NULL, NULL);\n"
+          "  clFinish(queue);";
+    }
+    /* Pick the output dir. */
+    std::string OutDir = Stem + "_" + Target;
+    std::error_code Ec;
+    /* Use mkdir(2) — std::filesystem available in C++17 but the rest of
+     * the tool uses cstdio shapes; mkdir/EEXIST is simpler. */
+    if (::mkdir(OutDir.c_str(), 0755) != 0 && errno != EEXIST) {
+      std::cerr << "error: -emit-" << Target << ": cannot create "
+                << OutDir << ": " << std::strerror(errno) << "\n";
+      return 1;
+    }
+    /* Kernel file. */
+    {
+      std::string Path = OutDir + "/" + Stem + "_kernel." + KernelExt;
+      std::ofstream OF(Path);
+      if (!OF) {
+        std::cerr << "error: cannot write " << Path << "\n";
+        return 1;
+      }
+      /* T2.B / T3 / T4 — for each Metal/CUDA/OpenCL emit mode, build
+       * a one-shot MLIR module and walk the matlab.gpu.kernel ops via
+       * the target-specific emit pass.  Result is the real kernel
+       * source translated from the user's MATLAB body.  Falls back to
+       * the identity placeholder if the MLIR build errors or no
+       * matlab.gpu.kernel ops were found. */
+      std::string KernelSource;
+      if (TU) {
+        mlirgen::Context MCtx;
+        DiagnosticEngine TmpDiag(SM);
+        auto M = mlirgen::lowerToMLIR(MCtx, TC, TmpDiag, *TU, &SM,
+                                       /*ReplMode=*/false,
+                                       /*DebugMode=*/false);
+        if (!TmpDiag.hasErrors()) {
+          if (Opts.Mode == Options::Mode::EmitMetal)
+            KernelSource = mlirgen::emitMetalKernels(M, Stem);
+          else if (Opts.Mode == Options::Mode::EmitCuda)
+            KernelSource = mlirgen::emitCudaKernels(M, Stem);
+          else if (Opts.Mode == Options::Mode::EmitOpenCL)
+            KernelSource = mlirgen::emitOpenCLKernels(M, Stem);
+        }
+      }
+      if (!KernelSource.empty()) {
+        OF << "/* " << Path << "\n"
+           << " * Generated by matlabc -emit-" << Target << "\n"
+           << " * Source: " << Opts.InputPath << "\n"
+           << " *\n"
+           << " * T2.B/T3/T4: body translated op-by-op from the user's\n"
+           << " * coder.gpu.kernelfun-tagged MATLAB body.  Unsupported\n"
+           << " * op shapes inline a FALLBACK comment + identity body. */\n\n"
+           << KernelSource;
+      } else {
+        OF << "/* " << Path << "\n"
+           << " * Generated by matlabc -emit-" << Target << "\n"
+           << " * Source: " << Opts.InputPath << "\n"
+           << " * \n"
+           << " * GPU Coder Tier-6 v1 kernel template.  The body below is\n"
+           << " * the placeholder that future per-target outliners will\n"
+           << " * fill in with the user's `coder.gpu.kernelfun`-tagged\n"
+           << " * function body.  Today the host driver calls the CPU\n"
+           << " * equivalent (see " << Stem << "_main.cpp).\n"
+           << " */\n\n"
+           << KernelDecl << " {\n"
+           << ThreadIdLine << "\n"
+           << "  if (tid >= n) return;\n"
+           << "  /* TODO: outlined kernel body lands here (blocked on the\n"
+           << "   * array-capture extension to LowerGpuKernels). */\n"
+           << "  Y[tid] = X[tid];  /* identity kernel — replace */\n"
+           << "}\n";
+      }
+    }
+    /* Host driver. */
+    {
+      std::string Path = OutDir + "/" + Stem + "_main." + HostExt;
+      std::ofstream OF(Path);
+      if (!OF) {
+        std::cerr << "error: cannot write " << Path << "\n";
+        return 1;
+      }
+      OF << "/* " << Path << "\n"
+         << " * Generated by matlabc -emit-" << Target << "\n"
+         << " * Source: " << Opts.InputPath << "\n"
+         << " * \n"
+         << " * GPU Coder Tier-6 host driver.  Allocates device buffers,\n"
+         << " * uploads X, launches " << Stem << "_kernel, downloads Y.\n"
+         << " * The driver demonstrates the host-side dispatch shape;\n"
+         << " * full device-kernel runtime semantics arrive in T2.B-D\n"
+         << " * (Metal) / T3 (CUDA) / T4 (OpenCL).\n"
+         << " */\n\n";
+      if (Opts.Mode == Options::Mode::EmitCuda) {
+        OF << "#include <cuda_runtime.h>\n"
+           << "#include <cstdio>\n\n"
+           << "extern void " << Stem << "_kernel(const double*, double*, int);\n\n"
+           << "int main(int argc, char **argv) {\n"
+           << "  const int n = 16;\n"
+           << "  double h_x[n], h_y[n];\n"
+           << "  for (int i = 0; i < n; ++i) h_x[i] = (double)i;\n"
+           << "  double *d_x, *d_y;\n"
+           << "  cudaMalloc(&d_x, n * sizeof(double));\n"
+           << "  cudaMalloc(&d_y, n * sizeof(double));\n"
+           << "  cudaMemcpy(d_x, h_x, n * sizeof(double), cudaMemcpyHostToDevice);\n"
+           << LaunchSnippet << "\n"
+           << "  cudaMemcpy(h_y, d_y, n * sizeof(double), cudaMemcpyDeviceToHost);\n"
+           << "  for (int i = 0; i < n; ++i) std::printf(\"%g\\n\", h_y[i]);\n"
+           << "  cudaFree(d_x); cudaFree(d_y);\n"
+           << "  return 0;\n"
+           << "}\n";
+      } else if (Opts.Mode == Options::Mode::EmitMetal) {
+        OF << "#import <Metal/Metal.h>\n"
+           << "#import <Foundation/Foundation.h>\n"
+           << "#include <cstdio>\n\n"
+           << "int main(int argc, char **argv) {\n"
+           << "  @autoreleasepool {\n"
+           << "    id<MTLDevice> dev = MTLCreateSystemDefaultDevice();\n"
+           << "    if (!dev) { std::fprintf(stderr, \"no Metal device\\n\"); return 1; }\n"
+           << "    id<MTLCommandQueue> q = [dev newCommandQueue];\n"
+           << "    NSError *err = nil;\n"
+           << "    NSString *src = [NSString stringWithContentsOfFile:@\"" << Stem << "_kernel.metal\"\n"
+           << "                                              encoding:NSUTF8StringEncoding error:&err];\n"
+           << "    id<MTLLibrary> lib = [dev newLibraryWithSource:src options:nil error:&err];\n"
+           << "    id<MTLFunction> fn = [lib newFunctionWithName:@\"" << Stem << "_kernel\"];\n"
+           << "    id<MTLComputePipelineState> pso = [dev newComputePipelineStateWithFunction:fn error:&err];\n"
+           << "    const unsigned n = 16;\n"
+           << "    double h_x[n];\n"
+           << "    for (unsigned i = 0; i < n; ++i) h_x[i] = (double)i;\n"
+           << "    id<MTLBuffer> bx = [dev newBufferWithBytes:h_x length:n*sizeof(double) options:MTLResourceStorageModeShared];\n"
+           << "    id<MTLBuffer> by = [dev newBufferWithLength:n*sizeof(double) options:MTLResourceStorageModeShared];\n"
+           << "    id<MTLCommandBuffer> cmdbuf = [q commandBuffer];\n"
+           << LaunchSnippet << "\n"
+           << "    double *out = (double *)[by contents];\n"
+           << "    for (unsigned i = 0; i < n; ++i) std::printf(\"%g\\n\", out[i]);\n"
+           << "  }\n"
+           << "  return 0;\n"
+           << "}\n";
+      } else {  /* OpenCL */
+        OF << "#define CL_TARGET_OPENCL_VERSION 120\n"
+           << "#ifdef __APPLE__\n"
+           << "#include <OpenCL/opencl.h>\n"
+           << "#else\n"
+           << "#include <CL/cl.h>\n"
+           << "#endif\n"
+           << "#include <cstdio>\n"
+           << "#include <cstdlib>\n"
+           << "#include <fstream>\n"
+           << "#include <sstream>\n\n"
+           << "int main(int argc, char **argv) {\n"
+           << "  cl_platform_id plat; clGetPlatformIDs(1, &plat, NULL);\n"
+           << "  cl_device_id dev; clGetDeviceIDs(plat, CL_DEVICE_TYPE_DEFAULT, 1, &dev, NULL);\n"
+           << "  cl_context ctx = clCreateContext(NULL, 1, &dev, NULL, NULL, NULL);\n"
+           << "  cl_command_queue queue = clCreateCommandQueue(ctx, dev, 0, NULL);\n"
+           << "  std::ifstream ifs(\"" << Stem << "_kernel.cl\");\n"
+           << "  std::stringstream ss; ss << ifs.rdbuf();\n"
+           << "  std::string src = ss.str();\n"
+           << "  const char *csrc = src.c_str(); size_t srcLen = src.size();\n"
+           << "  cl_program prog = clCreateProgramWithSource(ctx, 1, &csrc, &srcLen, NULL);\n"
+           << "  clBuildProgram(prog, 1, &dev, \"\", NULL, NULL);\n"
+           << "  cl_kernel kernel = clCreateKernel(prog, \"" << Stem << "_kernel\", NULL);\n"
+           << "  const int n = 16;\n"
+           << "  double h_x[n], h_y[n];\n"
+           << "  for (int i = 0; i < n; ++i) h_x[i] = (double)i;\n"
+           << "  cl_mem bx = clCreateBuffer(ctx, CL_MEM_READ_ONLY  | CL_MEM_COPY_HOST_PTR,\n"
+           << "                              n*sizeof(double), h_x, NULL);\n"
+           << "  cl_mem by = clCreateBuffer(ctx, CL_MEM_WRITE_ONLY,\n"
+           << "                              n*sizeof(double), NULL, NULL);\n"
+           << "  clSetKernelArg(kernel, 0, sizeof(cl_mem), &bx);\n"
+           << "  clSetKernelArg(kernel, 1, sizeof(cl_mem), &by);\n"
+           << "  clSetKernelArg(kernel, 2, sizeof(int),    &n);\n"
+           << LaunchSnippet << "\n"
+           << "  clEnqueueReadBuffer(queue, by, CL_TRUE, 0, n*sizeof(double), h_y, 0, NULL, NULL);\n"
+           << "  for (int i = 0; i < n; ++i) std::printf(\"%g\\n\", h_y[i]);\n"
+           << "  return 0;\n"
+           << "}\n";
+      }
+    }
+    /* Makefile. */
+    {
+      std::string Path = OutDir + "/Makefile";
+      std::ofstream OF(Path);
+      OF << "# " << Path << "\n"
+         << "# Generated by matlabc -emit-" << Target << "\n"
+         << ToolchainComment << "\n\n"
+         << "TARGET = " << Stem << "_" << Target << "\n"
+         << "SRC    = " << Stem << "_main." << HostExt << "\n\n"
+         << "$(TARGET): $(SRC) " << Stem << "_kernel." << KernelExt << "\n"
+         << "\t" << CompileCmd << " $(SRC) -o $(TARGET)" << BuildExtras << "\n\n"
+         << "clean:\n"
+         << "\trm -f $(TARGET)\n";
+    }
+    /* README — name the artifacts. */
+    {
+      std::ofstream OF(OutDir + "/README.md");
+      OF << "# " << Stem << " — " << Target << " bundle\n\n"
+         << "Generated by `matlabc -emit-" << Target << " "
+         << Opts.InputPath << "`.\n\n"
+         << "Build:\n```\nmake\n```\n\n"
+         << "Files:\n"
+         << "- `" << Stem << "_kernel." << KernelExt << "` — device kernel\n"
+         << "- `" << Stem << "_main." << HostExt << "` — host driver\n"
+         << "- `Makefile` — toolchain wiring\n";
+    }
+    std::cerr << "matlabc -emit-" << Target << ": wrote bundle to "
+              << OutDir << "/\n";
+    return 0;
+  }
   if (Opts.Mode == Options::Mode::EmitMLIR ||
       Opts.Mode == Options::Mode::EmitLLVM ||
       Opts.Mode == Options::Mode::EmitC ||
@@ -11970,6 +12353,17 @@ int main(int Argc, char **Argv) {
       // idempotent and a no-op on files without `% hdl:` comments.
       // The SV-specific pragma surface (fsm_encoding, input_pipeline,
       // ...) is re-scanned further down in the SV branch.
+      /* SV / hardware emit modes have their own integer-width inference
+       * (HWBitWidthInfer infers i1/i16/i32 widths from chart annotations).
+       * The PromoteNoneParams + PromoteBinopTypes f64-propagation lanes
+       * for GPU validate against scalar-double MATLAB semantics — applying
+       * them to chart-lowered .m files mis-promotes integer-typed signals
+       * (l_airflow et al) to f64 and breaks HWLegalize.  Skip the f64
+       * lanes entirely for HW-targeted compiles. */
+      bool IsHwEmit =
+          Opts.Mode == Options::Mode::EmitSystemVerilog ||
+          Opts.Mode == Options::Mode::CheckSynthesizable ||
+          Opts.Mode == Options::Mode::EmitHardwareReport;
       if (WantFullPipeline) {
         mlirgen::runScanHWPragmas(M, &SM);
         // Tier 5 — for a subsystem emit, ScanHWPragmas runs over the
@@ -12063,6 +12457,19 @@ int main(int Argc, char **Argv) {
           Diag.printAll();
           return 1;
         }
+        /* PromoteNoneParams runs AFTER ApplyPortTypePragmas so any HDL
+         * function whose `% hdl: port(x, 'int16')` pragma typed its arg
+         * to i16 / i8 / i32 is already non-none and my pass skips it
+         * (the AnyNone check returns false).  Plain functions (GPU
+         * PCT et al.) without port pragmas keep `none` args, which my
+         * pass promotes to f64.
+         *
+         * Must still run BEFORE SlotPromotion (next, inside WantClean)
+         * which collapses the matlab.store(%arg, %slot) anchor my
+         * detector uses.  HW-emit modes skip the whole f64 lane
+         * because their integer types come from the pragma + HW
+         * width-infer passes. */
+        if (!IsHwEmit) mlirgen::runPromoteNoneParams(M);
         // Seed slot/load types from the now-typed entry-block args
         // BEFORE SlotPromotion runs in WantClean. SlotPromotion
         // only fires when the value type matches the load result
@@ -12093,7 +12500,13 @@ int main(int Argc, char **Argv) {
         // Outline parfor first — that way the induction variable flows as a
         // direct block argument (f64) into disp/fprintf rather than via an
         // outer slot that would still be `none`-typed at LowerIO time.
+        if (!IsHwEmit) {
+          mlirgen::runPromoteNoneParams(M);
+          for (int Iter = 0; Iter < 4; ++Iter)
+            if (!mlirgen::runPromoteBinopTypes(M)) break;
+        }
         mlirgen::runOutlineParfor(M);
+        mlirgen::runOutlineGpuKernels(M);
         // Lower sequential matlab.for / matlab.while into scf.while so
         // the MLIR conversion pipeline can finish translation. Must run
         // before LowerTensorOps (which would erase the matlab.range
@@ -12142,6 +12555,17 @@ int main(int Argc, char **Argv) {
           bool A = mlirgen::runLowerScalarsToArith(M);
           bool B = mlirgen::runLowerUserCalls(M);
           if (!A && !B) break;
+        }
+        /* Propagate the freshly-typed call results through binops +
+         * slot chains so a chained `gather(a .* x + b)` pattern routes
+         * correctly.  Iterate to fixpoint.  Skipped for HW emit modes
+         * — see comment at the EARLY invocation site for rationale. */
+        if (!IsHwEmit) {
+          for (int Iter = 0; Iter < 4; ++Iter) {
+            bool Pb = mlirgen::runPromoteBinopTypes(M);
+            mlirgen::runRefineSlotTypes(M);
+            if (!Pb) break;
+          }
         }
         mlirgen::runLowerTensorOps(M);
         // Second LowerFixedPoint sweep — picks up matlab.call_builtin

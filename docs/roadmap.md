@@ -669,20 +669,22 @@ edge-element vector EM.
 
 ### 16. Future toolboxes — drafted compatibility roadmaps 🔵
 
-After the **sixteen shipped toolbox surfaces** (see
+After the **nineteen shipped toolbox surfaces** (see
 [`feature_status.md`](feature_status.md) and the README's
-"Shipped Toolboxes" table), five more have **full tiered compatibility
-roadmaps drafted** — same format as the shipped ones: per-tier function
-tables, a reusable-infrastructure map, a headline tracer-bullet, the
-Compile/Execute · Debug/REPL · examples · tests breakdown, carve-outs,
-and an effort summary. They are ordered by **gain** (demand × reuse of
-the already-shipped substrate — so cost is low and payoff high):
+"Shipped Toolboxes" table — Curve Fitting, Wavelet, DSP System + DSP HDL,
+and GPU Coder were drafted here and have since shipped), two of the
+original drafts remain — **full tiered compatibility roadmaps**, same
+format as the shipped ones: per-tier function tables, reusable-infra
+map, headline tracer-bullet, Compile/Execute · Debug/REPL · examples ·
+tests breakdown, carve-outs, effort summary. They are ordered by
+**gain** (demand × reuse of the already-shipped substrate — so cost is
+low and payoff high):
 
 | # | Toolbox | Roadmap | Tiers · effort | Why it's cheap | Headline |
 |---|---|---|---|---|---|
-| 1 | **Curve Fitting** | [`curve_fitting_toolbox_roadmap.md`](curve_fitting_toolbox_roadmap.md) | 6 · ~9.5 wk | rides shipped `polyfit`/`polyval`/`interp1` + Optim `lsqcurvefit`/`lsqnonlin` | `census_fit.m` (`fit`→`gof`→forecast→`plot`) |
-| 2 | **Wavelet** | [`wavelet_toolbox_roadmap.md`](wavelet_toolbox_roadmap.md) | 6 · ~10.5 wk | extends Signal — `conv`/`fft`/`dct`/`fwht`/`upfirdn` + Image `psnr` + Stats `fitcsvm` | `denoise_signal.m` (`wavedec`→`wthresh`→`waverec`) |
-| 3 | **DSP System + DSP HDL** | [`dsp_toolbox_roadmap.md`](dsp_toolbox_roadmap.md) | 8 · ~18 wk | Signal filters + `fi` + the emit-SV/cocotb lane; **T1 SO model unblocks Comm/RF SO tiers** | `dsphdl_fir_stream.m` (fixed-point FIR → synthesizable SV + cocotb SIL) |
+| 1 | **Curve Fitting** ✅ | [`curve_fitting_toolbox_roadmap.md`](curve_fitting_toolbox_roadmap.md) | 6 · shipped | rode shipped `polyfit`/`polyval`/`interp1` + Optim `lsqcurvefit`/`lsqnonlin` | `census_fit.m` (`fit`→`gof`→forecast→`plot`) |
+| 2 | **Wavelet** ✅ | [`wavelet_toolbox_roadmap.md`](wavelet_toolbox_roadmap.md) | 6 · shipped | extended Signal — `conv`/`fft`/`dct`/`fwht`/`upfirdn` + Image `psnr` + Stats `fitcsvm` | `denoise_signal.m` (`wavedec`→`wthresh`→`waverec`) |
+| 3 | **DSP System + DSP HDL** ✅ | [`dsp_toolbox_roadmap.md`](dsp_toolbox_roadmap.md) | 8 · shipped | Signal filters + `fi` + emit-SV/cocotb lane; **T1 SO model unblocked Comm/RF SO tiers** | `dsphdl_fir_stream.m` (fixed-point FIR → synthesizable SV + cocotb SIL) |
 | 4 | **Sensor Fusion and Tracking** | [`sensor_fusion_toolbox_roadmap.md`](sensor_fusion_toolbox_roadmap.md) | 6 · ~12.5 wk | **EKF/UKF cores already shipped** (Ident T5); ODE + linalg + PRNG | `imu_gps_fusion.m` (IMU+GPS → `insfilterMARG`) |
 | 5 | **Robotics System** | [`robotics_toolbox_roadmap.md`](robotics_toolbox_roadmap.md) | 6 · ~13 wk | **IK is `lsqnonlin`/`fminunc`** (Optim shipped); FK/Jacobian = linalg; URDF meshes reuse the PDE STL importer | `ik_path_trace.m` (`loadrobot`→`inverseKinematics`) |
 
@@ -711,6 +713,125 @@ the SO fix and unblock the SO-gated tiers project-wide) or the
 foundation; directly serves the `examples/quadrotor/` flight-control
 work and the shipped MPC/CST loops). **Wavelet** slots in any time as a
 self-contained Signal extension.
+
+These are **plans, not commitments** — each tier is independently
+shippable and demoable, and the per-toolbox docs are the source of truth.
+
+### 17. Complete toolbox audit — ranked backlog (2026-05-24) 🔵
+
+Full sweep against the official MathWorks R2026a toolbox catalog
+(~130 product names). Cross-referenced against `runtime/toolbox/` and
+the README badge ("19 shipped"). Effort buckets: **XS** <1w · **S** 1-3w
+· **M** 3-6w · **L** 6-10w · **XL** 10+w (one focused implementation
+session ≈ 1/5 of a week, per the project's existing cadence).
+
+#### Already shipped (matched against the official list)
+
+Algorithm/numerics: **DSP System** · **DSP HDL** · **Wavelet** ·
+**Curve Fitting** · **Optimization** · **Global Optimization** ·
+**Statistics and Machine Learning** · **Image Processing** ·
+**Signal Processing** · **Symbolic Math** · **System Identification**
+· **Control System** · **Model Predictive Control** · **Partial
+Differential Equation**. Comms/RF: **Communications** · **RF** ·
+**Antenna**. Codegen/HW: **MATLAB Coder** (we *are* matlabc) ·
+**Embedded Coder** (mflowLink) · **HDL Coder** (SV emit) ·
+**HDL Verifier** (cocotb SIL) · **GPU Coder** (T1+T2.A + CUDA/Metal/OpenCL
+emit lanes) · **Stateflow** (backend). Partials: **Parallel Computing**
+(`parfor` outliner) · **Fixed-Point Designer** (`fi` lane). Propagation
+folded into the Comm roadmap as priority §3.
+
+#### Out of scope (decided, not shipping)
+
+| Category | Reason |
+|---|---|
+| **Simulink** + all Simulink-* (`Coder`, `Compiler`, `Compiler SDK`, `Coverage`, `Design Verifier`, `Test`, `Report Generator`, `Real-Time`, `Desktop Real-Time`, `3D Animation`, `Check`, `Code Inspector`, `Control Design`, `Design Optimization`, `FMU Builder`, `Fault Analyzer`, `PLC Coder`, `Copilot`) | Graphical block-diagram UX — replaced by `.mflow` text-DSL |
+| **All Blocksets** (`AUTOSAR`, `C2000`, `DDS`, `Motor Control`, `Powertrain`, `Raspberry Pi`, `STM32`, `Vehicle Dynamics`, `SoC`, `RF Blockset`, `Aerospace Blockset`, `Audio Blockset`, `Mixed-Signal Blockset`) | Same — Simulink-bound |
+| **Simscape** + `Battery` / `Driveline` / `Electrical` / `Fluids` / `Multibody` / `Multibody Link` | Physical-network modeling engine — separate large undertaking |
+| **SimBiology**, **SimEvents** | Simulink-bound |
+| **All Polyspace** (`Access`, `as You Code`, `Bug Finder`, `Code Prover`, `Copilot`, `Products for Ada`, `Test`) | Static-analysis suite — different problem class |
+| **Compliance kits**: DO Qualification (DO-178), IEC Certification (ISO 26262 / IEC 61508) | Documentation/process products |
+| **Services**: MATLAB Online Courses, Grader, Mobile, Copilot, Parallel Server, Production Server, Web App Server, Compiler, Compiler SDK, Report Generator, Test, Drive | Hosted services |
+| **Host bindings**: Database, Datafeed, Data Acquisition, Instrument Control, Image Acquisition, Industrial Communication, Vehicle Network, OPC, Spreadsheet Link, ThingSpeak, Cloud Integrations | OS/HW driver wrappers; no algorithmic content |
+| **RoadRunner**, **RoadRunner Scenario** | 3D scene authoring tools |
+| **Requirements Toolbox**, **System Composer** | Architecture/req modeling UX |
+| **Installation and Licensing** | n/a |
+
+#### Missing — ranked by value × effort
+
+##### Top recommendations (high value, leverages shipped stack)
+
+| # | Toolbox | Effort | Why now |
+|---|---|---|---|
+| 1 | **Sensor Fusion and Tracking** | M (3-4w) | EKF/UKF already in Ident T5; add `trackingEKF/UKF/IMM`, `phd`, `insfilter`, track managers. Unlocks the **quadrotor IMU/GPS fusion demo**. Roadmap drafted ([`sensor_fusion_toolbox_roadmap.md`](sensor_fusion_toolbox_roadmap.md)). |
+| 2 | **Aerospace Toolbox** | S (2-3w) | Pure numerics: quaternion / DCM utils, ECEF/NED/ECI frames, standard atmosphere, gravity (`gravityWGS84`), World Magnetic Model. Pairs directly with quadrotor + sensor fusion. |
+| 3 | **Phased Array System** | M (4w) | RF + Antenna + Propagation all shipped — add array geometry (`phased.ULA/URA`), beamformers (delay-and-sum / MVDR / Capon), DOA (MUSIC/ESPRIT), `phased.Radar`, radar equation. Closes a complete RF research stack. |
+| 4 | **Computer Vision** | M (4-6w) | Image Processing shipped. Add feature detectors (Harris/FAST/ORB), RANSAC, geometric registration, stereo, camera calibration, optical flow. Bridges to UAV/AV demos. |
+| 5 | **Robust Control** | M (4-5w) | Control System shipped. Add `hinfsyn` / `musyn` / `uncertain` / LMI solver. Modest effort on top of `lqr` / `care` / SDP. |
+| 6 | **Navigation Toolbox** | M (5-6w) | Builds on Sensor Fusion. `plannerRRT/HybridAStar`, occupancy maps, `monteCarloLocalization`, INS/GPS integration. AV/drone capstone. |
+
+##### Tier 2 (high value, larger lift)
+
+| # | Toolbox | Effort | Notes |
+|---|---|---|---|
+| 7 | **Deep Learning** | XL (10-15w) | Cornerstone — autograd, `dlarray`, `dlnetwork`, optimizers (SGD/Adam/RMSProp), layer DAG runtime, training loop. **Unlocks RL · DL-CV · Text DL · DL HDL · DL Vision HDL.** |
+| 8 | **Reinforcement Learning** | L (~8w) **after DL** | `rlAgent` / DQN / PPO / SAC + env API. Trivial after DL lands. |
+| 9 | **Robotics System** | L (6-8w) | `rigidBodyTree`, fwd/inv kinematics, motion planning, collisions. Massive overlap with the quadrotor work. Roadmap drafted ([`robotics_toolbox_roadmap.md`](robotics_toolbox_roadmap.md)). |
+| 10 | **UAV Toolbox** | M (4-5w) **after #1+#6+#9** | Mostly integration — drone flight stack on top of the three above. |
+| 11 | **ROS Toolbox** | M (3-4w) | Plain ROS1/ROS2 marshalling (publish/subscribe + msg types). Self-contained protocol work. |
+
+##### Tier 3 (focused / niche / scientific)
+
+| # | Toolbox | Effort | Notes |
+|---|---|---|---|
+| 12 | **Lidar Toolbox** | M (4w) | Point clouds, ICP, voxel grids, normals. Builds on Image Proc + Stats. |
+| 13 | **Mapping Toolbox** | S (2-3w) | Geo transforms, projections (Mercator/UTM), `geotiff` reader. Light. |
+| 14 | **Audio Toolbox** | S (3w) | DSP toolbox wrap + MFCC, voice features, audio effects. |
+| 15 | **Predictive Maintenance** | S (2-3w) | Orchestrates Stats/ML + Signal + Ident — mostly shipped pieces. |
+| 16 | **Fuzzy Logic** | S (2w) | Mamdani/Sugeno inference. Niche. |
+| 17 | **Bioinformatics** | S (3-4w) | Smith-Waterman / Needleman-Wunsch, phylogenetic trees, BWT/FM-index. Self-contained numerics. |
+| 18 | **Econometrics** | S (3w) | ARIMA (have ARX in Ident), GARCH, VAR, cointegration. Stats + Ident overlap. |
+| 19 | **Financial** + **Financial Instruments** | S+S (3w+3w) | Black-Scholes, MC pricing, yield curves, portfolio optim. |
+| 20 | **Risk Management** | XS (1w) | VaR/CVaR/scenarios. Trivial atop Stats. |
+| 21 | **Text Analytics** | S (2w) light / L heavy w/ embeddings | Tokenization/BoW/TF-IDF/LDA. Heavy if doing transformer embeddings. |
+| 22 | **Medical Imaging** | M (3-4w) | DICOM I/O + 3-D volume registration + segmentation atop Image Processing. |
+| 23 | **Model-Based Calibration** | S (2-3w) | DOE + GP modeling — Stats + Curve Fitting overlap. |
+
+##### Tier 4 (wireless/RF family — only if pursuing comms research)
+
+| # | Toolbox | Effort | Notes |
+|---|---|---|---|
+| 24 | **Radar Toolbox** | M (4w) **with Phased Array** | Range-Doppler, CFAR, SAR. Natural pair with #3. |
+| 25 | **5G Toolbox** | XL (10w+) | OFDM, LDPC, polar codes, channel models, PUSCH/PUCCH. Massive surface. |
+| 26 | **WLAN Toolbox** | L (6-8w) | 802.11 a/b/g/n/ac/ax PHY. |
+| 27 | **LTE Toolbox** | L (~8w) | Legacy of 5G — bulk overlap. |
+| 28 | **Satellite Communications** | M-L (6w) | DVB-S2X, orbit propagation (ties Aerospace). |
+| 29 | **Bluetooth** | M (4w) | BT PHY / LE. Smaller surface than 802.11. |
+| 30 | **Wireless HDL** | M (4-5w) | Pairs with DSP HDL — HDL emit lane for wireless functions. |
+| 31 | **Wireless Network / Testbench** | L+ | Network simulation / HIL — out of pure-software scope mostly. |
+
+##### Tier 5 (HDL + verification specialists, very narrow)
+
+| # | Toolbox | Notes |
+|---|---|---|
+| 32 | **Vision HDL** | DL-CV pipelines targeting FPGAs. Build after CV. |
+| 33 | **Deep Learning HDL** | DL inference on FPGAs. Build after DL. |
+| 34 | **Mixed-Signal / SerDes / Signal Integrity** | RF Toolbox extension for IC-level signaling. |
+| 35 | **RF PCB Toolbox** | PCB EM solver. Heavy. |
+| 36 | **Automated Driving** | Pairs with #4 (CV) + #6 (Navigation) + #1 (Sensor Fusion). |
+
+#### Recommendation: next slice
+
+If you want **maximum demo value per week**:
+
+> **Aerospace (S) → Sensor Fusion (M) → Computer Vision (M) → Navigation (M)** ≈ 14-18 weeks. Completes a self-contained "autonomous drone" research stack on top of the shipped MPC + GPU + Symbolic + Quadrotor demos.
+
+If you want **maximum strategic value** for compiler reach:
+
+> **Deep Learning (XL, ~12w)** — single-handedly unlocks RL · DL-CV · Text DL · DL HDL · Vision HDL · Reinforcement Learning and modernizes the whole AI surface. Highest ceiling but biggest single commit.
+
+If you want **quick wins**:
+
+> **Risk Management (XS) → Mapping (S) → Audio (S) → Aerospace (S) → Predictive Maintenance (S)** ≈ 11-13 weeks for 5 toolboxes, each independently demoable, all leveraging shipped components.
 
 These are **plans, not commitments** — each tier is independently
 shippable and demoable, and the per-toolbox docs are the source of truth.

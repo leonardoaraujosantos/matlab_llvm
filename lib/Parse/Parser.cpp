@@ -952,6 +952,58 @@ Expr *Parser::parseUnary() {
  * PinnedClass + the `obj(x)`->step sugar) treats it as an ordinary class.
  * An unknown field — or a `dsp` that is actually a bound variable — is
  * left as a normal FieldAccess. */
+/* GPU Coder package folds.  MATLAB source uses three forms:
+ *   `coder.gpu.kernelfun()`            — 3-level chain
+ *   `coder.gpu.kernel`                  — 3-level chain (statement-form)
+ *   `coder.gpuConfig('mex')`           — 2-level chain
+ *   `gpucoder.reduce(X, @plus)`        — 2-level chain
+ * The parser fold collapses each chain to a single flat NameExpr
+ * (`coder_gpu_kernelfun`, `coder_gpuConfig`, `gpucoder_reduce`, ...)
+ * so the rest of the pipeline treats them as ordinary builtins. */
+static bool isCoderGpuLeaf(std::string_view Leaf) {
+  static const std::string_view Names[] = {
+    "kernelfun", "kernel", "constantMemory", "stream", "sync",
+  };
+  for (auto N : Names) if (N == Leaf) return true;
+  return false;
+}
+static bool isCoderTopLevel(std::string_view Leaf) {
+  /* `coder.gpuConfig` is 2-level; `coder.gpu.X` is 3-level (handled
+   * in the dedicated branch below).  This routine matches the
+   * 2-level leaves only. */
+  static const std::string_view Names[] = {
+    "gpuConfig",
+  };
+  for (auto N : Names) if (N == Leaf) return true;
+  return false;
+}
+static bool isGpucoderLeaf(std::string_view Leaf) {
+  static const std::string_view Names[] = {
+    "reduce", "matrixMatrixKernel", "sort", "batchedMatMul",
+    "stencilKernel",  /* deprecated MathWorks alias for stencilfun */
+  };
+  for (auto N : Names) if (N == Leaf) return true;
+  return false;
+}
+
+/* gpuArray.<leaf> static-method fold (PCT-style API):
+ *   gpuArray.rand(n, m, 'single')   → gpuArray_rand
+ *   gpuArray.zeros(n, m, 'single')  → gpuArray_zeros
+ *   gpuArray.ones / .eye / .linspace / .true / .false / .colon / .inf / .nan
+ * The CPU-debug lane lowers each to the underlying matlab_* allocator
+ * (matlab_rand / matlab_zeros / etc.).  Real backends will swap in
+ * device-allocated buffers when T2.D / T3 / T4 wire MPS / curand /
+ * clRng. */
+static bool isGpuArrayStatic(std::string_view Leaf) {
+  static const std::string_view Names[] = {
+    "rand",  "randn", "randi",
+    "zeros", "ones",  "eye",  "true", "false",
+    "linspace", "colon", "inf", "nan",
+  };
+  for (auto N : Names) if (N == Leaf) return true;
+  return false;
+}
+
 static bool isDspSysObjClass(std::string_view Pkg, std::string_view Field) {
   if (Pkg != "dsp" && Pkg != "dsphdl") return false;
   /* `dsphdl.*` is the cycle-accurate hardware counterpart of `dsp.*` —
@@ -1022,6 +1074,63 @@ Expr *Parser::parsePostfix(Expr *LHS) {
             std::string Flat = std::string(BN->Name) + "_" +
                                std::string(cur().Text);
             ++Idx;  // consume the field identifier
+            auto *N = Ctx.make<NameExpr>();
+            N->Name = Ctx.intern(Flat);
+            N->Range.Begin = LHS->Range.Begin;
+            N->Range.End = cur().Loc;
+            LHS = N;
+            continue;
+          }
+          /* GPU Coder folds.
+           *   `coder.gpu.<leaf>`  -> `coder_gpu_<leaf>` (3-level — peek ahead)
+           *   `coder.gpuConfig`   -> `coder_gpuConfig`  (2-level)
+           *   `gpucoder.<leaf>`   -> `gpucoder_<leaf>`  (2-level)
+           */
+          if (BN->Name == "coder" && cur().Text == "gpu") {
+            /* Peek: must be followed by `.<known-gpu-leaf>`. */
+            if (Idx + 2 < Toks.size() &&
+                Toks[Idx + 1].Kind == TokenKind::dot &&
+                Toks[Idx + 2].Kind == TokenKind::identifier &&
+                isCoderGpuLeaf(Toks[Idx + 2].Text)) {
+              std::string Flat = "coder_gpu_" + std::string(Toks[Idx + 2].Text);
+              Idx += 3;  /* consume `gpu` `.` `<leaf>` */
+              auto *N = Ctx.make<NameExpr>();
+              N->Name = Ctx.intern(Flat);
+              N->Range.Begin = LHS->Range.Begin;
+              N->Range.End = cur().Loc;
+              LHS = N;
+              continue;
+            }
+          }
+          if (BN->Name == "coder" && isCoderTopLevel(cur().Text)) {
+            std::string Flat = "coder_" + std::string(cur().Text);
+            ++Idx;  /* consume `<leaf>` */
+            auto *N = Ctx.make<NameExpr>();
+            N->Name = Ctx.intern(Flat);
+            N->Range.Begin = LHS->Range.Begin;
+            N->Range.End = cur().Loc;
+            LHS = N;
+            continue;
+          }
+          if (BN->Name == "gpucoder" && isGpucoderLeaf(cur().Text)) {
+            std::string Flat = "gpucoder_" + std::string(cur().Text);
+            ++Idx;  /* consume `<leaf>` */
+            auto *N = Ctx.make<NameExpr>();
+            N->Name = Ctx.intern(Flat);
+            N->Range.Begin = LHS->Range.Begin;
+            N->Range.End = cur().Loc;
+            LHS = N;
+            continue;
+          }
+          /* `gpuArray.<static>` static-method fold (PCT-style API).
+           * The leaf is one of rand/zeros/ones/linspace/etc.  We map
+           * `gpuArray.rand(...)` to a flat builtin call
+           * `gpuArray_rand(...)` — the CPU-debug lane treats it as the
+           * normal matlab allocator (gpuArray is host-only here), real
+           * backends route through curand / MPSMatrixRandom / clRng. */
+          if (BN->Name == "gpuArray" && isGpuArrayStatic(cur().Text)) {
+            std::string Flat = "gpuArray_" + std::string(cur().Text);
+            ++Idx;  /* consume `<leaf>` */
             auto *N = Ctx.make<NameExpr>();
             N->Name = Ctx.intern(Flat);
             N->Range.Begin = LHS->Range.Begin;

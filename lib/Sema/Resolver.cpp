@@ -824,6 +824,44 @@ void Resolver::registerBuiltins() {
     "writeVerilogATable",
     /* Tier-7 follow-on: composite RF / signal-chain blocks. */
     "writeVerilogAAmplifier", "writeVerilogAAM", "writeVerilogAIQMod",
+    /* GPU Coder pragma stubs.  Folded from `coder.gpu.kernelfun()` /
+     * `coder.gpu.kernel` / `coder.gpu.constantMemory(X)` /
+     * `coder.gpu.stream()` / `coder.gpu.sync()` by parsePostfix.
+     * Recognised + intercepted in Lowering::lowerStmt (ExprStmt arm) so
+     * they emit no IR; declared here so Sema accepts the name. */
+    "coder_gpu_kernelfun", "coder_gpu_kernel",
+    "coder_gpu_constantMemory", "coder_gpu_stream", "coder_gpu_sync",
+    /* GPU Coder helper functions.  Folded from `gpucoder.reduce(X,@f)` /
+     * `gpucoder.matrixMatrixKernel(C,op,A,B)` / `gpucoder.sort` /
+     * `gpucoder.batchedMatMul` / `gpucoder.stencilKernel` (deprecated). */
+    "gpucoder_reduce", "gpucoder_matrixMatrixKernel",
+    "gpucoder_sort", "gpucoder_batchedMatMul", "gpucoder_stencilKernel",
+    /* `coder.gpuConfig('mex' | 'lib' | 'exe' | 'dll')` returns a
+     * config record consumed by the -emit-{cuda,metal,opencl} lanes. */
+    "coder_gpuConfig",
+    /* GPU Coder host-side carriers — `gpuArray` is a classdef pulled
+     * in by the prelude (gpu_classdefs.m); the symbols listed below
+     * are the free functions declared alongside it (gather, etc.).
+     * Registering as builtin so Sema accepts the name in source code
+     * before the classdef prelude wires it up.  Note: gpuArray itself
+     * is intentionally NOT in this list — it's a class binding. */
+    "gather", "existsOnGPU", "gpuDevice",
+    /* Runtime ABI shims called from gpu_classdefs.m method bodies. */
+    "matlab_gpu_upload", "matlab_gpu_download",
+    "matlab_gpu_exists_on_gpu", "matlab_gpu_active_target_name",
+    "matlab_gpu_device_name",
+    /* gpuArray.<static> factory names (folded by Parser).  CPU-debug
+     * lane routes each to the corresponding matlab_* allocator. */
+    "gpuArray_rand", "gpuArray_randn", "gpuArray_randi",
+    "gpuArray_zeros", "gpuArray_ones", "gpuArray_eye",
+    "gpuArray_true", "gpuArray_false",
+    "gpuArray_linspace", "gpuArray_colon",
+    "gpuArray_inf", "gpuArray_nan",
+    /* PCT names that may appear in the validation suite. */
+    "gpuDeviceCount", "wait", "tic", "toc",
+    /* Stencil v2 — `stencilfun(@f, A, [m n])` is the supported form
+     * (matched as a regular builtin call; not parser-folded). */
+    "stencilfun",
   }) {
     registerBuiltin(N);
   }

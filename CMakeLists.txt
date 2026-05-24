@@ -195,6 +195,12 @@ if(MATLAB_LLVM_WITH_MLIR)
     lib/MLIR/Passes/LowerIO.cpp
     lib/MLIR/Passes/LowerPlot.cpp
     lib/MLIR/Passes/LowerParfor.cpp
+    lib/MLIR/Passes/LowerGpuKernels.cpp
+    lib/MLIR/Passes/EmitMetal.cpp
+    lib/MLIR/Passes/EmitCUDA.cpp
+    lib/MLIR/Passes/EmitOpenCL.cpp
+    lib/MLIR/Passes/PromoteNoneParams.cpp
+    lib/MLIR/Passes/PromoteBinopTypes.cpp
     lib/MLIR/Passes/LowerSeqLoops.cpp
     lib/MLIR/Passes/LowerAnonCalls.cpp
     lib/MLIR/Passes/LowerUserCalls.cpp
@@ -295,7 +301,9 @@ if(MATLAB_LLVM_WITH_MLIR)
     runtime/toolbox/curvefit/runtime_curvefit.cpp
     runtime/toolbox/wavelet/runtime_wavelet.cpp
     runtime/toolbox/dsp/runtime_dsp.cpp
-    runtime/toolbox/stateflow/runtime_mstateflow.cpp)
+    runtime/toolbox/stateflow/runtime_mstateflow.cpp
+    runtime/gpu/runtime_gpu.cpp
+    runtime/toolbox/gpu/runtime_gpu_helpers.cpp)
   if(MATLAB_LLVM_WITH_SYM)
     target_sources(matlabc PRIVATE runtime/toolbox/sym/runtime_sym.cpp)
     target_link_libraries(matlabc PRIVATE SymPP::sympp)
@@ -305,6 +313,21 @@ if(MATLAB_LLVM_WITH_MLIR)
     target_sources(matlabc PRIVATE ${MATLAB_PLOT_SOURCES})
     target_link_libraries(matlabc PRIVATE PkgConfig::CAIRO)
     target_compile_definitions(matlabc PRIVATE MATLAB_LLVM_WITH_PLOT=1)
+  endif()
+  # GPU Coder — Metal backend (T2).  Auto-on on macOS, off elsewhere.
+  # The .mm TU is compiled as Objective-C++ via the file extension;
+  # link against Metal + MetalPerformanceShaders + Foundation
+  # frameworks (always available on macOS, no Homebrew dep).
+  if(APPLE AND NOT DEFINED MATLAB_LLVM_GPU_METAL)
+    set(MATLAB_LLVM_GPU_METAL ON CACHE BOOL "Build Metal GPU backend" FORCE)
+  endif()
+  if(MATLAB_LLVM_GPU_METAL AND APPLE)
+    target_sources(matlabc PRIVATE runtime/gpu/metal/runtime_gpu_metal.mm)
+    target_link_libraries(matlabc PRIVATE
+      "-framework Metal"
+      "-framework MetalPerformanceShaders"
+      "-framework Foundation")
+    target_compile_definitions(matlabc PRIVATE MATLAB_LLVM_GPU_METAL=1)
   endif()
   # Export the matlab_* symbols so the JIT's dynamic lookup finds them
   # (by default executables hide symbols not referenced internally).
@@ -378,7 +401,9 @@ foreach(_rt_test IN ITEMS linalg shape rng complex reduce signal stats image mor
     runtime/toolbox/curvefit/runtime_curvefit.cpp
     runtime/toolbox/wavelet/runtime_wavelet.cpp
     runtime/toolbox/dsp/runtime_dsp.cpp
-    runtime/toolbox/stateflow/runtime_mstateflow.cpp)
+    runtime/toolbox/stateflow/runtime_mstateflow.cpp
+    runtime/gpu/runtime_gpu.cpp
+    runtime/toolbox/gpu/runtime_gpu_helpers.cpp)
   target_include_directories(${_rt_target} PRIVATE
     ${CMAKE_SOURCE_DIR}/runtime
     ${CMAKE_SOURCE_DIR}/test/Runtime)
@@ -420,6 +445,8 @@ set_source_files_properties(
   runtime/toolbox/rf/runtime_rf.cpp
   runtime/toolbox/prop/runtime_prop.cpp
   runtime/toolbox/stateflow/runtime_mstateflow.cpp
+  runtime/gpu/runtime_gpu.cpp
+  runtime/toolbox/gpu/runtime_gpu_helpers.cpp
   PROPERTIES COMPILE_OPTIONS "-Wold-style-cast;-Werror=old-style-cast")
 
 if(MATLAB_LLVM_WITH_PLOT)
@@ -561,6 +588,23 @@ add_test(
   COMMAND ${CMAKE_SOURCE_DIR}/test/Flowchart/EmitSubsystem/run_chart_cocotb_tests.sh
           $<TARGET_FILE:matlabc>
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/EmitSubsystem
+)
+# GPU Coder Tier-6 — AOT emission gate.  Verifies `matlabc
+# -emit-{cuda,metal,opencl}` produces structurally-valid bundles
+# (kernel source + host driver + Makefile + README) for a representative
+# `coder.gpu.kernelfun`-tagged MATLAB program.  Checks the kernel
+# source contains the canonical target-specific preamble (so the
+# emit pass walked the body, not just emitted a placeholder).
+#
+# Does NOT require GPU hardware — emission only.  On macOS, also
+# confirms the Metal bundle compiles against the system Metal SDK.
+# Real device validation runs separately via the Metal smoke tests
+# (gpu_metal_jit_smoke.mm, gpu_metal_mps_smoke.mm) on macOS runners.
+add_test(
+  NAME gpu-emit-tests
+  COMMAND ${CMAKE_SOURCE_DIR}/test/Run/run_gpu_emit_tests.sh
+          $<TARGET_FILE:matlabc>
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Run
 )
 # mflowLink §17.5 #6 — cross-dialect composition. Compile a .m
 # that calls `mflowlink_run("model.mflow")` via runtime/

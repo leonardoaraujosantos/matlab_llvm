@@ -157,6 +157,52 @@ bool runLowerSeqLoops(mlir::ModuleOp M);
 /// later LLVM conversion surfaces them.
 unsigned runOutlineParfor(mlir::ModuleOp M);
 
+/// Outline each matlab.gpu.kernel body into a private llvm.func and replace
+/// the op with a call to `matlab_gpu_launch_kernel`.  Same shape as
+/// runOutlineParfor — clones the body, lifts captures + reductions, replaces
+/// the op with a runtime dispatch call.  The kernel-id attribute carries
+/// the index into a per-module emitted-source table that the target backend
+/// (Metal / CUDA / OpenCL) reads at JIT time.  When no GPU backend is
+/// loaded at runtime, `matlab_gpu_launch_kernel` falls back to a CPU
+/// sequential loop calling the outlined function directly.
+unsigned runOutlineGpuKernels(mlir::ModuleOp M);
+
+/// Emit Metal Shading Language (MSL) source for every matlab.gpu.kernel
+/// op in `M`.  Returns the combined source string with one MSL
+/// `kernel void` function per op.  Walks read-only (does not mutate
+/// the IR), so it can co-exist with the simple-rewrite CPU lane.
+/// `Prefix` is the user-visible kernel-name prefix (typically the
+/// input file's stem).  Unsupported body shapes fall back to a
+/// placeholder body with a `// FALLBACK: <reason>` comment.
+std::string emitMetalKernels(mlir::ModuleOp M, llvm::StringRef Prefix);
+
+/// Emit CUDA-C kernel source for every matlab.gpu.kernel op.  Same
+/// shape as emitMetalKernels — uses __global__ + `T*` + thread-index
+/// macros.  Returns the combined source.  Cannot validate locally on
+/// macOS (no nvcc + no NVIDIA HW); Linux CI runs nvcc on the emitted
+/// bundle when a CUDA-capable runner is available.
+std::string emitCudaKernels(mlir::ModuleOp M, llvm::StringRef Prefix);
+
+/// Emit OpenCL-C kernel source for every matlab.gpu.kernel op.  Uses
+/// __kernel + __global + get_global_id(0).  fp64 enabled via
+/// cl_khr_fp64 extension pragma (most modern OpenCL stacks support it;
+/// older Mali GPUs reject the pragma — re-emit with single() casts).
+std::string emitOpenCLKernels(mlir::ModuleOp M, llvm::StringRef Prefix);
+
+/// Promote `none`-typed func.func input parameters to `f64` when the
+/// param's body usage is numeric.  Closes the Sema-typing gap that
+/// blocks top-level entry-point functions with no in-module call site
+/// (every GPU PCT validation test is shaped this way).  Returns the
+/// number of promoted args across the module.  Idempotent.
+unsigned runPromoteNoneParams(mlir::ModuleOp M);
+
+/// Propagate operand types through matlab.{add,sub,emul,ediv,matmul}
+/// results when one operand is ptr (a matrix).  Closes the body-typing
+/// gap that breaks `gather(a .* x + b)` chains inside function bodies.
+/// Returns true if any op was retyped (caller iterates until fixpoint).
+/// Companion to PromoteNoneParams + RefineSlotTypes.
+bool runPromoteBinopTypes(mlir::ModuleOp M);
+
 /// Convert the whole module down to the LLVM dialect and translate to an
 /// LLVM IR textual module. Returns empty string on failure.
 ///
