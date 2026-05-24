@@ -11,3 +11,4 @@ control/tf_basic.m                                 # EMIT
 pde/clamped_plate_pressure.m                       # EMIT
 pde/poisson_disk.m                                 # EMIT
 pde/tuningfork_modal.m                             # EMIT
+dsp/fixedpoint_fir_hdl.m                           # EMIT  (primary mode is -emit-systemverilog; fi-array slice doesn't lower in script mode)

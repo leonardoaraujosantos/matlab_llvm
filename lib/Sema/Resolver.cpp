@@ -267,6 +267,45 @@ void Resolver::registerBuiltins() {
     "wpdec", "wprec", "wpcoef", "wprcoef", "besttree", "bestlevt",
     "ewt", "vmd", "emd", "tqwt", "itqwt", "matchingPursuit",
     "waveletScattering", "featureMatrix",
+    /* ===== DSP System Toolbox ===== *
+     * The `dsp.*` System Objects live in dsp_classdefs.m; the user-facing
+     * surface is the constructor + `obj(frame)` call-syntax (lowered to
+     * step) — no bare builtin names here.  These `matlab_dsp_*` runtime
+     * symbols are the entries the classdef `step`/`reset` method bodies
+     * forward `obj` into (wired through the pde_table). */
+    /* Tier-1 — filter-object step + lifecycle. */
+    "matlab_dsp_iir_step", "matlab_dsp_sos_step", "matlab_dsp_delay_step",
+    "matlab_dsp_reset", "matlab_dsp_init_state", "matlab_dsp_get_state",
+    /* Tier-2 — filter design (function-form, user-facing). */
+    "firpm", "firpmord", "firls", "kaiserord",
+    "iirnotch", "iirpeak", "iircomb", "designfilt",
+    /* Tier-3 — adaptive-filter step + lifecycle. */
+    "matlab_dsp_lms_step", "matlab_dsp_rls_step", "matlab_dsp_get_weights",
+    /* Tier-4 — multirate step + filter-bank helpers. */
+    "matlab_dsp_firdecim_step", "matlab_dsp_firinterp_step",
+    "matlab_dsp_cicdecim_step", "matlab_dsp_cicinterp_step",
+    "matlab_dsp_rateconv_step", "matlab_dsp_channelizer_step",
+    "matlab_dsp_synthesizer_step",
+    /* Tier-5 — sources, sliding stats, detectors, spectral, buffering. */
+    "matlab_dsp_sine_step", "matlab_dsp_nco_step", "matlab_dsp_chirp_step",
+    "matlab_dsp_movavg_step", "matlab_dsp_movrms_step",
+    "matlab_dsp_movmax_step", "matlab_dsp_movmin_step", "matlab_dsp_movstd_step",
+    "matlab_dsp_peakfind_step", "matlab_dsp_dcblock_step",
+    "matlab_dsp_zcd_step", "matlab_dsp_spectest_step",
+    "matlab_dsp_asyncbuf_write", "matlab_dsp_asyncbuf_read",
+    /* Tier-5 user-facing buffering. */
+    "buffer",
+    /* Tier-6 — linalg SOs + polish filter SOs. */
+    "matlab_dsp_levinson_step", "matlab_dsp_notchpeak_step",
+    "matlab_dsp_lowpass_step",  "matlab_dsp_highpass_step",
+    /* Tier-7 / Tier-8 — dsphdl.* simulation step entries + CORDIC math. */
+    "matlab_dsphdl_fir_step", "matlab_dsphdl_biquad_step",
+    "matlab_dsphdl_sine_step", "matlab_dsphdl_nco_step",
+    "matlab_dsphdl_firdecim_step", "matlab_dsphdl_cicdecim_step",
+    "matlab_dsphdl_latency",
+    "matlab_dsp_cordic_atan2", "matlab_dsp_cordic_sqrt",
+    /* T8 user-facing CORDIC. */
+    "cordic_atan2", "cordic_sqrt",
     /* MPC Tier-4 §5.4 — standalone active-set QP solver. */
     "matlab_mpc_active_set",
     /* MPC Tier-4 §5.1/5.2/5.3 — explicit MPC. */

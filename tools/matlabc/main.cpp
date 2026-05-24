@@ -2102,6 +2102,7 @@ static std::string buildReplPrelude(const std::string &Src) {
   static const char *kToolboxDirs[] = {
     "comm", "rf", "optim", "mpc", "ident", "gads", "pde", "prop", "sym",
     "stateflow", "antenna", "control", "stats", "images", "curvefit",
+    "dsp",
   };
   std::vector<std::string> Files;
   auto add = [&](const std::string &Leaf) {
@@ -2308,6 +2309,88 @@ static std::string buildReplPrelude(const std::string &Src) {
      * captures a function handle + a `reset` that nukes
      * persistents. */
     {false, "stateChart",             "stateflow_classdefs.m"},
+    /* DSP System Toolbox — `dsp_classdefs.m` umbrella.  Both the dotted
+     * package form (matched in turn-0 source text, e.g.
+     * `dsp.FIRFilter(...)`) and the flat classdef name (matched against a
+     * persisted workspace object's class name in later REPL turns) point
+     * at the same file; the loader dedupes. */
+    {false, "dsp.FIRFilter",     "dsp_classdefs.m"},
+    {false, "dsp.IIRFilter",     "dsp_classdefs.m"},
+    {false, "dsp.BiquadFilter",  "dsp_classdefs.m"},
+    {false, "dsp.SOSFilter",     "dsp_classdefs.m"},
+    {false, "dsp.Delay",         "dsp_classdefs.m"},
+    {false, "dsp.LMSFilter",     "dsp_classdefs.m"},
+    {false, "dsp.RLSFilter",     "dsp_classdefs.m"},
+    {false, "dsp.FIRDecimator",  "dsp_classdefs.m"},
+    {false, "dsp.FIRInterpolator", "dsp_classdefs.m"},
+    {false, "dsp.CICDecimator",  "dsp_classdefs.m"},
+    {false, "dsp.CICInterpolator", "dsp_classdefs.m"},
+    {false, "dsp.SampleRateConverter", "dsp_classdefs.m"},
+    {false, "dsp.Channelizer",   "dsp_classdefs.m"},
+    {false, "dsp.ChannelSynthesizer", "dsp_classdefs.m"},
+    {false, "dsp_FIRFilter",     "dsp_classdefs.m"},
+    {false, "dsp_IIRFilter",     "dsp_classdefs.m"},
+    {false, "dsp_BiquadFilter",  "dsp_classdefs.m"},
+    {false, "dsp_SOSFilter",     "dsp_classdefs.m"},
+    {false, "dsp_Delay",         "dsp_classdefs.m"},
+    {false, "dsp_LMSFilter",     "dsp_classdefs.m"},
+    {false, "dsp_RLSFilter",     "dsp_classdefs.m"},
+    {false, "dsp_FIRDecimator",  "dsp_classdefs.m"},
+    {false, "dsp_FIRInterpolator", "dsp_classdefs.m"},
+    {false, "dsp_CICDecimator",  "dsp_classdefs.m"},
+    {false, "dsp_CICInterpolator", "dsp_classdefs.m"},
+    {false, "dsp_SampleRateConverter", "dsp_classdefs.m"},
+    {false, "dsp_Channelizer",   "dsp_classdefs.m"},
+    {false, "dsp_ChannelSynthesizer", "dsp_classdefs.m"},
+    /* T5 dotted + flat. */
+    {false, "dsp.SineWave",                "dsp_classdefs.m"},
+    {false, "dsp.NCO",                     "dsp_classdefs.m"},
+    {false, "dsp.Chirp",                   "dsp_classdefs.m"},
+    {false, "dsp.MovingAverage",           "dsp_classdefs.m"},
+    {false, "dsp.MovingRMS",               "dsp_classdefs.m"},
+    {false, "dsp.MovingMaximum",           "dsp_classdefs.m"},
+    {false, "dsp.MovingMinimum",           "dsp_classdefs.m"},
+    {false, "dsp.MovingStandardDeviation", "dsp_classdefs.m"},
+    {false, "dsp.PeakFinder",              "dsp_classdefs.m"},
+    {false, "dsp.DCBlocker",               "dsp_classdefs.m"},
+    {false, "dsp.ZeroCrossingDetector",    "dsp_classdefs.m"},
+    {false, "dsp.SpectrumEstimator",       "dsp_classdefs.m"},
+    {false, "dsp.AsyncBuffer",             "dsp_classdefs.m"},
+    {false, "dsp_SineWave",                "dsp_classdefs.m"},
+    {false, "dsp_NCO",                     "dsp_classdefs.m"},
+    {false, "dsp_Chirp",                   "dsp_classdefs.m"},
+    {false, "dsp_MovingAverage",           "dsp_classdefs.m"},
+    {false, "dsp_MovingRMS",               "dsp_classdefs.m"},
+    {false, "dsp_MovingMaximum",           "dsp_classdefs.m"},
+    {false, "dsp_MovingMinimum",           "dsp_classdefs.m"},
+    {false, "dsp_MovingStandardDeviation", "dsp_classdefs.m"},
+    {false, "dsp_PeakFinder",              "dsp_classdefs.m"},
+    {false, "dsp_DCBlocker",               "dsp_classdefs.m"},
+    {false, "dsp_ZeroCrossingDetector",    "dsp_classdefs.m"},
+    {false, "dsp_SpectrumEstimator",       "dsp_classdefs.m"},
+    {false, "dsp_AsyncBuffer",             "dsp_classdefs.m"},
+    /* T6 dotted + flat. */
+    {false, "dsp.LevinsonSolver",  "dsp_classdefs.m"},
+    {false, "dsp.NotchPeakFilter", "dsp_classdefs.m"},
+    {false, "dsp.LowpassFilter",   "dsp_classdefs.m"},
+    {false, "dsp.HighpassFilter",  "dsp_classdefs.m"},
+    {false, "dsp_LevinsonSolver",  "dsp_classdefs.m"},
+    {false, "dsp_NotchPeakFilter", "dsp_classdefs.m"},
+    {false, "dsp_LowpassFilter",   "dsp_classdefs.m"},
+    {false, "dsp_HighpassFilter",  "dsp_classdefs.m"},
+    /* DSP HDL Toolbox — Tier-7/8 simulation surface. */
+    {false, "dsphdl.FIRFilter",    "dsphdl_classdefs.m"},
+    {false, "dsphdl.BiquadFilter", "dsphdl_classdefs.m"},
+    {false, "dsphdl.SineWave",     "dsphdl_classdefs.m"},
+    {false, "dsphdl.NCO",          "dsphdl_classdefs.m"},
+    {false, "dsphdl.FIRDecimator", "dsphdl_classdefs.m"},
+    {false, "dsphdl.CICDecimator", "dsphdl_classdefs.m"},
+    {false, "dsphdl_FIRFilter",    "dsphdl_classdefs.m"},
+    {false, "dsphdl_BiquadFilter", "dsphdl_classdefs.m"},
+    {false, "dsphdl_SineWave",     "dsphdl_classdefs.m"},
+    {false, "dsphdl_NCO",          "dsphdl_classdefs.m"},
+    {false, "dsphdl_FIRDecimator", "dsphdl_classdefs.m"},
+    {false, "dsphdl_CICDecimator", "dsphdl_classdefs.m"},
   };
   /* Source-mention scan: turn-0-style detection. */
   for (auto &W : Cls) if (mentions(W.Name)) W.active = true;
@@ -11146,6 +11229,27 @@ int main(int Argc, char **Argv) {
       /* Curve Fitting Toolbox Tier-1 — `curvefit_classdefs.m` umbrella. */
       "fit", "cfit", "sfit", "fittype", "fitoptions", "coeffvalues",
       "ppform", "spline", "pchip", "ppmak", "fnder", "fnint",
+      /* DSP System Toolbox — `dsp_classdefs.m` umbrella.  The parser folds
+       * `dsp.Foo` -> `dsp_Foo`; the source-text scan keys on the dotted
+       * package form the user actually wrote. */
+      "dsp.FIRFilter", "dsp.IIRFilter", "dsp.BiquadFilter",
+      "dsp.SOSFilter", "dsp.Delay", "dsp.LMSFilter", "dsp.RLSFilter",
+      "dsp.FIRDecimator", "dsp.FIRInterpolator", "dsp.CICDecimator",
+      "dsp.CICInterpolator", "dsp.SampleRateConverter",
+      "dsp.Channelizer", "dsp.ChannelSynthesizer",
+      /* DSP Tier-5 — sources / stats / detectors / spectral / buffering. */
+      "dsp.SineWave", "dsp.NCO", "dsp.Chirp",
+      "dsp.MovingAverage", "dsp.MovingRMS", "dsp.MovingMaximum",
+      "dsp.MovingMinimum", "dsp.MovingStandardDeviation",
+      "dsp.PeakFinder", "dsp.DCBlocker",
+      "dsp.ZeroCrossingDetector", "dsp.SpectrumEstimator", "dsp.AsyncBuffer",
+      /* DSP Tier-6 — linalg + polish filter SOs. */
+      "dsp.LevinsonSolver", "dsp.NotchPeakFilter",
+      "dsp.LowpassFilter", "dsp.HighpassFilter",
+      /* DSP HDL Tier-7/8 simulation surface — `dsphdl_classdefs.m`. */
+      "dsphdl.FIRFilter", "dsphdl.BiquadFilter",
+      "dsphdl.SineWave", "dsphdl.NCO",
+      "dsphdl.FIRDecimator", "dsphdl.CICDecimator",
       "arx", "ar", "armax", "oe", "bj",
       "iv4", "delayest", "compare", "predict", "resid", "goodnessOfFit",
     };
@@ -11304,6 +11408,12 @@ int main(int Argc, char **Argv) {
         ClsName == "spline" || ClsName == "pchip" || ClsName == "ppmak" ||
         ClsName == "fnder" || ClsName == "fnint")
       return "curvefit_classdefs.m";
+    /* DSP System Toolbox umbrella — any `dsp.*` package class. */
+    if (ClsName.starts_with("dsp."))
+      return "dsp_classdefs.m";
+    /* DSP HDL Toolbox umbrella — any `dsphdl.*` package class. */
+    if (ClsName.starts_with("dsphdl."))
+      return "dsphdl_classdefs.m";
     return std::string();
   };
   for (const std::string &Cls : userMentionsExtClasses(Opts.InputPath)) {
@@ -11318,6 +11428,7 @@ int main(int Argc, char **Argv) {
     static const char *kToolboxDirs[] = {
       "comm", "rf", "optim", "mpc", "ident", "gads", "pde", "prop", "sym",
       "stateflow", "antenna", "control", "stats", "images", "curvefit",
+      "dsp",
     };
     std::vector<std::string> Cands;
     for (const char *Tb : kToolboxDirs) {

@@ -1,0 +1,3 @@
+FFT peak bin = 6 (expected ~6 for 50/1000*128)
+PSD length   = 65 (expected 65 = FFT/2 + 1)
+fifo:  1 2 3 4 5 6
