@@ -12353,13 +12353,24 @@ int main(int Argc, char **Argv) {
       // idempotent and a no-op on files without `% hdl:` comments.
       // The SV-specific pragma surface (fsm_encoding, input_pipeline,
       // ...) is re-scanned further down in the SV branch.
+      /* SV / hardware emit modes have their own integer-width inference
+       * (HWBitWidthInfer infers i1/i16/i32 widths from chart annotations).
+       * The PromoteNoneParams + PromoteBinopTypes f64-propagation lanes
+       * for GPU validate against scalar-double MATLAB semantics — applying
+       * them to chart-lowered .m files mis-promotes integer-typed signals
+       * (l_airflow et al) to f64 and breaks HWLegalize.  Skip the f64
+       * lanes entirely for HW-targeted compiles. */
+      bool IsHwEmit =
+          Opts.Mode == Options::Mode::EmitSystemVerilog ||
+          Opts.Mode == Options::Mode::CheckSynthesizable ||
+          Opts.Mode == Options::Mode::EmitHardwareReport;
       if (WantFullPipeline) {
         /* Promote none-typed func params to f64 BEFORE SlotPromotion
          * collapses the matlab.store(%arg, %slot) chain my detector
          * relies on.  Without this early call, function-form GPU
          * examples (function err = test_gpuarray_axpy(n)) fail the
          * subsequent LowerTensorOps dispatch on the n-arg position. */
-        mlirgen::runPromoteNoneParams(M);
+        if (!IsHwEmit) mlirgen::runPromoteNoneParams(M);
         mlirgen::runScanHWPragmas(M, &SM);
         // Tier 5 — for a subsystem emit, ScanHWPragmas runs over the
         // .mflow JSON buffer and finds nothing (the synthesised AST
@@ -12482,9 +12493,11 @@ int main(int Argc, char **Argv) {
         // Outline parfor first — that way the induction variable flows as a
         // direct block argument (f64) into disp/fprintf rather than via an
         // outer slot that would still be `none`-typed at LowerIO time.
-        mlirgen::runPromoteNoneParams(M);
-        for (int Iter = 0; Iter < 4; ++Iter)
-          if (!mlirgen::runPromoteBinopTypes(M)) break;
+        if (!IsHwEmit) {
+          mlirgen::runPromoteNoneParams(M);
+          for (int Iter = 0; Iter < 4; ++Iter)
+            if (!mlirgen::runPromoteBinopTypes(M)) break;
+        }
         mlirgen::runOutlineParfor(M);
         mlirgen::runOutlineGpuKernels(M);
         // Lower sequential matlab.for / matlab.while into scf.while so
@@ -12538,11 +12551,14 @@ int main(int Argc, char **Argv) {
         }
         /* Propagate the freshly-typed call results through binops +
          * slot chains so a chained `gather(a .* x + b)` pattern routes
-         * correctly.  Iterate to fixpoint. */
-        for (int Iter = 0; Iter < 4; ++Iter) {
-          bool Pb = mlirgen::runPromoteBinopTypes(M);
-          mlirgen::runRefineSlotTypes(M);
-          if (!Pb) break;
+         * correctly.  Iterate to fixpoint.  Skipped for HW emit modes
+         * — see comment at the EARLY invocation site for rationale. */
+        if (!IsHwEmit) {
+          for (int Iter = 0; Iter < 4; ++Iter) {
+            bool Pb = mlirgen::runPromoteBinopTypes(M);
+            mlirgen::runRefineSlotTypes(M);
+            if (!Pb) break;
+          }
         }
         mlirgen::runLowerTensorOps(M);
         // Second LowerFixedPoint sweep — picks up matlab.call_builtin

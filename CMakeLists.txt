@@ -589,6 +589,23 @@ add_test(
           $<TARGET_FILE:matlabc>
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/EmitSubsystem
 )
+# GPU Coder Tier-6 — AOT emission gate.  Verifies `matlabc
+# -emit-{cuda,metal,opencl}` produces structurally-valid bundles
+# (kernel source + host driver + Makefile + README) for a representative
+# `coder.gpu.kernelfun`-tagged MATLAB program.  Checks the kernel
+# source contains the canonical target-specific preamble (so the
+# emit pass walked the body, not just emitted a placeholder).
+#
+# Does NOT require GPU hardware — emission only.  On macOS, also
+# confirms the Metal bundle compiles against the system Metal SDK.
+# Real device validation runs separately via the Metal smoke tests
+# (gpu_metal_jit_smoke.mm, gpu_metal_mps_smoke.mm) on macOS runners.
+add_test(
+  NAME gpu-emit-tests
+  COMMAND ${CMAKE_SOURCE_DIR}/test/Run/run_gpu_emit_tests.sh
+          $<TARGET_FILE:matlabc>
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Run
+)
 # mflowLink §17.5 #6 — cross-dialect composition. Compile a .m
 # that calls `mflowlink_run("model.mflow")` via runtime/
 # runtime_mflowlink_call.cpp and confirm the round-trip works.
