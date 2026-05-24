@@ -57,6 +57,18 @@ Use this page as the entry point to the repo docs.
 - [`debug.md`](debug.md): DAP mode, `dbg`, and runtime debugging aids
 - [`lsp.md`](lsp.md): `matlab-lsp` capabilities and editor setup
 
+## Performance
+
+- [`acceleration_roadmap.md`](acceleration_roadmap.md): **🔵 plan**.
+  BLAS / LAPACK acceleration (gemm → linear solve → eig/SVD), SIMD /
+  `-mcpu=native`, parfor capture-gap closure (cross-ref
+  [issue #20](https://github.com/leonardoaraujosantos/matlab_llvm/issues/20)),
+  GPU bridge cross-ref ([`gpu_coder_roadmap.md`](gpu_coder_roadmap.md)),
+  and a perf-regression CI lane. Includes baseline numbers: matlab_llvm
+  parfor is 170× faster than pure-Python sequential and 25× faster than
+  Python `multiprocessing.Pool` on the same Mandelbrot workload today;
+  Tier 1 (BLAS gemm) closes the matmul-vs-NumPy gap.
+
 ## How To Read The Status Docs
 
 - Treat [`feature_status.md`](feature_status.md) as the source of truth for
