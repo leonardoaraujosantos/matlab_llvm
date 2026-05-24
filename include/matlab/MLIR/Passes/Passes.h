@@ -189,6 +189,13 @@ std::string emitCudaKernels(mlir::ModuleOp M, llvm::StringRef Prefix);
 /// older Mali GPUs reject the pragma — re-emit with single() casts).
 std::string emitOpenCLKernels(mlir::ModuleOp M, llvm::StringRef Prefix);
 
+/// Promote `none`-typed func.func input parameters to `f64` when the
+/// param's body usage is numeric.  Closes the Sema-typing gap that
+/// blocks top-level entry-point functions with no in-module call site
+/// (every GPU PCT validation test is shaped this way).  Returns the
+/// number of promoted args across the module.  Idempotent.
+unsigned runPromoteNoneParams(mlir::ModuleOp M);
+
 /// Convert the whole module down to the LLVM dialect and translate to an
 /// LLVM IR textual module. Returns empty string on failure.
 ///

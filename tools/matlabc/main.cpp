@@ -874,6 +874,7 @@ int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id,
   // this; without it, JIT silently fails to convert any user function
   // that returns a logical / boolean comparison. Idempotent.
   mlirgen::runRefineFuncSigs(M);
+  mlirgen::runPromoteNoneParams(M);
   mlirgen::runOutlineParfor(M);
   mlirgen::runOutlineGpuKernels(M);
   mlirgen::runLowerSeqLoops(M);
@@ -3702,6 +3703,7 @@ bool compileProgram() {
   // this; without it, JIT silently fails to convert any user function
   // that returns a logical / boolean comparison. Idempotent.
   mlirgen::runRefineFuncSigs(M);
+  mlirgen::runPromoteNoneParams(M);
   mlirgen::runOutlineParfor(M);
   mlirgen::runOutlineGpuKernels(M);
   mlirgen::runLowerSeqLoops(M);
@@ -12470,6 +12472,7 @@ int main(int Argc, char **Argv) {
         // Outline parfor first — that way the induction variable flows as a
         // direct block argument (f64) into disp/fprintf rather than via an
         // outer slot that would still be `none`-typed at LowerIO time.
+        mlirgen::runPromoteNoneParams(M);
         mlirgen::runOutlineParfor(M);
         mlirgen::runOutlineGpuKernels(M);
         // Lower sequential matlab.for / matlab.while into scf.while so
