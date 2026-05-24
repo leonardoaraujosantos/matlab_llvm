@@ -12365,12 +12365,6 @@ int main(int Argc, char **Argv) {
           Opts.Mode == Options::Mode::CheckSynthesizable ||
           Opts.Mode == Options::Mode::EmitHardwareReport;
       if (WantFullPipeline) {
-        /* Promote none-typed func params to f64 BEFORE SlotPromotion
-         * collapses the matlab.store(%arg, %slot) chain my detector
-         * relies on.  Without this early call, function-form GPU
-         * examples (function err = test_gpuarray_axpy(n)) fail the
-         * subsequent LowerTensorOps dispatch on the n-arg position. */
-        if (!IsHwEmit) mlirgen::runPromoteNoneParams(M);
         mlirgen::runScanHWPragmas(M, &SM);
         // Tier 5 — for a subsystem emit, ScanHWPragmas runs over the
         // .mflow JSON buffer and finds nothing (the synthesised AST
@@ -12463,6 +12457,19 @@ int main(int Argc, char **Argv) {
           Diag.printAll();
           return 1;
         }
+        /* PromoteNoneParams runs AFTER ApplyPortTypePragmas so any HDL
+         * function whose `% hdl: port(x, 'int16')` pragma typed its arg
+         * to i16 / i8 / i32 is already non-none and my pass skips it
+         * (the AnyNone check returns false).  Plain functions (GPU
+         * PCT et al.) without port pragmas keep `none` args, which my
+         * pass promotes to f64.
+         *
+         * Must still run BEFORE SlotPromotion (next, inside WantClean)
+         * which collapses the matlab.store(%arg, %slot) anchor my
+         * detector uses.  HW-emit modes skip the whole f64 lane
+         * because their integer types come from the pragma + HW
+         * width-infer passes. */
+        if (!IsHwEmit) mlirgen::runPromoteNoneParams(M);
         // Seed slot/load types from the now-typed entry-block args
         // BEFORE SlotPromotion runs in WantClean. SlotPromotion
         // only fires when the value type matches the load result
