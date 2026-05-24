@@ -1,0 +1,4 @@
+gpuDeviceCount = 1
+gpuDevice(1)   = 1
+existsOnGPU    = 1
+wait ok
