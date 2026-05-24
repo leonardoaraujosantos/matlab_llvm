@@ -4819,6 +4819,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"gpuArray",       "matlab_gpuArray_ctor",  PtrTy, {PtrTy}},
         /* existsOnGPU(g) — returns f64. */
         {"existsOnGPU",    "matlab_existsOnGPU",    F64, {PtrTy}},
+        /* Bare-name `toc` zero-arg form — f64 elapsed time. */
+        {"toc",            "matlab_toc",            F64, {}},
         /* gpuDevice() / gpuDevice(id) / gpuDeviceCount() — device
          * info + selection.  Strict 0/1-arg shapes. */
         {"gpuDeviceCount", "matlab_gpuDeviceCount", F64, {}},

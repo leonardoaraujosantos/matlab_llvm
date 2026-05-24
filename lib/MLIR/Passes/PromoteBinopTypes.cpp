@@ -58,7 +58,8 @@ bool isMatlabBinop(Operation *Op) {
   StringRef N = Op->getName().getStringRef();
   return N == "matlab.add" || N == "matlab.sub" ||
          N == "matlab.matmul" || N == "matlab.emul" ||
-         N == "matlab.ediv" || N == "matlab.epow";
+         N == "matlab.ediv" || N == "matlab.epow" ||
+         N == "matlab.matdiv" || N == "matlab.mldiv";
 }
 
 bool isMatlabUnop(Operation *Op) {

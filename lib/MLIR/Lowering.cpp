@@ -1465,6 +1465,38 @@ mlir::Value Lowerer::loadBinding(Binding *Bnd, const Type *ValTy,
         (Bnd->Name == "nargin") ? "matlab.nargin" : "matlab.nargout";
     return emitUnreg(OpName, {}, F64, L);
   }
+  /* MATLAB's implicit-call rule: a bare-name reference to a zero-arg
+   * value-returning builtin on the RHS of an assignment or as a sub-
+   * expression IS a call, not a function-handle.  Example:
+   *   gpuTime = toc;   ← calls toc(), assigns the f64 elapsed time
+   * The bare-name STATEMENT form (`toc;` on a line by itself) prints
+   * "Elapsed time is ..." and is handled in the ExprStmt arm above.
+   * Here we only handle the value-returning expression form. */
+  if (Bnd->Kind == BindingKind::Builtin) {
+    /* MATLAB's implicit-call rule: a bare-name reference to a zero-arg
+     * value-returning builtin on the RHS of an assignment or as a
+     * sub-expression IS a call, not a function-handle.  Example:
+     *   gpuTime = toc;        ← calls toc(), returns f64
+     *   h = gpuDevice;        ← returns the device handle (ptr)
+     *   wait(gpuDevice);       ← same — gpuDevice is the call result, not @
+     * The bare-name STATEMENT form (`toc;` on a line by itself) prints
+     * "Elapsed time is …" and is handled in the ExprStmt arm above.
+     * Here we emit a 0-arg matlab.call_builtin with the user name so
+     * LowerTensorOps's pde_table dispatches to the right runtime
+     * entry (matlab_toc / matlab_gpuDeviceCount / matlab_gpuDevice_handle). */
+    auto F64 = mlir::Float64Type::get(&MCtx);
+    auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+    mlir::Type RetTy;
+    if (Bnd->Name == "toc") RetTy = F64;
+    else if (Bnd->Name == "gpuDeviceCount") RetTy = F64;
+    else if (Bnd->Name == "gpuDevice") RetTy = PtrTy;
+    if (RetTy) {
+      mlir::NamedAttribute Cal(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, std::string(Bnd->Name)));
+      return emitUnreg("matlab.call_builtin", {}, RetTy, L, {Cal});
+    }
+  }
   if (Bnd->Kind == BindingKind::Function ||
       Bnd->Kind == BindingKind::Builtin) {
     mlir::NamedAttribute Cal(
