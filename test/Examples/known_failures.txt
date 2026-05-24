@@ -23,7 +23,7 @@ dsp/fixedpoint_fir_hdl.m                           # EMIT  (primary mode is -emi
 # `single()`/`double()` dispatch gap) is fixed and gated by
 # test/Run/single_cast_in_builtin_arg.m; what's left here is the orthogonal
 # function-only-needs-main / multi-file-resolution gap.
-gpu/benchmark_gpu_backend.m                        # EMIT  (matrix `for n = sizes` iteration, deferred — issue #23)
+gpu/benchmark_gpu_backend.m                        # EMIT  (matrix `for n = sizes` fixed by #23; still blocked by `rand(n, n, 'single')` 3-arg dtype-string dispatch)
 gpu/mandelbrot_gpu.m                               # LINK  (Metal host-driver, needs Metal SDK objects)
 gpu/run_validation_suite.m                         # EMIT  (multi-file resolution: calls test_gpuarray_*.m by name)
 gpu/test_gpuarray_arrayfun.m                       # LINK  (function-only, no main entry)
