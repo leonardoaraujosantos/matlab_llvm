@@ -68,7 +68,14 @@ bool isScalarBuiltinCall(Operation *User) {
   if (!Callee) return false;
   StringRef N = Callee.getValue();
   // gpuArray.* size-parameter builtins — n in gpuArray.rand(n, ...)
-  if (N.starts_with("matlab_gpuArray_") || N.starts_with("gpuArray__"))
+  // / gpuArray.linspace(a, b, n).  The MLIR callee is the un-prefixed
+  // class_method form `gpuArray_<method>` (single underscore between
+  // class and method); `matlab_gpuArray_*` is the post-lowering rename
+  // and `gpuArray__*` is the classdef-method namespace (double
+  // underscore).  All three forms surface here depending on pipeline
+  // order, so we accept any of them.
+  if (N.starts_with("matlab_gpuArray_") || N.starts_with("gpuArray__") ||
+      N.starts_with("gpuArray_"))
     return true;
   // scalar transcendental / arithmetic math
   static constexpr llvm::StringRef Scalars[] = {
