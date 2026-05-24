@@ -78,10 +78,16 @@ jobs:
       - name: Build test binaries
         run: cmake --build build -j
 
-      - name: Smoke tests — frontend + runtime + flowchart-emit
+      - name: Smoke tests — frontend + runtime + flowchart-emit + gpu-emit
         run: |
           ctest --test-dir build --output-on-failure -j $(nproc) \
-            -R 'frontend-tests|^runtime-tests|^flowchart-emit'
+            -R 'frontend-tests|^runtime-tests|^flowchart-emit|^gpu-emit'
+
+      # GPU emission lane — verifies `matlabc -emit-{cuda,metal,opencl}`
+      # produces structurally-complete bundles without needing GPU hardware.
+      # GitHub Actions runners have no GPU, so the test exercises the EMIT
+      # path only; real device validation (MTLLibrary JIT + MPS GEMM) runs
+      # on a separate macOS runner via the gpu_metal_*_smoke.mm fixtures.
 
       - name: REPL regression suite
         run: bash test/Repl/run_tests.sh "$PWD/build/matlabc"
