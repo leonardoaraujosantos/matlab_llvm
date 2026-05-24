@@ -240,13 +240,74 @@ bool outlineParfor(Operation *Parfor, unsigned Id) {
   llvm::DenseSet<Value> ReductionSlots;
   for (auto &R : Reductions) ReductionSlots.insert(R.AllocOp->getResult(0));
 
+  // --- Read-only scalar captures (issue #20, Phase 2) ---------------------
+  // For each matlab.load(%outer_slot) inside the body whose slot is defined
+  // outside the parfor and is NOT a reduction slot, capture the slot's
+  // value once at the call site and pass it through the state[] array.
+  // The body's loads get RAUW'd to the state-loaded value via IRMapping.
+  //
+  // Scope (this PR): scalar f64 captures only.  Matrix (ptr / tensor)
+  // captures require running OutlineParfor after LowerTensorOps so the
+  // slot is already `ptr`-typed — pass-ordering rework is the next slice
+  // of the issue.  See PR description for the documented carve-out.
+  //
+  // A slot qualifies as a Phase-2 capture only if the body NEVER stores
+  // to it.  Slots written from inside the body are either reductions
+  // (handled by ReductionBodyOps above) or write-by-row patterns
+  // (deferred — pragma support is the next slice of issue #20).
+  // Excluding written-to slots here keeps a reduction the detector
+  // missed from being silently mis-treated as a read-only capture;
+  // the existing "body captures value of unsupported defining op" path
+  // will surface it as before.
+  struct Capture {
+    Value Slot;                                     // outer matlab.alloc
+    Type CaptureType;                               // f64 today
+    llvm::SmallVector<Operation *, 2> Loads;        // matlab.load ops in body
+  };
+  llvm::DenseSet<Value> SlotsWrittenInBody;
+  for (Operation &Op : BodyBlock) {
+    if (isMatlabOp(&Op, "matlab.store") && Op.getNumOperands() == 2)
+      SlotsWrittenInBody.insert(Op.getOperand(1));
+  }
+  llvm::SmallVector<Capture> Captures;
+  llvm::DenseMap<Value, size_t> SlotToCaptureIdx;
+  llvm::DenseSet<Operation *> CaptureLoadOps;
+  llvm::DenseSet<Value> CaptureSlots;
+  for (Operation &Op : BodyBlock) {
+    if (!isMatlabOp(&Op, "matlab.load") || Op.getNumOperands() != 1) continue;
+    if (ReductionBodyOps.count(&Op)) continue;
+    Value Slot = Op.getOperand(0);
+    Operation *SlotDef = Slot.getDefiningOp();
+    if (!isMatlabOp(SlotDef, "matlab.alloc")) continue;
+    // Inner slot (defined inside the body): SlotPromotion will collapse it
+    // on a later iteration — no capture needed.
+    if (SlotDef->getBlock() == &BodyBlock) continue;
+    if (ReductionSlots.count(Slot)) continue;
+    if (SlotsWrittenInBody.count(Slot)) continue;
+    Type T = Op.getResult(0).getType();
+    // v1 scope: scalar f64 only.  Other types fall through to the existing
+    // capture-rejection path with a clear diagnostic.
+    if (T != F64) continue;
+    auto It = SlotToCaptureIdx.find(Slot);
+    if (It == SlotToCaptureIdx.end()) {
+      SlotToCaptureIdx[Slot] = Captures.size();
+      Captures.push_back({Slot, T, {&Op}});
+    } else {
+      Captures[It->second].Loads.push_back(&Op);
+    }
+    CaptureLoadOps.insert(&Op);
+    CaptureSlots.insert(Slot);
+  }
+
   llvm::SmallVector<Operation *> ExternsToClone;
   llvm::DenseSet<Operation *> ExternSet;
   for (Operation &Op : BodyBlock) {
     if (ReductionBodyOps.count(&Op)) continue; // will be replaced
+    if (CaptureLoadOps.count(&Op)) continue;   // will be replaced via state[]
     for (Value Operand : Op.getOperands()) {
       if (DefinedInside.count(Operand)) continue;
       if (ReductionSlots.count(Operand)) continue;
+      if (CaptureSlots.count(Operand)) continue;  /* handled via state[] */
       Operation *Def = Operand.getDefiningOp();
       if (!Def) {
         std::cerr << "parfor: body captures a block argument from outside — "
@@ -277,11 +338,16 @@ bool outlineParfor(Operation *Parfor, unsigned Id) {
   B.setInsertionPointToEnd(Entry);
 
   // Load each reduction pointer from state[k]. state is a `ptr` pointing to
-  // an array of `ptr`. For k-th reduction: `gep ptr, [k]`, then `load ptr`.
+  // an array of `ptr`-sized slots.  Layout:
+  //   state[0..n_red-1]              : reduction-variable pointers
+  //   state[n_red..n_red+n_cap-1]    : captured scalar values (Phase 2)
+  // For k-th reduction: `gep ptr, [k]`, then `load ptr`.
+  size_t NRed = Reductions.size();
+  size_t NCap = Captures.size();
   auto ArrayOfPtr = LLVM::LLVMArrayType::get(
-      PtrTy, static_cast<unsigned>(Reductions.size()));
-  llvm::SmallVector<Value> InnerRedPtrs(Reductions.size());
-  for (size_t k = 0; k < Reductions.size(); ++k) {
+      PtrTy, static_cast<unsigned>(NRed + NCap));
+  llvm::SmallVector<Value> InnerRedPtrs(NRed);
+  for (size_t k = 0; k < NRed; ++k) {
     Value IdxK = LLVM::ConstantOp::create(
         B, Loc, IntegerType::get(Ctx, 64), B.getI64IntegerAttr((int64_t)k));
     Value Gep = LLVM::GEPOp::create(B, Loc, PtrTy, PtrTy, State,
@@ -294,12 +360,28 @@ bool outlineParfor(Operation *Parfor, unsigned Id) {
   Mapping.map(IV, InnerIV);
   for (Operation *Ext : ExternsToClone) B.clone(*Ext, Mapping);
 
+  // Load each capture from state[NRed + k] at its captured type, and map
+  // every original in-body matlab.load result to it.  This lets ops cloned
+  // below see a properly-typed value instead of an external SSA reference.
+  for (size_t k = 0; k < NCap; ++k) {
+    Value IdxK = LLVM::ConstantOp::create(
+        B, Loc, IntegerType::get(Ctx, 64),
+        B.getI64IntegerAttr((int64_t)(NRed + k)));
+    Value Gep = LLVM::GEPOp::create(B, Loc, PtrTy, PtrTy, State,
+                                    ValueRange{IdxK});
+    Value Loaded =
+        LLVM::LoadOp::create(B, Loc, Captures[k].CaptureType, Gep);
+    for (Operation *L : Captures[k].Loads)
+      Mapping.map(L->getResult(0), Loaded);
+  }
+
   // Clone the body. For reduction ops, insert a runtime reduce call using
   // the slot pointer from state. Everything else clones normally.
   auto Reduce = getOrInsertRTDecl(B, Module, "matlab_reduce_add_f64", VoidTy,
                                   {PtrTy, F64});
   for (Operation &Op : BodyBlock) {
     if (isMatlabOp(&Op, "matlab.yield")) continue;
+    if (CaptureLoadOps.count(&Op)) continue;  /* replaced by state-load */
     if (ReductionBodyOps.count(&Op)) {
       if (isMatlabOp(&Op, "matlab.store")) {
         // This is the store terminator of a reduction — emit the call here.
@@ -364,21 +446,41 @@ bool outlineParfor(Operation *Parfor, unsigned Id) {
                            B, Loc, F64, B.getF64FloatAttr(1.0)));
   Value FnPtr = LLVM::AddressOfOp::create(B, Loc, PtrTy, Fn.getName());
 
-  // Build the state array on the stack and store each reduction pointer.
+  // Build the state array on the stack:
+  //   state[0..NRed-1]              : reduction-variable pointers
+  //   state[NRed..NRed+NCap-1]      : captured scalar values (Phase 2)
   Value StateArg;
-  if (Reductions.empty()) {
+  if (NRed == 0 && NCap == 0) {
     StateArg = LLVM::ZeroOp::create(B, Loc, PtrTy);
   } else {
     Value One = LLVM::ConstantOp::create(
         B, Loc, IntegerType::get(Ctx, 64), B.getI64IntegerAttr(1));
     StateArg = LLVM::AllocaOp::create(B, Loc, PtrTy, ArrayOfPtr, One,
                                       /*alignment=*/0);
-    for (size_t k = 0; k < Reductions.size(); ++k) {
+    for (size_t k = 0; k < NRed; ++k) {
       Value IdxK = LLVM::ConstantOp::create(
           B, Loc, IntegerType::get(Ctx, 64), B.getI64IntegerAttr((int64_t)k));
       Value Gep = LLVM::GEPOp::create(B, Loc, PtrTy, PtrTy, StateArg,
                                       ValueRange{IdxK});
       LLVM::StoreOp::create(B, Loc, Reductions[k].AllocOp->getResult(0), Gep);
+    }
+    /* Capture values: emit one matlab.load per unique outer slot right
+     * before the dispatch, then llvm.store into state[NRed+k].  matlab.load
+     * here remains for downstream LowerScalarSlots / LowerTensorOps to
+     * convert into a typed LLVM load against the slot's final lowering. */
+    for (size_t k = 0; k < NCap; ++k) {
+      Value Slot = Captures[k].Slot;
+      OperationState LoadState(Loc, "matlab.load");
+      LoadState.addOperands(ValueRange{Slot});
+      LoadState.addTypes(TypeRange{Captures[k].CaptureType});
+      Operation *LoadOp = B.create(LoadState);
+      Value CapVal = LoadOp->getResult(0);
+      Value IdxK = LLVM::ConstantOp::create(
+          B, Loc, IntegerType::get(Ctx, 64),
+          B.getI64IntegerAttr((int64_t)(NRed + k)));
+      Value Gep = LLVM::GEPOp::create(B, Loc, PtrTy, PtrTy, StateArg,
+                                      ValueRange{IdxK});
+      LLVM::StoreOp::create(B, Loc, CapVal, Gep);
     }
   }
 

@@ -157,6 +157,19 @@ bool runLowerSeqLoops(mlir::ModuleOp M);
 /// later LLVM conversion surfaces them.
 unsigned runOutlineParfor(mlir::ModuleOp M);
 
+/// Forward constant captures into matlab.parfor bodies before
+/// runOutlineParfor runs.  Bridges the gap between SlotPromotion
+/// (intra-block only — bails on any cross-block use) and the parfor
+/// outliner's capture analysis (rejects matlab.alloc).  For each
+/// scalar slot whose only writes are in an ancestor block, all
+/// dominate the parfor, and store the SAME constant literal
+/// (matlab.const_int / matlab.const_float / arith.constant /
+/// LLVM::ConstantOp), the pass clones the literal inside each
+/// parfor body and replaces in-body matlab.load uses, leaving the
+/// outer slot alone so post-parfor reads/writes keep working.
+/// Idempotent.  Returns the number of in-body loads rewritten.
+unsigned runForwardParforCaptures(mlir::ModuleOp M);
+
 /// Outline each matlab.gpu.kernel body into a private llvm.func and replace
 /// the op with a call to `matlab_gpu_launch_kernel`.  Same shape as
 /// runOutlineParfor — clones the body, lifts captures + reductions, replaces

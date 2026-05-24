@@ -877,6 +877,10 @@ int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id,
   mlirgen::runPromoteNoneParams(M);
   for (int Iter = 0; Iter < 4; ++Iter)
     if (!mlirgen::runPromoteBinopTypes(M)) break;
+  /* Forward outer-scope literal captures into parfor bodies before the
+   * outliner runs.  Closes the matlab.alloc-capture rejection from
+   * issue #20 for the common case (constant captures like W = 800). */
+  mlirgen::runForwardParforCaptures(M);
   mlirgen::runOutlineParfor(M);
   mlirgen::runOutlineGpuKernels(M);
   mlirgen::runLowerSeqLoops(M);
@@ -3708,6 +3712,10 @@ bool compileProgram() {
   mlirgen::runPromoteNoneParams(M);
   for (int Iter = 0; Iter < 4; ++Iter)
     if (!mlirgen::runPromoteBinopTypes(M)) break;
+  /* Forward outer-scope literal captures into parfor bodies before the
+   * outliner runs.  Closes the matlab.alloc-capture rejection from
+   * issue #20 for the common case (constant captures like W = 800). */
+  mlirgen::runForwardParforCaptures(M);
   mlirgen::runOutlineParfor(M);
   mlirgen::runOutlineGpuKernels(M);
   mlirgen::runLowerSeqLoops(M);
@@ -12505,6 +12513,10 @@ int main(int Argc, char **Argv) {
           for (int Iter = 0; Iter < 4; ++Iter)
             if (!mlirgen::runPromoteBinopTypes(M)) break;
         }
+        /* Forward outer-scope literal captures into parfor bodies
+         * before the outliner — closes the matlab.alloc-capture
+         * rejection from issue #20 for the common literal case. */
+        mlirgen::runForwardParforCaptures(M);
         mlirgen::runOutlineParfor(M);
         mlirgen::runOutlineGpuKernels(M);
         // Lower sequential matlab.for / matlab.while into scf.while so
