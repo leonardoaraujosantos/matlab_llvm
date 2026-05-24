@@ -167,6 +167,28 @@ unsigned runOutlineParfor(mlir::ModuleOp M);
 /// sequential loop calling the outlined function directly.
 unsigned runOutlineGpuKernels(mlir::ModuleOp M);
 
+/// Emit Metal Shading Language (MSL) source for every matlab.gpu.kernel
+/// op in `M`.  Returns the combined source string with one MSL
+/// `kernel void` function per op.  Walks read-only (does not mutate
+/// the IR), so it can co-exist with the simple-rewrite CPU lane.
+/// `Prefix` is the user-visible kernel-name prefix (typically the
+/// input file's stem).  Unsupported body shapes fall back to a
+/// placeholder body with a `// FALLBACK: <reason>` comment.
+std::string emitMetalKernels(mlir::ModuleOp M, llvm::StringRef Prefix);
+
+/// Emit CUDA-C kernel source for every matlab.gpu.kernel op.  Same
+/// shape as emitMetalKernels — uses __global__ + `T*` + thread-index
+/// macros.  Returns the combined source.  Cannot validate locally on
+/// macOS (no nvcc + no NVIDIA HW); Linux CI runs nvcc on the emitted
+/// bundle when a CUDA-capable runner is available.
+std::string emitCudaKernels(mlir::ModuleOp M, llvm::StringRef Prefix);
+
+/// Emit OpenCL-C kernel source for every matlab.gpu.kernel op.  Uses
+/// __kernel + __global + get_global_id(0).  fp64 enabled via
+/// cl_khr_fp64 extension pragma (most modern OpenCL stacks support it;
+/// older Mali GPUs reject the pragma — re-emit with single() casts).
+std::string emitOpenCLKernels(mlir::ModuleOp M, llvm::StringRef Prefix);
+
 /// Convert the whole module down to the LLVM dialect and translate to an
 /// LLVM IR textual module. Returns empty string on failure.
 ///

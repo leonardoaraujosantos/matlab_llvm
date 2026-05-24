@@ -28,6 +28,7 @@
 //     / MPSGraph FFT.
 
 #import <Metal/Metal.h>
+#import <MetalPerformanceShaders/MetalPerformanceShaders.h>
 #import <Foundation/Foundation.h>
 
 #include <atomic>
@@ -35,6 +36,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
+#include <unordered_map>
 #include <unistd.h>
 
 namespace {
@@ -76,6 +79,104 @@ bool ensureMetalDevice() {
 
 extern "C" {
 
+/* T2.C — MSL JIT compile + cache.  Compiles MSL source via
+ * `MTLDevice newLibraryWithSource:options:error:` on first call,
+ * caches the MTLComputePipelineState by source-hash so subsequent
+ * launches skip the compile.  The kernel name inside the source
+ * must match `kernel_name`. */
+struct CachedKernel {
+  id<MTLComputePipelineState> pso;
+};
+
+static std::unordered_map<std::string, CachedKernel> *kernelCache() {
+  static std::unordered_map<std::string, CachedKernel> Cache;
+  return &Cache;
+}
+
+extern "C" int matlab_gpu_metal_jit_compile(const char *src, const char *name,
+                                            void **out_pso) {
+  if (!ensureMetalDevice()) return -1;
+  std::string Key(src);
+  Key += "\n@@@KNAME@@@";
+  Key += name;
+  auto *C = kernelCache();
+  auto It = C->find(Key);
+  if (It != C->end()) {
+    *out_pso = (__bridge void *)It->second.pso;
+    return 0;
+  }
+  @autoreleasepool {
+    NSError *err = nil;
+    NSString *NsSrc = [NSString stringWithUTF8String:src];
+    NSString *NsName = [NSString stringWithUTF8String:name];
+    MTLCompileOptions *opts = [[MTLCompileOptions alloc] init];
+    id<MTLLibrary> lib = [g_Device newLibraryWithSource:NsSrc options:opts
+                                                   error:&err];
+    if (!lib) {
+      std::fprintf(stderr, "matlab_gpu_metal_jit_compile: MSL compile "
+                            "failed for kernel '%s'\n  %s\n",
+                   name,
+                   err ? err.localizedDescription.UTF8String : "(no error)");
+      return -2;
+    }
+    id<MTLFunction> fn = [lib newFunctionWithName:NsName];
+    if (!fn) {
+      std::fprintf(stderr, "matlab_gpu_metal_jit_compile: function '%s' "
+                            "not found in compiled library\n", name);
+      return -3;
+    }
+    id<MTLComputePipelineState> pso =
+        [g_Device newComputePipelineStateWithFunction:fn error:&err];
+    if (!pso) {
+      std::fprintf(stderr, "matlab_gpu_metal_jit_compile: pipeline-state "
+                            "create failed for '%s': %s\n", name,
+                   err ? err.localizedDescription.UTF8String : "(no error)");
+      return -4;
+    }
+    CachedKernel Ck = {pso};
+    /* Bridge-retain to keep the pso alive past the autorelease pool. */
+    (*C)[Key] = Ck;
+    *out_pso = (__bridge_retained void *)pso;
+    return 0;
+  }
+}
+
+/* Launch a precompiled kernel.  `pso_handle` is an opaque
+ * MTLComputePipelineState* returned by jit_compile; `buffer_ptrs` is
+ * an array of MTLBuffer* (or null for scalar args), `buffer_count` is
+ * the count, `grid_size` is the number of threads to dispatch
+ * (1-D, matches the end-start+1 of the MATLAB range). */
+extern "C" int matlab_gpu_metal_dispatch(void *pso_handle,
+                                          void **buffer_ptrs,
+                                          int buffer_count,
+                                          int grid_size) {
+  if (!ensureMetalDevice()) return -1;
+  @autoreleasepool {
+    id<MTLComputePipelineState> pso =
+        (__bridge id<MTLComputePipelineState>)pso_handle;
+    id<MTLCommandBuffer> cmdbuf = [g_Queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cmdbuf computeCommandEncoder];
+    [enc setComputePipelineState:pso];
+    for (int i = 0; i < buffer_count; ++i) {
+      id<MTLBuffer> buf = (__bridge id<MTLBuffer>)buffer_ptrs[i];
+      [enc setBuffer:buf offset:0 atIndex:i];
+    }
+    NSUInteger tpgw = pso.threadExecutionWidth;
+    if (tpgw == 0) tpgw = 32;
+    [enc dispatchThreads:MTLSizeMake(grid_size, 1, 1)
+         threadsPerThreadgroup:MTLSizeMake(tpgw, 1, 1)];
+    [enc endEncoding];
+    [cmdbuf commit];
+    [cmdbuf waitUntilCompleted];
+    if (cmdbuf.error) {
+      std::fprintf(stderr, "matlab_gpu_metal_dispatch: error %s\n",
+                   cmdbuf.error.localizedDescription.UTF8String);
+      return -2;
+    }
+  }
+  return 0;
+}
+
 /* Strong override of the weak stub in runtime_gpu.cpp.  Linker
  * selects this when the Metal TU is in the link line on macOS. */
 int matlab_gpu_launch_metal(double start, double step, double end,
@@ -86,16 +187,16 @@ int matlab_gpu_launch_metal(double start, double step, double end,
         "  No Metal-capable GPU.  Fall back: MATLAB_GPU_TARGET=cpu\n");
     std::abort();
   }
-  /* T2.A: Metal device + queue are live, but kernel-source JIT lands
-   * in T2.B/C.  Until then, run the body sequentially on the host
-   * (same as the CPU-debug lane).  This proves the Metal dispatch
-   * arm is active — the weak stub aborts with "not built in", but
-   * with this strong override we run cleanly.  An env-var sentinel
-   * lets the test harness assert that the Metal path was selected. */
+  /* T2.A/C: until the AOT codegen embeds the kernel source + calls
+   * jit_compile/dispatch, this dispatch arm still falls back to the
+   * sequential host loop calling fn_ptr(iv, state).  The JIT compile
+   * + dispatch ABI above is exercised by the standalone T2.C smoke
+   * test (test/Run/gpu_metal_jit.mm). */
   if (std::getenv("MATLAB_GPU_DEBUG"))
     std::fprintf(stderr,
-        "matlab_gpu_metal: launch kernel_id=%d range=[%g:%g:%g] (CPU fallback "
-        "until T2.B/C MSL JIT lands)\n", kernel_id, start, step, end);
+        "matlab_gpu_metal: launch kernel_id=%d range=[%g:%g:%g] "
+        "(host fallback; AOT-to-JIT linkage is T2.C v1.1)\n",
+        kernel_id, start, step, end);
 
   using KernelFn = void(*)(double, void *);
   KernelFn Fn = reinterpret_cast<KernelFn>(fn_ptr);
@@ -175,6 +276,69 @@ void matlab_gpu_metal_sync(void) {
       [b waitUntilCompleted];
     }
   }
+}
+
+/* T2.D — MPS GEMM.  Computes C = A * B on Apple GPU via
+ * MPSMatrixMultiplication.  Inputs / output are row-major fp32
+ * MTLBuffers (caller owns).  Matches MathWorks GPU Coder's cuBLAS
+ * Sgemm shape; the runtime can route `mtimes(gpuArray,gpuArray)` here
+ * when the active backend is Metal.
+ *
+ * Returns 0 on success, non-zero on error.
+ *
+ * v1 is row-major fp32; fp64 isn't supported by Apple GPUs.  fp16
+ * (half) lane is a future addition using MPSDataTypeFloat16. */
+extern "C" int matlab_gpu_metal_gemm_f32(
+    void *a_buf, void *b_buf, void *c_buf,
+    int M, int N, int K)
+{
+  if (!ensureMetalDevice()) return -1;
+  @autoreleasepool {
+    id<MTLBuffer> A = (__bridge id<MTLBuffer>)a_buf;
+    id<MTLBuffer> B = (__bridge id<MTLBuffer>)b_buf;
+    id<MTLBuffer> C = (__bridge id<MTLBuffer>)c_buf;
+
+    MPSMatrixDescriptor *Da =
+        [MPSMatrixDescriptor matrixDescriptorWithRows:M columns:K
+                                              rowBytes:K * sizeof(float)
+                                              dataType:MPSDataTypeFloat32];
+    MPSMatrixDescriptor *Db =
+        [MPSMatrixDescriptor matrixDescriptorWithRows:K columns:N
+                                              rowBytes:N * sizeof(float)
+                                              dataType:MPSDataTypeFloat32];
+    MPSMatrixDescriptor *Dc =
+        [MPSMatrixDescriptor matrixDescriptorWithRows:M columns:N
+                                              rowBytes:N * sizeof(float)
+                                              dataType:MPSDataTypeFloat32];
+
+    MPSMatrix *MA = [[MPSMatrix alloc] initWithBuffer:A descriptor:Da];
+    MPSMatrix *MB = [[MPSMatrix alloc] initWithBuffer:B descriptor:Db];
+    MPSMatrix *MC = [[MPSMatrix alloc] initWithBuffer:C descriptor:Dc];
+
+    MPSMatrixMultiplication *Mul =
+        [[MPSMatrixMultiplication alloc] initWithDevice:g_Device
+                                          transposeLeft:NO
+                                         transposeRight:NO
+                                             resultRows:M
+                                          resultColumns:N
+                                        interiorColumns:K
+                                                  alpha:1.0
+                                                   beta:0.0];
+
+    id<MTLCommandBuffer> cmdbuf = [g_Queue commandBuffer];
+    [Mul encodeToCommandBuffer:cmdbuf
+                    leftMatrix:MA
+                   rightMatrix:MB
+                  resultMatrix:MC];
+    [cmdbuf commit];
+    [cmdbuf waitUntilCompleted];
+    if (cmdbuf.error) {
+      std::fprintf(stderr, "matlab_gpu_metal_gemm_f32: %s\n",
+                   cmdbuf.error.localizedDescription.UTF8String);
+      return -2;
+    }
+  }
+  return 0;
 }
 
 /* Device-name probe for gpuDevice() / DAP. */
