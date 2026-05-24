@@ -4795,14 +4795,13 @@ bool TensorLowering::rewriteBuiltinCalls() {
          PtrTy, {PtrTy, PtrTy, PtrTy}},  /* deprecated alias */
         {"gpucoder_sort",               "matlab_gpucoder_sort",
          PtrTy, {PtrTy}},
-        /* Plain `rand(n, m, 'single')` etc. — same dtype-tag-drop
-         * pattern as gpuArray.X.  These match the MATLAB convention
-         * that the third arg is a class name string. */
-        {"rand",   "matlab_gpuArray_rand",  PtrTy, {F64, F64, PtrTy}},
-        {"randn",  "matlab_gpuArray_randn", PtrTy, {F64, F64, PtrTy}},
-        {"zeros",  "matlab_gpuArray_zeros", PtrTy, {F64, F64, PtrTy}},
-        {"ones",   "matlab_gpuArray_ones",  PtrTy, {F64, F64, PtrTy}},
-        {"eye",    "matlab_gpuArray_eye",   PtrTy, {F64, F64, PtrTy}},
+        /* (Removed: bare-name `rand/zeros/ones/eye/randn(n,m,'single')`
+         * dispatch — it collided with 3-D `zeros(n,m,d)` because the
+         * strict matcher coerces the literal-f64 third arg into ptr
+         * via matlab_mat_from_scalar, breaking the matlab_zeros3 path.
+         * `benchmark_gpu_backend.m` uses this form and is the only
+         * affected fixture; rewrite it as `gpuArray.rand(n,n,'single')`
+         * which parser-folds to gpuArray_rand and dispatches cleanly.) */
         /* gpuArray.<static> with the dtype-tag arg (`'single'` /
          * `'double'`) — loose-match coerces the const_char to a
          * matlab_string* via matlab_string_from_literal; the runtime

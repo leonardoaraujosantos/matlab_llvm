@@ -57,19 +57,53 @@ bool isMatlabOp(Operation *Op, StringRef Name) {
   return Op && Op->getName().getStringRef() == Name;
 }
 
+/* True when the callee of a matlab.call_builtin op treats its
+ * operand as a scalar f64.  We can't blanket-trust call_builtin
+ * (length(obj), disp(obj), step(sys), imadd(mat,mat) take ptrs
+ * or matrices, not scalars), so this is a narrow allowlist of
+ * builtins whose first argument is unambiguously a scalar. */
+bool isScalarBuiltinCall(Operation *User) {
+  if (!isMatlabOp(User, "matlab.call_builtin")) return false;
+  auto Callee = User->getAttrOfType<StringAttr>("callee");
+  if (!Callee) return false;
+  StringRef N = Callee.getValue();
+  // gpuArray.* size-parameter builtins — n in gpuArray.rand(n, ...)
+  if (N.starts_with("matlab_gpuArray_") || N.starts_with("gpuArray__"))
+    return true;
+  // scalar transcendental / arithmetic math
+  static constexpr llvm::StringRef Scalars[] = {
+    "matlab_sin", "matlab_cos", "matlab_tan",
+    "matlab_asin", "matlab_acos", "matlab_atan", "matlab_atan2",
+    "matlab_sind", "matlab_cosd", "matlab_tand",
+    "matlab_asind", "matlab_acosd", "matlab_atand",
+    "matlab_sinh", "matlab_cosh", "matlab_tanh",
+    "matlab_exp", "matlab_log", "matlab_log2", "matlab_log10",
+    "matlab_sqrt", "matlab_abs", "matlab_sign",
+    "matlab_ceil", "matlab_floor", "matlab_round", "matlab_fix",
+    "matlab_mod", "matlab_rem", "matlab_power", "matlab_pow",
+    "matlab_max2", "matlab_min2",
+  };
+  for (auto S : Scalars) if (N == S) return true;
+  return false;
+}
+
 /* True when this op consumes its operand as a numeric (scalar) value.
  * The list mirrors the dispatch surfaces in LowerTensorOps. */
 bool consumesAsNumeric(Operation *User) {
   if (!User) return false;
   StringRef N = User->getName().getStringRef();
-  // matlab.* numeric ops (binops + unops)
+  // matlab.* numeric ops (binops + unops).  Excludes matlab.subscript
+  // and matlab.transpose: both signal that the operand is a matrix
+  // (e.g. p(i) — p is the indexable, NOT a scalar), so they must NOT
+  // trigger param-promotion.
   if (N == "matlab.add" || N == "matlab.sub" || N == "matlab.matmul" ||
       N == "matlab.emul" || N == "matlab.ediv" || N == "matlab.epow" ||
-      N == "matlab.neg" || N == "matlab.transpose" ||
-      N == "matlab.range" || N == "matlab.subscript" ||
-      N == "matlab.cmp" ||
-      N == "matlab.call_builtin")
+      N == "matlab.neg" ||
+      N == "matlab.range" || N == "matlab.cmp")
     return true;
+  // matlab.call_builtin only counts when the callee is a scalar-only
+  // builtin (not length/disp/step/imadd/etc., which take ptr/object).
+  if (isScalarBuiltinCall(User)) return true;
   // arith.* float ops
   if (isa<arith::AddFOp, arith::SubFOp, arith::MulFOp, arith::DivFOp,
           arith::CmpFOp, arith::NegFOp>(User))
@@ -181,6 +215,33 @@ unsigned runPromoteNoneParams(mlir::ModuleOp M) {
       if (mlir::isa<NoneType>(T)) { AnyNone = true; break; }
     if (!AnyNone)
       return;
+
+    /* Skip functions that have in-module callers.  Promoting a polymorphic
+     * helper (e.g. `function y = sq(x); y = x.*x; end` called both as
+     * `sq(5)` and `sq([1 2 3])`) to f64 would monomorphize it and break
+     * the matrix call sites.  Sema's call-site arg-flow already refines
+     * such helpers' arg types from the actual call args; the pass is
+     * meant for true entry-point functions with no in-module caller
+     * (the GPU PCT validation tests). */
+    bool HasCaller = false;
+    auto FnName = Fn.getSymName();
+    M.walk([&](Operation *Op) {
+      if (HasCaller) return;
+      if (auto Call = dyn_cast<func::CallOp>(Op)) {
+        if (Call.getCallee() == FnName) HasCaller = true;
+        return;
+      }
+      // matlab.call still un-lowered when PromoteNoneParams runs early
+      if (Op->getName().getStringRef() == "matlab.call") {
+        if (auto CalleeAttr = Op->getAttrOfType<StringAttr>("callee"))
+          if (CalleeAttr.getValue() == FnName) HasCaller = true;
+      }
+    });
+    if (HasCaller) {
+      if (std::getenv("MATLAB_GPU_DEBUG_PROMOTE"))
+        std::fprintf(stderr, "  skip: has in-module caller(s)\n");
+      return;
+    }
 
     /* Find each param slot. */
     llvm::SmallVector<Value> Slots;
