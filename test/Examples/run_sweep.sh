@@ -89,6 +89,8 @@ RUNTIME_SRCS=(
   "$ROOT/runtime/toolbox/wavelet/runtime_wavelet.cpp"
   "$ROOT/runtime/toolbox/dsp/runtime_dsp.cpp"
   "$ROOT/runtime/toolbox/stateflow/runtime_mstateflow.cpp"
+  "$ROOT/runtime/gpu/runtime_gpu.cpp"
+  "$ROOT/runtime/toolbox/gpu/runtime_gpu_helpers.cpp"
 )
 
 WORK="$(mktemp -d -t mlc-sweep.XXXXXX)"
