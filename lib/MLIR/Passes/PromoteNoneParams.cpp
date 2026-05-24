@@ -33,6 +33,8 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -40,6 +42,9 @@
 #include "mlir/IR/Value.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+
+#include <cstdio>
+#include <cstdlib>
 
 namespace matlab {
 namespace mlirgen {
@@ -57,15 +62,17 @@ bool isMatlabOp(Operation *Op, StringRef Name) {
 bool consumesAsNumeric(Operation *User) {
   if (!User) return false;
   StringRef N = User->getName().getStringRef();
-  // matlab.* numeric ops
+  // matlab.* numeric ops (binops + unops)
   if (N == "matlab.add" || N == "matlab.sub" || N == "matlab.matmul" ||
-      N == "matlab.emul" || N == "matlab.ediv" ||
+      N == "matlab.emul" || N == "matlab.ediv" || N == "matlab.epow" ||
+      N == "matlab.neg" || N == "matlab.transpose" ||
       N == "matlab.range" || N == "matlab.subscript" ||
+      N == "matlab.cmp" ||
       N == "matlab.call_builtin")
     return true;
   // arith.* float ops
   if (isa<arith::AddFOp, arith::SubFOp, arith::MulFOp, arith::DivFOp,
-          arith::CmpFOp>(User))
+          arith::CmpFOp, arith::NegFOp>(User))
     return true;
   return false;
 }
@@ -147,12 +154,33 @@ unsigned runPromoteNoneParams(mlir::ModuleOp M) {
     if (Fn.empty()) return;
     if (Fn.getNumArguments() == 0) return;
 
+    /* Skip classdef methods / constructors.  A classdef ctor returns
+     * a ptr-typed matlab_obj* and a classdef method's first input is
+     * also ptr-typed (the `obj` receiver).  These functions' param
+     * types are determined by the classdef contract (not numeric
+     * usage in the body), so promoting them is wrong.  Detect via:
+     *   - first output is ptr (ctor returning obj)
+     *   - first input is ptr (method receiver)
+     *   - mangled name contains "__" (classdef method namespace) */
+    auto FnTy = Fn.getFunctionType();
+    auto PtrTy = LLVM::LLVMPointerType::get(Ctx);
+    if (FnTy.getNumResults() >= 1 && FnTy.getResult(0) == PtrTy) {
+      return;
+    }
+    if (FnTy.getNumInputs() >= 1 && FnTy.getInput(0) == PtrTy) {
+      if (std::getenv("MATLAB_GPU_DEBUG_PROMOTE"))
+        std::fprintf(stderr, "  skip: first input is ptr\n");
+      return;
+    }
+    if (Fn.getSymName().contains("__"))
+      return;
     /* Skip functions that already have non-none arg types — they've
      * been refined by RefineFuncSigs or had types from Sema. */
     bool AnyNone = false;
-    for (auto T : Fn.getFunctionType().getInputs())
+    for (auto T : FnTy.getInputs())
       if (mlir::isa<NoneType>(T)) { AnyNone = true; break; }
-    if (!AnyNone) return;
+    if (!AnyNone)
+      return;
 
     /* Find each param slot. */
     llvm::SmallVector<Value> Slots;

@@ -4795,6 +4795,14 @@ bool TensorLowering::rewriteBuiltinCalls() {
          PtrTy, {PtrTy, PtrTy, PtrTy}},  /* deprecated alias */
         {"gpucoder_sort",               "matlab_gpucoder_sort",
          PtrTy, {PtrTy}},
+        /* Plain `rand(n, m, 'single')` etc. — same dtype-tag-drop
+         * pattern as gpuArray.X.  These match the MATLAB convention
+         * that the third arg is a class name string. */
+        {"rand",   "matlab_gpuArray_rand",  PtrTy, {F64, F64, PtrTy}},
+        {"randn",  "matlab_gpuArray_randn", PtrTy, {F64, F64, PtrTy}},
+        {"zeros",  "matlab_gpuArray_zeros", PtrTy, {F64, F64, PtrTy}},
+        {"ones",   "matlab_gpuArray_ones",  PtrTy, {F64, F64, PtrTy}},
+        {"eye",    "matlab_gpuArray_eye",   PtrTy, {F64, F64, PtrTy}},
         /* gpuArray.<static> with the dtype-tag arg (`'single'` /
          * `'double'`) — loose-match coerces the const_char to a
          * matlab_string* via matlab_string_from_literal; the runtime

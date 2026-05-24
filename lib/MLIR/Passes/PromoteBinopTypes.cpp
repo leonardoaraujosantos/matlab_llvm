@@ -58,7 +58,13 @@ bool isMatlabBinop(Operation *Op) {
   StringRef N = Op->getName().getStringRef();
   return N == "matlab.add" || N == "matlab.sub" ||
          N == "matlab.matmul" || N == "matlab.emul" ||
-         N == "matlab.ediv";
+         N == "matlab.ediv" || N == "matlab.epow";
+}
+
+bool isMatlabUnop(Operation *Op) {
+  if (!Op) return false;
+  StringRef N = Op->getName().getStringRef();
+  return N == "matlab.neg" || N == "matlab.transpose";
 }
 
 }  // namespace
@@ -67,8 +73,29 @@ bool runPromoteBinopTypes(mlir::ModuleOp M) {
   MLIRContext *Ctx = M.getContext();
   auto PtrTy = LLVM::LLVMPointerType::get(Ctx);
 
+  auto F64 = Float64Type::get(Ctx);
+
   bool Changed = false;
   M.walk([&](Operation *Op) {
+    /* Unary ops — promote result from operand. */
+    if (isMatlabUnop(Op) && Op->getNumResults() == 1 &&
+        Op->getNumOperands() == 1 &&
+        mlir::isa<NoneType>(Op->getResult(0).getType())) {
+      Type T0 = Op->getOperand(0).getType();
+      if (T0 == PtrTy ||
+          mlir::isa<RankedTensorType, UnrankedTensorType>(T0)) {
+        Op->getResult(0).setType(T0 == PtrTy ? PtrTy : T0);
+        Changed = true;
+        return;
+      }
+      if (T0 == F64) {
+        Op->getResult(0).setType(F64);
+        Changed = true;
+        return;
+      }
+      return;
+    }
+
     if (!isMatlabBinop(Op)) return;
     if (Op->getNumResults() != 1) return;
     if (Op->getNumOperands() != 2) return;
@@ -77,16 +104,16 @@ bool runPromoteBinopTypes(mlir::ModuleOp M) {
     Type T0 = Op->getOperand(0).getType();
     Type T1 = Op->getOperand(1).getType();
     /* If either operand is ptr-typed (a matrix), the result is also
-     * a matrix (ptr).  This matches the runtime behavior of
-     * matlab_add_mm / matlab_emul_ms / matlab_emul_sm etc. — any
-     * scalar-by-matrix or matrix-by-matrix binop returns a matrix. */
+     * a matrix (ptr).  Matches matlab_add_mm / matlab_emul_ms /
+     * matlab_emul_sm — scalar-by-matrix or matrix-by-matrix returns
+     * a matrix. */
     if (T0 == PtrTy || T1 == PtrTy) {
       Op->getResult(0).setType(PtrTy);
       Changed = true;
       return;
     }
-    /* Tensor operands also indicate matrix semantics; retype to the
-     * tensor type that's present. */
+    /* Tensor operands → tensor result (early-pipeline shape before
+     * LowerTensorOps converts to ptr). */
     if (mlir::isa<RankedTensorType, UnrankedTensorType>(T0)) {
       Op->getResult(0).setType(T0);
       Changed = true;
@@ -97,24 +124,35 @@ bool runPromoteBinopTypes(mlir::ModuleOp M) {
       Changed = true;
       return;
     }
+    /* Both scalar → f64 result.  Closes the activation_kernel chain
+     * `matlab.neg(x_f64) → matlab.emul(.., .. )` when x has just been
+     * promoted by PromoteNoneParams. */
+    if (T0 == F64 && T1 == F64) {
+      Op->getResult(0).setType(F64);
+      Changed = true;
+      return;
+    }
   });
 
-  /* Propagate to slots: when a binop now produces ptr and is stored
-   * into a `none`-typed slot, retype the slot + its load results.
-   * Mirrors RefineSlotTypes for slots that the existing pass missed. */
+  /* Propagate to slots: when a store value is now typed (ptr or f64)
+   * and the slot is still none, retype the slot + every load that
+   * reads from it.  Mirrors RefineSlotTypes for slots the existing
+   * pass missed (it requires types to be settled before its sweep). */
   M.walk([&](Operation *Op) {
     if (!isMatlabOp(Op, "matlab.store") || Op->getNumOperands() != 2) return;
     Value Val = Op->getOperand(0);
     Value Slot = Op->getOperand(1);
-    if (Val.getType() != PtrTy) return;
     if (!mlir::isa<NoneType>(Slot.getType())) return;
-    /* Retype the slot itself + every load that reads from it. */
-    Slot.setType(PtrTy);
+    Type NewTy;
+    if (Val.getType() == PtrTy) NewTy = PtrTy;
+    else if (Val.getType() == F64) NewTy = F64;
+    else return;
+    Slot.setType(NewTy);
     Changed = true;
     for (Operation *U : Slot.getUsers()) {
       if (isMatlabOp(U, "matlab.load") && U->getNumResults() == 1 &&
           mlir::isa<NoneType>(U->getResult(0).getType())) {
-        U->getResult(0).setType(PtrTy);
+        U->getResult(0).setType(NewTy);
       }
     }
   });

@@ -325,7 +325,29 @@ bool rewriteMakeHandle(ModuleOp M) {
     auto Attr = H->getAttrOfType<StringAttr>("callee");
     if (!Attr) continue;
     auto It = ScalarRt.find(Attr.getValue());
-    if (It == ScalarRt.end()) continue;
+    if (It == ScalarRt.end()) {
+      /* Fall through: maybe it's a user-defined func.func in the
+       * module.  Resolve `@name` → llvm.mlir.addressof so arrayfun /
+       * matlab_gpucoder_reduce / etc. get a real function pointer.
+       * The runtime call ABI expects `double (double)` for unary or
+       * `double (double, double)` for binary — caller's responsibility
+       * to match. */
+      auto FuncSym = M.lookupSymbol<func::FuncOp>(Attr.getValue());
+      if (!FuncSym) continue;
+      /* Use func.constant to materialise a function reference to the
+       * func.func, then bitcast/unrealized_conversion_cast to ptr for
+       * the make_handle's downstream ptr consumers. */
+      B.setInsertionPoint(H);
+      auto FuncRef = func::ConstantOp::create(
+          B, H->getLoc(), FuncSym.getFunctionType(),
+          FuncSym.getSymName());
+      auto Cast = mlir::UnrealizedConversionCastOp::create(
+          B, H->getLoc(), PtrTy, FuncRef.getResult());
+      H->getResult(0).replaceAllUsesWith(Cast.getResult(0));
+      H->erase();
+      Changed = true;
+      continue;
+    }
 
     /* Declare the runtime function if missing. Signature: (f64) -> f64. */
     StringRef RtName = It->second;

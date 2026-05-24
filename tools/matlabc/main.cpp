@@ -12354,6 +12354,12 @@ int main(int Argc, char **Argv) {
       // The SV-specific pragma surface (fsm_encoding, input_pipeline,
       // ...) is re-scanned further down in the SV branch.
       if (WantFullPipeline) {
+        /* Promote none-typed func params to f64 BEFORE SlotPromotion
+         * collapses the matlab.store(%arg, %slot) chain my detector
+         * relies on.  Without this early call, function-form GPU
+         * examples (function err = test_gpuarray_axpy(n)) fail the
+         * subsequent LowerTensorOps dispatch on the n-arg position. */
+        mlirgen::runPromoteNoneParams(M);
         mlirgen::runScanHWPragmas(M, &SM);
         // Tier 5 — for a subsystem emit, ScanHWPragmas runs over the
         // .mflow JSON buffer and finds nothing (the synthesised AST
