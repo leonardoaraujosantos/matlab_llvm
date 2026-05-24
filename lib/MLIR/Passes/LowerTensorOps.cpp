@@ -6566,13 +6566,22 @@ bool TensorLowering::rewriteBuiltinCalls() {
     // are inline — would never rewrite.
     const Spec *S = nullptr;
     unsigned NOps = Call->getNumOperands();
+    /* f32 is accepted at every 'f' slot — MATLAB `single()` / `double()`
+     * casts lower to f32 results, and the runtime stays f64 internally,
+     * so we widen with an fpext at the call site below.  Without this,
+     * `gpuArray.linspace(single(-10), single(10), n)` and every other
+     * builtin reached via a single() cast in its arg list fails dispatch.
+     * (See issue #22.) */
+    auto isFTagOK = [&](Type Got) -> bool {
+      return Got == F64 || mlir::isa<Float32Type>(Got);
+    };
     auto argTypesMatch = [&](const Spec &E) -> bool {
       if (E.ArgKinds.size() != NOps) return false;
       for (unsigned i = 0; i < NOps; ++i) {
         char Kind = E.ArgKinds[i];
         Type Got = Call->getOperand(i).getType();
         if (Kind == 'f') {
-          if (Got != F64) return false;
+          if (!isFTagOK(Got)) return false;
         } else { /* 'p' */
           if (Got != PtrTy && !isTensorLike(Got)) return false;
         }
@@ -6669,7 +6678,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
             char K = E.ArgKinds[i];
             Type Got = Call->getOperand(i).getType();
             if (K == 'f') {
-              if (Got != F64) { can_box = false; break; }
+              if (!isFTagOK(Got)) { can_box = false; break; }
             } else { /* 'p' */
               if (Got == PtrTy || isTensorLike(Got)) {
                 /* already matches strictly */
@@ -6784,7 +6793,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
       // runtime). We'll be strict and require ptr now; tensor-typed inputs
       // come from allocs that our slot-retype handled, so by the time we
       // run this they should already be ptr.
-      if (Exp == F64 && Got != F64) { OK = false; break; }
+      if (Exp == F64 && !isFTagOK(Got)) { OK = false; break; }
       if (Exp == PtrTy && Got != PtrTy) { OK = false; break; }
     }
     if (!OK) continue;
@@ -6795,11 +6804,25 @@ bool TensorLowering::rewriteBuiltinCalls() {
     for (unsigned i = 0; i < Call->getNumOperands(); ++i) {
       Value V = Call->getOperand(i);
       if (BoxSet_count(i)) {
+        /* If the boxed scalar arrived as f32 (e.g. `single(2.5)`),
+         * widen to f64 before boxing — matlab_mat_from_scalar takes
+         * a double. */
+        if (mlir::isa<Float32Type>(V.getType())) {
+          auto Ext = LLVM::FPExtOp::create(B, Call->getLoc(), F64, V);
+          V = Ext.getResult();
+        }
         auto FnBox = rt("matlab_mat_from_scalar", PtrTy, {F64});
         auto Box = LLVM::CallOp::create(B, Call->getLoc(), FnBox,
                                          ValueRange{V});
         CallOps.push_back(Box.getResult());
       } else {
+        /* f32 -> f64 widening at every 'f' slot reached via a
+         * single() / double() cast.  The runtime entry signature is
+         * always (double, ...), so we extend before the call. */
+        if (S->ArgKinds[i] == 'f' && mlir::isa<Float32Type>(V.getType())) {
+          auto Ext = LLVM::FPExtOp::create(B, Call->getLoc(), F64, V);
+          V = Ext.getResult();
+        }
         CallOps.push_back(V);
       }
     }
