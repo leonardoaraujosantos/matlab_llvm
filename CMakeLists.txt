@@ -195,6 +195,7 @@ if(MATLAB_LLVM_WITH_MLIR)
     lib/MLIR/Passes/LowerIO.cpp
     lib/MLIR/Passes/LowerPlot.cpp
     lib/MLIR/Passes/LowerParfor.cpp
+    lib/MLIR/Passes/ForwardParforCaptures.cpp
     lib/MLIR/Passes/LowerGpuKernels.cpp
     lib/MLIR/Passes/EmitMetal.cpp
     lib/MLIR/Passes/EmitCUDA.cpp
