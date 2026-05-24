@@ -21,6 +21,7 @@
 #include "mlir/IR/OperationSupport.h"
 #include "mlir/IR/Types.h"
 #include "mlir/IR/Verifier.h"
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/Support/raw_os_ostream.h"
@@ -363,6 +364,13 @@ private:
     mlir::Value ContinueSlot;
   };
   std::vector<LoopCtx> LoopStack;
+
+  /* GPU Coder pragma state.  Set by `coder.gpu.kernelfun()` (whole
+   * function) or `coder.gpu.kernel` (next for-loop only).  Consulted
+   * in the ForStmt arm to emit `matlab.gpu.kernel` instead of
+   * `matlab.for`.  Reset at lowerFunction entry. */
+  bool InGpuKernelfun     = false;
+  bool NextForIsGpuKernel = false;
 
   //--- location / type helpers
   mlir::Location loc(SourceLocation L) const;
@@ -1566,6 +1574,18 @@ void Lowerer::lowerFunction(const Function &F, mlir::ModuleOp M,
   mlir::OpBuilder::InsertionGuard G(B);
   B.setInsertionPointToEnd(M.getBody());
 
+  /* Save + reset GPU-pragma state.  Each function starts with a clean
+   * slate; the `coder.gpu.kernelfun()` marker inside its body re-enables
+   * the kernel lane.  Nested functions / methods don't inherit. */
+  bool SavedInGpuKernelfun = InGpuKernelfun;
+  bool SavedNextForIsGpuKernel = NextForIsGpuKernel;
+  InGpuKernelfun = false;
+  NextForIsGpuKernel = false;
+  auto RestoreGpuState = llvm::make_scope_exit([&]() {
+    InGpuKernelfun = SavedInGpuKernelfun;
+    NextForIsGpuKernel = SavedNextForIsGpuKernel;
+  });
+
   // Build parameter / result type vectors from Sema-inferred types.
   /* If the function's last input is `varargin`, that parameter
    * receives a matlab_cell pointer packed by the call site, so type
@@ -2089,6 +2109,37 @@ void Lowerer::lowerStmt(const Stmt &St) {
   case NodeKind::ExprStmt: {
     auto &E = static_cast<const ExprStmt &>(St);
     if (!E.E) return;
+    /* GPU Coder pragma intercept — `coder.gpu.kernelfun()` and
+     * `coder.gpu.kernel` are folded by Parser into NameExprs
+     * `coder_gpu_kernelfun` / `coder_gpu_kernel`.  They have no
+     * runtime semantics: the kernelfun-form flags every for-loop in
+     * the enclosing function as a GPU kernel, the kernel-form flags
+     * only the next for-loop.  Drop the marker call without emitting
+     * IR. */
+    if (auto *CI = dynamic_cast<const CallOrIndex *>(E.E)) {
+      if (auto *NE = dynamic_cast<const NameExpr *>(CI->Callee)) {
+        if (NE->Name == "coder_gpu_kernelfun") {
+          InGpuKernelfun = true;
+          return;
+        }
+        if (NE->Name == "coder_gpu_kernel") {
+          NextForIsGpuKernel = true;
+          return;
+        }
+      }
+    }
+    /* Bare-name forms (no parens) `coder.gpu.kernelfun` / `coder.gpu.kernel`
+     * also fold to NameExpr and reach here as ExprStmt(NameExpr). */
+    if (auto *NE = dynamic_cast<const NameExpr *>(E.E)) {
+      if (NE->Name == "coder_gpu_kernelfun") {
+        InGpuKernelfun = true;
+        return;
+      }
+      if (NE->Name == "coder_gpu_kernel") {
+        NextForIsGpuKernel = true;
+        return;
+      }
+    }
     /* Bare-name invocation of side-effect-only builtins like `who` /
      * `whos` / `clear`: MATLAB allows `who` at the prompt as a
      * command, parsed here as `ExprStmt(NameExpr("who"))`. Without
@@ -3287,9 +3338,21 @@ void Lowerer::lowerStmt(const Stmt &St) {
     llvm::SmallVector<mlir::Value, 2> ForOperands;
     ForOperands.push_back(Iter);
     if (ForHasBC) ForOperands.push_back(BSlotF);
+    /* Pick between `matlab.for`, `matlab.parfor`, and `matlab.gpu.kernel`.
+     * The GPU kernel form is chosen when a `coder.gpu.kernelfun()` is
+     * active on the enclosing function, or when an immediately preceding
+     * `coder.gpu.kernel` pragma flagged this loop.  Per-loop flag is
+     * one-shot: consumed here so a later for-loop in the same function
+     * (without the pragma) goes back to the CPU lane unless kernelfun
+     * is on. */
+    bool ThisIsGpuKernel = NextForIsGpuKernel || InGpuKernelfun;
+    NextForIsGpuKernel = false;  /* one-shot */
+    llvm::StringRef ForOpName;
+    if (ThisIsGpuKernel) ForOpName = "matlab.gpu.kernel";
+    else if (F.IsParfor) ForOpName = "matlab.parfor";
+    else ForOpName = "matlab.for";
     mlir::Operation *ForOp = emitUnregOp(
-        F.IsParfor ? "matlab.parfor" : "matlab.for",
-        ForOperands, {}, loc(F.Range), {VarAttr}, /*NumRegions=*/1);
+        ForOpName, ForOperands, {}, loc(F.Range), {VarAttr}, /*NumRegions=*/1);
     auto &Region = ForOp->getRegion(0);
     mlir::Block *Body = B.createBlock(&Region, Region.end(), {ElemTy}, {loc(F.Range)});
 

@@ -157,6 +157,16 @@ bool runLowerSeqLoops(mlir::ModuleOp M);
 /// later LLVM conversion surfaces them.
 unsigned runOutlineParfor(mlir::ModuleOp M);
 
+/// Outline each matlab.gpu.kernel body into a private llvm.func and replace
+/// the op with a call to `matlab_gpu_launch_kernel`.  Same shape as
+/// runOutlineParfor — clones the body, lifts captures + reductions, replaces
+/// the op with a runtime dispatch call.  The kernel-id attribute carries
+/// the index into a per-module emitted-source table that the target backend
+/// (Metal / CUDA / OpenCL) reads at JIT time.  When no GPU backend is
+/// loaded at runtime, `matlab_gpu_launch_kernel` falls back to a CPU
+/// sequential loop calling the outlined function directly.
+unsigned runOutlineGpuKernels(mlir::ModuleOp M);
+
 /// Convert the whole module down to the LLVM dialect and translate to an
 /// LLVM IR textual module. Returns empty string on failure.
 ///
