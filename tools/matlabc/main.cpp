@@ -875,6 +875,8 @@ int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id,
   // that returns a logical / boolean comparison. Idempotent.
   mlirgen::runRefineFuncSigs(M);
   mlirgen::runPromoteNoneParams(M);
+  for (int Iter = 0; Iter < 4; ++Iter)
+    if (!mlirgen::runPromoteBinopTypes(M)) break;
   mlirgen::runOutlineParfor(M);
   mlirgen::runOutlineGpuKernels(M);
   mlirgen::runLowerSeqLoops(M);
@@ -3704,6 +3706,8 @@ bool compileProgram() {
   // that returns a logical / boolean comparison. Idempotent.
   mlirgen::runRefineFuncSigs(M);
   mlirgen::runPromoteNoneParams(M);
+  for (int Iter = 0; Iter < 4; ++Iter)
+    if (!mlirgen::runPromoteBinopTypes(M)) break;
   mlirgen::runOutlineParfor(M);
   mlirgen::runOutlineGpuKernels(M);
   mlirgen::runLowerSeqLoops(M);
@@ -12473,6 +12477,8 @@ int main(int Argc, char **Argv) {
         // direct block argument (f64) into disp/fprintf rather than via an
         // outer slot that would still be `none`-typed at LowerIO time.
         mlirgen::runPromoteNoneParams(M);
+        for (int Iter = 0; Iter < 4; ++Iter)
+          if (!mlirgen::runPromoteBinopTypes(M)) break;
         mlirgen::runOutlineParfor(M);
         mlirgen::runOutlineGpuKernels(M);
         // Lower sequential matlab.for / matlab.while into scf.while so
@@ -12523,6 +12529,14 @@ int main(int Argc, char **Argv) {
           bool A = mlirgen::runLowerScalarsToArith(M);
           bool B = mlirgen::runLowerUserCalls(M);
           if (!A && !B) break;
+        }
+        /* Propagate the freshly-typed call results through binops +
+         * slot chains so a chained `gather(a .* x + b)` pattern routes
+         * correctly.  Iterate to fixpoint. */
+        for (int Iter = 0; Iter < 4; ++Iter) {
+          bool Pb = mlirgen::runPromoteBinopTypes(M);
+          mlirgen::runRefineSlotTypes(M);
+          if (!Pb) break;
         }
         mlirgen::runLowerTensorOps(M);
         // Second LowerFixedPoint sweep — picks up matlab.call_builtin

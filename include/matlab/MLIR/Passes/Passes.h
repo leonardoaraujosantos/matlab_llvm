@@ -196,6 +196,13 @@ std::string emitOpenCLKernels(mlir::ModuleOp M, llvm::StringRef Prefix);
 /// number of promoted args across the module.  Idempotent.
 unsigned runPromoteNoneParams(mlir::ModuleOp M);
 
+/// Propagate operand types through matlab.{add,sub,emul,ediv,matmul}
+/// results when one operand is ptr (a matrix).  Closes the body-typing
+/// gap that breaks `gather(a .* x + b)` chains inside function bodies.
+/// Returns true if any op was retyped (caller iterates until fixpoint).
+/// Companion to PromoteNoneParams + RefineSlotTypes.
+bool runPromoteBinopTypes(mlir::ModuleOp M);
+
 /// Convert the whole module down to the LLVM dialect and translate to an
 /// LLVM IR textual module. Returns empty string on failure.
 ///
