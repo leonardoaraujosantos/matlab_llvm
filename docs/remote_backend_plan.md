@@ -344,14 +344,3 @@ endpoint is drop-in for an OpenAI Base URL override.
 
 > First milestone to show on an iPad: Phases 0 → 1 → 3 — type MATLAB,
 > upload a CSV, get a plot back, download the result.
-
----
-
-## 15. Future: Learning platform (LMS)
-
-A planned data + learning layer on top of this backend — per-user data and
-files, **programming courses** (lessons + exercises), and per-user learning
-paths/scores, with code exercises **auto-graded by `matlabc`**. Decided:
-**PostgreSQL** (SQLAlchemy async + Alembic), full LMS incl. authoring, built on
-the CyberdyneAuth identity. Not started — full design, schema, API surface, and
-phased plan in [`docs/lms_roadmap.md`](lms_roadmap.md).
