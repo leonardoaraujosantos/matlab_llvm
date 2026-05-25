@@ -139,6 +139,7 @@ target_link_libraries(MatlabLex PUBLIC MatlabBasic)
 add_library(MatlabAST STATIC
   lib/AST/AST.cpp
   lib/AST/ASTDumper.cpp
+  lib/AST/Cloner.cpp
   lib/AST/Formatter.cpp
 )
 target_link_libraries(MatlabAST PUBLIC MatlabBasic)
@@ -172,6 +173,8 @@ add_library(MatlabSema STATIC
   lib/Sema/TypeInference.cpp
   lib/Sema/SemaDumper.cpp
   lib/Sema/RewriteDspSoForSv.cpp
+  lib/Sema/CallSiteAnalyzer.cpp
+  lib/Sema/Monomorphize.cpp
 )
 target_link_libraries(MatlabSema PUBLIC MatlabAST MatlabBasic)
 

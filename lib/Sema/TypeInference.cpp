@@ -267,7 +267,29 @@ void TypeInference::runFunction(Function &F) {
   // `fi(param, signed, WL, FL)` re-cast; param starts as
   // `fixedScalar(spec)` (or `fixedArray` when both the vector
   // and fi pieces of evidence are present).
-  for (Binding *B : F.ParamRefs) {
+  for (size_t PI = 0; PI < F.ParamRefs.size(); ++PI) {
+    Binding *B = F.ParamRefs[PI];
+    // Sema-time monomorphization (#38, Phase 5). When the
+    // monomorphizer has stamped a concrete arg type for this
+    // parameter, honor it as the param's initial env type instead of
+    // starting at Any. The stamp lives on the Function (not on the
+    // Binding) so it survives Resolver re-runs. Builtin-pre-pass
+    // evidence (ParamMaxIdx / ParamFiSpec) still wins when present —
+    // it represents stronger in-body usage facts that should refine
+    // even concrete stamps.
+    if (PI < F.ParamTypeStamps.size() && F.ParamTypeStamps[PI] &&
+        F.ParamTypeStamps[PI]->K != Type::Kind::Any) {
+      auto VIt = ParamMaxIdx.find(B);
+      auto FIt = ParamFiSpec.find(B);
+      bool HasEvidence =
+          (VIt != ParamMaxIdx.end() && VIt->second >= 1) ||
+          (FIt != ParamFiSpec.end());
+      if (!HasEvidence) {
+        E[B] = F.ParamTypeStamps[PI];
+        B->InferredType = F.ParamTypeStamps[PI];
+        continue;
+      }
+    }
     auto VIt = ParamMaxIdx.find(B);
     auto FIt = ParamFiSpec.find(B);
     bool HasVec = VIt != ParamMaxIdx.end() && VIt->second >= 1;
@@ -1586,6 +1608,13 @@ const Type *TypeInference::visitCallOrIndex(CallOrIndex &C, Env &Env) {
       if (N->Ref && N->Ref->Kind == BindingKind::Function && N->Ref->FuncDef) {
         // Visit arguments for side-effect annotation.
         for (Expr *A : C.Args) if (A) visit(*A, Env);
+        // Snapshot per-arg inferred types onto the Call node so the Sema-time
+        // monomorphizer (#38, Phase 1) can bucket call sites by signature
+        // without re-walking the type-inference environment.
+        C.ArgTypes.clear();
+        C.ArgTypes.reserve(C.Args.size());
+        for (Expr *A : C.Args)
+          C.ArgTypes.push_back(A ? A->Ty : nullptr);
         // Tier-6 — cross-function return-type propagation. When the
         // callee has been visited earlier in the TU walk (e.g. an
         // inner subsystem helper that was emitted before its

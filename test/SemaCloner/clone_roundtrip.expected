@@ -1,0 +1,205 @@
+TranslationUnit
+  Function head
+    Inputs: x[any]
+    Outputs: y[any]
+    Locals:
+    Block
+      IfStmt
+        Cond
+          BinOp > [logical]
+            Name x (param) [any]
+            IntLit 0 [double]
+        Then
+          Block
+            AssignStmt suppressed
+              LHS
+                Name y (output) [any]
+              RHS
+                BinOp .* [any]
+                  Name x (param) [any]
+                  Name x (param) [any]
+        ElseIf
+          BinOp == [logical]
+            Name x (param) [any]
+            IntLit 0 [double]
+          Block
+            AssignStmt suppressed
+              LHS
+                Name y (output) [double]
+              RHS
+                IntLit 1 [double]
+        Else
+          Block
+            AssignStmt suppressed
+              LHS
+                Name y (output) [any]
+              RHS
+                UnaryOp - [any]
+                  Name x (param) [any]
+  Function sweep
+    Inputs: n[any]
+    Outputs: y[double]
+    Locals: k[double]
+    Block
+      AssignStmt suppressed
+        LHS
+          Name y (output) [double]
+        RHS
+          IntLit 0 [double]
+      ForStmt k
+        Iter
+          Range [double:vec[-1]]
+            IntLit 1 [double]
+            Name n (param) [any]
+        Block
+          AssignStmt suppressed
+            LHS
+              Name y (output) [double]
+            RHS
+              BinOp + [double]
+                Name y (output) [double]
+                Name k (var) [double]
+      WhileStmt
+        Cond
+          BinOp < [logical]
+            Name y (output) [double]
+            IntLit 100 [double]
+        Block
+          AssignStmt suppressed
+            LHS
+              Name y (output) [double]
+            RHS
+              BinOp + [double]
+                Name y (output) [double]
+                IntLit 1 [double]
+  Function mix
+    Inputs: a[any] b[any]
+    Outputs: y[any]
+    Locals: M[double:?]
+    Block
+      AssignStmt suppressed
+        LHS
+          Name M (var) [double:?]
+        RHS
+          MatrixLit rows=2 [double:?]
+            Row 0
+              Name a (param) [any]
+              Name b (param) [any]
+            Row 1
+              Name b (param) [any]
+              Name a (param) [any]
+      AssignStmt suppressed
+        LHS
+          Name y (output) [any]
+        RHS
+          BinOp - [any]
+            BinOp + [any]
+              Index [double]
+                Name M (var) [double:?]
+                IntLit 1 [double]
+                IntLit 2 [double]
+              Postfix ' [any]
+                Name a (param) [any]
+            Name b (param) [any]
+  Function head__clone
+    Inputs: x[any]
+    Outputs: y[any]
+    Locals:
+    Block
+      IfStmt
+        Cond
+          BinOp > [logical]
+            Name x (param) [any]
+            IntLit 0 [double]
+        Then
+          Block
+            AssignStmt suppressed
+              LHS
+                Name y (output) [any]
+              RHS
+                BinOp .* [any]
+                  Name x (param) [any]
+                  Name x (param) [any]
+        ElseIf
+          BinOp == [logical]
+            Name x (param) [any]
+            IntLit 0 [double]
+          Block
+            AssignStmt suppressed
+              LHS
+                Name y (output) [double]
+              RHS
+                IntLit 1 [double]
+        Else
+          Block
+            AssignStmt suppressed
+              LHS
+                Name y (output) [any]
+              RHS
+                UnaryOp - [any]
+                  Name x (param) [any]
+  Function sweep__clone
+    Inputs: n[any]
+    Outputs: y[double]
+    Locals: k[double]
+    Block
+      AssignStmt suppressed
+        LHS
+          Name y (output) [double]
+        RHS
+          IntLit 0 [double]
+      ForStmt k
+        Iter
+          Range [double:vec[-1]]
+            IntLit 1 [double]
+            Name n (param) [any]
+        Block
+          AssignStmt suppressed
+            LHS
+              Name y (output) [double]
+            RHS
+              BinOp + [double]
+                Name y (output) [double]
+                Name k (var) [double]
+      WhileStmt
+        Cond
+          BinOp < [logical]
+            Name y (output) [double]
+            IntLit 100 [double]
+        Block
+          AssignStmt suppressed
+            LHS
+              Name y (output) [double]
+            RHS
+              BinOp + [double]
+                Name y (output) [double]
+                IntLit 1 [double]
+  Function mix__clone
+    Inputs: a[any] b[any]
+    Outputs: y[any]
+    Locals: M[double:?]
+    Block
+      AssignStmt suppressed
+        LHS
+          Name M (var) [double:?]
+        RHS
+          MatrixLit rows=2 [double:?]
+            Row 0
+              Name a (param) [any]
+              Name b (param) [any]
+            Row 1
+              Name b (param) [any]
+              Name a (param) [any]
+      AssignStmt suppressed
+        LHS
+          Name y (output) [any]
+        RHS
+          BinOp - [any]
+            BinOp + [any]
+              Index [double]
+                Name M (var) [double:?]
+                IntLit 1 [double]
+                IntLit 2 [double]
+              Postfix ' [any]
+                Name a (param) [any]
+            Name b (param) [any]

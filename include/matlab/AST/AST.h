@@ -220,6 +220,11 @@ public:
   Expr *Callee = nullptr;
   std::vector<Expr *> Args;
   CallKind Resolved = CallKind::Unresolved;
+  // Populated by TypeInference: one entry per Arg, holding the inferred Type
+  // at the call site. Used by the Sema-time monomorphizer (issue #38) to
+  // bucket per-callee call sites into concrete signature variants before
+  // AST→MLIR lowering. Empty until TypeInference has run.
+  std::vector<const Type *> ArgTypes;
   CallOrIndex() : Expr(NodeKind::CallOrIndex) {}
 };
 
@@ -420,6 +425,14 @@ public:
   Binding *Self = nullptr;           // this function's own binding
   std::vector<Binding *> ParamRefs;  // one per Inputs, in order
   std::vector<Binding *> OutputRefs; // one per Outputs, in order
+
+  // Populated by the Sema-time monomorphizer (#38, Phase 5). One entry
+  // per Inputs slot, holding the concrete arg Type observed at this
+  // function's call sites after specialisation. Persists across Sema
+  // re-runs (unlike the per-Binding InferredType, which Resolver
+  // recreates each pass) so TypeInference can refine the body under
+  // the specialised arg types. Empty until the monomorphizer has run.
+  std::vector<const Type *> ParamTypeStamps;
 
   Function() : Node(NodeKind::Function) {}
 };

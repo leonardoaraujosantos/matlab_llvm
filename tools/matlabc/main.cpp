@@ -73,6 +73,9 @@
 #endif
 #include "matlab/Sema/Resolver.h"
 #include "matlab/Sema/RewriteDspSoForSv.h"
+#include "matlab/AST/Cloner.h"
+#include "matlab/Sema/CallSiteAnalyzer.h"
+#include "matlab/Sema/Monomorphize.h"
 #include "matlab/Sema/SemaDumper.h"
 #include "matlab/Sema/Scope.h"
 #include "matlab/Sema/Type.h"
@@ -169,7 +172,9 @@ static void stampSubsystemPortPragmas(
 
 namespace {
 struct Options {
-  enum class Mode { DumpTokens, DumpAST, EmitSema, EmitMIR, EmitMLIR,
+  enum class Mode { DumpTokens, DumpAST, EmitSema, DumpCallSites,
+                    TestAstClone, TestMonomorphize,
+                    EmitMIR, EmitMLIR,
                     EmitLLVM, EmitC, EmitCpp, EmitPython, EmitTypeScript,
                     EmitFiReport, EmitSystemVerilog, CheckSynthesizable,
                     EmitHardwareReport, EmitCocotb,
@@ -342,7 +347,8 @@ struct Options {
 
 int usage(const char *Prog) {
   std::cerr << "usage: " << Prog
-            << " [-dump-tokens | -dump-ast | -emit-sema | -emit-mir |\n"
+            << " [-dump-tokens | -dump-ast | -emit-sema |\n"
+               "             -dump-call-sites | -emit-mir |\n"
                "             -emit-mlir | -emit-llvm | -emit-c | -emit-cpp |\n"
                "             -emit-python | -emit-typescript |\n"
                "             -emit-systemverilog | -check-synthesizable |\n"
@@ -361,6 +367,25 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
     if (A == "-dump-tokens") Opts.Mode = Options::Mode::DumpTokens;
     else if (A == "-dump-ast") Opts.Mode = Options::Mode::DumpAST;
     else if (A == "-emit-sema") Opts.Mode = Options::Mode::EmitSema;
+    /* Phase 1 of the Sema-time monomorphization epic (issue #38): dump the
+     * per-callee call-site signature buckets produced by CallSiteAnalyzer.
+     * Pure analysis — no IR is emitted. Used by test/Sema goldens to gate
+     * the analyzer's bucketing logic before Phase 3 starts consuming it. */
+    else if (A == "-dump-call-sites") Opts.Mode = Options::Mode::DumpCallSites;
+    /* Phase 2 of #38: round-trip the AST cloner. After the parse, each
+     * top-level function is cloned with a `__clone` suffix and the clone
+     * is inserted next to the original in the TU. Then Sema + dumpSema
+     * run. If the cloner is correct, original and clone show structurally
+     * identical Sema state (apart from the renamed function). */
+    else if (A == "-test-ast-clone") Opts.Mode = Options::Mode::TestAstClone;
+    /* Phases 3+4 of #38: run the monomorphization driver to fixpoint.
+     * For each user function called with >1 distinct signatures, the
+     * pass deep-clones the body once per non-canonical signature and
+     * rewrites the corresponding call sites to dispatch to the clone.
+     * Phase 4 closes the loop by re-running Sema after each round so
+     * call sites inside cloned bodies can be discovered + retargeted.
+     * Mode outputs the post-mono Sema dump + an iteration summary. */
+    else if (A == "-test-monomorphize") Opts.Mode = Options::Mode::TestMonomorphize;
     else if (A == "-emit-mir") Opts.Mode = Options::Mode::EmitMIR;
     else if (A == "-emit-mlir") Opts.Mode = Options::Mode::EmitMLIR;
     else if (A == "-emit-llvm") Opts.Mode = Options::Mode::EmitLLVM;
@@ -11919,6 +11944,23 @@ int main(int Argc, char **Argv) {
     return Diag.hasErrors() ? 1 : 0;
   }
 
+  // Phase 2 of #38 — AST cloner round-trip. Inserts a deep-cloned copy of
+  // each top-level function (suffix `__clone`) into the TU before Sema
+  // runs, so Resolver + TypeInference see both originals and clones in
+  // the same TU. If the cloner is correct, both halves resolve and infer
+  // types independently and the dump shows structurally identical bindings.
+  if (Opts.Mode == Options::Mode::TestAstClone && TU) {
+    std::vector<Function *> Clones;
+    Clones.reserve(TU->Functions.size());
+    for (Function *F : TU->Functions) {
+      if (!F) continue;
+      std::string NewName = std::string(F->Name) + "__clone";
+      Clones.push_back(cloneFunction(Ctx, *F, NewName));
+    }
+    for (Function *C : Clones)
+      TU->Functions.push_back(C);
+  }
+
   // Sema
   SemaContext Sema;
   TypeContext TC;
@@ -11931,6 +11973,87 @@ int main(int Argc, char **Argv) {
     if (TU) dumpSema(std::cout, *TU);
     Diag.printAll();
     return Diag.hasErrors() ? 1 : 0;
+  }
+
+  if (Opts.Mode == Options::Mode::DumpCallSites) {
+    // Phase 1 of #38: surface the per-callee signature buckets discovered
+    // by TypeInference. No further pipeline stages run.
+    if (TU) {
+      CallSiteAnalysis Sites = analyzeCallSites(*TU);
+      std::cout << Sites.dump();
+    }
+    Diag.printAll();
+    return Diag.hasErrors() ? 1 : 0;
+  }
+
+  if (Opts.Mode == Options::Mode::TestAstClone) {
+    // Phase 2 of #38: clones were appended before Sema ran. Now dump the
+    // augmented TU via the standard SemaDumper — golden compares original
+    // vs `<name>__clone` bindings/types for structural equivalence.
+    if (TU) dumpSema(std::cout, *TU);
+    Diag.printAll();
+    return Diag.hasErrors() ? 1 : 0;
+  }
+
+  if (Opts.Mode == Options::Mode::TestMonomorphize) {
+    // Phases 3+4 of #38: run the monomorphizer to fixpoint. We re-use the
+    // already-instantiated Sema / TC objects across iterations — Resolver
+    // and TypeInference are idempotent on a re-run (Scope::declare returns
+    // existing bindings, Refs/Ty pointers are overwritten by the new
+    // walk). The callback below is invoked between iterations to refresh
+    // ArgTypes on cloned bodies before the next analyze step.
+    if (TU) {
+      auto runSemaPass = [&]() {
+        Resolver R2(Sema, TC, Diag);
+        R2.resolve(*TU);
+        TypeInference Inf2(Sema, TC, Diag);
+        // Two passes — see comment on the env-gated path below.
+        Inf2.run(*TU);
+        Inf2.run(*TU);
+      };
+      MonomorphizeStats S =
+          runMonomorphize(*TU, Ctx, runSemaPass, /*MaxIters=*/8);
+      dumpSema(std::cout, *TU);
+      std::cout << "monomorphize: iterations=" << S.Iterations
+                << " clones=" << S.ClonesCreated
+                << " rewrites=" << S.CallSitesRewritten
+                << " converged=" << (S.Converged ? "true" : "false")
+                << "\n";
+    }
+    Diag.printAll();
+    return Diag.hasErrors() ? 1 : 0;
+  }
+
+  // Phase 5 of #38 — Sema-time monomorphization, enabled via
+  // MATLAB_LLVM_SEMA_MONO=1. Runs the clone-and-stamp fixpoint loop
+  // so each user Function in the TU ends up with concrete arg types
+  // for its surviving call-site signature. The AST→MLIR lowerer then
+  // picks up the concrete types naturally, replacing the late-pipeline
+  // PromoteNoneParams + runMonomorphiseUserCalls workarounds (Phase 6
+  // removes those once this lane is green).
+  //
+  // Sema dumps and diagnostic modes above (`-emit-sema`,
+  // `-dump-call-sites`, `-test-ast-clone`, `-test-monomorphize`) have
+  // already returned by this point so they see the pre-mono Sema state.
+  // Test-monomorphize runs the same driver as part of its own flow.
+  if (TU) {
+    if (const char *Env = std::getenv("MATLAB_LLVM_SEMA_MONO");
+        Env && *Env && std::string_view(Env) != "0") {
+      auto runSemaPass = [&]() {
+        Resolver R2(Sema, TC, Diag);
+        R2.resolve(*TU);
+        TypeInference Inf2(Sema, TC, Diag);
+        // Two passes: TypeInference visits the script before the
+        // functions, so the script's call sites cannot see refined
+        // OutputRefs[i]->InferredType on the first pass. The second
+        // pass propagates the just-refined function output types into
+        // script-level expressions (and into other functions' callers
+        // when the call graph has forward references).
+        Inf2.run(*TU);
+        Inf2.run(*TU);
+      };
+      (void)runMonomorphize(*TU, Ctx, runSemaPass, /*MaxIters=*/8);
+    }
   }
 
   if (Opts.Mode == Options::Mode::EmitFiReport) {
