@@ -7002,6 +7002,20 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         auto *AN0 = dynamic_cast<const NameExpr *>(C.Args[0]);
         const ClassDef *Cls0 = (AN0 && AN0->Ref) ? AN0->Ref->PinnedClass
                                                   : nullptr;
+        /* Recognise inline constructor calls (e.g. `c2d(ss(A,B,C,D),
+         * Ts, 'zoh')`) so the short-form dispatch fires the same as
+         * for a class-pinned binding. Without this, callers have to
+         * spell the binding twice — once to assign, once to use —
+         * which breaks user-facing examples that compose model
+         * construction with conversion in a single expression. */
+        if (!Cls0) {
+          if (auto *AC0 = dynamic_cast<const CallOrIndex *>(C.Args[0])) {
+            if (auto *CFN = dynamic_cast<const NameExpr *>(AC0->Callee)) {
+              if (CFN->Ref && CFN->Ref->Kind == BindingKind::Class)
+                Cls0 = CFN->Ref->ClassDef;
+            }
+          }
+        }
         const llvm::StringRef Cn0 = Cls0
             ? llvm::StringRef(Cls0->Name.data(), Cls0->Name.size())
             : llvm::StringRef();
@@ -7915,23 +7929,36 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                              PtrTy);
         }
 
-        /* §3.2 c2d(sys, Ts) — discretise an ss model. Result is a
-         * fresh ss instance with (Ad, Bd, sys.C, sys.D) where
-         *   Ad = matlab_c2d_Ad(A, B, Ts),
-         *   Bd = matlab_c2d_Bd(A, B, Ts).
-         * Default discretisation method is ZOH. Result slot is
-         * class-pinned by Resolver.cpp's pinnedOfRhs extension. */
-        if (Nm == "c2d" && Cls0 && Cn0 == "ss" && C.Args.size() == 2) {
+        /* §3.2 c2d(sys, Ts [, method]) — discretise an ss model.
+         * Result is a fresh ss instance with (Ad, Bd, sys.C, sys.D)
+         * where the (Ad, Bd) pair is picked per method:
+         *   'zoh' (default) — matlab_c2d_Ad / matlab_c2d_Bd (expm-based)
+         *   'tustin'        — matlab_c2d_tustin_Ad / _Bd (bilinear)
+         * The 3-arg form with method='zoh' matches the 2-arg form so
+         * `c2d(sys, Ts)` and `c2d(sys, Ts, 'zoh')` produce identical IR.
+         * Result slot is class-pinned by Resolver.cpp's pinnedOfRhs. */
+        {
+          const CharLiteral *C2dMethod =
+              (Nm == "c2d" && C.Args.size() == 3)
+                  ? dynamic_cast<const CharLiteral *>(C.Args[2])
+                  : nullptr;
+          bool C2dArityOk = C.Args.size() == 2 ||
+              (C.Args.size() == 3 && C2dMethod &&
+               (C2dMethod->Value == "zoh" || C2dMethod->Value == "tustin"));
+          if (Nm == "c2d" && Cls0 && Cn0 == "ss" && C2dArityOk) {
+          bool IsTustin = C2dMethod && C2dMethod->Value == "tustin";
           mlir::Value Obj = loadObj(C.Args[0]);
           mlir::Value Ts  = lowerExpr(*C.Args[1]);
           mlir::Value AVal = getProp(Obj, "A");
           mlir::Value BVal = getProp(Obj, "B");
           mlir::NamedAttribute CalAd(
               mlir::StringAttr::get(&MCtx, "callee"),
-              mlir::StringAttr::get(&MCtx, "matlab_c2d_Ad"));
+              mlir::StringAttr::get(&MCtx,
+                  IsTustin ? "matlab_c2d_tustin_Ad" : "matlab_c2d_Ad"));
           mlir::NamedAttribute CalBd(
               mlir::StringAttr::get(&MCtx, "callee"),
-              mlir::StringAttr::get(&MCtx, "matlab_c2d_Bd"));
+              mlir::StringAttr::get(&MCtx,
+                  IsTustin ? "matlab_c2d_tustin_Bd" : "matlab_c2d_Bd"));
           mlir::Value Ad = emitUnreg("matlab.call_builtin",
                                        {AVal, BVal, Ts}, PtrTy, L, {CalAd});
           mlir::Value Bd = emitUnreg("matlab.call_builtin",
@@ -7948,6 +7975,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           return emitUnreg("matlab.call",
                            {Ad, Bd, CVal, DVal, Ts},
                            PtrTy, L, {CtorCal});
+          }
         }
 
         /* MPC Tier-1 — `mpcmove(obj, st, ym, r)` and `sim(obj, T, r)`
