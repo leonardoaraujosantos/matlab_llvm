@@ -324,7 +324,7 @@ bool runLowerNarginNargout(ModuleOp M) {
  * have collapsed tensor types to !llvm.ptr — the only real dispatch
  * distinction remaining is f64 vs ptr, with f64 covering scalar calls
  * and ptr covering any matrix shape. */
-bool runMonomorphiseUserCalls(ModuleOp M, bool SkipClassMethods) {
+bool runMonomorphiseUserCalls(ModuleOp M) {
   MLIRContext *Ctx = M.getContext();
   auto I64 = IntegerType::get(Ctx, 64);
   /* Gather matlab.call sites that remain (untyped-path). */
@@ -368,16 +368,8 @@ bool runMonomorphiseUserCalls(ModuleOp M, bool SkipClassMethods) {
      * (tensor, tensor) signature locks in a sig that doesn't match
      * post-boxing ptr operands and leaves the cloned constructor
      * with `matlab.call_builtin matlab_obj_set_f64` ops carrying
-     * tensor-typed values that no LowerTensorOps dispatch handles.
-     * Non-class user functions keep the existing per-tensor-shape
-     * cloning so `sq([1 2 3])` and `sq(5)` get separate clones with
-     * correctly-typed arithmetic bodies. */
+     * tensor-typed values that no LowerTensorOps dispatch handles. */
     bool IsClassMethod = Fn->hasAttr("matlab.class_name");
-    /* Early-pipeline invocation (issue #36) skips class methods entirely
-     * — they have ctor/method/property-write relationships that are
-     * delicate and tested against the existing late-pipeline mono
-     * placement.  Leave them to the late pass. */
-    if (SkipClassMethods && IsClassMethod) continue;
     for (Operation *C : S) {
       unsigned N = C->getNumOperands();
       if (N > DeclArity) continue; /* too many args — user error, skip */
@@ -751,6 +743,20 @@ bool runLowerUserCalls(ModuleOp M) {
     unsigned N = Call->getNumOperands();
     unsigned M_ = FnTy.getNumInputs();
     if (N > M_) continue; /* too many args — skip */
+
+    /* Don't pad missing trailing args until the monomorphiser has had
+     * a chance to clone the callee with a matching matlab.nargin_value.
+     * Without this guard, an `add2(5)` call to a 2-arg helper would be
+     * converted to `func.call @add2(5, 0.0)` here, defeating any
+     * `if nargin == 2 ... end` branching inside the body. After late
+     * mono creates `add2__s0` with matlab.nargin_value=1, the same
+     * call (now retargeted) clears this check because FnUA == N. */
+    if (N < M_) {
+      int64_t FnUA = (int64_t)M_;
+      if (auto FA = Fn->getAttrOfType<IntegerAttr>("matlab.nargin_value"))
+        FnUA = FA.getValue().getSExtValue();
+      if (FnUA != (int64_t)N) continue;
+    }
 
     /* Skip this call if the user-visible arity (from the frontend's
      * variadic-packing attribute) doesn't match the callee's

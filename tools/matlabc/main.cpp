@@ -12024,21 +12024,23 @@ int main(int Argc, char **Argv) {
     return Diag.hasErrors() ? 1 : 0;
   }
 
-  // Phase 5 of #38 — Sema-time monomorphization, enabled via
-  // MATLAB_LLVM_SEMA_MONO=1. Runs the clone-and-stamp fixpoint loop
-  // so each user Function in the TU ends up with concrete arg types
-  // for its surviving call-site signature. The AST→MLIR lowerer then
-  // picks up the concrete types naturally, replacing the late-pipeline
-  // PromoteNoneParams + runMonomorphiseUserCalls workarounds (Phase 6
-  // removes those once this lane is green).
+  // Phase 5/6 of #38 — Sema-time monomorphization. Runs the
+  // clone-and-stamp fixpoint loop so each user Function in the TU
+  // ends up with concrete arg types for its surviving call-site
+  // signature. The AST→MLIR lowerer then picks up the concrete types
+  // naturally, replacing the late-pipeline PromoteNoneParams +
+  // runMonomorphiseUserCalls workarounds. ON by default; set
+  // MATLAB_LLVM_SEMA_MONO=0 to disable for bisecting downstream issues.
   //
   // Sema dumps and diagnostic modes above (`-emit-sema`,
   // `-dump-call-sites`, `-test-ast-clone`, `-test-monomorphize`) have
   // already returned by this point so they see the pre-mono Sema state.
   // Test-monomorphize runs the same driver as part of its own flow.
   if (TU) {
-    if (const char *Env = std::getenv("MATLAB_LLVM_SEMA_MONO");
-        Env && *Env && std::string_view(Env) != "0") {
+    bool MonoEnabled = true;
+    if (const char *Env = std::getenv("MATLAB_LLVM_SEMA_MONO"))
+      MonoEnabled = !(*Env == '\0' || std::string_view(Env) == "0");
+    if (MonoEnabled) {
       auto runSemaPass = [&]() {
         Resolver R2(Sema, TC, Diag);
         R2.resolve(*TU);
@@ -12717,14 +12719,24 @@ int main(int Argc, char **Argv) {
           // Re-run LowerTensorOps so disp(ptr) routes to matlab_disp_mat.
           mlirgen::runLowerTensorOps(M);
         }
-        // Multi-callsite monomorphisation: if a user function is called
-        // with both scalar and matrix args (sq(5) + sq([1 2 3])) we
-        // clone it per concrete signature so each specialisation
-        // retypes independently. Runs AFTER LowerTensorOps when
-        // operand types have collapsed to f64 / !llvm.ptr — matrix
-        // shapes share the ptr sig. If any clones were made, iterate
-        // the user-call + tensor-op fixpoint once more so the clones
-        // get their signatures refined and their bodies retyped.
+        // Multi-callsite monomorphisation. Phase 5 of #38 moved
+        // scalar-polymorphic helpers to a Sema-time clone (each call
+        // site already dispatches to its own per-type specialisation
+        // by this point), but the late pass is still load-bearing for:
+        //   - matrix-typed call sites (Sema-mono defers ptr-shape sigs
+        //     until LowerTensorOps materialises tensor literals);
+        //   - arity-varying callees (nargin per-arity clones, e.g.
+        //     `add2(5, 7)` + `add2(5)` against the same body);
+        //   - varargin / varargout (per-arity bucket clones the cell
+        //     pack/unpack shape).
+        // Sema-mono's growPlan skips these classes explicitly, so the
+        // pass below sees a strictly smaller workload than before
+        // Phase 5 landed (most run-tests fixtures pass through this
+        // call without any cloning) but it's NOT redundant — dropping
+        // it regresses fn_polymorphic_invariant + fn_nargin_callsite +
+        // varargout_basic. The Phase 6 cleanup that retires this call
+        // entirely needs the matrix-ptr and arity-varying classes
+        // absorbed Sema-side first; documented as a follow-up.
         if (mlirgen::runMonomorphiseUserCalls(M)) {
           for (int Iter = 0; Iter < 4; ++Iter) {
             bool A = mlirgen::runLowerScalarsToArith(M);

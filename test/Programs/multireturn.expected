@@ -5,9 +5,9 @@ module {
     %0:2 = "matlab.call"(%cst, %cst_0) {callee = "sumdiff", matlab.name = "y", nargout = 2 : i64} : (f64, f64) -> (f64, f64)
     return
   }
-  func.func @sumdiff(%arg0: none {matlab.name = "a"}, %arg1: none {matlab.name = "b"}) -> (none {matlab.name = "s"}, none {matlab.name = "d"}) {
-    %0 = "matlab.add"(%arg0, %arg1) {matlab.name = "s"} : (none, none) -> none
-    %1 = "matlab.sub"(%arg0, %arg1) {matlab.name = "d"} : (none, none) -> none
-    return %0, %1 : none, none
+  func.func @sumdiff(%arg0: f64 {matlab.name = "a"}, %arg1: f64 {matlab.name = "b"}) -> (f64 {matlab.name = "s"}, f64 {matlab.name = "d"}) {
+    %0 = arith.addf %arg0, %arg1 : f64
+    %1 = arith.subf %arg0, %arg1 : f64
+    return %0, %1 : f64, f64
   }
 }
