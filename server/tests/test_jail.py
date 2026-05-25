@@ -76,3 +76,52 @@ def test_jail_unknown_backend_falls_back(monkeypatch):
     monkeypatch.setattr(jail.settings, "sandbox_backend", "bogus")
     argv = ["m"]
     assert jail.wrap(argv, "/ws") == argv
+
+
+def test_probe_none_is_short_circuit(monkeypatch):
+    monkeypatch.setattr(jail.settings, "sandbox_backend", "none")
+    works, reason = jail.probe()
+    assert works is False
+    assert reason is None
+    assert jail.probe_reason() is None
+
+
+def test_probe_tool_missing_is_short_circuit(monkeypatch):
+    monkeypatch.setattr(jail.settings, "sandbox_backend", "bwrap")
+    monkeypatch.setattr(jail.shutil, "which", lambda _t: None)
+    works, reason = jail.probe()
+    assert works is False
+    assert reason is None  # silent fallback, not an error condition
+
+
+def test_probe_success(monkeypatch, tmp_path):
+    monkeypatch.setattr(jail.settings, "sandbox_backend", "bwrap")
+    monkeypatch.setattr(jail.shutil, "which", lambda t: f"/usr/bin/{t}")
+    monkeypatch.setattr(jail.settings.__class__, "workspace_root_path", property(lambda self: tmp_path))
+
+    class _CP:
+        returncode = 0
+        stderr = b""
+
+    monkeypatch.setattr(jail.subprocess, "run", lambda *a, **k: _CP())
+    works, reason = jail.probe()
+    assert works is True
+    assert reason is None
+    assert jail.probe_reason() is None
+
+
+def test_probe_detects_userns_block(monkeypatch, tmp_path):
+    monkeypatch.setattr(jail.settings, "sandbox_backend", "bwrap")
+    monkeypatch.setattr(jail.shutil, "which", lambda t: f"/usr/bin/{t}")
+    monkeypatch.setattr(jail.settings.__class__, "workspace_root_path", property(lambda self: tmp_path))
+
+    class _CP:
+        returncode = 1
+        stderr = b"bwrap: No permissions to create new namespace, likely because the kernel does not allow non-privileged user namespaces.\n"
+
+    monkeypatch.setattr(jail.subprocess, "run", lambda *a, **k: _CP())
+    works, reason = jail.probe()
+    assert works is False
+    assert reason is not None
+    assert "userns" in reason.lower() or "user namespaces" in reason.lower()
+    assert jail.probe_reason() == reason
