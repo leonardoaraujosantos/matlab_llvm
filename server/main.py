@@ -79,10 +79,27 @@ def create_app() -> FastAPI:
 
     @app.get("/healthz", tags=["meta"])
     async def healthz() -> dict:
+        import shutil as _sh
+
+        sb = settings.sandbox_backend
+        # tier-2 is "active" when configured AND the tool is on PATH AND it
+        # is one of the known backends. Reflects what jail.wrap() will do.
+        from jail import _TOOL  # local import to avoid circulars
+
+        sandbox_active = (
+            sb != "none"
+            and sb in _TOOL
+            and _sh.which(_TOOL[sb]) is not None
+        )
         return {
             "status": "ok",
             "matlabc": str(settings.matlabc_path),
             "matlabc_present": settings.matlabc_path.exists(),
+            "sandbox": {
+                "backend": sb,
+                "active": sandbox_active,
+                "allow_net": settings.sandbox_allow_net,
+            },
         }
 
     return app

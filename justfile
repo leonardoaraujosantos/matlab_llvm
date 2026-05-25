@@ -541,3 +541,18 @@ backend-cov:
 # Uses build/matlabc when present (real compiler), else a fake stub.
 backend-itest:
     cd server && uv run --extra dev pytest integration -q
+
+# Same suite, against an already-deployed backend (e.g. the Coolify URL).
+# Auth is resolved in this order: BACKEND_TOKEN env (static / pre-minted) →
+# CYBERDYNE_USER + CYBERDYNE_PASS (logs in to CYBERDYNE_AUTH_URL, default
+# https://auth.backend.coolify.cyberdynecorp.ai) → none.
+# Usage:
+#   just backend-test-remote URL=https://matlab-backend.coolify.cyberdynecorp.ai \
+#       USER=leotest@test.com PASS='kugmet-5zozki-nuwJef'
+#   just backend-test-remote URL=https://… TOKEN='ey…'
+backend-test-remote URL TOKEN="" USER="" PASS="" AUTH="https://auth.backend.coolify.cyberdynecorp.ai" EXPECT_SANDBOX="":
+    cd server && BACKEND_URL="{{URL}}" BACKEND_TOKEN="{{TOKEN}}" \
+        CYBERDYNE_USER="{{USER}}" CYBERDYNE_PASS="{{PASS}}" \
+        CYBERDYNE_AUTH_URL="{{AUTH}}" \
+        EXPECT_SANDBOX="{{EXPECT_SANDBOX}}" \
+        uv run --extra dev pytest integration -v
