@@ -244,9 +244,26 @@ run_one() {
 
 # --- Sizes per kernel ----------------------------------------------------
 # All kernels at N=100, 300, 1000. Pure Python skipped at N=1000 (see above).
-KERNELS=( matmul solve lu qr chol inv eig svd mandelbrot gpu_gemm )
-SIZES=( 100 300 1000 )
-IMPLS=( matlab_llvm numpy pure_python )
+# Tier 7 (acceleration_roadmap §8) — let CI subset the (kernel × size ×
+# impl) matrix by env var.  The full local sweep stays the default;
+# `BENCH_KERNELS="matmul mandelbrot" BENCH_SIZES=300 BENCH_IMPLS="matlab_llvm numpy" driver.sh ci`
+# is what the perf-bench CI lane runs (skips pure-python entirely and
+# gpu_gemm on Linux, where Metal isn't available).
+if [[ -n "${BENCH_KERNELS:-}" ]]; then
+  IFS=' ' read -r -a KERNELS <<< "$BENCH_KERNELS"
+else
+  KERNELS=( matmul solve lu qr chol inv eig svd mandelbrot gpu_gemm )
+fi
+if [[ -n "${BENCH_SIZES:-}" ]]; then
+  IFS=' ' read -r -a SIZES <<< "$BENCH_SIZES"
+else
+  SIZES=( 100 300 1000 )
+fi
+if [[ -n "${BENCH_IMPLS:-}" ]]; then
+  IFS=' ' read -r -a IMPLS <<< "$BENCH_IMPLS"
+else
+  IMPLS=( matlab_llvm numpy pure_python )
+fi
 
 # --- Driver loop ----------------------------------------------------------
 {

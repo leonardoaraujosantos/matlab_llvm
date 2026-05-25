@@ -202,6 +202,133 @@ jobs:
         run: ccache -s
 
   # -------------------------------------------------------------------------
+  # PERF-BENCH — Tier 7 of docs/acceleration_roadmap.md.  Builds matlabc
+  # on the PR HEAD and on the merge-base with main, runs the LAPACK +
+  # Mandelbrot bench harness on both, and fails the lane if any kernel
+  # regressed by more than the threshold (default 30%, set wide because
+  # shared-runner variance on GitHub Actions is ~10-15%).
+  #
+  # PR label `perf-allowed` downgrades the gate to informational — useful
+  # when an intentional algorithmic change moves the numbers.  The full
+  # comparison table lands on the workflow run's Summary tab regardless.
+  # -------------------------------------------------------------------------
+  perf-bench:
+    name: Perf bench (regression gate)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # We need both PR HEAD and the merge-base, so fetch enough
+          # history.  `fetch-depth: 0` is heavier than necessary but
+          # GitHub Actions can't tell us the exact distance to main
+          # ahead of time on PRs from forks.
+          fetch-depth: 0
+
+      - name: Set up LLVM 22 + build deps
+        uses: ./.github/actions/setup-llvm
+
+      - name: Install bench deps (numpy)
+        run: python3 -m pip install --user numpy
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-perf-${{ github.sha }}
+          restore-keys: |
+            ccache-perf-
+            ccache-smoke-
+            ccache-
+
+      # ---- HEAD side: bench the PR HEAD ----
+      - name: Configure (HEAD)
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DMATLAB_LLVM_WITH_MLIR=ON \
+            -DMATLAB_LLVM_WITH_PLOT=ON \
+            -DLLVM_DIR="$LLVM_DIR" \
+            -DMLIR_DIR="$MLIR_DIR"
+
+      - name: Build matlabc (HEAD)
+        run: cmake --build build --target matlabc -j
+
+      - name: Bench HEAD
+        run: bash scripts/run_perf_bench.sh head
+
+      - name: Stash HEAD result
+        run: cp bench/lapack/results/perf_head.json /tmp/perf_head.json
+
+      # ---- BASE side: check out the merge-base and re-bench ----
+      - name: Capture PR HEAD SHA + merge-base
+        id: refs
+        run: |
+          head_sha="$(git rev-parse HEAD)"
+          base_sha="$(git merge-base origin/${{ github.base_ref }} HEAD)"
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+          echo "PR HEAD:     $head_sha"
+          echo "Merge-base:  $base_sha"
+
+      - name: Checkout merge-base (preserving bench harness from HEAD)
+        run: |
+          set -eux
+          # Drop untracked build artifacts from the HEAD bench run so
+          # the base checkout is clean.
+          rm -rf bench/lapack/results
+          git checkout ${{ steps.refs.outputs.base_sha }}
+          # Restore the bench harness (scripts + bench/lapack) from the
+          # PR HEAD on top of the base-runtime checkout, so a PR that
+          # touches the harness itself still benches old runtime via
+          # the new harness.  Directory pathspecs are evaluated by git
+          # (not the shell) so they work even when the base lacks
+          # files the HEAD added.
+          git checkout ${{ steps.refs.outputs.head_sha }} -- \
+            scripts/run_perf_bench.sh \
+            bench/lapack/
+
+      - name: Build matlabc (base)
+        run: cmake --build build --target matlabc -j
+
+      - name: Bench base
+        run: bash scripts/run_perf_bench.sh base
+
+      - name: Stash base result
+        run: cp bench/lapack/results/perf_base.json /tmp/perf_base.json
+
+      # ---- Compare ----
+      - name: Check regression
+        run: |
+          ALLOW=""
+          if [[ "${{ contains(github.event.pull_request.labels.*.name, 'perf-allowed') }}" == "true" ]]; then
+            ALLOW="--allow-regression"
+            echo "PR label 'perf-allowed' present — gate is informational only." >&2
+          fi
+          python3 bench/lapack/check_regression.py \
+            --base /tmp/perf_base.json \
+            --head /tmp/perf_head.json \
+            --threshold 0.30 \
+            $ALLOW
+
+      - name: Upload bench results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-bench-results
+          path: |
+            /tmp/perf_head.json
+            /tmp/perf_base.json
+          if-no-files-found: warn
+
+      - name: ccache stats
+        if: always()
+        run: ccache -s
+
+  # -------------------------------------------------------------------------
   # NIGHTLY — strict-emit lanes + cocotb / verilator hardware co-simulation
   # (~60 min wall time).  Scheduled at 04:00 UTC.  Runnable on demand via
   # workflow_dispatch and on PRs labelled `nightly-ci`.
