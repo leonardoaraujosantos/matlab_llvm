@@ -132,7 +132,14 @@ bool runLowerUserCalls(mlir::ModuleOp M);
 /// (f64 vs ptr). Also splits by call-site arity so functions called
 /// with fewer args than declared get a per-arity clone with the
 /// matching `nargin` value. Re-runs LowerUserCalls to retype the clones.
-bool runMonomorphiseUserCalls(mlir::ModuleOp M);
+/// Bucket polymorphic helpers per concrete arg-type signature and
+/// clone the func.func for each.  When `SkipClassMethods` is true,
+/// functions tagged with `matlab.class_name` (classdef ctors +
+/// methods) are left alone — used by the early-pipeline invocation
+/// (issue #36) where the late pipeline's mono pass will handle them
+/// after their ptr operands have settled.
+bool runMonomorphiseUserCalls(mlir::ModuleOp M,
+                              bool SkipClassMethods = false);
 
 /// Lower matlab.nargin / matlab.nargout placeholder ops to
 /// arith.constant inside each enclosing func.func. The value comes

@@ -48,29 +48,56 @@ bool isMatlabOp(Operation *Op, StringRef Name) {
   return Op && Op->getName().getStringRef() == Name;
 }
 
-/* Extract (start, step, end) from a matlab.range producer. Returns
- * false if the op isn't a range or the step can't be synthesised. */
+/* Extract (start, step, end) from a matlab.range producer.  Returns
+ * false if the op isn't a range or the step can't be synthesised.
+ *
+ * Accepts two shapes:
+ *   (1) The MATLAB-dialect op `matlab.range(start, end)` or
+ *       `matlab.range(start, step, end)` with `has_step` attr.  This
+ *       is the frontend-emitted form before LowerTensorOps runs.
+ *   (2) The post-LowerTensorOps form `llvm.call @matlab_range(start,
+ *       step, end) : (f64, f64, f64) -> !llvm.ptr`.  Issue #36 moves
+ *       LowerTensorOps earlier in the pipeline; the matlab.range op
+ *       is consumed before LowerSeqLoops runs, so the iter operand of
+ *       a surviving matlab.for is the lowered runtime call. */
 bool extractRange(Value V, Value &Start, Value &Step, Value &End,
                   OpBuilder &B, Location Loc) {
   Operation *Def = V.getDefiningOp();
-  if (!isMatlabOp(Def, "matlab.range")) return false;
+  if (!Def) return false;
   auto F64 = B.getF64Type();
-  unsigned N = Def->getNumOperands();
-  auto HasStepAttr = Def->getAttrOfType<BoolAttr>("has_step");
-  bool HasStep = HasStepAttr && HasStepAttr.getValue();
-  if (HasStep && N == 3) {
-    Start = Def->getOperand(0);
-    Step  = Def->getOperand(1);
-    End   = Def->getOperand(2);
-  } else if (!HasStep && N == 2) {
-    Start = Def->getOperand(0);
-    End   = Def->getOperand(1);
-    Step  = arith::ConstantOp::create(B, Loc, B.getF64FloatAttr(1.0));
+
+  if (isMatlabOp(Def, "matlab.range")) {
+    unsigned N = Def->getNumOperands();
+    auto HasStepAttr = Def->getAttrOfType<BoolAttr>("has_step");
+    bool HasStep = HasStepAttr && HasStepAttr.getValue();
+    if (HasStep && N == 3) {
+      Start = Def->getOperand(0);
+      Step  = Def->getOperand(1);
+      End   = Def->getOperand(2);
+    } else if (!HasStep && N == 2) {
+      Start = Def->getOperand(0);
+      End   = Def->getOperand(1);
+      Step  = arith::ConstantOp::create(B, Loc, B.getF64FloatAttr(1.0));
+    } else {
+      return false;
+    }
+  } else if (auto Call = dyn_cast<LLVM::CallOp>(Def)) {
+    /* Post-LowerTensorOps form: matlab_range(start, step, end) -> ptr.
+     * LowerTensorOps always emits the 3-arg variant (step=1.0 when
+     * the source had no step) so we don't need a 2-arg case. */
+    auto Callee = Call.getCallee();
+    if (!Callee || *Callee != "matlab_range") return false;
+    if (Call.getNumOperands() != 3) return false;
+    Start = Call.getOperand(0);
+    Step  = Call.getOperand(1);
+    End   = Call.getOperand(2);
   } else {
     return false;
   }
+
   /* All three values must already be f64 (they are, because the frontend
-   * emits matlab.range with f64 operands for numeric ranges). */
+   * emits matlab.range with f64 operands and LowerTensorOps preserves
+   * the type through the runtime call). */
   if (Start.getType() != F64 || Step.getType() != F64 ||
       End.getType() != F64) return false;
   return true;
@@ -110,24 +137,57 @@ bool lowerForOp(Operation *ForOp) {
    * iteration (block arg becomes a column slice) is a follow-on. */
   Value Start, Step, End;
   bool MatrixIter = false;
-  int64_t MatrixIterN = 0;
+  bool MatrixIterPtr = false;          /* iter is matlab_mat * (post-LT) */
   Type MatrixIterElemTy;
+  auto PtrTy = LLVM::LLVMPointerType::get(B.getContext());
   if (!extractRange(Iter, Start, Step, End, B, L)) {
-    auto T = mlir::dyn_cast<RankedTensorType>(Iter.getType());
-    if (!T || !T.hasStaticShape() || T.getShape().size() != 1)
+    /* Two matrix-iter shapes:
+     *   (a) Pre-LowerTensorOps: `tensor<NxT>` with static shape.  N
+     *       is known at compile time; emit matlab.subscript(M, IV)
+     *       and let LowerTensorOps convert it on its later sweep.
+     *   (b) Post-LowerTensorOps (issue #36 ordering): `!llvm.ptr`
+     *       (matlab_mat *).  N is unknown statically — call
+     *       matlab_size_dim(M, 2.0) at runtime for the bound, and
+     *       per-iteration call matlab_subscript1_s(M, IV) → f64. */
+    auto IterTy = Iter.getType();
+    if (auto T = mlir::dyn_cast<RankedTensorType>(IterTy)) {
+      if (!T.hasStaticShape() || T.getShape().size() != 1)
+        return false;
+      MatrixIterElemTy = T.getElementType();
+      if (BB.getArgument(0).getType() != MatrixIterElemTy) return false;
+      int64_t N = T.getShape()[0];
+      if (N <= 0) return false;
+      MatrixIter = true;
+      Start = arith::ConstantOp::create(B, L, B.getF64FloatAttr(1.0));
+      End   = arith::ConstantOp::create(
+          B, L, B.getF64FloatAttr((double)N));
+      Step  = arith::ConstantOp::create(B, L, B.getF64FloatAttr(1.0));
+    } else if (IterTy == PtrTy) {
+      /* Body arg must be f64 — for ptr we read scalar elements via
+       * the runtime subscript helper which returns f64. */
+      if (BB.getArgument(0).getType() != F64) return false;
+      MatrixIterElemTy = F64;
+      MatrixIter = true;
+      MatrixIterPtr = true;
+      /* End = matlab_size_dim(M, 2.0) — number of columns. */
+      auto Mod = ForOp->getParentOfType<ModuleOp>();
+      auto FnSym = Mod.lookupSymbol<LLVM::LLVMFuncOp>("matlab_size_dim");
+      if (!FnSym) {
+        OpBuilder::InsertionGuard G(B);
+        B.setInsertionPointToStart(Mod.getBody());
+        auto Ty = LLVM::LLVMFunctionType::get(F64, {PtrTy, F64});
+        FnSym = LLVM::LLVMFuncOp::create(B, ForOp->getLoc(),
+                                          "matlab_size_dim", Ty);
+        FnSym.setLinkage(LLVM::Linkage::External);
+      }
+      Value Two = arith::ConstantOp::create(B, L, B.getF64FloatAttr(2.0));
+      auto Call = LLVM::CallOp::create(B, L, FnSym, ValueRange{Iter, Two});
+      End = Call.getResult();
+      Start = arith::ConstantOp::create(B, L, B.getF64FloatAttr(1.0));
+      Step  = arith::ConstantOp::create(B, L, B.getF64FloatAttr(1.0));
+    } else {
       return false;
-    MatrixIterElemTy = T.getElementType();
-    /* Only support scalar element types — block arg must match. */
-    if (BB.getArgument(0).getType() != MatrixIterElemTy) return false;
-    MatrixIterN = T.getShape()[0];
-    if (MatrixIterN <= 0) return false;
-    MatrixIter = true;
-    /* Drive the inner scf.while with a 1-based f64 index matching
-     * MATLAB's `1..N` convention so subscript(M, IV) is correct. */
-    Start = arith::ConstantOp::create(B, L, B.getF64FloatAttr(1.0));
-    End   = arith::ConstantOp::create(
-        B, L, B.getF64FloatAttr((double)MatrixIterN));
-    Step  = arith::ConstantOp::create(B, L, B.getF64FloatAttr(1.0));
+    }
   }
   /* Remember the matlab.range producer so we can erase it below if its
    * only user was this matlab.for. Leaving it in place would cause
@@ -185,7 +245,22 @@ bool lowerForOp(Operation *ForOp) {
      * MATLAB dialect; LowerTensorOps converts it to a runtime call on
      * a later pass once M's tensor type has been lowered to ptr. */
     IRMapping Map;
-    if (MatrixIter) {
+    if (MatrixIter && MatrixIterPtr) {
+      /* Post-LowerTensorOps ptr arm: emit a runtime subscript call. */
+      auto Mod = ForOp->getParentOfType<ModuleOp>();
+      auto SubFn =
+          Mod.lookupSymbol<LLVM::LLVMFuncOp>("matlab_subscript1_s");
+      if (!SubFn) {
+        OpBuilder::InsertionGuard G(B);
+        B.setInsertionPointToStart(Mod.getBody());
+        auto Ty = LLVM::LLVMFunctionType::get(F64, {PtrTy, F64});
+        SubFn = LLVM::LLVMFuncOp::create(B, ForOp->getLoc(),
+                                          "matlab_subscript1_s", Ty);
+        SubFn.setLinkage(LLVM::Linkage::External);
+      }
+      auto Call = LLVM::CallOp::create(B, L, SubFn, ValueRange{Iter, IV});
+      Map.map(BB.getArgument(0), Call.getResult());
+    } else if (MatrixIter) {
       OperationState SS(L, "matlab.subscript");
       SS.addOperands(ValueRange{Iter, IV});
       SS.addTypes(TypeRange{MatrixIterElemTy});
