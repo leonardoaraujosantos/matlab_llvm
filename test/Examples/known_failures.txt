@@ -4,10 +4,8 @@
 # Out-of-scope dirs (hdl/ mflow/ mflowlink/ stateflow/) are SKIPped, not listed.
 # Regenerated: 2026-05-24T16:41:55Z
 
-control/c2d_zoh_demo.m                             # EMIT
-control/kalman_tracker.m                           # EMIT
-control/lqr_double_integrator.m                    # EMIT
-control/tf_basic.m                                 # EMIT
+control/c2d_zoh_demo.m                             # EMIT  (needs c2d/d2c on tf + tfdata 2-return, see #27 follow-up)
+control/tf_basic.m                                 # EMIT  (needs tf operator-method body-type refinement, see #27 follow-up)
 pde/clamped_plate_pressure.m                       # EMIT
 pde/poisson_disk.m                                 # EMIT
 pde/tuningfork_modal.m                             # EMIT
