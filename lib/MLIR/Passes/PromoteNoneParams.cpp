@@ -223,7 +223,24 @@ unsigned runPromoteNoneParams(mlir::ModuleOp M) {
     if (!AnyNone)
       return;
 
-    /* Skip functions that have in-module callers.  Promoting a polymorphic
+    /* === Polymorphic-helper guard (issue #21 workaround) ===
+     *
+     * THIS IS A KNOWN BAND-AID.  The "real fix" — per-call-site
+     * monomorphization happening BEFORE this pass — was attempted
+     * and found to require a deeper refactor of LowerTensorOps into
+     * composable phases (see issue #36 + the comment thread there).
+     *
+     * INVARIANT THIS GUARD MAINTAINS: a func.func with multiple
+     * in-module callers and at least one `none` arg stays `none`-typed
+     * after this pass runs, so the late `runMonomorphiseUserCalls`
+     * can clone the body per concrete signature seen at call sites.
+     *
+     * CANARY: test/Run/fn_polymorphic_invariant.m exercises four
+     * shape combinations of the same callee.  If the guard ever stops
+     * firing prematurely, that fixture is the first to break in the
+     * per-PR run-tests lane.
+     *
+     * Skip functions that have in-module callers.  Promoting a polymorphic
      * helper (e.g. `function y = sq(x); y = x.*x; end` called both as
      * `sq(5)` and `sq([1 2 3])`) to f64 would monomorphize it and break
      * the matrix call sites.  Sema's call-site arg-flow already refines

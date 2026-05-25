@@ -324,7 +324,7 @@ bool runLowerNarginNargout(ModuleOp M) {
  * have collapsed tensor types to !llvm.ptr — the only real dispatch
  * distinction remaining is f64 vs ptr, with f64 covering scalar calls
  * and ptr covering any matrix shape. */
-bool runMonomorphiseUserCalls(ModuleOp M) {
+bool runMonomorphiseUserCalls(ModuleOp M, bool SkipClassMethods) {
   MLIRContext *Ctx = M.getContext();
   auto I64 = IntegerType::get(Ctx, 64);
   /* Gather matlab.call sites that remain (untyped-path). */
@@ -373,6 +373,11 @@ bool runMonomorphiseUserCalls(ModuleOp M) {
      * cloning so `sq([1 2 3])` and `sq(5)` get separate clones with
      * correctly-typed arithmetic bodies. */
     bool IsClassMethod = Fn->hasAttr("matlab.class_name");
+    /* Early-pipeline invocation (issue #36) skips class methods entirely
+     * — they have ctor/method/property-write relationships that are
+     * delicate and tested against the existing late-pipeline mono
+     * placement.  Leave them to the late pass. */
+    if (SkipClassMethods && IsClassMethod) continue;
     for (Operation *C : S) {
       unsigned N = C->getNumOperands();
       if (N > DeclArity) continue; /* too many args — user error, skip */

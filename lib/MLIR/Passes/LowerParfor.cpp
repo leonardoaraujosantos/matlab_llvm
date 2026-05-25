@@ -78,25 +78,39 @@ bool outlineParfor(Operation *Parfor, unsigned Id) {
   auto PtrTy = LLVM::LLVMPointerType::get(Ctx);
   auto VoidTy = LLVM::LLVMVoidType::get(Ctx);
 
-  // Extract (start, step, end) from the matlab.range feeding the parfor.
+  // Extract (start, step, end) from the iter producer feeding the parfor.
+  // Two shapes (see LowerSeqLoops::extractRange for details — same story):
+  //   (a) matlab.range(start[, step], end) — pre-LowerTensorOps form.
+  //   (b) llvm.call @matlab_range(start, step, end) -> ptr — the form
+  //       that survives when LowerTensorOps ran earlier (issue #36).
   if (Parfor->getNumOperands() != 1) return false;
   Value Iter = Parfor->getOperand(0);
   Operation *Range = Iter.getDefiningOp();
-  if (!isMatlabOp(Range, "matlab.range")) {
-    std::cerr << "parfor: iter operand is not a matlab.range — skipping\n";
-    return false;
-  }
-
   Value Start, Step, End;
-  if (Range->getNumOperands() == 2) {
-    Start = Range->getOperand(0);
-    End = Range->getOperand(1);
-    Step = nullptr;
-  } else if (Range->getNumOperands() == 3) {
-    Start = Range->getOperand(0);
-    Step = Range->getOperand(1);
-    End = Range->getOperand(2);
+  if (isMatlabOp(Range, "matlab.range")) {
+    if (Range->getNumOperands() == 2) {
+      Start = Range->getOperand(0);
+      End = Range->getOperand(1);
+      Step = nullptr;
+    } else if (Range->getNumOperands() == 3) {
+      Start = Range->getOperand(0);
+      Step = Range->getOperand(1);
+      End = Range->getOperand(2);
+    } else {
+      return false;
+    }
+  } else if (auto Call = dyn_cast<LLVM::CallOp>(Range)) {
+    auto Callee = Call.getCallee();
+    if (!Callee || *Callee != "matlab_range") {
+      std::cerr << "parfor: iter operand is not a matlab.range — skipping\n";
+      return false;
+    }
+    if (Call.getNumOperands() != 3) return false;
+    Start = Call.getOperand(0);
+    Step  = Call.getOperand(1);
+    End   = Call.getOperand(2);
   } else {
+    std::cerr << "parfor: iter operand is not a matlab.range — skipping\n";
     return false;
   }
   if (Start.getType() != F64 || End.getType() != F64 ||
