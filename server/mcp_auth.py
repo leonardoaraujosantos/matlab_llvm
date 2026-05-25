@@ -7,8 +7,7 @@ verified locally (no DB, no per-request call to CyberdyneAuth):
     <base64url(payload)>.<base64url(hmac_sha256(secret, payload))>
 
 The payload carries ``sub`` (identity id), ``email``, ``typ=mcp``, ``iat``,
-``exp``. Revocation is by expiry or secret rotation (a denylist arrives with
-the DB layer — see docs/lms_roadmap.md).
+``exp``. Revocation is by expiry or secret rotation.
 """
 
 from __future__ import annotations
