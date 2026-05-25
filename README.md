@@ -167,6 +167,31 @@ optimiser handles register allocation, loop unrolling, and the
 data-dependent escape branch tightly enough that matlab_llvm wins
 even against NumPy's vectorised mask-update approach.
 
+### Story 3 — GPU library replacement (Phase 4, Metal MPS)
+
+When the active backend is Metal — `MATLAB_GPU_TARGET=metal` — the
+`gpucoder.gemm(A, B)` dispatcher routes through
+`MPSMatrixMultiplication` instead of Accelerate. On an M2 Max the
+Metal lane finishes a 1000×1000 gemm in **2.7 ms — 3× faster than
+Accelerate (8.07 ms) and 3.3× faster than NumPy (8.9 ms)**:
+
+| N | matlab_llvm (Accelerate) | matlab_llvm (Metal MPS) | NumPy | Metal vs Accelerate | Metal vs NumPy |
+|---|---|---|---|---|---|
+| 100 | 0.04 ms | 0.05 ms *(below threshold; CPU fallback)* | 0.01 ms | — | — |
+| 300 | 0.87 ms | 0.49 ms | 0.16 ms | **1.78×** | 0.32× |
+| 1000 | 8.07 ms | **2.73 ms** | 8.90 ms | **2.96×** | **3.26×** |
+
+The dispatcher falls back to the host CPU lane below `N ≥ 128` (the
+fp64 → fp32 host-side conversion + Metal command-buffer setup
+dominates the kernel for small sizes). Above the threshold the GPU
+wins decisively — and crucially, the call site is unchanged: same
+fp64 matlab_mat \* matlab_mat surface, the fp64↔fp32 round-trip is
+hidden in `runtime/gpu/metal/runtime_gpu_metal.mm`.
+
+Full architectural argument and per-kernel coverage in
+[`docs/lapack_roadmap.md`](docs/lapack_roadmap.md) §4. The CUDA /
+cuBLAS analogue and AMD ROCm / clBLAS are documented follow-ons.
+
 ### Reproducing
 
 ```bash
@@ -174,17 +199,19 @@ even against NumPy's vectorised mask-update approach.
 # build still works):
 WITH_BLAS=0 bash bench/lapack/driver.sh baseline_pre_lapack
 
-# With LAPACK acceleration on:
-WITH_BLAS=1 bash bench/lapack/driver.sh phase3
+# With LAPACK acceleration on (Tier 4 SIMD + Phase 4 Metal MPS):
+bash bench/lapack/driver.sh tier4_phase4
 
 # Render the before/after Markdown table:
-python3 bench/lapack/report.py baseline_pre_lapack phase3
+python3 bench/lapack/report.py baseline_pre_lapack tier4_phase4
 ```
 
 The bench harness pins single-threaded BLAS so per-implementation
 comparisons are fair (NumPy on macOS uses Accelerate, on Linux uses
 OpenBLAS; both spawn pools that would otherwise skew the matlab_llvm
-comparison).
+comparison). The Metal lane is auto-on when the build is on macOS
+and `MATLAB_GPU_TARGET=metal` is set at run time; otherwise
+`gpucoder.gemm` is identical to `matlab_matmul_mm`.
 
 ### The cross-emit invariant
 

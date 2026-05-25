@@ -34,6 +34,20 @@ fi
 CXX="${CXX:-${CLANG}++}"
 CXXSTD="${CXXSTD:--std=c++20}"
 
+# Tier 4 (acceleration_roadmap §5) — let clang autovec to the host's
+# native vector ISA (NEON / AVX2 / AVX-512 / Apple AMX).  Trade-off:
+# the resulting binary is not portable across CPU families.  This is
+# fine for benches because they're disposable.  Toggle off via
+# `MARCH_NATIVE=0` to capture the pre-Tier-4 baseline.
+MARCH_NATIVE="${MARCH_NATIVE:-1}"
+MARCH_FLAG=""
+if [[ "$MARCH_NATIVE" == "1" ]]; then
+  MARCH_FLAG="-march=native"
+  echo "SIMD tuning: -march=native" >&2
+else
+  echo "SIMD tuning: OFF (generic target)" >&2
+fi
+
 # Pin BLAS to single-threaded so per-implementation comparisons are
 # fair (NumPy on macOS uses Accelerate, NumPy on Linux uses OpenBLAS;
 # both spawn pools that would skew the comparison vs. our matlab_llvm
@@ -89,16 +103,56 @@ else
   echo "BLAS dispatch: OFF (naive O(N^3) only)" >&2
 fi
 
+# Phase 4 of lapack_roadmap §4 — Metal MPS dispatch.  Adds the Metal
+# Obj-C++ TU to the runtime so `gpucoder.gemm(A,B)` lights up.
+# Auto-on for macOS; off elsewhere.  Disable with `WITH_METAL=0`.
+WITH_METAL="${WITH_METAL:-}"
+METAL_SRCS=()
+METAL_LINK=""
+if [[ -z "$WITH_METAL" ]]; then
+  if [[ "$(uname -s)" == "Darwin" ]]; then WITH_METAL=1; else WITH_METAL=0; fi
+fi
+if [[ "$WITH_METAL" == "1" && "$(uname -s)" == "Darwin" ]]; then
+  METAL_SRCS=( "$ROOT/runtime/gpu/metal/runtime_gpu_metal.mm" )
+  METAL_LINK="-framework Metal -framework MetalPerformanceShaders -framework Foundation"
+  # Apple's newer Obj-C `msgsend selector stubs` are linker-resolved
+  # by the system clang's libobjc; Homebrew clang's libtool can't find
+  # them.  Force the link step through `/usr/bin/clang++` when Metal
+  # is in the link line.
+  if [[ -x /usr/bin/clang++ ]]; then
+    LINK_CXX=/usr/bin/clang++
+  else
+    LINK_CXX="$CXX"
+  fi
+  echo "Metal GPU lane: ON ($METAL_LINK; linker=$LINK_CXX)" >&2
+else
+  LINK_CXX="$CXX"
+  echo "Metal GPU lane: OFF" >&2
+fi
+
 echo "Precompiling runtime ($(uname -s)/$(uname -m), $(${CXX} --version | head -1))..." >&2
 RUNTIME_OBJS=()
 for src in "${RUNTIME_SRCS[@]}"; do
   obj="$OBJDIR/$(basename "${src%.cpp}").o"
-  if ! "$CXX" $CXXSTD -O3 $BLAS_DEFINE -I"$ROOT/runtime" -c "$src" -o "$obj" 2>"$OBJDIR/cc.err"; then
+  if ! "$CXX" $CXXSTD -O3 $MARCH_FLAG $BLAS_DEFINE -I"$ROOT/runtime" -c "$src" -o "$obj" 2>"$OBJDIR/cc.err"; then
     echo "FATAL: failed to compile runtime TU $src" >&2
     cat "$OBJDIR/cc.err" >&2
     exit 2
   fi
   RUNTIME_OBJS+=( "$obj" )
+done
+# Metal Obj-C++ TU — same -O3 + -march=native, but compiled via the
+# system clang (Apple SDK) so the new objc_msgSend selector-stub ABI
+# lines up with Apple's libobjc at link time.
+for msrc in "${METAL_SRCS[@]}"; do
+  mobj="$OBJDIR/$(basename "${msrc%.mm}").o"
+  MM_CXX="${LINK_CXX:-/usr/bin/clang++}"
+  if ! "$MM_CXX" $CXXSTD -O3 $MARCH_FLAG -I"$ROOT/runtime" -c "$msrc" -o "$mobj" 2>"$OBJDIR/cc.err"; then
+    echo "FATAL: failed to compile metal TU $msrc" >&2
+    cat "$OBJDIR/cc.err" >&2
+    exit 2
+  fi
+  RUNTIME_OBJS+=( "$mobj" )
 done
 
 # --- Build the matlabc binary for one .m file ---
@@ -116,8 +170,8 @@ build_matlabc_bench() {
     rm -f "$tmpm" "$tmpll" "$tmpll.err"
     return 1
   fi
-  if ! "$CXX" $CXXSTD -O3 -I"$ROOT/runtime" \
-        "$tmpll" "${RUNTIME_OBJS[@]}" $BLAS_LINK -o "$outbin" 2>"$OBJDIR/link.err"; then
+  if ! "$LINK_CXX" $CXXSTD -O3 $MARCH_FLAG -I"$ROOT/runtime" \
+        "$tmpll" "${RUNTIME_OBJS[@]}" $BLAS_LINK $METAL_LINK -o "$outbin" 2>"$OBJDIR/link.err"; then
     echo "FAIL build: clang link $mfile (N=$N)" >&2
     sed 's/^/  /' "$OBJDIR/link.err" >&2 | head -8
     rm -f "$tmpm" "$tmpll" "$tmpll.err"
@@ -139,6 +193,12 @@ run_one() {
     matlab_llvm)
       local mfile="$BDIR/bench_${kernel}.m"
       [[ -e "$mfile" ]] || { echo "skip"; return; }
+      # gpu_gemm bench needs the active backend env var; for the
+      # Metal lane we pass MATLAB_GPU_TARGET=metal at run time.
+      local extra_env=""
+      if [[ "$kernel" == "gpu_gemm" && "$WITH_METAL" == "1" ]]; then
+        extra_env="MATLAB_GPU_TARGET=metal"
+      fi
       local bin
       bin="$(mktemp -t mlc-bench.XXXXXX)"
       if ! build_matlabc_bench "$mfile" "$N" "$bin" >&2; then
@@ -147,11 +207,13 @@ run_one() {
         return
       fi
       local out
-      out="$("$bin" 2>&1)"
+      out="$(env $extra_env "$bin" 2>&1)"
       rm -f "$bin"
       echo "$out" | extract_best
       ;;
     numpy)
+      # gpu_gemm has no NumPy equivalent (NumPy is CPU); skip.
+      [[ "$kernel" == "gpu_gemm" ]] && { echo "skip"; return; }
       export BENCH_KERNEL="$kernel"
       python3 "$BDIR/bench_numpy.py" 2>&1 | extract_best
       ;;
@@ -182,7 +244,7 @@ run_one() {
 
 # --- Sizes per kernel ----------------------------------------------------
 # All kernels at N=100, 300, 1000. Pure Python skipped at N=1000 (see above).
-KERNELS=( matmul solve lu qr chol inv eig svd mandelbrot )
+KERNELS=( matmul solve lu qr chol inv eig svd mandelbrot gpu_gemm )
 SIZES=( 100 300 1000 )
 IMPLS=( matlab_llvm numpy pure_python )
 

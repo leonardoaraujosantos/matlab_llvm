@@ -487,12 +487,20 @@ matlab_mat *matlab_matmul_mm(matlab_mat *A, matlab_mat *B) {
         }
     }
 #endif
+    /* Tier 4 (acceleration_roadmap §5) — hoist the operand data
+     * pointers into __restrict__ locals so the back-end knows
+     * A/B/C are disjoint (C is freshly allocated above) and can
+     * vectorise the inner reduction.  Without this, the opaque-
+     * pointer-via-struct view blocks NEON / AVX autovec. */
+    const double * __restrict__ Adata = A->data;
+    const double * __restrict__ Bdata = B->data;
+    double       * __restrict__ Cdata = C->data;
     for (int64_t i = 0; i < m; ++i) {
         for (int64_t j = 0; j < n; ++j) {
             double s = 0.0;
             for (int64_t t = 0; t < k; ++t)
-                s += A->data[i * k + t] * B->data[t * n + j];
-            C->data[i * n + j] = s;
+                s += Adata[i * k + t] * Bdata[t * n + j];
+            Cdata[i * n + j] = s;
         }
     }
     return C;
@@ -6438,6 +6446,12 @@ static matlab_mat_c *to_mat_c(void *p) {
  *
  * `epow` is only defined for real inputs at runtime; it keeps the
  * old macro. */
+/* Tier 4: hoist the freshly-allocated output buffer into a __restrict__
+ * local pointer so clang's autovec sees that writes through Cd don't
+ * alias reads through A/B (the macro `op` reads via A->data / B->data).
+ * Inputs intentionally aren't __restrict__ — `A .+ A` (Ap == Bp) is
+ * legal MATLAB and read-only aliasing between the input operands is
+ * fine. */
 #define BINARY_MM(name, op) \
     matlab_mat *matlab_##name##_mm(void *Ap, void *Bp) { \
         if (mat_is_complex(Ap) || mat_is_complex(Bp)) \
@@ -6448,14 +6462,16 @@ static matlab_mat_c *to_mat_c(void *p) {
             matlab_mat3 *C3 = mat3_alloc(A3->rows, A3->cols, A3->depth); \
             matlab_mat Ah = {A3->data, tot, 1}, Bh = {B3->data, tot, 1}, Ch = {C3->data, tot, 1}; \
             matlab_mat *A = &Ah, *B = &Bh, *C = &Ch; \
-            for (int64_t k = 0; k < tot; ++k) C->data[k] = (op); \
+            double * __restrict__ Cd = C->data; \
+            for (int64_t k = 0; k < tot; ++k) Cd[k] = (op); \
             return (matlab_mat *)C3; \
         } \
         matlab_mat *A = (matlab_mat *)Ap; \
         matlab_mat *B = (matlab_mat *)Bp; \
         int64_t m = A->rows, n = A->cols; \
         matlab_mat *C = mat_alloc(m, n); \
-        for (int64_t k = 0; k < m * n; ++k) C->data[k] = (op); \
+        double * __restrict__ Cd = C->data; \
+        for (int64_t k = 0; k < m * n; ++k) Cd[k] = (op); \
         return C; \
     }
 
@@ -6474,13 +6490,15 @@ static matlab_mat_c *to_mat_c(void *p) {
             matlab_mat3 *C3 = mat3_alloc(A3->rows, A3->cols, A3->depth); \
             matlab_mat Ah = {A3->data, tot, 1}, Ch = {C3->data, tot, 1}; \
             matlab_mat *A = &Ah, *C = &Ch; \
-            for (int64_t k = 0; k < tot; ++k) C->data[k] = (op); \
+            double * __restrict__ Cd = C->data; \
+            for (int64_t k = 0; k < tot; ++k) Cd[k] = (op); \
             return (matlab_mat *)C3; \
         } \
         matlab_mat *A = (matlab_mat *)Ap; \
         int64_t m = A->rows, n = A->cols; \
         matlab_mat *C = mat_alloc(m, n); \
-        for (int64_t k = 0; k < m * n; ++k) C->data[k] = (op); \
+        double * __restrict__ Cd = C->data; \
+        for (int64_t k = 0; k < m * n; ++k) Cd[k] = (op); \
         return C; \
     }
 
@@ -6495,13 +6513,15 @@ static matlab_mat_c *to_mat_c(void *p) {
             matlab_mat3 *C3 = mat3_alloc(A3->rows, A3->cols, A3->depth); \
             matlab_mat Ah = {A3->data, tot, 1}, Ch = {C3->data, tot, 1}; \
             matlab_mat *A = &Ah, *C = &Ch; \
-            for (int64_t k = 0; k < tot; ++k) C->data[k] = (op); \
+            double * __restrict__ Cd = C->data; \
+            for (int64_t k = 0; k < tot; ++k) Cd[k] = (op); \
             return (matlab_mat *)C3; \
         } \
         matlab_mat *A = (matlab_mat *)Ap; \
         int64_t m = A->rows, n = A->cols; \
         matlab_mat *C = mat_alloc(m, n); \
-        for (int64_t k = 0; k < m * n; ++k) C->data[k] = (op); \
+        double * __restrict__ Cd = C->data; \
+        for (int64_t k = 0; k < m * n; ++k) Cd[k] = (op); \
         return C; \
     }
 
@@ -6515,8 +6535,9 @@ BINARY_MM(ediv, A->data[k] / B->data[k])
 matlab_mat *matlab_epow_mm(matlab_mat *A, matlab_mat *B) {
     int64_t m = A->rows, n = A->cols;
     matlab_mat *C = mat_alloc(m, n);
+    double * __restrict__ Cd = C->data;
     for (int64_t k = 0; k < m * n; ++k)
-        C->data[k] = pow(A->data[k], B->data[k]);
+        Cd[k] = pow(A->data[k], B->data[k]);
     return C;
 }
 

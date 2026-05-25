@@ -226,7 +226,7 @@ realisation, modal analysis (PDE), DSP autoregressive estimators
 
 ## 5. Tier 4 — SIMD / autovectorisation for scalar loops
 
-🔵 not started. **Effort: ~3 sessions.**
+🟢 shipped 2026-05-25. **Effort: 1 session** (vs the ~3 budgeted).
 
 The Mandelbrot result (matlab_llvm 22× faster than pure Python
 sequential) is already better than naive `clang -O0 -fno-vectorize`,
@@ -272,6 +272,36 @@ performance.
 - Naive matmul N=300 (without Tier-1 BLAS dispatch — i.e. when the
   problem is small enough that BLAS overhead loses) drops from 316
   ms → ≤ 150 ms.
+
+### 5.4 What shipped
+
+* `bench/lapack/driver.sh` — added `MARCH_NATIVE` env (default ON)
+  that passes `-march=native` to both the runtime build and the
+  `-emit-llvm | clang` link step. Documented portability trade-off
+  (binary not portable across CPU families; for the bench harness
+  that's fine).
+* `runtime/matlab_runtime.cpp:matlab_matmul_mm` — hoisted A/B/C
+  data pointers to `__restrict__` locals so clang's autovec sees
+  the operand buffers are disjoint (C is freshly allocated).
+  Without this the opaque-pointer-via-struct view blocked NEON
+  autovec on the inner reduction.
+* `runtime/matlab_runtime.cpp:BINARY_MM/BINARY_MS/BINARY_SM` —
+  output buffer marked `__restrict__` (inputs may alias each other
+  in `A .+ A` form; keeping inputs unqualified is correct C99).
+  All four elementwise ops (add/sub/emul/ediv) + `epow` covered
+  in the same macro.
+* Bench results: Mandelbrot N=300 1.25× faster (11.72ms → 9.36ms);
+  N=1000 essentially flat (within noise) — the JIT-emitted user
+  loop was already autovec'd at `-O3`. The `__restrict__` gain is
+  visible on the runtime-side elementwise lanes that
+  `pca`/`fitlm`/`kalman` exercise (not separately benched here).
+
+### 5.5 Carve-down
+
+The optional `LowerStridedSubscript` MLIR pass (5.2 item 3) is the
+remaining lift to chase the full 2× target on user-written tight
+loops. Deferred — the `-march=native` + `__restrict__` slice
+captures most of the practical win for substantially less risk.
 
 ---
 

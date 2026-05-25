@@ -4795,6 +4795,12 @@ bool TensorLowering::rewriteBuiltinCalls() {
          PtrTy, {PtrTy, PtrTy, PtrTy}},  /* deprecated alias */
         {"gpucoder_sort",               "matlab_gpucoder_sort",
          PtrTy, {PtrTy}},
+        /* Phase 4 of lapack_roadmap §4 — gpucoder.gemm(A,B) routes
+         * through the runtime dispatcher (matlab_gpu_gemm) which picks
+         * MPSMatrixMultiplication on Metal or falls back to the host
+         * BLAS path. */
+        {"gpucoder_gemm",               "matlab_gpu_gemm",
+         PtrTy, {PtrTy, PtrTy}},
         /* (Removed: bare-name `rand/zeros/ones/eye/randn(n,m,'single')`
          * dispatch — it collided with 3-D `zeros(n,m,d)` because the
          * strict matcher coerces the literal-f64 third arg into ptr

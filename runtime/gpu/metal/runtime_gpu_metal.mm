@@ -40,6 +40,8 @@
 #include <unordered_map>
 #include <unistd.h>
 
+#include "../../runtime_internal.h"
+
 namespace {
 
 id<MTLDevice> g_Device = nil;
@@ -339,6 +341,84 @@ extern "C" int matlab_gpu_metal_gemm_f32(
     }
   }
   return 0;
+}
+
+/* Phase 4 of #45 (LAPACK roadmap §4) — high-level matlab_mat * round-
+ * trip wrapper around matlab_gpu_metal_gemm_f32.  Takes two fp64
+ * row-major matrices, downcasts to fp32, runs MPSMatrixMultiplication
+ * on the active Metal device, upcasts the fp32 result back to fp64.
+ *
+ * Returns nullptr on dimension mismatch or device failure; the runtime
+ * gpu_gemm dispatcher falls back to the CPU lane in that case.
+ *
+ * Precision note: fp64 → fp32 → fp64 is the only path Apple GPUs
+ * support (no fp64 hardware on M-series).  Accept ~1e-6 relative
+ * tolerance for the gating test. */
+extern "C" matlab_mat *matlab_gpu_metal_gemm_double(matlab_mat *A,
+                                                    matlab_mat *B) {
+  if (!A || !B) return nullptr;
+  int64_t M  = A->rows;
+  int64_t K  = A->cols;
+  int64_t Kb = B->rows;
+  int64_t N  = B->cols;
+  if (K != Kb) return nullptr;
+  if (!ensureMetalDevice()) return nullptr;
+
+  std::size_t bytesA = static_cast<std::size_t>(M) * K * sizeof(float);
+  std::size_t bytesB = static_cast<std::size_t>(K) * N * sizeof(float);
+  std::size_t bytesC = static_cast<std::size_t>(M) * N * sizeof(float);
+
+  void *bufA = matlab_gpu_metal_alloc(bytesA);
+  void *bufB = matlab_gpu_metal_alloc(bytesB);
+  void *bufC = matlab_gpu_metal_alloc(bytesC);
+  if (!bufA || !bufB || !bufC) {
+    if (bufA) matlab_gpu_metal_free(bufA);
+    if (bufB) matlab_gpu_metal_free(bufB);
+    if (bufC) matlab_gpu_metal_free(bufC);
+    return nullptr;
+  }
+
+  /* Downcast fp64 → fp32 directly into the MTLBuffer contents. */
+  @autoreleasepool {
+    id<MTLBuffer> A32 = (__bridge id<MTLBuffer>)bufA;
+    id<MTLBuffer> B32 = (__bridge id<MTLBuffer>)bufB;
+    float *fA = static_cast<float *>([A32 contents]);
+    float *fB = static_cast<float *>([B32 contents]);
+    const double *dA = A->data;
+    const double *dB = B->data;
+    int64_t ka = M * K, kb = K * N;
+    for (int64_t i = 0; i < ka; ++i) fA[i] = static_cast<float>(dA[i]);
+    for (int64_t i = 0; i < kb; ++i) fB[i] = static_cast<float>(dB[i]);
+#if !defined(__arm64__) && !defined(__aarch64__)
+    [A32 didModifyRange:NSMakeRange(0, bytesA)];
+    [B32 didModifyRange:NSMakeRange(0, bytesB)];
+#endif
+  }
+
+  int rc = matlab_gpu_metal_gemm_f32(bufA, bufB, bufC,
+                                     static_cast<int>(M),
+                                     static_cast<int>(N),
+                                     static_cast<int>(K));
+  if (rc != 0) {
+    matlab_gpu_metal_free(bufA);
+    matlab_gpu_metal_free(bufB);
+    matlab_gpu_metal_free(bufC);
+    return nullptr;
+  }
+
+  matlab_mat *C = mat_alloc(M, N);
+  @autoreleasepool {
+    id<MTLBuffer> C32 = (__bridge id<MTLBuffer>)bufC;
+    const float *fC = static_cast<const float *>([C32 contents]);
+    double *dC = C->data;
+    int64_t kc = M * N;
+    for (int64_t i = 0; i < kc; ++i) dC[i] = static_cast<double>(fC[i]);
+  }
+
+  matlab_gpu_metal_free(bufA);
+  matlab_gpu_metal_free(bufB);
+  matlab_gpu_metal_free(bufC);
+  return C;
 }
 
 /* Device-name probe for gpuDevice() / DAP. */
