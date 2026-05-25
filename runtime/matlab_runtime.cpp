@@ -60,7 +60,10 @@
      typedef __CLPK_integer lapack_int_t;
 #  else
 #    include <cblas.h>
-#    include <lapack.h>
+     /* No <lapack.h> on Linux — Apple's vecLib ships one, but
+      * libopenblas-dev / liblapack-dev on Ubuntu provide only the
+      * .so/.a, not a C header.  Every LAPACK entry point we call is
+      * forward-declared in the extern "C" block below. */
      typedef int lapack_int_t;
      /* Reference / OpenBLAS / MKL all expose the classic ABI with a
       * trailing underscore on Linux ELF. */
