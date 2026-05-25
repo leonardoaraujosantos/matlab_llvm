@@ -71,11 +71,29 @@ RUNTIME_SRCS=(
   "$ROOT/runtime/gpu/runtime_gpu.cpp"
   "$ROOT/runtime/toolbox/gpu/runtime_gpu_helpers.cpp"
 )
+# Build flag: WITH_BLAS toggles LAPACK acceleration in the runtime.
+# Default ON on macOS (Accelerate framework is preinstalled); explicit
+# `WITH_BLAS=0` env disables for the baseline-pre-lapack measurement.
+WITH_BLAS="${WITH_BLAS:-1}"
+BLAS_DEFINE=""
+BLAS_LINK=""
+if [[ "$WITH_BLAS" == "1" ]]; then
+  BLAS_DEFINE="-DMATLAB_LLVM_WITH_BLAS"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    BLAS_LINK="-framework Accelerate"
+  else
+    BLAS_LINK="-lblas -llapack"
+  fi
+  echo "BLAS dispatch: ON ($BLAS_LINK)" >&2
+else
+  echo "BLAS dispatch: OFF (naive O(N^3) only)" >&2
+fi
+
 echo "Precompiling runtime ($(uname -s)/$(uname -m), $(${CXX} --version | head -1))..." >&2
 RUNTIME_OBJS=()
 for src in "${RUNTIME_SRCS[@]}"; do
   obj="$OBJDIR/$(basename "${src%.cpp}").o"
-  if ! "$CXX" $CXXSTD -O3 -I"$ROOT/runtime" -c "$src" -o "$obj" 2>"$OBJDIR/cc.err"; then
+  if ! "$CXX" $CXXSTD -O3 $BLAS_DEFINE -I"$ROOT/runtime" -c "$src" -o "$obj" 2>"$OBJDIR/cc.err"; then
     echo "FATAL: failed to compile runtime TU $src" >&2
     cat "$OBJDIR/cc.err" >&2
     exit 2
@@ -99,7 +117,7 @@ build_matlabc_bench() {
     return 1
   fi
   if ! "$CXX" $CXXSTD -O3 -I"$ROOT/runtime" \
-        "$tmpll" "${RUNTIME_OBJS[@]}" -o "$outbin" 2>"$OBJDIR/link.err"; then
+        "$tmpll" "${RUNTIME_OBJS[@]}" $BLAS_LINK -o "$outbin" 2>"$OBJDIR/link.err"; then
     echo "FAIL build: clang link $mfile (N=$N)" >&2
     sed 's/^/  /' "$OBJDIR/link.err" >&2 | head -8
     rm -f "$tmpm" "$tmpll" "$tmpll.err"

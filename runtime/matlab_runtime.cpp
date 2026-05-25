@@ -31,6 +31,27 @@
 
 #include "runtime_internal.h"
 
+/* LAPACK / BLAS acceleration epic (#45 / docs/lapack_roadmap.md).
+ *
+ * Opt-in at build time via -DMATLAB_LLVM_WITH_BLAS=ON. When OFF (the
+ * default for cross-compile / embedded targets) the preprocessor
+ * strips every cblas_* / LAPACKE_* reference so the resulting object
+ * has zero external linalg dependency — verified by the bench
+ * driver's cross-emit invariant check.
+ *
+ * Apple Accelerate provides BLAS + LAPACK via the unified
+ * <Accelerate/Accelerate.h> umbrella; CMake links -framework Accelerate.
+ * Linux / Windows builds use the system OpenBLAS / MKL / generic LAPACK
+ * via CMake's FindBLAS / FindLAPACK (cblas.h + lapacke.h includes). */
+#ifdef MATLAB_LLVM_WITH_BLAS
+#  ifdef __APPLE__
+#    include <Accelerate/Accelerate.h>
+#  else
+#    include <cblas.h>
+#    include <lapacke.h>
+#  endif
+#endif
+
 extern "C" {
 
 /* A single global mutex serializes all stdout I/O so parfor bodies that call
@@ -380,6 +401,33 @@ matlab_mat *matlab_matmul_mm(matlab_mat *A, matlab_mat *B) {
     if (A->cols != B->rows) return mat_alloc(0, 0);
     int64_t m = A->rows, k = A->cols, n = B->cols;
     matlab_mat *C = mat_alloc(m, n);
+#ifdef MATLAB_LLVM_WITH_BLAS
+    /* Phase 1 of #45 — dispatch to cblas_dgemm when the operand shape
+     * is "big enough" that the BLAS call overhead is amortised.
+     * Below the threshold the naive triple loop is faster (BLAS
+     * function-call + parameter marshalling dominates the actual
+     * arithmetic). The threshold mirrors NumPy / SciPy heuristics
+     * (m·n·k ≥ 64³ ≈ 262144). Tunable via MATLAB_BLAS_GEMM_MIN env
+     * var for benchmark sweeps. matlab_mat is row-major and BLAS
+     * accepts CblasRowMajor directly, so no transpose at boundary. */
+    {
+        static int threshold = -1;
+        if (threshold < 0) {
+            const char *env = std::getenv("MATLAB_BLAS_GEMM_MIN");
+            threshold = (env && *env) ? std::atoi(env) : 262144;  /* 64^3 */
+        }
+        if ((int64_t)m * n * k >= threshold) {
+            cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                        (int)m, (int)n, (int)k,
+                        1.0,
+                        A->data, (int)k,
+                        B->data, (int)n,
+                        0.0,
+                        C->data, (int)n);
+            return C;
+        }
+    }
+#endif
     for (int64_t i = 0; i < m; ++i) {
         for (int64_t j = 0; j < n; ++j) {
             double s = 0.0;
