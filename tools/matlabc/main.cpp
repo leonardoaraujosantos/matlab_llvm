@@ -12032,12 +12032,31 @@ int main(int Argc, char **Argv) {
   // runMonomorphiseUserCalls workarounds. ON by default; set
   // MATLAB_LLVM_SEMA_MONO=0 to disable for bisecting downstream issues.
   //
+  // Skipped on the HW emit lanes (SystemVerilog / CocoTB / synth check
+  // / hardware report / fi report). Those flows have explicit port-
+  // width contracts written by the user — fi types declared via
+  // `numerictype(...)` and op-by-op width growth rules — that
+  // Sema-mono's call-site-driven type propagation would override (e.g.
+  // `y = a + b` of two int16 args widens to int17 at the function
+  // boundary). Keeping the HW lane on the late MLIR pipeline preserves
+  // golden output for the 79 EmitSV fixtures (port widths, saturation
+  // shapes, body arithmetic).
+  //
   // Sema dumps and diagnostic modes above (`-emit-sema`,
   // `-dump-call-sites`, `-test-ast-clone`, `-test-monomorphize`) have
   // already returned by this point so they see the pre-mono Sema state.
   // Test-monomorphize runs the same driver as part of its own flow.
   if (TU) {
-    bool MonoEnabled = true;
+    bool IsHwEmit =
+        Opts.Mode == Options::Mode::EmitSystemVerilog ||
+        Opts.Mode == Options::Mode::CheckSynthesizable ||
+        Opts.Mode == Options::Mode::EmitHardwareReport ||
+        Opts.Mode == Options::Mode::EmitCocotb ||
+        Opts.Mode == Options::Mode::EmitFiReport;
+    // Default: on for software lanes, off for HW lanes (port-width
+    // contracts). The env var overrides either way: =1 forces on, =0
+    // forces off — useful for bisecting and for the gated test sweep.
+    bool MonoEnabled = !IsHwEmit;
     if (const char *Env = std::getenv("MATLAB_LLVM_SEMA_MONO"))
       MonoEnabled = !(*Env == '\0' || std::string_view(Env) == "0");
     if (MonoEnabled) {
