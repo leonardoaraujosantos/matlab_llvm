@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI
 
+import jail
 import rag
 import sessions
 from auth import require_auth
@@ -40,6 +41,20 @@ async def lifespan(app: FastAPI):
             "MATLAB_BACKEND_MATLABC_BIN. Routes will fail until it exists.",
             mc,
         )
+    # Tier-2 sandbox self-test: probe the configured backend with a no-op
+    # invocation. If it fails (commonly: host blocks unprivileged userns),
+    # downgrade to "none" so user code paths keep working — the failure
+    # reason is exposed on /healthz so ops can fix it without guessing.
+    if settings.sandbox_backend != "none":
+        works, reason = jail.probe()
+        if not works and reason:
+            log.warning(
+                "tier-2 sandbox %r unavailable on this host (%s) — "
+                "falling back to rlimit-only",
+                settings.sandbox_backend,
+                reason,
+            )
+            settings.sandbox_backend = "none"
     if settings.rag_enabled:
         try:
             n = rag.build_default_index()
@@ -83,23 +98,27 @@ def create_app() -> FastAPI:
 
         sb = settings.sandbox_backend
         # tier-2 is "active" when configured AND the tool is on PATH AND it
-        # is one of the known backends. Reflects what jail.wrap() will do.
-        from jail import _TOOL  # local import to avoid circulars
-
+        # is one of the known backends. Lifespan downgrades sb to "none" if
+        # the startup probe failed (e.g. userns blocked), so this reflects
+        # the *runtime* state, not the env var the operator set.
         sandbox_active = (
             sb != "none"
-            and sb in _TOOL
-            and _sh.which(_TOOL[sb]) is not None
+            and sb in jail._TOOL
+            and _sh.which(jail._TOOL[sb]) is not None
         )
+        sandbox_info: dict = {
+            "backend": sb,
+            "active": sandbox_active,
+            "allow_net": settings.sandbox_allow_net,
+        }
+        reason = jail.probe_reason()
+        if reason:
+            sandbox_info["reason"] = reason
         return {
             "status": "ok",
             "matlabc": str(settings.matlabc_path),
             "matlabc_present": settings.matlabc_path.exists(),
-            "sandbox": {
-                "backend": sb,
-                "active": sandbox_active,
-                "allow_net": settings.sandbox_allow_net,
-            },
+            "sandbox": sandbox_info,
         }
 
     return app
