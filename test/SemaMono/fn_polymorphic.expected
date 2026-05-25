@@ -10,7 +10,7 @@ TranslationUnit
       ExprStmt suppressed
         Call [any]
           Name disp (builtin) [@handle]
-          Call [double:vec[3]]
+          Call [any]
             Name sq__s1 (function) [@handle]
             MatrixLit rows=1 [double:vec[3]]
               Row 0
@@ -20,7 +20,7 @@ TranslationUnit
       ExprStmt suppressed
         Call [any]
           Name disp (builtin) [@handle]
-          Call [double:mat[2,2]]
+          Call [any]
             Name twice__s1 (function) [@handle]
             MatrixLit rows=2 [double:mat[2,2]]
               Row 0
@@ -60,27 +60,27 @@ TranslationUnit
             Name x (param) [double]
             Name x (param) [double]
   Function sq__s1
-    Inputs: x[double:vec[3]]
-    Outputs: y[double:vec[3]]
+    Inputs: x[any]
+    Outputs: y[any]
     Locals:
     Block
       AssignStmt suppressed
         LHS
-          Name y (output) [double:vec[3]]
+          Name y (output) [any]
         RHS
-          BinOp .* [double:vec[3]]
-            Name x (param) [double:vec[3]]
-            Name x (param) [double:vec[3]]
+          BinOp .* [any]
+            Name x (param) [any]
+            Name x (param) [any]
   Function twice__s1
-    Inputs: x[double:mat[2,2]]
-    Outputs: y[double:mat[2,2]]
+    Inputs: x[any]
+    Outputs: y[any]
     Locals:
     Block
       AssignStmt suppressed
         LHS
-          Name y (output) [double:mat[2,2]]
+          Name y (output) [any]
         RHS
-          BinOp + [double:mat[2,2]]
-            Name x (param) [double:mat[2,2]]
-            Name x (param) [double:mat[2,2]]
+          BinOp + [any]
+            Name x (param) [any]
+            Name x (param) [any]
 monomorphize: iterations=2 clones=2 rewrites=2 converged=true

@@ -493,25 +493,35 @@ bool runLowerUserCalls(ModuleOp M) {
     llvm::SmallVector<Type, 4> NewInputs(OldType.getInputs().begin(),
                                           OldType.getInputs().end());
     bool IsClassMethod = Fn->hasAttr("matlab.class_name");
+    /* Pre-scan: which arg slots have a tensor operand at any call site?
+     * Tensor operands come from literal `[1 2]` / `[1 2 3; 4 5 6]`
+     * concat ops that LowerTensorOps will rewrite to
+     * `matlab_mat_from_buf` (returning ptr) on a later sweep. Refining
+     * the callee sig to tensor now would lock in a sig that doesn't
+     * match the post-rewrite ptr operand and the matlab.call →
+     * func.call conversion silently skips, leaving the call unlowered.
+     *
+     * Originally guarded by IsClassMethod only — the bug shows up for
+     * non-class functions too whenever a polymorphic helper splits
+     * into a single-tensor-caller variant (always the case for matrix
+     * args under the Sema-time monomorphizer, #38). Per-slot defer
+     * keeps the scalar refinement working when only SOME args of a
+     * mixed-arity callee are tensor at any site. */
+    llvm::SmallVector<bool, 4> ArgDeferred(NumIn, false);
+    for (Operation *C : Sites) {
+      if (C->getNumOperands() != NumIn) continue;
+      for (unsigned i = 0; i < NumIn; ++i) {
+        if (mlir::isa<RankedTensorType, UnrankedTensorType>(
+                C->getOperand(i).getType()))
+          ArgDeferred[i] = true;
+      }
+    }
     for (Operation *C : Sites) {
       if (C->getNumOperands() != NumIn) { Compatible = false; break; }
       for (unsigned i = 0; i < NumIn; ++i) {
+        if (ArgDeferred[i]) continue;
         Type CallTy = C->getOperand(i).getType();
         Type ExistingNew = NewInputs[i];
-        /* For class methods only: tensor-typed operands at matlab.call
-         * sites come from literal `[1 2]` or similar concat ops that
-         * LowerTensorOps will rewrite to `matlab_mat_from_buf`
-         * (returning ptr) on a later sweep. If we refine the
-         * constructor sig to the tensor type now, the post-rewrite
-         * ptr-typed operands won't match the (now stale) tensor sig
-         * and the matlab.call → func.call conversion silently skips,
-         * leaving the constructor call unlowered with a stranded
-         * `matlab.call_builtin matlab_obj_set_f64` carrying tensor
-         * RHS. Non-class user functions still want the tensor sig
-         * because their bodies depend on per-tensor-shape arithmetic. */
-        if (IsClassMethod &&
-            mlir::isa<RankedTensorType, UnrankedTensorType>(CallTy))
-          continue;
         if (canRefineTo(ExistingNew, CallTy)) {
           NewInputs[i] = CallTy;
         } else if (ExistingNew != CallTy &&
@@ -523,6 +533,7 @@ bool runLowerUserCalls(ModuleOp M) {
       }
       if (!Compatible) break;
     }
+    (void)IsClassMethod;
 
     // b) Infer result types from func.return operand types if currently `none`.
     llvm::SmallVector<Type, 4> NewResults(OldType.getResults().begin(),

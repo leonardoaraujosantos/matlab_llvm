@@ -72,4 +72,17 @@ using UserCallAction =
     std::function<void(CallOrIndex &, NameExpr &, Function &)>;
 void walkUserCalls(TranslationUnit &TU, const UserCallAction &Action);
 
+// Same as walkUserCalls but also passes the containing Function* (or
+// nullptr if the call site lives in the script body). Needed by the
+// monomorphizer's recursive-only-signature filter: a Sig that only
+// appears at call sites where Caller == Callee shouldn't be counted
+// as a separate signature, since Phase 4's fixpoint will rewrite the
+// recursive call to match whichever specialisation the external
+// caller settled on.
+using UserCallActionWithCaller =
+    std::function<void(Function * /*Caller*/, CallOrIndex &, NameExpr &,
+                       Function & /*Callee*/)>;
+void walkUserCallsWithCaller(TranslationUnit &TU,
+                             const UserCallActionWithCaller &Action);
+
 } // namespace matlab

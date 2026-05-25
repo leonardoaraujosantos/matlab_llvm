@@ -71,17 +71,62 @@ Function *rootOf(ClonePlan &Plan, Function *F) {
 // and create+register the corresponding clones in TU.Functions. Returns
 // the number of new clones added.
 int growPlan(TranslationUnit &TU, ASTContext &Ctx, ClonePlan &Plan) {
-  CallSiteAnalysis Analysis = analyzeCallSites(TU);
+  // Group call sites by their ROOT function. We track, per (root, sig),
+  // whether the sig has at least one EXTERNAL caller (caller's root !=
+  // callee's root). A sig that only appears at recursive self-call
+  // sites doesn't deserve its own clone — Phase 4's fixpoint rewrites
+  // the recursive call to match whichever specialisation the external
+  // caller settled on, and the would-be canonical clone for the
+  // recursive sig ends up dead with un-lowerable matlab.* ops in its
+  // body. See fn_call_recursive / fn_call_self_two regressions.
+  std::map<Function *, std::map<CallSignature, bool>> SigHasExt;
+  // Track which roots have at least one call site whose arity differs
+  // from the declared parameter count (i.e. fewer args via nargin
+  // semantics), or whose declared output list ends in `varargout`.
+  // Those callees rely on per-arity machinery (`matlab.nargin_value`
+  // attr + varargout cell unpacking) the existing late MLIR
+  // monomorphiser owns; Sema-time cloning would produce duplicate
+  // bodies with stale references to undefined trailing params or
+  // mis-sized output packing. Defer such callees to the late path.
+  std::set<Function *> SkipRoot;
+  walkUserCallsWithCaller(
+      TU, [&](Function *Caller, CallOrIndex &C, NameExpr & /*N*/,
+              Function &F) {
+        Function *CalleeRoot = rootOf(Plan, &F);
+        Function *CallerRoot = Caller ? rootOf(Plan, Caller) : nullptr;
+        bool Recursive = (CallerRoot == CalleeRoot);
+        if (C.Args.size() != CalleeRoot->Inputs.size())
+          SkipRoot.insert(CalleeRoot);
+        if (!CalleeRoot->Outputs.empty() &&
+            CalleeRoot->Outputs.back() == "varargout")
+          SkipRoot.insert(CalleeRoot);
+        if (!CalleeRoot->Inputs.empty() &&
+            CalleeRoot->Inputs.back() == "varargin")
+          SkipRoot.insert(CalleeRoot);
+        CallSignature Sig = callSignatureFrom(C.ArgTypes);
+        // Touch the slot so its presence reflects "this sig was seen
+        // for this callee". External sightings flip it to true; purely
+        // recursive sightings leave it default-false.
+        bool &Slot = SigHasExt[CalleeRoot][Sig];
+        if (!Recursive) Slot = true;
+      });
 
-  // Group call sites by their ROOT function (so clones-of-the-same-root
-  // contribute to the same signature table). For each root, we accumulate
-  // the union of all signatures seen at any of its (root or clone) calls.
+  // Build per-root bucket using only sigs that have at least one
+  // external caller (or any sig already in the Plan from a prior
+  // iteration — those clones must stay live).
   std::map<Function *, std::set<CallSignature>> ByRoot;
-  for (auto &KV : Analysis.Sigs) {
-    Function *F = KV.first;
-    Function *Root = rootOf(Plan, F);
+  for (auto &KV : SigHasExt) {
+    Function *Root = KV.first;
+    if (SkipRoot.count(Root)) continue; // defer to late mono
     auto &Bucket = ByRoot[Root];
-    for (const CallSignature &Sig : KV.second) Bucket.insert(Sig);
+    for (auto &SigSlot : KV.second)
+      if (SigSlot.second) Bucket.insert(SigSlot.first);
+    // Preserve any signatures already named in a prior iteration; the
+    // recursion-closure step may rewrite recursive calls to those
+    // names so they continue to need their clones.
+    auto It = Plan.ByRoot.find(Root);
+    if (It != Plan.ByRoot.end())
+      for (auto &SN : It->second) Bucket.insert(SN.first);
   }
 
   int NewClones = 0;
@@ -151,8 +196,26 @@ int applyPlan(TranslationUnit &TU, ASTContext &Ctx, const ClonePlan &Plan) {
 // any call site's ArgTypes is sufficient. Returns the number of stamp
 // slots that actually changed (so the driver can detect a fixpoint).
 int stampSignatureTypes(TranslationUnit &TU) {
+  // Pre-scan: collect Functions to skip entirely. These are the
+  // ones whose signature shape the late MLIR machinery owns —
+  // varargin / varargout / any call site with arity != declared. A
+  // single arity-mismatched site is enough to disqualify the
+  // function from being stamped (the late `runMonomorphiseUserCalls`
+  // would need its declared `none` params to dispatch per-arity via
+  // LowerNarginNargout; stamping just the matching-arity sites
+  // would freeze the signature before the late pass can clone).
+  std::set<Function *> Skip;
+  walkUserCalls(TU, [&](CallOrIndex &C, NameExpr & /*N*/, Function &F) {
+    if (!F.Outputs.empty() && F.Outputs.back() == "varargout")
+      Skip.insert(&F);
+    if (!F.Inputs.empty() && F.Inputs.back() == "varargin")
+      Skip.insert(&F);
+    if (C.Args.size() != F.Inputs.size()) Skip.insert(&F);
+  });
+
   std::map<Function *, std::vector<const Type *>> ChosenSigs;
   walkUserCalls(TU, [&](CallOrIndex &C, NameExpr & /*N*/, Function &F) {
+    if (Skip.count(&F)) return;
     if (ChosenSigs.count(&F)) return;
     ChosenSigs[&F] = C.ArgTypes;
   });
@@ -171,6 +234,23 @@ int stampSignatureTypes(TranslationUnit &TU) {
       // Only refine (don't widen). Refusing to overwrite a concrete
       // stamp with Any keeps the lattice monotonic across iterations.
       if (NewT->K == Type::Kind::Any) continue;
+      // Non-scalar Array types: at the AST→MLIR boundary `mirTy` maps
+      // these to `tensor<NxF64>`, but the downstream lowering pipeline
+      // (LowerTensorOps + LowerIO + LowerUserCalls' iterative loop)
+      // is built around matrix args/results flowing as `ptr` to a
+      // runtime matlab_mat. Stamping tensor types onto func.func
+      // signatures locks in a sig that the pipeline can't bridge to
+      // the post-LowerTensorOps ptr operands. Skipping the matrix
+      // stamps lets such call sites fall through to the late-MLIR
+      // monomorphizer (runMonomorphiseUserCalls) which buckets by the
+      // settled ptr type after materialization. The clone itself is
+      // still useful (each call site already dispatches to its own
+      // function symbol) — only the SIG stays `(none) -> (none)` so
+      // the existing pipeline machinery handles the ptr refinement.
+      if (NewT->K == Type::Kind::Array) {
+        auto &AT = static_cast<const ArrayType &>(*NewT);
+        if (AT.S.K != Shape::Rank::Scalar) continue;
+      }
       if (F->ParamTypeStamps[I] == NewT) continue;
       // Skip if a different concrete type is already stamped (signals
       // an inconsistency the monomorphizer should have resolved into

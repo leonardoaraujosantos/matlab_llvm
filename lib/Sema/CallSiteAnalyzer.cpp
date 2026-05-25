@@ -34,15 +34,20 @@ namespace {
 
 // Recursive AST walker. Visits every Expr / Stmt looking for CallOrIndex
 // nodes whose Resolved == Call and whose callee resolves to a user
-// Function*. For each such call, invokes the action callback.
+// Function*. For each such call, invokes the action callback. Tracks
+// the enclosing Function* so callers can distinguish recursive sites
+// (Caller == Callee) from external ones.
 class Walker {
 public:
-  explicit Walker(const UserCallAction &Action) : Action(Action) {}
+  explicit Walker(const UserCallActionWithCaller &Action) : Action(Action) {}
 
   void visit(Function &F) {
+    Function *Saved = CurrentFn;
+    CurrentFn = &F;
     if (F.Body) visit(*F.Body);
     for (Function *Nested : F.Nested)
       if (Nested) visit(*Nested);
+    CurrentFn = Saved;
   }
 
   void visit(Script &S) { if (S.Body) visit(*S.Body); }
@@ -197,21 +202,29 @@ private:
     if (N->Ref->Kind != BindingKind::Function) return;
     Function *F = N->Ref->FuncDef;
     if (!F) return;
-    Action(C, *N, *F);
+    Action(CurrentFn, C, *N, *F);
   }
 
-  const UserCallAction &Action;
+  const UserCallActionWithCaller &Action;
+  Function *CurrentFn = nullptr;
 };
 
 } // namespace
 
-void walkUserCalls(TranslationUnit &TU, const UserCallAction &Action) {
+void walkUserCallsWithCaller(TranslationUnit &TU,
+                             const UserCallActionWithCaller &Action) {
   Walker W(Action);
   if (TU.ScriptNode) W.visit(*TU.ScriptNode);
   for (Function *F : TU.Functions)
     if (F) W.visit(*F);
   for (ClassDef *C : TU.Classes)
     if (C) W.visit(*C);
+}
+
+void walkUserCalls(TranslationUnit &TU, const UserCallAction &Action) {
+  walkUserCallsWithCaller(
+      TU, [&](Function * /*Caller*/, CallOrIndex &C, NameExpr &N,
+              Function &F) { Action(C, N, F); });
 }
 
 CallSiteAnalysis analyzeCallSites(TranslationUnit &TU) {

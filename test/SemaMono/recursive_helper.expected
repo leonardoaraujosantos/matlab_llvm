@@ -5,14 +5,14 @@ TranslationUnit
         Call [any]
           Name disp (builtin) [@handle]
           Call [double]
-            Name accum__s1 (function) [@handle]
+            Name accum (function) [@handle]
             FPLit 0.0 [double]
             IntLit 3 [double]
       ExprStmt suppressed
         Call [any]
           Name disp (builtin) [@handle]
-          Call [double:vec[3]]
-            Name accum__s2 (function) [@handle]
+          Call [double]
+            Name accum__s1 (function) [@handle]
             MatrixLit rows=1 [double:vec[3]]
               Row 0
                 IntLit 0 [double]
@@ -20,35 +20,6 @@ TranslationUnit
                 IntLit 0 [double]
             IntLit 3 [double]
   Function accum
-    Inputs: s[any] n[any]
-    Outputs: s[any]
-    Locals:
-    Block
-      IfStmt
-        Cond
-          BinOp > [logical]
-            Name n (param) [any]
-            IntLit 0 [double]
-        Then
-          Block
-            AssignStmt suppressed
-              LHS
-                Name s (param) [any]
-              RHS
-                BinOp + [any]
-                  Name s (param) [any]
-                  IntLit 1 [double]
-            AssignStmt suppressed
-              LHS
-                Name s (param) [any]
-              RHS
-                Call [any]
-                  Name accum (function) [@handle]
-                  Name s (param) [any]
-                  BinOp - [any]
-                    Name n (param) [any]
-                    IntLit 1 [double]
-  Function accum__s1
     Inputs: s[double] n[double]
     Outputs: s[double]
     Locals:
@@ -72,14 +43,14 @@ TranslationUnit
                 Name s (param) [double]
               RHS
                 Call [double]
-                  Name accum__s1 (function) [@handle]
+                  Name accum (function) [@handle]
                   Name s (param) [double]
                   BinOp - [double]
                     Name n (param) [double]
                     IntLit 1 [double]
-  Function accum__s2
-    Inputs: s[double:vec[3]] n[double]
-    Outputs: s[double:vec[3]]
+  Function accum__s1
+    Inputs: s[double] n[double]
+    Outputs: s[double]
     Locals:
     Block
       IfStmt
@@ -91,19 +62,19 @@ TranslationUnit
           Block
             AssignStmt suppressed
               LHS
-                Name s (param) [double:vec[3]]
+                Name s (param) [any]
               RHS
-                BinOp + [double:vec[3]]
-                  Name s (param) [double:vec[3]]
+                BinOp + [any]
+                  Name s (param) [any]
                   IntLit 1 [double]
             AssignStmt suppressed
               LHS
-                Name s (param) [double:vec[3]]
+                Name s (param) [double]
               RHS
-                Call [double:vec[3]]
-                  Name accum__s2 (function) [@handle]
-                  Name s (param) [double:vec[3]]
+                Call [double]
+                  Name accum (function) [@handle]
+                  Name s (param) [any]
                   BinOp - [double]
                     Name n (param) [double]
                     IntLit 1 [double]
-monomorphize: iterations=3 clones=2 rewrites=4 converged=true
+monomorphize: iterations=2 clones=1 rewrites=1 converged=true
