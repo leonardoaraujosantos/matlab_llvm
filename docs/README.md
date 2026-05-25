@@ -7,6 +7,7 @@ Use this page as the entry point to the repo docs.
 - [`../README.md`](../README.md): project overview, build, CLI, and main features
 - [`feature_status.md`](feature_status.md): authoritative compatibility matrix
 - [`roadmap.md`](roadmap.md): forward-looking work tracker (CocoTB verification, SV→MATLAB lift, runtime / REPL / HDL improvements; the block language is shipped — see [`flowchart_frontend.md`](flowchart_frontend.md))
+- [`remote_backend_trd.md`](remote_backend_trd.md) + [`remote_backend_plan.md`](remote_backend_plan.md): **MATLAB-in-your-pocket** remote backend — FastAPI edge over `matlabc` (check / REPL / codegen / DAP / files / plot / MCP / OpenAI-grounded chat). **All phases shipped + deployed** at `https://matlab-backend.coolify.cyberdynecorp.ai` (Cyberdyne Coolify). CyberdyneAuth on `/v1/*`, backend-minted HMAC bearer on `/mcp/` (streamable-HTTP). See [`../server/README.md`](../server/README.md) for runtime config + env vars.
 - [`../examples/README.md`](../examples/README.md): runnable sample programs
 
 ## Frontend And Sema
