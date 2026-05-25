@@ -10,25 +10,32 @@ This plan turns the corrected TRD into ordered, shippable phases. Every
 `matlabc` invocation below is the real CLI verified in
 `tools/matlabc/main.cpp`.
 
-> **Implementation status (branch `feat_compiler_backend`).** The `server/`
-> tree exists with **Phase 1** (`/v1/check`, `/v1/repl`, hardened sandbox),
-> **Phase 2** (`/v1/codegen/*`), a **partial Phase 3** (workspaces +
-> `/v1/files` + REPL figure capture), and **Phase 4** (`WS
-> /v1/dap/ws/{session_id}` — opaque DAP-over-WebSocket byte bridge to
-> `matlabc -dap`), **Phase 5** (FastMCP tools mounted at `/mcp` —
-> streamable-HTTP, since SSE is deprecated), and **Phase 6**
-> (`/v1/chat/completions`, OpenAI-compatible, grounded in a dependency-free
-> BM25 index over `docs/**/*.md`; proxies to OpenAI when a key is set, else
-> retrieval-only), and **Phase 7** (bearer auth on all `/v1`, per-client
-> rate limiting, a global matlabc concurrency cap, per-workspace disk quotas,
-> and **stateful REPL sessions** with idle eviction, a **warm pool** of
-> pre-warmed workers, and a **tier-2 syscall sandbox** bwrap/firejail/nsjail).
-> Also **`/v1/plot`** (run a snippet → stream PNG/SVG/PDF). **Phase 0/8** ship
-> as the root `Dockerfile` + `docker-compose.yaml`. Run locally with `just
-> backend-up`; test with `just backend-test` / `just backend-cov` (fake
-> matlabc, no LLVM build needed; **92% coverage**). See
-> [`server/README.md`](../server/README.md). Deferred: only the CI/deploy
-> half of Phase 8.
+> **Status: shipped + deployed 2026-05-25.** All phases 0–8 merged to `main`;
+> the backend runs at <https://matlab-backend.coolify.cyberdynecorp.ai> on the
+> Cyberdyne Coolify (project `MatlabLLVM` / env `production` / build pack
+> `dockercompose`, tracks `main`). REST + DAP-over-WebSocket + **FastMCP at
+> `/mcp/`** (streamable-HTTP — SSE is deprecated) + OpenAI-proxied
+> `/v1/chat/completions` grounded in a dependency-free BM25 index over
+> `docs/**/*.md` (proxies to OpenAI when `OPENAI_API_KEY` is set, else
+> retrieval-only). Auth = **CyberdyneAuth bearer** validated against
+> `${CYBERDYNE_AUTH_URL}/api/v1/users/me` on every `/v1/*`; MCP clients
+> present an HMAC-signed bearer **minted by `POST /v1/mcp/token`** (30-day
+> TTL, bound to the CyberdyneAuth identity). Stateful REPL (long-lived
+> `matlabc -repl` per session, **15-min idle eviction**, warm pool size 2,
+> **15 s wall-clock per turn**) + `/v1/plot` PNG/SVG/PDF + REPL figure capture.
+> Tier-2 syscall sandbox plumbing (`bwrap`/`firejail`/`nsjail`) ships **but
+> stays off on this host**: the lifespan-time `jail.probe()` found Docker's
+> default seccomp/AppArmor profile blocks userns from inside the container
+> even with `kernel.unprivileged_userns_clone=1` on the host; the probe
+> downgrades automatically to `none` and surfaces the reason on `/healthz`
+> under `sandbox.reason`. Real containment = container + non-root `runner`
+> user + `rlimit` (CPU/AS/FSIZE/NPROC) + cwd jail (matlabc has no `cd`
+> builtin) + scrubbed env + Docker default seccomp/AppArmor. Run locally
+> with `just backend-up`; test with `just backend-test` (83 unit @ 92%, fake
+> matlabc, no LLVM build), `just backend-itest` (live local uvicorn), or
+> `just backend-test-remote URL '' USER PASS [AUTH_URL] [EXPECT_SANDBOX]`
+> (same 21-test suite against any deploy). See
+> [`server/README.md`](../server/README.md).
 
 ---
 
@@ -75,14 +82,17 @@ server/
     plot.py                # POST /v1/plot  (snippet -> figure bytes)
     chat.py                # POST /v1/chat/completions (OpenAI-compatible)
     dap_ws.py              # WS /v1/dap/ws/{session_id}  (stdio bridge)
-  mcp/
-    server.py             # FastMCP tools -> mounted at /mcp/sse
-  rag/
-    indexer.py            # startup: chunk+embed docs/ + include/ + signatures
-    store.py              # vector store (FAISS/Chroma) load/query
-  tests/
-    test_check.py test_repl.py test_codegen.py test_files.py
-    test_dap_ws.py test_sandbox.py test_chat.py
+  mcp_tools.py             # FastMCP tools -> mounted at /mcp/ (streamable-HTTP)
+                           # NB: file is mcp_tools.py, NOT a `mcp/` package —
+                           # a local mcp/ would shadow the installed mcp SDK.
+  mcp_auth.py              # HMAC mint/verify for backend-issued MCP tokens
+  rag.py                   # dependency-free BM25 over docs/**/*.md
+  auth.py                  # CyberdyneAuth bearer validation + cache
+  jail.py                  # tier-2 sandbox argv builders + startup probe
+  sessions.py              # stateful REPL session manager + warm pool
+  limits.py                # rate limit / global concurrency / disk quota
+  tests/                   # unit tests (fake matlabc, no LLVM build needed)
+  integration/             # live-server suite — local boot or remote URL
 Dockerfile                 # multi-stage (see TRD §5)
 docker-compose.yaml        # Coolify (see TRD §5)
 ```
@@ -211,16 +221,23 @@ the breakpoint/inspect/step flow from `test/Debug/`.
 
 ---
 
-## 7. Phase 5 — FastMCP / SSE
+## 7. Phase 5 — FastMCP (streamable-HTTP at `/mcp/`)
 
 **Goal:** expose the compiler as MCP tools for AI clients.
 
-* `mcp/server.py`: register tools `matlab_check`, `matlab_repl`,
-  `matlab_codegen` (target enum), `matlab_plot`, `list_files`,
-  `read_file` — thin wrappers over the Phase 1–3 services.
-* Mount FastMCP's SSE app at `/mcp/sse` on the same FastAPI process/port.
+* `mcp_tools.py`: register tools `matlab_check`, `matlab_repl`,
+  `matlab_codegen` (target enum), `list_files`, `read_file` — thin
+  wrappers over the Phase 1–3 services (the dedicated `matlab_plot`
+  tool is folded into `matlab_repl` + figure-capture artifacts).
+* Mount FastMCP's streamable-HTTP app at `/mcp/` on the same FastAPI
+  process/port. (The plan originally proposed `/mcp/sse`; SSE was
+  deprecated by MCP — we ship modern streamable-HTTP. **Note:** the
+  module is `mcp_tools.py`, NOT a `mcp/` package — a local `mcp/`
+  would shadow the installed `mcp` SDK that FastMCP imports.)
 * Reuse the same sandbox + workspace resolution so MCP and REST share
-  isolation and per-user state.
+  isolation and per-user state. MCP auth is handled in Phase 7
+  (backend-minted HMAC tokens, not CyberdyneAuth bearers directly —
+  MCP clients can't run the OAuth/refresh flow).
 
 **Exit criteria:** an MCP client (e.g. `mcp-client` skill) lists the
 tools and successfully invokes `matlab_repl` and `matlab_codegen`.
@@ -250,71 +267,119 @@ endpoint is drop-in for an OpenAI Base URL override.
 
 ## 9. Phase 7 — Hardening, auth, observability
 
-* **Auth:** bearer token / API key middleware on every `/v1/*` and
-  `/mcp/*` route; per-user identity drives workspace routing.
-* **Sandboxing tier-2:** wrap children in `nsjail`/`firejail` (or run
-  REPL/DAP in an ephemeral per-session container) for syscall-level
-  isolation beyond `rlimit`; mount workspace read-write, everything else
-  read-only; `--pids-limit`, `--cap-drop ALL`, `no-new-privileges`.
-* **Quotas & rate limits:** per-user concurrent-job cap, request rate
-  limit, disk quota, and a global worker semaphore so a burst can't
-  exhaust the host.
-* **Warm pool (perf, FIX-8):** maintain N pre-spawned `matlabc -repl`
-  workers to amortize JIT startup for `/v1/repl`.
-* **Observability:** structured logs, per-route latency/error metrics
-  (Prometheus), and a `/healthz` for Coolify health checks.
+* **Auth (resolved as CyberdyneAuth + minted MCP token):** `auth_mode`
+  is picked at startup from env:
+  * `cyberdyne` when `CYBERDYNE_AUTH_URL` is set — every `/v1/*` bearer
+    is validated against `${CYBERDYNE_AUTH_URL}/api/v1/users/me`
+    (`auth.py`). Successful checks are cached for
+    `AUTH_VERIFY_CACHE_TTL_S`. The verified id becomes the request
+    *principal*, so workspaces are isolated per CyberdyneAuth UUID
+    regardless of any client-sent `user_id`.
+  * `token` when `MATLAB_BACKEND_API_TOKEN` is set — single shared static
+    bearer (handy for CI / curl probes).
+  * `none` otherwise — open (local-dev default).
+  **MCP** uses a separate flow: an authenticated REST caller mints a
+  stateless **HMAC-signed bearer** via `POST /v1/mcp/token`
+  (`mcp_auth.py`, 30-day TTL, payload binds the CyberdyneAuth `sub`).
+  MCP clients present that bearer on `/mcp/`; revocation = rotate
+  `MATLAB_BACKEND_MCP_TOKEN_SECRET` on the host.
+* **Sandboxing tier-2:** `jail.py` plumbing for `bwrap`/`firejail`/
+  `nsjail`. **Stays off in production**: a lifespan-time
+  `jail.probe()` runs the wrapper on a no-op argv before declaring it
+  active; on failure `settings.sandbox_backend` is downgraded to
+  `none` and the reason surfaces on `/healthz` under `sandbox.reason`.
+  On the Cyberdyne Coolify host, Docker's default seccomp + AppArmor
+  profile blocks userns creation from inside the container even with
+  `kernel.unprivileged_userns_clone=1` on the host, so bwrap can't run
+  without weakening Docker's own MAC profile — explicitly *not* done,
+  since the container's namespaces + non-root + rlimit + cwd jail +
+  Docker default seccomp/AppArmor already give layered isolation that
+  bwrap would mostly duplicate.
+* **Quotas & rate limits (`limits.py`):** per-client sliding-window
+  rate limit (`rate_limit_per_minute`, default 120; 429 on overflow),
+  global concurrency semaphore on matlabc children
+  (`max_concurrent_jobs`, default 8 — excess queues), per-workspace
+  disk quota (`user_quota_mb`, default 200). **Open follow-on:** no
+  per-user *session count* cap yet — users can mint arbitrary
+  `session_id`s (memory is the practical bound, with idle eviction).
+* **Stateful REPL + warm pool (`sessions.py`):** long-lived
+  `matlabc -repl` per `(user_id, session_id)`, each turn delimited by
+  a stdin-injected marker (`disp('<<<MLBC_TURN_uuid>>>')`). Idle
+  eviction at `repl_idle_timeout_s` (15 min) via background sweep
+  every `repl_evict_interval_s` (60 s). `warm_pool_size` workers
+  (default 2) are pre-JIT-warmed at lifespan startup; the first N
+  sessions adopt a pool worker's cwd (matlabc has no `cd` builtin,
+  so the worker can't be retargeted — files are migrated on adopt /
+  retire).
+* **Observability:** `/healthz` returns the matlabc path + tier-2
+  sandbox state (`{backend, active, allow_net, reason?}`). Structured
+  logs + per-route latency/error metrics (Prometheus) are an open
+  follow-on.
 
 ---
 
 ## 10. Phase 8 — Coolify deploy & CI/CD
 
-* Commit `Dockerfile` + `docker-compose.yaml` (TRD §5) at repo root (or
-  under `deploy/`), point Coolify at the repo, map `OPENAI_API_KEY` +
-  the resource-ceiling env vars, and attach the `workspace_data` volume.
-* Traefik (Coolify) terminates TLS → HTTPS/WSS on `:443`; single
-  upstream port `:8000`. Add the `/healthz` check and `restart: always`.
-* CI (GitHub Actions): build the image, run the Phase-0 smoke gate +
-  `server/tests/`, and on green let Coolify auto-deploy from `main`.
-* Optional sidecar: `code-server` service for a full VS Code Web IDE
-  reachable from Safari/Blink/Android browsers (deferred past v1).
+* **Deployed.** App `matlab-llvm-backend` (uuid `go4s0sw0oo048gs0kc48ogoo`)
+  on `https://coolify.cyberdynecorp.ai`, project `MatlabLLVM`, env
+  `production`. Source: this repo on branch `main`, build pack
+  `dockercompose`, compose file `/docker-compose.yaml`, expose `:8000`,
+  FQDN `https://matlab-backend.coolify.cyberdynecorp.ai` (Traefik
+  terminates TLS → HTTPS/WSS). Persistent workspace volume mounted at
+  `/workspace`. Coolify env vars:
+  `MATLAB_BACKEND_MCP_REQUIRE_AUTH=1`, `MATLAB_BACKEND_MCP_TOKEN_SECRET`
+  (64-hex), `OPENAI_API_KEY` + `OPENAI_BASE_URL` (from prod
+  geo_dashboard — the local `.env` is stale), `CYBERDYNE_AUTH_URL`
+  (also defaults in compose to the same value). `MATLAB_BACKEND_SANDBOX_BACKEND`
+  is **not set** (compose default `none`) — see Phase 7.
+* **CI (`.github/workflows/backend.yml`):** `tests` job is fast, runs
+  on any backend-related push (server/+Dockerfile+compose), gates on
+  `--cov-fail-under=90` + live integration. The heavier `image` job
+  (build + smoke gate on the real container) is **opt-in via the
+  `backend-image` PR label or `workflow_dispatch`** to avoid the
+  LLVM build on every push; flip to auto-on-`main` once the host
+  proves stable.
+* **Optional sidecar:** `code-server` for a full VS Code Web IDE on
+  mobile browsers — explicitly deferred past v1.
 
 ---
 
 ## 11. Cross-cutting design decisions
 
-* **Session model.** Two options:
-  * *Stateless* — each `/v1/repl` is a fresh process (simple; no shared
-    variables between calls).
-  * *Stateful* — a long-lived `matlabc -repl` per session keeps the
-    workspace variables across calls (matches desktop MATLAB; needs a
-    session store, idle eviction, and the warm pool). **Recommended for
-    the pocket-MATLAB UX**; start stateless in Phase 1, add stateful in
-    Phase 7.
+* **Session model — resolved as stateful.** A long-lived `matlabc -repl`
+  per `(user_id, session_id)` keeps workspace variables across `/v1/repl`
+  turns (matches desktop MATLAB UX). Backed by `sessions.SessionManager`
+  + warm pool + idle eviction (Phase 7). Per-request override available
+  via `stateful: false` for one-shot semantics.
 * **Mobile clients (iPad/iPhone/Android).** The backend is
-  platform-neutral: REST + JSON for run/codegen/files, WebSocket for
-  DAP, SSE for MCP and chat streaming. Native apps or a PWA render text
-  output, inline figures (PNG/SVG), and a file browser; the DAP client
-  can be a VS Code Web instance (code-server sidecar) or a custom thin
-  DAP UI talking to `/v1/dap/ws`.
+  platform-neutral: REST + JSON for check/run/codegen/files,
+  **WebSocket** for DAP, **streamable-HTTP** for MCP and **SSE** for
+  chat streaming. Native apps or a PWA render text output, inline
+  figures (PNG/SVG), and a file browser; the DAP client can be a VS
+  Code Web instance (code-server sidecar, deferred) or a custom thin
+  DAP UI talking to `/v1/dap/ws`. *No mobile client has been written
+  yet — this is the largest remaining gap to end-user value.*
 * **Artifacts.** Everything downloadable lives in the workspace volume;
   the API returns relative paths the client turns into
-  `GET /v1/files/{path}` URLs. Consider short-lived signed URLs if the
-  CDN/edge ever serves them directly.
+  `GET /v1/files/{path}` URLs. Short-lived signed URLs (for direct
+  CDN/edge serving) are an open follow-on.
 
 ---
 
 ## 12. Testing & acceptance (maps to TRD §6)
 
-| Test | Phase | Pass condition |
-|---|---|---|
-| Build smoke | 0 | repl/codegen/plot run in the runtime image; `ldd` clean |
-| Route payloads | 1–2 | `check`/`repl`/`codegen/*` return valid JSON from a mobile HTTP client |
-| Isolation | 1 | crash, infinite loop, OOM each killed cleanly; FastAPI unaffected |
-| Latency | 1 | `/v1/check` p95 `<200ms`; `/v1/repl` p95 within warm-pool target |
-| Data round-trip | 3 | upload CSV → `readmatrix` → plot → download PNG |
-| DAP stress | 4 | breakpoint/inspect/step/reverse over `/v1/dap/ws` |
-| MCP tools | 5 | NL client triggers `matlab_repl`/`matlab_codegen` |
-| Grounded chat | 6 | toolbox question retrieves correct doc chunk + cites it |
+| Test | Phase | Pass condition | Status |
+|---|---|---|---|
+| Build smoke | 0 | `matlabc` repl/codegen/plot run in the runtime image | ✅ |
+| Route payloads | 1–2 | `check`/`repl`/`codegen/*` return valid JSON | ✅ 5 codegen targets covered |
+| Isolation | 1 | crash, infinite loop, OOM each killed cleanly; FastAPI unaffected | ✅ unit + live |
+| Latency | 1 | `/v1/check` p95 `<200ms`; `/v1/repl` p95 within warm-pool target | ✅ observed |
+| Data round-trip | 3 | upload CSV → `readmatrix` → plot → download PNG | ✅ |
+| DAP stress | 4 | breakpoint/inspect/step/reverse over `/v1/dap/ws` | ✅ initialize/launch/configurationDone/threads + events verified |
+| MCP tools | 5 | NL client triggers `matlab_check`/`matlab_repl`/`matlab_codegen` via the **`mcp-client` skill** | ✅ |
+| MCP auth | 7 | unauthenticated `/mcp/` rejected; minted token accepted | ✅ |
+| Grounded chat | 6 | toolbox question retrieves doc chunks + cites; tolerates LLM 4xx | ✅ live with `gpt-4o-mini` |
+| Sandbox state | 7 | `/healthz` reflects runtime backend + reason on probe failure | ✅ |
 
 ---
 

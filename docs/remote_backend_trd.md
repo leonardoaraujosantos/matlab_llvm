@@ -1,11 +1,13 @@
 # Technical Requirements Document (TRD)
 ## Project: matlab_llvm Remote Backend ("MATLAB in your pocket")
 
-> **Status:** reviewed for feasibility against the actual codebase and
-> corrected. See [§7 Feasibility Assessment & Corrections](#7-feasibility-assessment--corrections)
-> for every change made to the original draft and the evidence behind it.
-> The companion implementation plan is in
-> [`docs/remote_backend_plan.md`](remote_backend_plan.md).
+> **Status (2026-05-25):** every requirement in this TRD is implemented
+> and deployed at <https://matlab-backend.coolify.cyberdynecorp.ai> (see
+> the status block at the top of [`remote_backend_plan.md`](remote_backend_plan.md)).
+> [§7 Feasibility Assessment & Corrections](#7-feasibility-assessment--corrections)
+> remains the canonical record of the corrections applied to the original
+> external draft; the "Open product decisions" at the bottom of §7 are
+> now resolved and reflected in the running system.
 
 ---
 
@@ -35,8 +37,9 @@ the Git repository.
   deep, retrieval-grounded context about the compiler's internals and
   its shipped toolboxes.
 * **Unified management** — consolidate the communication channels
-  (REST, MCP/SSE, WebSocket) and the debug stack (DAP) behind a single
-  Python orchestrator (FastAPI) in a Coolify-managed container.
+  (REST, MCP streamable-HTTP, WebSocket, SSE for chat streaming) and
+  the debug stack (DAP) behind a single Python orchestrator (FastAPI)
+  in a Coolify-managed container.
 
 ---
 
@@ -58,7 +61,7 @@ an optional sidecar.
 |  [ Traefik / Coolify reverse proxy ]  — TLS termination + routing          |
 |             |                                          |                   |
 |     :443  HTTPS / WSS                          :443 (optional path)         |
-|     (REST + MCP/SSE + DAP-over-WS)             (code-server IDE)            |
+|     (REST + MCP streamable-HTTP + DAP-WS)      (code-server IDE)            |
 |             v                                          v                    |
 |  +-------------------------------------+   +-----------------------------+  |
 |  | Container 1: matlab-llvm-backend    |   | Container 2 (optional):     |  |
@@ -66,7 +69,7 @@ an optional sidecar.
 |  |                                     |   |   reached from Safari /      |  |
 |  |   - REST: /v1/repl, /v1/codegen/*   |   |   Blink Shell on the iPad    |  |
 |  |   - /v1/chat/completions (OpenAI)   |   +-----------------------------+  |
-|  |   - MCP/SSE: /mcp/sse               |                                    |
+|  |   - MCP: /mcp/ (streamable-HTTP)    |                                    |
 |  |   - DAP bridge: /v1/dap/ws/{sid}    |  spawns, per session:              |
 |  |        |                            |    `matlabc -dap <prog.m>`         |
 |  |        +--- stdio <--> WebSocket ---+----> (native DAP over stdin/stdout)|
@@ -146,10 +149,14 @@ an optional sidecar.
   * `POST /v1/codegen/systemverilog` — synthesizable RTL (`-emit-systemverilog`).
     *(Original draft folded Python+TypeScript into one route and called
     Verilog "verilog"; these are distinct flags — see §7, FIX-6.)*
-* **FastMCP interface (Model Context Protocol):** an SSE server at
-  `/mcp/sse` that auto-publishes the compiler operations (check, repl,
-  each codegen target) as MCP tools callable by MCP-aware AI clients on
-  the iPad.
+* **FastMCP interface (Model Context Protocol):** a **streamable-HTTP**
+  server at `/mcp/` (SSE is deprecated by MCP; we ship the modern
+  transport) that auto-publishes the compiler operations
+  (`matlab_check`, `matlab_repl`, `matlab_codegen` with target enum,
+  `list_files`, `read_file`) as MCP tools callable by MCP-aware AI
+  clients. Auth: a backend-minted HMAC bearer per identity (see §3 F3
+  and `mcp_auth.py`) — MCP clients can't run the CyberdyneAuth refresh
+  flow themselves.
 * **Low-latency WebSocket channel:** `/v1/dap/ws/{session_id}` — the DAP
   stdio↔WebSocket proxy. This is **mandatory** (it is the only remote
   path to the debugger), not the optional convenience the original draft
@@ -251,7 +258,7 @@ services:
       - REPL_TIMEOUT_SECONDS=10
       - REPL_MEMORY_MB=512
     ports:
-      - "8000:8000"   # REST + MCP/SSE + DAP-over-WebSocket (single port)
+      - "8000:8000"   # REST + MCP streamable-HTTP + DAP-over-WS (single port)
     volumes:
       - workspace_data:/workspace
     restart: always
@@ -360,7 +367,7 @@ CMD ["uvicorn", "server.main:app", "--host", "0.0.0.0", "--port", "8000"]
    `codegen/*` target.
 2. **MCP tool tests.** Connect an MCP-compatible client and confirm
    natural-language invocation correctly triggers the compiler tools
-   over `/mcp/sse`.
+   over `/mcp/` (streamable-HTTP, with a minted HMAC bearer).
 3. **Debugger stress test.** Set breakpoints in non-trivial MATLAB
    scripts from VS Code Web on the iPad via the `/v1/dap/ws/{sid}`
    bridge; verify stops, variable inspection, stepping, and reverse
@@ -406,12 +413,22 @@ inspection of the repository.
 * OpenAI-compatible `/v1/chat/completions` with internal code context —
   feasible, with the retrieval correction in FIX-7.
 
-### Open product decisions (carried into the plan)
+### Open product decisions — resolved 2026-05-25
 
-* **Stateful vs stateless REPL sessions** — one-shot per request, or
-  long-lived per-user workspace? (affects warm-pool + session store).
-* **Auth model** — static API key, per-user tokens, or Coolify-fronted
-  basic auth?
-* **Chat backend** — proxy to OpenAI (needs key + egress) vs a local
-  model. The current draft assumes OpenAI.
-* **code-server** — ship the optional IDE sidecar in v1 or defer?
+* **Stateful vs stateless REPL sessions** — **stateful**, with the
+  per-request `stateful: false` escape hatch. `sessions.SessionManager`
+  + warm pool (size 2) + 15-min idle eviction + 15 s wall-clock per
+  turn.
+* **Auth model** — **CyberdyneAuth bearer** validated against
+  `${CYBERDYNE_AUTH_URL}/api/v1/users/me` for `/v1/*` (per-identity
+  workspace isolation). Static `MATLAB_BACKEND_API_TOKEN` is kept as a
+  fallback. MCP gets a separate **backend-minted HMAC bearer** via
+  `POST /v1/mcp/token` (30-day TTL), bound to the CyberdyneAuth `sub`.
+* **Chat backend** — **OpenAI proxy** (`gpt-4o-mini`-class) with RAG
+  retrieval grounding via a dependency-free BM25 index over
+  `docs/**/*.md`. Retrieval-only fallback when `OPENAI_API_KEY` is
+  unset or upstream returns 4xx (citations still attached). No local
+  model in this v1.
+* **code-server sidecar** — **deferred past v1**. Backend is
+  DAP-ready; bring it back when a mobile-friendly IDE shell is a
+  priority.
