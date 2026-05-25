@@ -228,6 +228,15 @@ jobs:
 
       - name: Set up LLVM 22 + build deps
         uses: ./.github/actions/setup-llvm
+        with:
+          # bench/lapack/driver.sh defaults WITH_BLAS=1, which makes the
+          # runtime include <cblas.h> + <lapack.h> (provided by
+          # libopenblas-dev) and link against -lblas -llapack (provided
+          # by liblapack-dev's reference LAPACK; OpenBLAS's libopenblas
+          # also satisfies the BLAS symbols via the -lblas alias on
+          # Ubuntu).  Without these dev packages the perf-bench TU
+          # fails to compile.
+          extra-apt-packages: libopenblas-dev liblapack-dev
 
       - name: Install bench deps (numpy)
         run: python3 -m pip install --user numpy
