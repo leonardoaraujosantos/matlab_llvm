@@ -1,0 +1,86 @@
+TranslationUnit
+  Script
+    Block
+      ExprStmt suppressed
+        Call [any]
+          Name disp (builtin) [@handle]
+          Call [double]
+            Name sq (function) [@handle]
+            IntLit 5 [double]
+      ExprStmt suppressed
+        Call [any]
+          Name disp (builtin) [@handle]
+          Call [any]
+            Name sq__s1 (function) [@handle]
+            MatrixLit rows=1 [double:vec[3]]
+              Row 0
+                IntLit 1 [double]
+                IntLit 2 [double]
+                IntLit 3 [double]
+      ExprStmt suppressed
+        Call [any]
+          Name disp (builtin) [@handle]
+          Call [any]
+            Name twice__s1 (function) [@handle]
+            MatrixLit rows=2 [double:mat[2,2]]
+              Row 0
+                IntLit 1 [double]
+                IntLit 2 [double]
+              Row 1
+                IntLit 3 [double]
+                IntLit 4 [double]
+      ExprStmt suppressed
+        Call [any]
+          Name disp (builtin) [@handle]
+          Call [double]
+            Name twice (function) [@handle]
+            IntLit 7 [double]
+  Function sq
+    Inputs: x[double]
+    Outputs: y[double]
+    Locals:
+    Block
+      AssignStmt suppressed
+        LHS
+          Name y (output) [double]
+        RHS
+          BinOp .* [double]
+            Name x (param) [double]
+            Name x (param) [double]
+  Function twice
+    Inputs: x[double]
+    Outputs: y[double]
+    Locals:
+    Block
+      AssignStmt suppressed
+        LHS
+          Name y (output) [double]
+        RHS
+          BinOp + [double]
+            Name x (param) [double]
+            Name x (param) [double]
+  Function sq__s1
+    Inputs: x[any]
+    Outputs: y[any]
+    Locals:
+    Block
+      AssignStmt suppressed
+        LHS
+          Name y (output) [any]
+        RHS
+          BinOp .* [any]
+            Name x (param) [any]
+            Name x (param) [any]
+  Function twice__s1
+    Inputs: x[any]
+    Outputs: y[any]
+    Locals:
+    Block
+      AssignStmt suppressed
+        LHS
+          Name y (output) [any]
+        RHS
+          BinOp + [any]
+            Name x (param) [any]
+            Name x (param) [any]
+monomorphize: iterations=2 clones=2 rewrites=2 converged=true

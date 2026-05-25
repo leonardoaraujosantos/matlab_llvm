@@ -1,0 +1,80 @@
+TranslationUnit
+  Script
+    Block
+      ExprStmt suppressed
+        Call [any]
+          Name disp (builtin) [@handle]
+          Call [double]
+            Name accum (function) [@handle]
+            FPLit 0.0 [double]
+            IntLit 3 [double]
+      ExprStmt suppressed
+        Call [any]
+          Name disp (builtin) [@handle]
+          Call [double]
+            Name accum__s1 (function) [@handle]
+            MatrixLit rows=1 [double:vec[3]]
+              Row 0
+                IntLit 0 [double]
+                IntLit 0 [double]
+                IntLit 0 [double]
+            IntLit 3 [double]
+  Function accum
+    Inputs: s[double] n[double]
+    Outputs: s[double]
+    Locals:
+    Block
+      IfStmt
+        Cond
+          BinOp > [logical]
+            Name n (param) [double]
+            IntLit 0 [double]
+        Then
+          Block
+            AssignStmt suppressed
+              LHS
+                Name s (param) [double]
+              RHS
+                BinOp + [double]
+                  Name s (param) [double]
+                  IntLit 1 [double]
+            AssignStmt suppressed
+              LHS
+                Name s (param) [double]
+              RHS
+                Call [double]
+                  Name accum (function) [@handle]
+                  Name s (param) [double]
+                  BinOp - [double]
+                    Name n (param) [double]
+                    IntLit 1 [double]
+  Function accum__s1
+    Inputs: s[double] n[double]
+    Outputs: s[double]
+    Locals:
+    Block
+      IfStmt
+        Cond
+          BinOp > [logical]
+            Name n (param) [double]
+            IntLit 0 [double]
+        Then
+          Block
+            AssignStmt suppressed
+              LHS
+                Name s (param) [any]
+              RHS
+                BinOp + [any]
+                  Name s (param) [any]
+                  IntLit 1 [double]
+            AssignStmt suppressed
+              LHS
+                Name s (param) [double]
+              RHS
+                Call [double]
+                  Name accum (function) [@handle]
+                  Name s (param) [any]
+                  BinOp - [double]
+                    Name n (param) [double]
+                    IntLit 1 [double]
+monomorphize: iterations=2 clones=1 rewrites=1 converged=true

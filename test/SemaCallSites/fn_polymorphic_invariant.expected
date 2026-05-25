@@ -1,0 +1,10 @@
+addtwo:
+  (double, double)
+  (double:mat[2,1], double:mat[2,1])
+  (double:mat[2,2], double:mat[2,2])
+  (double:vec[3], double:vec[3])
+square:
+  (complex)
+  (double)
+  (double:mat[2,2])
+  (double:vec[3])

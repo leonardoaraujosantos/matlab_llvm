@@ -1,0 +1,6 @@
+sq:
+  (double)
+  (double:vec[3])
+twice:
+  (double)
+  (double:mat[2,2])

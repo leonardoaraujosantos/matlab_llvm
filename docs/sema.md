@@ -69,9 +69,11 @@ The driver runs Sema in this order (see `Resolver::resolve` in
 `lib/Sema/Resolver.cpp:92`):
 
 ```
-Parser → AST → Resolver → TypeInference → (lowering)
-                  ↑
-             SemaContext (arena)
+Parser → AST → Resolver → TypeInference → Monomorphize → (lowering)
+                  ↑                            ↑
+             SemaContext (arena)        clones per call-site
+                                        signature; stamps
+                                        concrete arg types
 ```
 
 Two passes inside `Resolver` itself:
@@ -86,6 +88,26 @@ Two passes inside `Resolver` itself:
 
 Then `TypeInference` runs over the now-fully-resolved AST, computing
 `Type*` for every expression and `InferredType` for every binding.
+
+`Monomorphize` (`lib/Sema/Monomorphize.cpp`, added by issue #38 /
+PR #39) then walks the TU and clones user functions per call-site
+signature, stamping concrete arg types on each clone's
+`Function::ParamTypeStamps` so AST→MLIR lowering emits concrete
+`func.func` signatures rather than `(none, ...) -> none`. Enabled by
+default; set `MATLAB_LLVM_SEMA_MONO=0` to disable (the late MLIR
+`runMonomorphiseUserCalls` then handles the same job at the matlab.call
+layer). The fixpoint loop interleaves cloning, call-site rewriting,
+type stamping, and Sema re-runs until no further specialisation is
+discovered — `Resolver::collectAssignments` clears stale
+`ParamRefs`/`OutputRefs` on each re-run so binding state stays clean.
+
+The Sema-time pass leaves three classes to the late MLIR mono:
+matrix-typed call sites (the ptr-shape settling depends on
+`LowerTensorOps` materialising tensor literals first), arity-varying
+callees (`add2(5)` + `add2(5, 7)` need per-arity clones with
+`matlab.nargin_value`), and `varargin`/`varargout` (per-arity
+cell-pack/unpack shape). Absorbing those classes Sema-side is
+tracked in issue #40.
 
 ## 3. Resolver, walked through
 

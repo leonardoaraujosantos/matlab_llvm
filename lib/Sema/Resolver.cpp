@@ -1228,6 +1228,14 @@ void Resolver::resolve(TranslationUnit &TU) {
 //===----------------------------------------------------------------------===//
 
 void Resolver::collectAssignments(Function &F, Scope *FnScope) {
+  // Re-runnable Resolver invariant. The monomorphizer (#38 Phases 3+4)
+  // re-invokes resolve() on the same TU after appending clones; without
+  // these clears, F.ParamRefs / F.OutputRefs would accumulate duplicate
+  // bindings from each prior run and downstream consumers would see
+  // stale entries first. Single-pass callers see no behavior change
+  // since these vectors start empty on a freshly-parsed Function.
+  F.ParamRefs.clear();
+  F.OutputRefs.clear();
   // Parameters and outputs are declared up-front.
   for (auto Name : F.Inputs) {
     if (Name == "~") continue; // placeholder parameter

@@ -165,7 +165,7 @@ In scope (subsets shipped, covered by dedicated docs):
 | Type inference (fixpoint with CF merges) | ✅ | |
 | Shape propagation through slicing, broadcast | ✅ | |
 | `nargin` / `nargout` dispatch (multi-return selection) | ✅ | |
-| Polymorphic call monomorphization | ✅ | |
+| Polymorphic call monomorphization | ✅ | Sema-time clone-per-signature pass (`lib/Sema/Monomorphize.cpp`, #38 / PR #39). Stamps concrete arg types on `Function::ParamTypeStamps` so AST→MLIR emits concrete `func.func` sigs (e.g. `@sq(double)` + `@sq__s1(ptr)` for `sq(5)` vs `sq([1 2 3])`). Default on; `MATLAB_LLVM_SEMA_MONO=0` falls back to the late MLIR mono. Matrix / arity-varying / `varargout` still flow through the late pass — tracked in #40. |
 | Integer dtype tracking (`int8..int64`, `uint8..uint64`) | 🟡 | Tracked in type lattice; `int32` and `uint8` matrix lanes have a typed runtime (Phase 1.1); narrower / wider int lanes still f64-shadowed |
 | Complex dtype tracking | ✅ | Lowers to `!llvm.ptr` (matlab_mat_c*); runtime arithmetic shipped |
 | N-dim (>2D) rank tracking | 🟡 | Tracked; runtime assumes ≤2D |

@@ -324,7 +324,7 @@ bool runLowerNarginNargout(ModuleOp M) {
  * have collapsed tensor types to !llvm.ptr — the only real dispatch
  * distinction remaining is f64 vs ptr, with f64 covering scalar calls
  * and ptr covering any matrix shape. */
-bool runMonomorphiseUserCalls(ModuleOp M, bool SkipClassMethods) {
+bool runMonomorphiseUserCalls(ModuleOp M) {
   MLIRContext *Ctx = M.getContext();
   auto I64 = IntegerType::get(Ctx, 64);
   /* Gather matlab.call sites that remain (untyped-path). */
@@ -368,16 +368,8 @@ bool runMonomorphiseUserCalls(ModuleOp M, bool SkipClassMethods) {
      * (tensor, tensor) signature locks in a sig that doesn't match
      * post-boxing ptr operands and leaves the cloned constructor
      * with `matlab.call_builtin matlab_obj_set_f64` ops carrying
-     * tensor-typed values that no LowerTensorOps dispatch handles.
-     * Non-class user functions keep the existing per-tensor-shape
-     * cloning so `sq([1 2 3])` and `sq(5)` get separate clones with
-     * correctly-typed arithmetic bodies. */
+     * tensor-typed values that no LowerTensorOps dispatch handles. */
     bool IsClassMethod = Fn->hasAttr("matlab.class_name");
-    /* Early-pipeline invocation (issue #36) skips class methods entirely
-     * — they have ctor/method/property-write relationships that are
-     * delicate and tested against the existing late-pipeline mono
-     * placement.  Leave them to the late pass. */
-    if (SkipClassMethods && IsClassMethod) continue;
     for (Operation *C : S) {
       unsigned N = C->getNumOperands();
       if (N > DeclArity) continue; /* too many args — user error, skip */
@@ -493,25 +485,35 @@ bool runLowerUserCalls(ModuleOp M) {
     llvm::SmallVector<Type, 4> NewInputs(OldType.getInputs().begin(),
                                           OldType.getInputs().end());
     bool IsClassMethod = Fn->hasAttr("matlab.class_name");
+    /* Pre-scan: which arg slots have a tensor operand at any call site?
+     * Tensor operands come from literal `[1 2]` / `[1 2 3; 4 5 6]`
+     * concat ops that LowerTensorOps will rewrite to
+     * `matlab_mat_from_buf` (returning ptr) on a later sweep. Refining
+     * the callee sig to tensor now would lock in a sig that doesn't
+     * match the post-rewrite ptr operand and the matlab.call →
+     * func.call conversion silently skips, leaving the call unlowered.
+     *
+     * Originally guarded by IsClassMethod only — the bug shows up for
+     * non-class functions too whenever a polymorphic helper splits
+     * into a single-tensor-caller variant (always the case for matrix
+     * args under the Sema-time monomorphizer, #38). Per-slot defer
+     * keeps the scalar refinement working when only SOME args of a
+     * mixed-arity callee are tensor at any site. */
+    llvm::SmallVector<bool, 4> ArgDeferred(NumIn, false);
+    for (Operation *C : Sites) {
+      if (C->getNumOperands() != NumIn) continue;
+      for (unsigned i = 0; i < NumIn; ++i) {
+        if (mlir::isa<RankedTensorType, UnrankedTensorType>(
+                C->getOperand(i).getType()))
+          ArgDeferred[i] = true;
+      }
+    }
     for (Operation *C : Sites) {
       if (C->getNumOperands() != NumIn) { Compatible = false; break; }
       for (unsigned i = 0; i < NumIn; ++i) {
+        if (ArgDeferred[i]) continue;
         Type CallTy = C->getOperand(i).getType();
         Type ExistingNew = NewInputs[i];
-        /* For class methods only: tensor-typed operands at matlab.call
-         * sites come from literal `[1 2]` or similar concat ops that
-         * LowerTensorOps will rewrite to `matlab_mat_from_buf`
-         * (returning ptr) on a later sweep. If we refine the
-         * constructor sig to the tensor type now, the post-rewrite
-         * ptr-typed operands won't match the (now stale) tensor sig
-         * and the matlab.call → func.call conversion silently skips,
-         * leaving the constructor call unlowered with a stranded
-         * `matlab.call_builtin matlab_obj_set_f64` carrying tensor
-         * RHS. Non-class user functions still want the tensor sig
-         * because their bodies depend on per-tensor-shape arithmetic. */
-        if (IsClassMethod &&
-            mlir::isa<RankedTensorType, UnrankedTensorType>(CallTy))
-          continue;
         if (canRefineTo(ExistingNew, CallTy)) {
           NewInputs[i] = CallTy;
         } else if (ExistingNew != CallTy &&
@@ -523,6 +525,7 @@ bool runLowerUserCalls(ModuleOp M) {
       }
       if (!Compatible) break;
     }
+    (void)IsClassMethod;
 
     // b) Infer result types from func.return operand types if currently `none`.
     llvm::SmallVector<Type, 4> NewResults(OldType.getResults().begin(),
@@ -740,6 +743,20 @@ bool runLowerUserCalls(ModuleOp M) {
     unsigned N = Call->getNumOperands();
     unsigned M_ = FnTy.getNumInputs();
     if (N > M_) continue; /* too many args — skip */
+
+    /* Don't pad missing trailing args until the monomorphiser has had
+     * a chance to clone the callee with a matching matlab.nargin_value.
+     * Without this guard, an `add2(5)` call to a 2-arg helper would be
+     * converted to `func.call @add2(5, 0.0)` here, defeating any
+     * `if nargin == 2 ... end` branching inside the body. After late
+     * mono creates `add2__s0` with matlab.nargin_value=1, the same
+     * call (now retargeted) clears this check because FnUA == N. */
+    if (N < M_) {
+      int64_t FnUA = (int64_t)M_;
+      if (auto FA = Fn->getAttrOfType<IntegerAttr>("matlab.nargin_value"))
+        FnUA = FA.getValue().getSExtValue();
+      if (FnUA != (int64_t)N) continue;
+    }
 
     /* Skip this call if the user-visible arity (from the frontend's
      * variadic-packing attribute) doesn't match the callee's

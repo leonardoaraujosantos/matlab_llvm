@@ -49,6 +49,19 @@ run_suite() {
 run_suite Lexer    -dump-tokens
 run_suite Parser   -dump-ast
 run_suite Sema     -emit-sema
+# Phase 1 of the Sema-time monomorphization epic (#38) — gates the
+# CallSiteAnalyzer's per-callee signature buckets. Pure analysis pass;
+# Phase 3 consumes the result to clone helpers per signature.
+run_suite SemaCallSites -dump-call-sites
+# Phase 2 of #38 — AST cloner round-trip. Deep-clones each top-level
+# function and re-runs Sema; original and `__clone` must produce the
+# same Sema state.
+run_suite SemaCloner -test-ast-clone
+# Phases 3+4 of #38 — specialization driver + recursion closure. Runs
+# the monomorphizer to fixpoint and verifies the post-mono TU shape
+# (one canonical Function plus one clone per non-canonical signature,
+# each call site re-pointed to the matching specialization).
+run_suite SemaMono -test-monomorphize
 run_suite MIR      -emit-mir
 run_suite MLIR     -emit-mlir
 run_suite Opt      "-emit-mlir -opt"

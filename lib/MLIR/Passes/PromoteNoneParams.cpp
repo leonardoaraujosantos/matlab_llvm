@@ -223,49 +223,13 @@ unsigned runPromoteNoneParams(mlir::ModuleOp M) {
     if (!AnyNone)
       return;
 
-    /* === Polymorphic-helper guard (issue #21 workaround) ===
-     *
-     * THIS IS A KNOWN BAND-AID.  The "real fix" — per-call-site
-     * monomorphization happening BEFORE this pass — was attempted
-     * and found to require a deeper refactor of LowerTensorOps into
-     * composable phases (see issue #36 + the comment thread there).
-     *
-     * INVARIANT THIS GUARD MAINTAINS: a func.func with multiple
-     * in-module callers and at least one `none` arg stays `none`-typed
-     * after this pass runs, so the late `runMonomorphiseUserCalls`
-     * can clone the body per concrete signature seen at call sites.
-     *
-     * CANARY: test/Run/fn_polymorphic_invariant.m exercises four
-     * shape combinations of the same callee.  If the guard ever stops
-     * firing prematurely, that fixture is the first to break in the
-     * per-PR run-tests lane.
-     *
-     * Skip functions that have in-module callers.  Promoting a polymorphic
-     * helper (e.g. `function y = sq(x); y = x.*x; end` called both as
-     * `sq(5)` and `sq([1 2 3])`) to f64 would monomorphize it and break
-     * the matrix call sites.  Sema's call-site arg-flow already refines
-     * such helpers' arg types from the actual call args; the pass is
-     * meant for true entry-point functions with no in-module caller
-     * (the GPU PCT validation tests). */
-    bool HasCaller = false;
-    auto FnName = Fn.getSymName();
-    M.walk([&](Operation *Op) {
-      if (HasCaller) return;
-      if (auto Call = dyn_cast<func::CallOp>(Op)) {
-        if (Call.getCallee() == FnName) HasCaller = true;
-        return;
-      }
-      // matlab.call still un-lowered when PromoteNoneParams runs early
-      if (Op->getName().getStringRef() == "matlab.call") {
-        if (auto CalleeAttr = Op->getAttrOfType<StringAttr>("callee"))
-          if (CalleeAttr.getValue() == FnName) HasCaller = true;
-      }
-    });
-    if (HasCaller) {
-      if (std::getenv("MATLAB_GPU_DEBUG_PROMOTE"))
-        std::fprintf(stderr, "  skip: has in-module caller(s)\n");
-      return;
-    }
+    /* Issue #38 retired the in-module-caller skip that used to guard
+     * polymorphic helpers from being promoted (and then mis-typed
+     * relative to their matrix call sites). The Sema-time
+     * monomorphizer now lands each polymorphic helper with concrete
+     * arg types before this pass runs, so a `none` arg here is a
+     * true entry-point function (the GPU PCT lane) — promote it as
+     * such. */
 
     /* Find each param slot. */
     llvm::SmallVector<Value> Slots;
