@@ -550,8 +550,9 @@ backend-itest:
 #   just backend-test-remote URL=https://matlab-backend.coolify.cyberdynecorp.ai \
 #       USER=leotest@test.com PASS='kugmet-5zozki-nuwJef'
 #   just backend-test-remote URL=https://… TOKEN='ey…'
-backend-test-remote URL TOKEN="" USER="" PASS="" AUTH="https://auth.backend.coolify.cyberdynecorp.ai":
+backend-test-remote URL TOKEN="" USER="" PASS="" AUTH="https://auth.backend.coolify.cyberdynecorp.ai" EXPECT_SANDBOX="":
     cd server && BACKEND_URL="{{URL}}" BACKEND_TOKEN="{{TOKEN}}" \
         CYBERDYNE_USER="{{USER}}" CYBERDYNE_PASS="{{PASS}}" \
         CYBERDYNE_AUTH_URL="{{AUTH}}" \
+        EXPECT_SANDBOX="{{EXPECT_SANDBOX}}" \
         uv run --extra dev pytest integration -v

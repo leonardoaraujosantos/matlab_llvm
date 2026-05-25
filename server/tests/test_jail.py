@@ -18,6 +18,36 @@ def test_jail_bwrap_builds_argv(monkeypatch):
     assert out[-2:] == ["matlabc", "-repl"]
 
 
+def test_jail_bwrap_isolation_flags_complete(monkeypatch):
+    """The flags that *are* the security boundary — regression-pin them."""
+    monkeypatch.setattr(jail.settings, "sandbox_backend", "bwrap")
+    monkeypatch.setattr(jail.settings, "sandbox_allow_net", False)
+    monkeypatch.setattr(jail.shutil, "which", lambda _t: "/usr/bin/bwrap")
+    out = jail.wrap(["matlabc", "-repl"], "/ws")
+    pairs = list(zip(out, out[1:]))
+    # Root is mounted read-only — host fs visible but un-writable.
+    assert ("--ro-bind", "/") in pairs
+    # A fresh procfs view (only the sandbox's PIDs are visible).
+    assert ("--proc", "/proc") in pairs
+    # Minimal /dev — no /dev/mem etc.
+    assert ("--dev", "/dev") in pairs
+    # /tmp is a clean tmpfs.
+    assert ("--tmpfs", "/tmp") in pairs
+    # Workspace is the *only* read-write bind.
+    assert ("--bind", "/ws") in pairs
+    assert ("--chdir", "/ws") in pairs
+    # Namespaces — process, IPC, UTS, network. PID namespace alone reduces
+    # /proc to the sandbox's own processes.
+    for flag in ("--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-net"):
+        assert flag in out, f"missing isolation flag: {flag}"
+    # Lifecycle hardening.
+    assert "--die-with-parent" in out
+    assert "--new-session" in out
+    # argv is appended after the `--` separator.
+    sep = out.index("--")
+    assert out[sep + 1 :] == ["matlabc", "-repl"]
+
+
 def test_jail_allow_net_drops_net_unshare(monkeypatch):
     monkeypatch.setattr(jail.settings, "sandbox_backend", "bwrap")
     monkeypatch.setattr(jail.settings, "sandbox_allow_net", True)

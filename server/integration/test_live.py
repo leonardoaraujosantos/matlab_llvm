@@ -30,6 +30,35 @@ def test_healthz(http):
     assert body["matlabc_present"] is True
 
 
+def test_healthz_sandbox_field(http):
+    """The deployment exposes its tier-2 sandbox state."""
+    body = http.get("/healthz").json()
+    assert "sandbox" in body, body
+    sb = body["sandbox"]
+    assert sb["backend"] in ("none", "bwrap", "firejail", "nsjail")
+    assert isinstance(sb["active"], bool)
+
+
+def test_sandbox_matches_expected(http):
+    """If EXPECT_SANDBOX=<backend> is set, the deployment MUST report it active.
+
+    Use this in CI / post-deploy to fail loudly when sandbox flips back to
+    'none' (e.g. someone removed the env var on Coolify). When EXPECT_SANDBOX
+    is unset the test is a no-op.
+    """
+    import os
+
+    expected = os.environ.get("EXPECT_SANDBOX", "").strip()
+    if not expected:
+        pytest.skip("EXPECT_SANDBOX not set — skipping post-deploy guardrail")
+    sb = http.get("/healthz").json().get("sandbox", {})
+    assert sb.get("backend") == expected, sb
+    assert sb.get("active") is True, (
+        f"sandbox configured as {expected!r} but not active "
+        f"(tool missing or userns blocked): {sb}"
+    )
+
+
 def test_whoami(http, auth_token):
     r = http.get("/v1/auth/whoami")
     assert r.status_code == 200, r.text
