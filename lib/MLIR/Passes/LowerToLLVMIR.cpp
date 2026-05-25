@@ -7,6 +7,7 @@
 
 #include "matlab/MLIR/Passes/Passes.h"
 
+#include "llvm/ADT/SetVector.h"
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
 #include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
 #include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVMPass.h"
@@ -232,6 +233,7 @@ mlir::LogicalResult validateAllMatlabOpsLowered(mlir::ModuleOp M) {
    * op. */
   llvm::SmallVector<mlir::Operation *, 16> Calls;
   llvm::SmallVector<mlir::Operation *, 16> Indirects;
+  llvm::SmallVector<mlir::Operation *, 16> MakeHandles;
   llvm::SmallVector<mlir::Operation *, 16> Others;
   M.walk([&](mlir::Operation *Op) {
     auto Name = Op->getName().getStringRef();
@@ -240,10 +242,13 @@ mlir::LogicalResult validateAllMatlabOpsLowered(mlir::ModuleOp M) {
       Calls.push_back(Op);
     else if (Name == "matlab.call_indirect")
       Indirects.push_back(Op);
+    else if (Name == "matlab.make_handle")
+      MakeHandles.push_back(Op);
     else
       Others.push_back(Op);
   });
-  if (Calls.empty() && Indirects.empty() && Others.empty())
+  if (Calls.empty() && Indirects.empty() && MakeHandles.empty() &&
+      Others.empty())
     return mlir::success();
 
   for (mlir::Operation *Op : Calls) {
@@ -272,6 +277,36 @@ mlir::LogicalResult validateAllMatlabOpsLowered(mlir::ModuleOp M) {
            "or an arity the runtime doesn't yet implement. See "
            "docs/feature_status.md / docs/plotting.md for the "
            "currently supported call shapes.\n";
+  }
+  /* `matlab.make_handle "<name>"` survives when the callee is a
+   * builtin name that Sema accepted (it's registered in the resolver's
+   * builtin set) but no lowering pattern in any pass knows how to
+   * realise it as a runtime call (e.g. `peaks`, `magma`, `surfl` —
+   * registered for parse acceptance but not yet implemented). Dedup by
+   * callee name and emit one focused error per name instead of letting
+   * the downstream `Others` aggregator hide them all as "1× make_handle"
+   * (issue #30). The note also calls out which name was the culprit so
+   * any cascading `unsupported call shape` errors above are easy to
+   * recognise as downstream consequences. */
+  if (!MakeHandles.empty()) {
+    llvm::SetVector<llvm::StringRef> ReportedNames;
+    for (mlir::Operation *Op : MakeHandles) {
+      llvm::StringRef Callee;
+      if (auto CAttr = Op->getAttrOfType<mlir::StringAttr>("callee"))
+        Callee = CAttr.getValue();
+      if (Callee.empty() || !ReportedNames.insert(Callee)) continue;
+      std::string LocStr;
+      {
+        llvm::raw_string_ostream OS(LocStr);
+        Op->getLoc().print(OS);
+        OS.flush();
+      }
+      llvm::errs()
+          << LocStr << ": error: undefined function '" << Callee
+          << "': name is recognised by the frontend but the runtime "
+             "doesn't implement it. See docs/feature_status.md for the "
+             "currently supported function surface.\n";
+    }
   }
   for (mlir::Operation *Op : Indirects) {
     /* `matlab.call_indirect` survives when the callee is an

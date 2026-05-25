@@ -188,6 +188,15 @@ jobs:
         # so running with -j and a hung external sim are both safe.
         run: ctest --test-dir build --output-on-failure -j $(nproc)
 
+      # Examples sweep — compile/link/run every in-scope examples/**/*.m
+      # through the AOT path and gate on regressions vs
+      # test/Examples/known_failures.txt. Promoted from Nightly to per-PR
+      # Full lane in #29 so baseline regressions surface immediately rather
+      # than waiting for the nightly schedule. SymPP is built above and
+      # WITH_SYM is on, so the symbolic examples link + run (not SKIPped).
+      - name: Examples sweep (compile/run all examples)
+        run: bash test/Examples/run_sweep.sh "$PWD/build/matlabc"
+
       - name: ccache stats
         if: always()
         run: ccache -s
@@ -304,13 +313,9 @@ jobs:
           ctest --test-dir build --output-on-failure \
             -R '^(cocotb-tests|flowchart-emit-(chart|diagram)-cocotb|flowchart-emit-subsystem-sv-(verilator|cosim))$'
 
-      # Examples sweep — compile/link/run every in-scope examples/**/*.m through
-      # the AOT path and gate on regressions vs test/Examples/known_failures.txt.
-      # Scheduled-only (this job), so it runs nightly even with no code change;
-      # the writeup lands in the Actions job summary.  SymPP is built above and
-      # WITH_SYM is on, so the symbolic examples link + run (not SKIPped).
-      - name: Examples sweep (compile/run all examples)
-        run: bash test/Examples/run_sweep.sh "$PWD/build/matlabc"
+      # Examples sweep was moved to the Full lane in #29 — it now runs on
+      # every PR so baseline regressions surface immediately. Nightly still
+      # exercises the strict / cocotb / verilator lanes above.
 
       - name: ccache stats
         if: always()
