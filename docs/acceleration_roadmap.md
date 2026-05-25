@@ -1,15 +1,29 @@
 # Acceleration Roadmap — BLAS, SIMD, parfor, GPU
 
-Status: 🔵 plan / not started. Companion to
-[`gpu_coder_roadmap.md`](gpu_coder_roadmap.md) (the GPU half of this
-story) and the parfor outliner gap tracked at
-[issue #20](https://github.com/leonardoaraujosantos/matlab_llvm/issues/20).
+Status: 🔵 plan / not started. Companion to:
+- [`lapack_roadmap.md`](lapack_roadmap.md) — focused source-of-truth for
+  the **host-CPU LAPACK / BLAS** slice (Tiers 1-3 below). Contains the
+  two-layer build invariant that keeps emit-c / emit-cpp / emit-sv
+  output portable to any CPU — the "Embedded Coder" requirement.
+- [`gpu_coder_roadmap.md`](gpu_coder_roadmap.md) — the **GPU half** of
+  this story (cuBLAS / cuSOLVER on NVIDIA, MPS on Metal).
+- [issue #20](https://github.com/leonardoaraujosantos/matlab_llvm/issues/20) —
+  parfor outliner gap.
+
 Authoritative live status in [`feature_status.md`](feature_status.md).
 
 This doc collects every "make matlab_llvm faster" lane in one place,
 ranked by user-visible gain and dependency chain. Each tier is sized in
 calendar-time at the standard one-focused-session-per-stage cadence
 (a "week" = ~5 sessions).
+
+**Cross-emit invariant.** Tiers 1-3 below add LAPACK / BLAS as an
+opt-in build-time link; the runtime's default build stays
+library-agnostic so `-emit-c` / `-emit-cpp` users get a single-file
+`runtime/matlab_runtime.cpp` with no `cblas_*` references. matlabc
+itself can link LAPACK for fast REPL without affecting what gets
+emitted to a cross-compile target. Full design lives in
+[`lapack_roadmap.md`](lapack_roadmap.md) §0.
 
 The numbers below were captured on an Apple M-series laptop (12 logical
 cores) running an `-O3` matlabc-compiled binary linked against the
@@ -74,6 +88,12 @@ explicit SIMD plus the parfor + GPU bridges.
 ## 2. Tier 1 — Dense gemm via a host BLAS (the headline)
 
 🔵 not started. **Effort: ~1.5 weeks.**
+
+> Deeper coverage of Tiers 1-3 (per-routine inventory with exact
+> `runtime/matlab_runtime.cpp` line citations, library selection per
+> host, the two-layer build invariant) lives in
+> [`lapack_roadmap.md`](lapack_roadmap.md). The summary below is
+> kept in sync with that doc's §1 and §2.
 
 Replace the naive triple-loop `matlab_matmul_mm` and friends with a
 call into a host BLAS library when the operand shape is "big enough"
@@ -144,7 +164,8 @@ configurable via `MATLAB_BLAS_GEMM_MIN` env var for benchmarking.
 ## 3. Tier 2 — LAPACK for linear solve / LU / QR / triangular
 
 🔵 not started. **Effort: ~1 week** (after Tier 1 ships — same link
-infrastructure).
+infrastructure). Per-routine details + LAPACK call mapping in
+[`lapack_roadmap.md`](lapack_roadmap.md) §1.2.
 
 | MATLAB surface | LAPACK call | Today |
 |---|---|---|
@@ -171,7 +192,9 @@ identification / Kalman path** in the runtime — `idtools`, `regress`,
 
 ## 4. Tier 3 — LAPACK eig / SVD / Schur
 
-🔵 not started. **Effort: ~1.5 weeks** (these are heavier LAPACK
+🔵 not started. **Effort: ~1.5 weeks**. Per-routine details +
+2-/3-return splitter wiring in
+[`lapack_roadmap.md`](lapack_roadmap.md) §1.3. (these are heavier LAPACK
 kernels; need careful 2-/3-return splitter wiring).
 
 | MATLAB surface | LAPACK call | Today |
@@ -324,6 +347,13 @@ lands, the GPU lane unlocks:
   and JIT-compile on the device.
 - **T3**: CUDA (Linux + NVIDIA).
 - **T4**: OpenCL (Linux + AMD / Intel iGPU).
+
+GPU-side library replacement (cuBLAS / cuSOLVER on NVIDIA,
+MPSMatrix on Apple Metal) is the GPU complement to this doc's
+CPU Tiers 1-3 — same dispatch pattern (gemm / solve / decomp →
+library call) but device-side. Summary in
+[`lapack_roadmap.md`](lapack_roadmap.md) §4; full details in
+`gpu_coder_roadmap.md` §2.5 (MPS) / §3.5 (cuBLAS).
 
 The Mandelbrot benchmark used above is **the same code path** the
 GPU lane targets — once T2.B ships, `bench_mandel_parfor.m` with a
