@@ -171,14 +171,24 @@ ALL="$WORK/all.tsv"; : >"$ALL"
 # An example is in SKIP scope if its relative path matches one of these
 # prefixes (SystemVerilog / cocotb / flowchart-dialect targets, not standalone
 # LLVM-execute programs — see docs/examples_status_report.md §A and §F).
+# Also covers HDL-targeted files outside hdl/: a `*_hdl.m` filename suffix or
+# a leading `% hdl:` port pragma is the strong signal that the file is
+# SystemVerilog-only (issue #26). Suffix check is the cheap fast-path; the
+# pragma scan reads only the first 20 lines so the cost stays bounded.
 skip_scope() {
   case "$1" in
     hdl/*)        return 0 ;;  # SV / cocotb modules + testbenches + synth wrappers
     mflow/*)      return 0 ;;  # custom-block fragments, run via .mflow tooling
     mflowlink/*)  return 0 ;;  # cross-dialect fragments, run via mflowlink_run
     stateflow/*)  return 0 ;;  # state-chart fragments
-    *)            return 1 ;;
+    *_hdl.m)      return 0 ;;  # HDL-targeted file outside hdl/
   esac
+  # Pragma scan: head -20 keeps the cost bounded for files that don't match
+  # the suffix but still carry `% hdl: port(...)` annotations.
+  if head -20 "$EXDIR/$1" 2>/dev/null | grep -qE '^[[:space:]]*%[[:space:]]*hdl:'; then
+    return 0
+  fi
+  return 1
 }
 
 # Heuristic: does the example need the Symbolic Math Toolbox?
