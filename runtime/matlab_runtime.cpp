@@ -70,6 +70,12 @@
        void dpotrf_(char*, int*, double*, int*, int*);
        void dgeqrf_(int*, int*, double*, int*, double*, double*, int*, int*);
        void dorgqr_(int*, int*, int*, double*, int*, double*, double*, int*, int*);
+       void dgesvd_(char*, char*, int*, int*, double*, int*, double*,
+                    double*, int*, double*, int*, double*, int*, int*);
+       void dsyevd_(char*, char*, int*, double*, int*, double*,
+                    double*, int*, int*, int*, int*);
+       void dgeev_(char*, char*, int*, double*, int*, double*, double*,
+                   double*, int*, double*, int*, double*, int*, int*);
      }
 #  endif
 
@@ -683,6 +689,36 @@ matlab_mat *matlab_mrdivide_mm(matlab_mat *A, matlab_mat *B) {
  */
 matlab_mat *matlab_svd(matlab_mat *A_in) {
     int64_t m_orig = A_in->rows, n_orig = A_in->cols;
+#ifdef MATLAB_LLVM_WITH_BLAS
+    if (std::min(m_orig, n_orig) >= lapack_threshold()) {
+        /* Phase 3 of #45 — dgesvd_ with jobu='N', jobvt='N' computes
+         * only the singular values (no U / V matrices). MATLAB's
+         * scalar-return form `s = svd(A)` returns a column vector of
+         * length min(m,n) in descending order — which is what dgesvd
+         * gives us natively. Row-major in / col-major LAPACK / row-
+         * major out; the singular values themselves are layout-
+         * agnostic so no post-transpose needed for the result. */
+        int64_t k = std::min(m_orig, n_orig);
+        std::vector<double> A_cm(m_orig * n_orig);
+        rm_to_cm(A_in->data, A_cm.data(), m_orig, n_orig);
+        std::vector<double> s(k);
+        lapack_int_t mm = (lapack_int_t)m_orig,
+                     nn = (lapack_int_t)n_orig,
+                     info = 0, lwork = -1;
+        char jobu = 'N', jobvt = 'N';
+        double wopt = 0.0;
+        /* Workspace query. */
+        dgesvd_(&jobu, &jobvt, &mm, &nn, A_cm.data(), &mm, s.data(),
+                nullptr, &mm, nullptr, &nn, &wopt, &lwork, &info);
+        lwork = (lapack_int_t)wopt;
+        std::vector<double> work(lwork > 0 ? (size_t)lwork : 1);
+        dgesvd_(&jobu, &jobvt, &mm, &nn, A_cm.data(), &mm, s.data(),
+                nullptr, &mm, nullptr, &nn, work.data(), &lwork, &info);
+        matlab::runtime::MatPtr S = matlab::runtime::make_mat(k, 1);
+        for (int64_t i = 0; i < k; ++i) S->data[i] = s[i];
+        return S.release();
+    }
+#endif
     int64_t m = m_orig, n = n_orig;
     matlab_mat *A = A_in;
     matlab_mat *T = NULL;
@@ -1006,6 +1042,73 @@ static int extract_eigenvalues_(const double *H, int64_t n,
 matlab_mat *matlab_eig(matlab_mat *A_in) {
     if (!A_in || A_in->rows != A_in->cols) return mat_alloc(0, 0);
     int64_t n = A_in->rows;
+#ifdef MATLAB_LLVM_WITH_BLAS
+    if (n >= lapack_threshold()) {
+        /* Phase 3 of #45 — dispatch based on symmetry detection.
+         * Symmetric: dsyevd_ (divide & conquer, ascending eigenvalues).
+         * Non-symmetric: dgeev_ (real Schur form → ere, eim arrays).
+         * The non-symmetric path mirrors the hand-rolled output
+         * contract: real column when all eigenvalues are real, complex
+         * (matlab_mat_c*) otherwise. */
+        if (n > 0 && matrix_is_symmetric_(A_in->data, n)) {
+            std::vector<double> A_cm(n * n);
+            rm_to_cm(A_in->data, A_cm.data(), n, n);
+            std::vector<double> w(n);
+            char jobz = 'N', uplo = 'U';
+            lapack_int_t nn = (lapack_int_t)n, info = 0,
+                         lwork = -1, liwork = -1;
+            double wopt = 0;
+            lapack_int_t iwopt = 0;
+            dsyevd_(&jobz, &uplo, &nn, A_cm.data(), &nn, w.data(),
+                    &wopt, &lwork, &iwopt, &liwork, &info);
+            lwork = (lapack_int_t)wopt;
+            liwork = iwopt;
+            std::vector<double> work(lwork > 0 ? (size_t)lwork : 1);
+            std::vector<lapack_int_t> iwork(liwork > 0 ? (size_t)liwork : 1);
+            dsyevd_(&jobz, &uplo, &nn, A_cm.data(), &nn, w.data(),
+                    work.data(), &lwork, iwork.data(), &liwork, &info);
+            matlab::runtime::MatPtr E = matlab::runtime::make_mat(n, 1);
+            for (int64_t i = 0; i < n; ++i) E->data[i] = w[i];
+            return E.release();
+        }
+        /* Non-symmetric — dgeev_ with jobvl='N', jobvr='N'. */
+        std::vector<double> A_cm(n * n);
+        rm_to_cm(A_in->data, A_cm.data(), n, n);
+        std::vector<double> wr(n), wi(n);
+        char jobvl = 'N', jobvr = 'N';
+        lapack_int_t nn = (lapack_int_t)n, info = 0, lwork = -1;
+        double wopt = 0.0;
+        dgeev_(&jobvl, &jobvr, &nn, A_cm.data(), &nn, wr.data(), wi.data(),
+               nullptr, &nn, nullptr, &nn, &wopt, &lwork, &info);
+        lwork = (lapack_int_t)wopt;
+        std::vector<double> work(lwork > 0 ? (size_t)lwork : 1);
+        dgeev_(&jobvl, &jobvr, &nn, A_cm.data(), &nn, wr.data(), wi.data(),
+               nullptr, &nn, nullptr, &nn, work.data(), &lwork, &info);
+        /* Sort ascending by real part, tie-break by imag (match the
+         * hand-rolled path's sort contract). */
+        for (int64_t i = 0; i < n; ++i) {
+            for (int64_t j = i + 1; j < n; ++j) {
+                bool swap = (wr[j] < wr[i]) ||
+                            (wr[j] == wr[i] && wi[j] < wi[i]);
+                if (swap) {
+                    double t;
+                    t = wr[i]; wr[i] = wr[j]; wr[j] = t;
+                    t = wi[i]; wi[i] = wi[j]; wi[j] = t;
+                }
+            }
+        }
+        bool all_real = true;
+        for (int64_t i = 0; i < n; ++i) if (wi[i] != 0.0) { all_real = false; break; }
+        if (all_real) {
+            matlab::runtime::MatPtr E = matlab::runtime::make_mat(n, 1);
+            for (int64_t i = 0; i < n; ++i) E->data[i] = wr[i];
+            return E.release();
+        }
+        matlab_mat_c *Ec = mat_c_alloc(n, 1);
+        for (int64_t i = 0; i < n; ++i) { Ec->re[i] = wr[i]; Ec->im[i] = wi[i]; }
+        return (matlab_mat *)Ec;
+    }
+#endif
 
     /* Non-symmetric path — Francis double-shift QR on Hessenberg form.
      * Returns matlab_mat* (real) when all eigenvalues are real, or
