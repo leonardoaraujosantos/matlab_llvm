@@ -48,14 +48,20 @@ Confirmed via `MATLABC_REPL_DUMP=1` on the IR emitted for
 workspace load + `matlab_subscript1_s(ptr, 0.0)` (array index, not
 call).
 
-### Layer 3 — `runLowerUserCalls` can't see the call as a call
+### Layer 3 — neither monomorphiser can see the call as a call
 
-`lib/MLIR/Passes/LowerUserCalls.cpp:467–472` walks `matlab.call` ops
-and groups them by callee. Once the resolver has rewritten the call
-site as a workspace load, there *is* no `matlab.call` op — the
-linkage to the function definition is gone at the MLIR level. Type
-monomorphisation, signature refinement, and call lowering all skip
-this call site.
+Both monomorphisation stages drop the workspace-rewritten call:
+
+* **Sema-time** (`lib/Sema/Monomorphize.cpp`, #38 / PR #39) — runs
+  before lowering and walks `CallOrIndex` nodes whose `Callee` is a
+  `NameExpr` resolved to a user `Function`. When the resolver has
+  rewritten the call site into a workspace load, the `CallOrIndex` is
+  gone at the AST level too, so the call never enters the analyzer's
+  bucket.
+* **Late MLIR pass** (`lib/MLIR/Passes/LowerUserCalls.cpp:~470`) —
+  walks `matlab.call` ops and groups them by callee. The same
+  workspace-load rewrite hides the call from this pass; signature
+  refinement and `matlab.call → func.call` conversion both skip it.
 
 ### Layer 4 — Workspace hook has no "Function" kind
 
