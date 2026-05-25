@@ -110,6 +110,92 @@ over the shipped `lsqnonlin`/`fminunc`; shares the `quaternion` +
 coordinate-transform foundation with Sensor Fusion). See
 [`docs/roadmap.md`](docs/roadmap.md) §16 for the sequencing rationale.
 
+## Performance
+
+Two stories, captured by the reproducible bench harness at
+[`bench/lapack/`](bench/lapack/). Apple M-series, single-threaded BLAS
+(`OPENBLAS_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1`), `clang++ -O3`,
+matlabc built with `MATLAB_LLVM_WITH_BLAS=ON` (default on macOS — links
+Apple Accelerate; Linux uses CMake's `FindBLAS` / `FindLAPACK` to pick
+OpenBLAS / MKL / generic LAPACK).
+
+### Story 1 — dense linear algebra (LAPACK kernels)
+
+After the LAPACK acceleration epic ([#45](https://github.com/leonardoaraujosantos/matlab_llvm/issues/45)),
+every hot dense-linalg kernel dispatches to LAPACK / BLAS above a size
+threshold. matlab_llvm now matches NumPy to within ±50% on N=1000 across
+the board, and in several places (`chol`, `inv`, `svd`) is faster than
+NumPy on Apple Silicon because Accelerate uses the AMX matrix
+coprocessor.
+
+| Kernel | Pre-LAPACK | After Phases 1-3 | Speedup | vs NumPy (after) |
+|---|---|---|---|---|
+| `matmul` | 1.137 s | 7.97 ms | **143×** | 0.97× |
+| `solve` (`A \ b`) | 71.5 ms | 5.85 ms | 12× | 0.96× |
+| `lu` | 150 ms | 13.0 ms | 12× | — |
+| `qr` | 1.615 s | 58.0 ms | 28× | 0.62× |
+| `chol` | 168 ms | 3.34 ms | 50× | **1.09×** |
+| `inv` | 882 ms | 18.8 ms | 47× | **1.12×** |
+| `eig` (symmetric) | 6.451 s | 96.8 ms | 67× | 0.72× |
+| `svd` | 20.324 s | 76.5 ms | **266×** | **1.05×** |
+
+All numbers at N=1000 (square matrix). Threshold for the dispatch is
+`N ≥ 64` for LAPACK and `m·n·k ≥ 64³` for BLAS gemm; below those the
+naive O(N³) path stays competitive (the LAPACK call overhead dominates).
+Full per-(kernel × size × implementation) data: [`bench/lapack/results/`](bench/lapack/results/).
+
+### Story 2 — scalar inner loops (Mandelbrot)
+
+Where LAPACK matters for dense linalg, it can't help with the
+opposite shape: scalar arithmetic per element with data-dependent
+branches. matlab_llvm's LLVM JIT compiles those loops to tight native
+code; NumPy has to either vectorize (overhead per masked element) or
+fall back to Python-level iteration.
+
+Mandelbrot escape-time at `max_iter=100`, square N×N image:
+
+| N (image side) | matlab_llvm | NumPy (vectorized + masked) | Pure Python | matlab_llvm vs NumPy | vs pure Python |
+|---|---|---|---|---|---|
+| 100 | 1.25 ms | 4.88 ms | 14.32 ms | **3.92× faster** | **11.5× faster** |
+| 300 | 11.72 ms | 43.62 ms | 130.02 ms | **3.72× faster** | **11.1× faster** |
+| 1000 | 100.88 ms | 560.63 ms | — *(too slow)* | **5.56× faster** | — |
+
+`bench/lapack/bench_mandelbrot.m` is the same scalar-loop algorithm
+across all three implementations — no `parfor`, no broadcasting trick,
+just `for py = 1:N; for px = 1:N; for k = 1:max_iter`. The LLVM
+optimiser handles register allocation, loop unrolling, and the
+data-dependent escape branch tightly enough that matlab_llvm wins
+even against NumPy's vectorised mask-update approach.
+
+### Reproducing
+
+```bash
+# Pre-LAPACK baseline (naive C only; verifies the cross-emit-clean
+# build still works):
+WITH_BLAS=0 bash bench/lapack/driver.sh baseline_pre_lapack
+
+# With LAPACK acceleration on:
+WITH_BLAS=1 bash bench/lapack/driver.sh phase3
+
+# Render the before/after Markdown table:
+python3 bench/lapack/report.py baseline_pre_lapack phase3
+```
+
+The bench harness pins single-threaded BLAS so per-implementation
+comparisons are fair (NumPy on macOS uses Accelerate, on Linux uses
+OpenBLAS; both spawn pools that would otherwise skew the matlab_llvm
+comparison).
+
+### The cross-emit invariant
+
+LAPACK acceleration is **opt-in at build time** and never leaks into
+the user's emitted source. The matlabc binary on a dev machine can be
+linked against Apple Accelerate for fast REPL while emitting C source
+that cross-compiles to a Cortex-M7 against the naive-only runtime
+build. Verified by `nm runtime/matlab_runtime.o | grep cblas_`
+returning empty on a `WITH_BLAS=OFF` build. Full architectural
+argument in [`docs/lapack_roadmap.md`](docs/lapack_roadmap.md) §0.
+
 ## What It Covers
 
 The implemented subset is centered on numeric programs, linear algebra,

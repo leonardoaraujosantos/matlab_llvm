@@ -156,26 +156,33 @@ run_one() {
       python3 "$BDIR/bench_numpy.py" 2>&1 | extract_best
       ;;
     pure_python)
-      # Only matmul has a pure-Python version; others are intentionally
-      # absent (a triple-loop LU/QR/SVD at N≥100 would take minutes and
-      # contributes nothing to the comparison story).
-      if [[ "$kernel" != "matmul" ]]; then
-        echo "skip"
-        return
-      fi
-      # And skip pure Python for N=1000 — would take ~15 min for matmul.
-      if [[ "$N" == "1000" ]]; then
-        echo "skip"
-        return
-      fi
-      python3 "$BDIR/bench_matmul_pure.py" 2>&1 | extract_best
+      # Pure-Python comparisons only make sense for kernels where the
+      # algorithm is genuinely scalar (matmul triple-loop, mandelbrot
+      # scalar inner loop). The LAPACK kernels (lu/qr/svd/eig/chol/inv)
+      # are dispatched through library calls in NumPy too — a pure-
+      # Python implementation would take minutes and tell us nothing
+      # about the BLAS/LAPACK story.
+      case "$kernel" in
+        matmul)
+          [[ "$N" == "1000" ]] && { echo "skip"; return; }
+          python3 "$BDIR/bench_matmul_pure.py" 2>&1 | extract_best
+          ;;
+        mandelbrot)
+          [[ "$N" == "1000" ]] && { echo "skip"; return; }
+          python3 "$BDIR/bench_mandelbrot_pure.py" 2>&1 | extract_best
+          ;;
+        *)
+          echo "skip"
+          return
+          ;;
+      esac
       ;;
   esac
 }
 
 # --- Sizes per kernel ----------------------------------------------------
 # All kernels at N=100, 300, 1000. Pure Python skipped at N=1000 (see above).
-KERNELS=( matmul solve lu qr chol inv eig svd )
+KERNELS=( matmul solve lu qr chol inv eig svd mandelbrot )
 SIZES=( 100 300 1000 )
 IMPLS=( matlab_llvm numpy pure_python )
 

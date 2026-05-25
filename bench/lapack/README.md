@@ -28,18 +28,25 @@ python3 bench/lapack/report.py baseline_pre_lapack phase3
 
 ## Kernels covered
 
-| Kernel | Phase | Sizes |
-|---|---|---|
-| `matmul` (`A * B`) | 1 | 100, 300, 1000 |
-| `solve` (`A \ b`) | 2 | 100, 300, 1000 |
-| `lu` (`[L,U] = lu(A)`) | 2 | 100, 300, 1000 |
-| `qr` (`[Q,R] = qr(A)`) | 2 | 100, 300, 1000 |
-| `chol` (`R = chol(A'*A + I)`) | 2 | 100, 300, 1000 |
-| `inv` (`inv(A)`) | 2 | 100, 300, 1000 |
-| `eig` (`eig(A+A')` symmetric) | 3 | 100, 300, 1000 |
-| `svd` (`svd(A)`) | 3 | 100, 300, 1000 |
+| Kernel | Phase | Sizes | Story |
+|---|---|---|---|
+| `matmul` (`A * B`) | 1 | 100, 300, 1000 | dense linalg — LAPACK closes the gap to NumPy |
+| `solve` (`A \ b`) | 2 | 100, 300, 1000 | dense linalg |
+| `lu` (`[L,U] = lu(A)`) | 2 | 100, 300, 1000 | dense linalg |
+| `qr` (`[Q,R] = qr(A)`) | 2 | 100, 300, 1000 | dense linalg |
+| `chol` (`R = chol(A'*A + I)`) | 2 | 100, 300, 1000 | dense linalg |
+| `inv` (`inv(A)`) | 2 | 100, 300, 1000 | dense linalg |
+| `eig` (`eig(A+A')` symmetric) | 3 | 100, 300, 1000 | dense linalg |
+| `svd` (`svd(A)`) | 3 | 100, 300, 1000 | dense linalg |
+| `mandelbrot` (escape-time, max_iter=100) | — | 100, 300, 1000 | scalar inner loop — matlab_llvm beats NumPy 4-6× and pure Python 11× |
 
-Pure-Python at N=1000 is skipped — the triple loop would take minutes.
+Pure-Python is intentionally limited to the kernels where a scalar
+algorithm is the natural comparison: `matmul` (triple loop) and
+`mandelbrot`. Pure-Python at N=1000 is skipped for both — the runs
+would take minutes and add nothing to the story. The dense-linalg
+kernels (`lu` / `qr` / `svd` / etc.) skip pure-Python entirely; NumPy
+already dispatches to LAPACK there, so a pure-Python version would
+just measure CPython interpreter overhead.
 
 ## Reproducibility
 

@@ -67,6 +67,32 @@ def kernel_svd():
     return lambda: np.linalg.svd(A, compute_uv=False)
 
 
+def kernel_mandelbrot():
+    """Vectorized NumPy Mandelbrot — masked update, identical iteration
+    count as bench_mandelbrot.m (the scalar loop). Tracks first divergence
+    per pixel via the standard escape-time masking trick."""
+    max_iter = 100
+    re = np.linspace(-2.0, 1.0, N)
+    im = np.linspace(-1.5, 1.5, N)
+    C = re[None, :] + 1j * im[:, None]
+
+    def run():
+        Z = np.zeros_like(C)
+        counts = np.zeros(C.shape, dtype=np.int32)
+        mask = np.ones(C.shape, dtype=bool)
+        for k in range(1, max_iter + 1):
+            Z[mask] = Z[mask] * Z[mask] + C[mask]
+            diverged = np.abs(Z) > 2.0
+            new_div = diverged & mask
+            counts[new_div] = k
+            mask = mask & ~diverged
+            if not mask.any():
+                break
+        return counts
+
+    return run
+
+
 KERNELS = {
     "matmul": kernel_matmul,
     "solve": kernel_solve,
@@ -76,6 +102,7 @@ KERNELS = {
     "inv": kernel_inv,
     "eig": kernel_eig,
     "svd": kernel_svd,
+    "mandelbrot": kernel_mandelbrot,
 }
 
 setup = KERNELS[KERNEL]
