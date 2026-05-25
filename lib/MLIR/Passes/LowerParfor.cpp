@@ -145,10 +145,14 @@ bool outlineParfor(Operation *Parfor, unsigned Id) {
   if (auto VA = Parfor->getAttrOfType<StringAttr>("var"))
     VarName = VA.getValue();
   if (!VarName.empty()) {
+    // Walk the parfor region transitively — nested for/while loops can
+    // also reference the IV slot (e.g. `for px = 1:N; ... = ... + py * px`
+    // where `py` is the parfor IV).
+    Region &PR = Parfor->getRegion(0);
     llvm::SmallVector<Operation *, 4> StoresToErase;
-    for (Operation &Op : BodyBlock) {
-      if (isMatlabOp(&Op, "matlab.load") && Op.getNumOperands() == 1) {
-        Operation *SlotDef = Op.getOperand(0).getDefiningOp();
+    PR.walk([&](Operation *Op) {
+      if (isMatlabOp(Op, "matlab.load") && Op->getNumOperands() == 1) {
+        Operation *SlotDef = Op->getOperand(0).getDefiningOp();
         if (isMatlabOp(SlotDef, "matlab.alloc")) {
           auto NameA = SlotDef->getAttrOfType<StringAttr>("name");
           if (NameA && NameA.getValue() == VarName) {
@@ -158,26 +162,27 @@ bool outlineParfor(Operation *Parfor, unsigned Id) {
             // which doesn't enforce type equality on operands, and once the
             // disp is rewritten by LowerIO the signature matches the f64
             // runtime entry point exactly.
-            Op.getResult(0).replaceAllUsesWith(IV);
+            Op->getResult(0).replaceAllUsesWith(IV);
           }
         }
       }
-    }
-    for (Operation &Op : BodyBlock) {
-      if (isMatlabOp(&Op, "matlab.store") && Op.getNumOperands() == 2) {
-        Operation *SlotDef = Op.getOperand(1).getDefiningOp();
+    });
+    PR.walk([&](Operation *Op) {
+      if (isMatlabOp(Op, "matlab.store") && Op->getNumOperands() == 2) {
+        Operation *SlotDef = Op->getOperand(1).getDefiningOp();
         if (isMatlabOp(SlotDef, "matlab.alloc")) {
           auto NameA = SlotDef->getAttrOfType<StringAttr>("name");
           if (NameA && NameA.getValue() == VarName)
-            StoresToErase.push_back(&Op);
+            StoresToErase.push_back(Op);
         }
       }
-    }
+    });
     for (Operation *S : StoresToErase) S->erase();
     llvm::SmallVector<Operation *, 4> DeadLoads;
-    for (Operation &Op : BodyBlock)
-      if (isMatlabOp(&Op, "matlab.load") && Op.use_empty())
-        DeadLoads.push_back(&Op);
+    PR.walk([&](Operation *Op) {
+      if (isMatlabOp(Op, "matlab.load") && Op->use_empty())
+        DeadLoads.push_back(Op);
+    });
     for (Operation *L : DeadLoads) L->erase();
   }
 
@@ -242,12 +247,61 @@ bool outlineParfor(Operation *Parfor, unsigned Id) {
     }
   }
 
+  // --- Iteration-local outer-slot detection (issue #20 follow-on) ---------
+  // The MATLAB frontend allocates every named variable as a `matlab.alloc`
+  // in the enclosing scope, even for purely-body-local intermediates like
+  // `cim = ...; total = total + cim;` inside a parfor (and any helper
+  // slots a nested for loop introduces, e.g. an inner `for px = 1:N`
+  // adds its own px slot).  Such slots are NOT captures (they're written
+  // in the body) and NOT reductions, but their alloc lives outside the
+  // body — so the operand-check loop below would reject them.  Identify
+  // them here and arrange to clone the alloc into the outlined function
+  // entry so each iteration has its own private slot.
+  Region &ParforRegion = Parfor->getRegion(0);
+  llvm::SmallVector<Operation *> IterLocalAllocs;
+  llvm::DenseSet<Value> IterLocalSlots;
+  {
+    llvm::DenseSet<Value> CandidateSlots;
+    ParforRegion.walk([&](Operation *Op) {
+      if (!isMatlabOp(Op, "matlab.store") || Op->getNumOperands() != 2)
+        return;
+      Value Slot = Op->getOperand(1);
+      Operation *SlotDef = Slot.getDefiningOp();
+      if (!isMatlabOp(SlotDef, "matlab.alloc")) return;
+      // Skip allocs that already live anywhere inside the parfor region.
+      if (ParforRegion.isAncestor(SlotDef->getParentRegion())) return;
+      CandidateSlots.insert(Slot);
+    });
+    for (Value Slot : CandidateSlots) {
+      // Iteration-local iff every use of the slot lives somewhere inside
+      // the parfor region (transitively — nested for / if / while are
+      // fine).
+      bool AllInRegion = true;
+      for (OpOperand &Use : Slot.getUses()) {
+        Region *UR = Use.getOwner()->getParentRegion();
+        if (!UR || !ParforRegion.isAncestor(UR)) {
+          AllInRegion = false;
+          break;
+        }
+      }
+      if (!AllInRegion) continue;
+      IterLocalAllocs.push_back(Slot.getDefiningOp());
+      IterLocalSlots.insert(Slot);
+    }
+  }
+
   // --- Capture analysis (now excluding reduction chains) ------------------
+  // Walk transitively so values produced inside nested for/while loops
+  // count as defined-inside the parfor region.
   llvm::DenseSet<Value> DefinedInside;
   DefinedInside.insert(IV);
-  for (Operation &Op : BodyBlock) {
-    for (Value R : Op.getResults()) DefinedInside.insert(R);
-  }
+  ParforRegion.walk([&](Operation *Op) {
+    for (Value R : Op->getResults()) DefinedInside.insert(R);
+    for (Region &R : Op->getRegions())
+      for (Block &Blk : R)
+        for (BlockArgument BA : Blk.getArguments())
+          DefinedInside.insert(BA);
+  });
   // The reduction slot values are consumed by the reduction chain itself;
   // their replacement (a ptr loaded from state) will be created later. For
   // the purpose of capture analysis they are allowed.
@@ -278,64 +332,101 @@ bool outlineParfor(Operation *Parfor, unsigned Id) {
     Type CaptureType;                               // f64 today
     llvm::SmallVector<Operation *, 2> Loads;        // matlab.load ops in body
   };
+  // Collect stores transitively — nested for/while loops inside the body
+  // contribute stores too (their own IV slot writes, intermediate locals).
   llvm::DenseSet<Value> SlotsWrittenInBody;
-  for (Operation &Op : BodyBlock) {
-    if (isMatlabOp(&Op, "matlab.store") && Op.getNumOperands() == 2)
-      SlotsWrittenInBody.insert(Op.getOperand(1));
-  }
+  ParforRegion.walk([&](Operation *Op) {
+    if (isMatlabOp(Op, "matlab.store") && Op->getNumOperands() == 2)
+      SlotsWrittenInBody.insert(Op->getOperand(1));
+  });
   llvm::SmallVector<Capture> Captures;
   llvm::DenseMap<Value, size_t> SlotToCaptureIdx;
   llvm::DenseSet<Operation *> CaptureLoadOps;
   llvm::DenseSet<Value> CaptureSlots;
-  for (Operation &Op : BodyBlock) {
-    if (!isMatlabOp(&Op, "matlab.load") || Op.getNumOperands() != 1) continue;
-    if (ReductionBodyOps.count(&Op)) continue;
-    Value Slot = Op.getOperand(0);
+  // Walk the parfor region transitively so nested-for loads of outer slots
+  // (e.g. `for px = 1:W` capturing W from outside) are surfaced too.
+  ParforRegion.walk([&](Operation *Op) {
+    if (!isMatlabOp(Op, "matlab.load") || Op->getNumOperands() != 1) return;
+    if (ReductionBodyOps.count(Op)) return;
+    Value Slot = Op->getOperand(0);
     Operation *SlotDef = Slot.getDefiningOp();
-    if (!isMatlabOp(SlotDef, "matlab.alloc")) continue;
-    // Inner slot (defined inside the body): SlotPromotion will collapse it
-    // on a later iteration — no capture needed.
-    if (SlotDef->getBlock() == &BodyBlock) continue;
-    if (ReductionSlots.count(Slot)) continue;
-    if (SlotsWrittenInBody.count(Slot)) continue;
-    Type T = Op.getResult(0).getType();
-    // v1 scope: scalar f64 only.  Other types fall through to the existing
-    // capture-rejection path with a clear diagnostic.
-    if (T != F64) continue;
+    if (!isMatlabOp(SlotDef, "matlab.alloc")) return;
+    // Inner slot (defined anywhere inside the parfor region) — handled
+    // separately (reduction / IterLocal / body-defined SSA).
+    if (ParforRegion.isAncestor(SlotDef->getParentRegion())) return;
+    if (ReductionSlots.count(Slot)) return;
+    if (IterLocalSlots.count(Slot)) return;
+    if (SlotsWrittenInBody.count(Slot)) return;
+    Type T = Op->getResult(0).getType();
+    // Capture-supported types.  v1 (45ed8fb) was f64-only.  #20-A widens to
+    // every scalar integer/float type that fits in a ptr-sized state[]
+    // slot — they're stored at their natural LLVM width into the 8-byte
+    // ptr-array element.  #20-B accepts tensor types (matrix capture) via
+    // an unrealized_conversion_cast to/from PtrTy bracketing the state[]
+    // slot store/load — LowerTensorOps resolves the cast when it converts
+    // the tensor to a matlab_mat * carrier.
+    //
+    // Safety note for tensor captures: the SlotsWrittenInBody check above
+    // guarantees the captured *slot* isn't reassigned in the body.  Writes
+    // through the captured pointer (e.g. `A(i,j) = x` on a shared matrix)
+    // are the user's responsibility — same contract as MATLAB's parfor.
+    bool ScalarOk = (mlir::isa<FloatType>(T) || mlir::isa<IntegerType>(T)) &&
+                    T.getIntOrFloatBitWidth() <= 64;
+    bool PtrOk    = mlir::isa<LLVM::LLVMPointerType>(T);
+    bool TensorOk = mlir::isa<RankedTensorType, UnrankedTensorType>(T);
+    if (!ScalarOk && !PtrOk && !TensorOk) return;
     auto It = SlotToCaptureIdx.find(Slot);
     if (It == SlotToCaptureIdx.end()) {
       SlotToCaptureIdx[Slot] = Captures.size();
-      Captures.push_back({Slot, T, {&Op}});
+      Captures.push_back({Slot, T, {Op}});
     } else {
-      Captures[It->second].Loads.push_back(&Op);
+      Captures[It->second].Loads.push_back(Op);
     }
-    CaptureLoadOps.insert(&Op);
+    CaptureLoadOps.insert(Op);
     CaptureSlots.insert(Slot);
-  }
+  });
 
   llvm::SmallVector<Operation *> ExternsToClone;
   llvm::DenseSet<Operation *> ExternSet;
-  for (Operation &Op : BodyBlock) {
-    if (ReductionBodyOps.count(&Op)) continue; // will be replaced
-    if (CaptureLoadOps.count(&Op)) continue;   // will be replaced via state[]
-    for (Value Operand : Op.getOperands()) {
+  bool RejectCapture = false;
+  // Walk operands transitively too so the rejection check sees nested-for
+  // loads of outer values.
+  ParforRegion.walk([&](Operation *Op) {
+    if (RejectCapture) return;
+    if (ReductionBodyOps.count(Op)) return; // will be replaced
+    if (CaptureLoadOps.count(Op)) return;   // will be replaced via state[]
+    for (Value Operand : Op->getOperands()) {
       if (DefinedInside.count(Operand)) continue;
       if (ReductionSlots.count(Operand)) continue;
       if (CaptureSlots.count(Operand)) continue;  /* handled via state[] */
+      if (IterLocalSlots.count(Operand))
+        continue;  /* alloc cloned inside the outlined function */
+      // Block args of the parfor region itself (e.g. the IV / a nested-
+      // for's IV) are produced inside the region; treat as defined-inside.
+      if (auto BA = mlir::dyn_cast<BlockArgument>(Operand)) {
+        if (ParforRegion.isAncestor(BA.getOwner()->getParent())) continue;
+        std::cerr << "parfor: body captures a block argument from outside — "
+                     "not supported\n";
+        RejectCapture = true;
+        return;
+      }
       Operation *Def = Operand.getDefiningOp();
       if (!Def) {
         std::cerr << "parfor: body captures a block argument from outside — "
                      "not supported\n";
-        return false;
+        RejectCapture = true;
+        return;
       }
       if (!isCloneableExternal(Def)) {
         std::cerr << "parfor: body captures value of unsupported defining op '"
                   << Def->getName().getStringRef().str() << "'\n";
-        return false;
+        RejectCapture = true;
+        return;
       }
       if (ExternSet.insert(Def).second) ExternsToClone.push_back(Def);
     }
-  }
+  });
+  if (RejectCapture) return false;
 
   // --- Create outlined function ------------------------------------------
   // Signature: (f64 iv, ptr state). `state` points to a packed array of
@@ -373,18 +464,41 @@ bool outlineParfor(Operation *Parfor, unsigned Id) {
   IRMapping Mapping;
   Mapping.map(IV, InnerIV);
   for (Operation *Ext : ExternsToClone) B.clone(*Ext, Mapping);
+  // Clone iteration-local matlab.alloc ops into the outlined entry so
+  // each thread gets its own slot.  The original outer alloc is still
+  // emitted but ends up dead (its only uses were inside the parfor body,
+  // which we're erasing); LowerScalarSlots / LowerTensorOps will sweep
+  // it on a later pass iteration.
+  for (Operation *A : IterLocalAllocs) B.clone(*A, Mapping);
 
-  // Load each capture from state[NRed + k] at its captured type, and map
-  // every original in-body matlab.load result to it.  This lets ops cloned
-  // below see a properly-typed value instead of an external SSA reference.
+  // Load each capture from state[NRed + k] and map every original in-body
+  // matlab.load result to it.
+  //
+  // For scalar / ptr captures the load is directly typed (state[] slot's
+  // 8-byte width fits any scalar ≤ 64 bits).  For tensor types (#20-B
+  // matrix capture) we always load PtrTy from state[] and map the body's
+  // matlab.load result (typed tensor) to the PtrTy value — matlab.subscript
+  // and friends are operand-type-generic in their signatures, so the cloned
+  // body verifies, and LowerTensorOps' subscript-rewrite (which gates on
+  // operand 0 being PtrTy) then fires as it would in the non-parfor flow
+  // after matlab.alloc retypes to llvm.alloca.
   for (size_t k = 0; k < NCap; ++k) {
     Value IdxK = LLVM::ConstantOp::create(
         B, Loc, IntegerType::get(Ctx, 64),
         B.getI64IntegerAttr((int64_t)(NRed + k)));
     Value Gep = LLVM::GEPOp::create(B, Loc, PtrTy, PtrTy, State,
                                     ValueRange{IdxK});
-    Value Loaded =
-        LLVM::LoadOp::create(B, Loc, Captures[k].CaptureType, Gep);
+    Type CapTy = Captures[k].CaptureType;
+    bool CapTyIsLLVM = mlir::isa<LLVM::LLVMPointerType>(CapTy) ||
+                       ((mlir::isa<FloatType>(CapTy) ||
+                         mlir::isa<IntegerType>(CapTy)) &&
+                        CapTy.getIntOrFloatBitWidth() <= 64);
+    Value Loaded;
+    if (CapTyIsLLVM) {
+      Loaded = LLVM::LoadOp::create(B, Loc, CapTy, Gep);
+    } else {
+      Loaded = LLVM::LoadOp::create(B, Loc, PtrTy, Gep);
+    }
     for (Operation *L : Captures[k].Loads)
       Mapping.map(L->getResult(0), Loaded);
   }
@@ -481,14 +595,28 @@ bool outlineParfor(Operation *Parfor, unsigned Id) {
     /* Capture values: emit one matlab.load per unique outer slot right
      * before the dispatch, then llvm.store into state[NRed+k].  matlab.load
      * here remains for downstream LowerScalarSlots / LowerTensorOps to
-     * convert into a typed LLVM load against the slot's final lowering. */
+     * convert into a typed LLVM load against the slot's final lowering.
+     *
+     * Non-LLVM types (tensor — #20-B matrix capture) are cast to PtrTy via
+     * unrealized_conversion_cast before storing into the ptr-sized state[]
+     * slot; LowerTensorOps later resolves the cast when the tensor becomes
+     * a matlab_mat *. */
     for (size_t k = 0; k < NCap; ++k) {
       Value Slot = Captures[k].Slot;
+      Type CapTy = Captures[k].CaptureType;
       OperationState LoadState(Loc, "matlab.load");
       LoadState.addOperands(ValueRange{Slot});
-      LoadState.addTypes(TypeRange{Captures[k].CaptureType});
+      LoadState.addTypes(TypeRange{CapTy});
       Operation *LoadOp = B.create(LoadState);
       Value CapVal = LoadOp->getResult(0);
+      bool CapTyIsLLVM = mlir::isa<LLVM::LLVMPointerType>(CapTy) ||
+                         ((mlir::isa<FloatType>(CapTy) ||
+                           mlir::isa<IntegerType>(CapTy)) &&
+                          CapTy.getIntOrFloatBitWidth() <= 64);
+      if (!CapTyIsLLVM) {
+        CapVal = UnrealizedConversionCastOp::create(B, Loc, PtrTy, CapVal)
+                     .getResult(0);
+      }
       Value IdxK = LLVM::ConstantOp::create(
           B, Loc, IntegerType::get(Ctx, 64),
           B.getI64IntegerAttr((int64_t)(NRed + k)));
