@@ -1,0 +1,6 @@
+GBM paths: 253 x 2000
+start row all 100: P(1,1)=100.0
+GBM terminal mean ~ 104.98 (truth 105.13)
+HWV terminal mean ~ 0.0474 (level 0.05)
+CIR terminal mean ~ 0.0378 (level 0.04)
+GBM exact terminal mean ~ 104.79

@@ -106,3 +106,65 @@ classdef PortfolioMAD
         end
     end
 end
+
+% ---------------------------------------------------------------------
+% Stochastic Differential Equation models (Tier-6). Each carries the
+% model parameters + a ModelType discriminant; simByEuler / simBySolution
+% read them at simulation time. 1-D models.
+% ---------------------------------------------------------------------
+
+% Geometric Brownian motion: dX = mu X dt + sigma X dW.
+classdef gbm
+    properties
+        Drift; Sigma; StartState; Speed; Level; ModelType
+    end
+    methods
+        function obj = gbm(mu, sigma, S0)
+            if nargin < 3, S0 = 1; end
+            obj.Drift = mu; obj.Sigma = sigma; obj.StartState = S0;
+            obj.Speed = 0; obj.Level = 0; obj.ModelType = 1;
+        end
+    end
+end
+
+% Brownian motion (arithmetic): dX = mu dt + sigma dW.
+classdef bm
+    properties
+        Drift; Sigma; StartState; Speed; Level; ModelType
+    end
+    methods
+        function obj = bm(mu, sigma, X0)
+            if nargin < 3, X0 = 0; end
+            obj.Drift = mu; obj.Sigma = sigma; obj.StartState = X0;
+            obj.Speed = 0; obj.Level = 0; obj.ModelType = 0;
+        end
+    end
+end
+
+% Cox-Ingersoll-Ross: dX = speed(level - X) dt + sigma sqrt(X) dW.
+classdef cir
+    properties
+        Drift; Sigma; StartState; Speed; Level; ModelType
+    end
+    methods
+        function obj = cir(speed, level, sigma, X0)
+            if nargin < 4, X0 = level; end
+            obj.Speed = speed; obj.Level = level; obj.Sigma = sigma;
+            obj.StartState = X0; obj.Drift = 0; obj.ModelType = 2;
+        end
+    end
+end
+
+% Hull-White / Vasicek: dX = speed(level - X) dt + sigma dW.
+classdef hwv
+    properties
+        Drift; Sigma; StartState; Speed; Level; ModelType
+    end
+    methods
+        function obj = hwv(speed, level, sigma, X0)
+            if nargin < 4, X0 = level; end
+            obj.Speed = speed; obj.Level = level; obj.Sigma = sigma;
+            obj.StartState = X0; obj.Drift = 0; obj.ModelType = 3;
+        end
+    end
+end

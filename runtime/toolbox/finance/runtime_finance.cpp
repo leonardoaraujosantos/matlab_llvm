@@ -2076,3 +2076,100 @@ extern "C" matlab_mat *matlab_backtest_summary(matlab_mat *equity) {
     out->data[2] = mdd;
     return out;
 }
+
+/* ============================================================================
+ * §T6 — Stochastic Differential Equations (Monte Carlo)
+ *
+ * Classdef carriers (bm / gbm / cir / hwv) hold the model parameters +
+ * a ModelType discriminant (0=bm, 1=gbm, 2=cir, 3=hwv); simByEuler runs
+ * the Euler-Maruyama scheme. 1-D models; the heston 2-D stochastic-vol
+ * model + correlated multi-asset baskets are documented follow-ons.
+ *
+ * Random normals come from the shipped matlab_randn, so rng(seed) makes
+ * a simulation reproducible.
+ * ==========================================================================*/
+
+extern "C" matlab_mat *matlab_randn(double m, double n);
+
+enum { SDE_BM = 0, SDE_GBM = 1, SDE_CIR = 2, SDE_HWV = 3 };
+
+/* simByEuler(obj, nPeriods, dt, nTrials) -> (nPeriods+1) × nTrials path
+ * matrix. Each column is one simulated path; row 0 is StartState. */
+extern "C" matlab_mat *matlab_sde_sim_euler(struct matlab_obj_s *obj,
+                                             double nPeriods, double dt,
+                                             double nTrials) {
+    if (!obj) return mat_alloc(0, 0);
+    int mt = static_cast<int>(matlab_obj_get_f64(obj, "ModelType", 9));
+    double X0    = matlab_obj_get_f64(obj, "StartState", 10);
+    double drift = matlab_obj_get_f64(obj, "Drift", 5);
+    double sigma = matlab_obj_get_f64(obj, "Sigma", 5);
+    double speed = matlab_obj_get_f64(obj, "Speed", 5);
+    double level = matlab_obj_get_f64(obj, "Level", 5);
+    int64_t P = static_cast<int64_t>(nPeriods);
+    int64_t M = static_cast<int64_t>(nTrials);
+    if (P <= 0 || M <= 0) return mat_alloc(0, 0);
+    double sqdt = sqrt(dt);
+    /* Pre-draw all normals: (P × M) row-major. */
+    matlab_mat *Z = matlab_randn(static_cast<double>(P), static_cast<double>(M));
+    matlab_mat *paths = mat_alloc(P + 1, M);   /* (P+1) × M */
+    for (int64_t c = 0; c < M; ++c) paths->data[0*M + c] = X0;
+    for (int64_t c = 0; c < M; ++c) {
+        double x = X0;
+        for (int64_t t = 0; t < P; ++t) {
+            double z = (Z && Z->data) ? Z->data[t*M + c] : 0.0;
+            double dx = 0.0;
+            switch (mt) {
+                case SDE_BM:
+                    dx = drift * dt + sigma * sqdt * z;
+                    break;
+                case SDE_GBM:
+                    dx = drift * x * dt + sigma * x * sqdt * z;
+                    break;
+                case SDE_CIR: {
+                    double xc = x < 0.0 ? 0.0 : x;
+                    dx = speed * (level - x) * dt + sigma * sqrt(xc) * sqdt * z;
+                    break;
+                }
+                case SDE_HWV:
+                    dx = speed * (level - x) * dt + sigma * sqdt * z;
+                    break;
+            }
+            x += dx;
+            if ((mt == SDE_CIR) && x < 0.0) x = 0.0;   /* keep CIR non-negative */
+            paths->data[(t + 1)*M + c] = x;
+        }
+    }
+    return paths;
+}
+
+/* simBySolution(obj, nPeriods, dt, nTrials) -> exact GBM transition
+ * (no discretisation error): X_{t+1} = X_t exp((mu - sigma^2/2) dt +
+ * sigma sqrt(dt) Z). Falls back to Euler for non-GBM models. */
+extern "C" matlab_mat *matlab_sde_sim_solution(struct matlab_obj_s *obj,
+                                                double nPeriods, double dt,
+                                                double nTrials) {
+    if (!obj) return mat_alloc(0, 0);
+    int mt = static_cast<int>(matlab_obj_get_f64(obj, "ModelType", 9));
+    if (mt != SDE_GBM)
+        return matlab_sde_sim_euler(obj, nPeriods, dt, nTrials);
+    double X0    = matlab_obj_get_f64(obj, "StartState", 10);
+    double mu    = matlab_obj_get_f64(obj, "Drift", 5);
+    double sigma = matlab_obj_get_f64(obj, "Sigma", 5);
+    int64_t P = static_cast<int64_t>(nPeriods);
+    int64_t M = static_cast<int64_t>(nTrials);
+    if (P <= 0 || M <= 0) return mat_alloc(0, 0);
+    double sqdt = sqrt(dt);
+    double adrift = (mu - 0.5 * sigma * sigma) * dt;
+    matlab_mat *Z = matlab_randn(static_cast<double>(P), static_cast<double>(M));
+    matlab_mat *paths = mat_alloc(P + 1, M);
+    for (int64_t c = 0; c < M; ++c) {
+        double x = X0;
+        paths->data[0*M + c] = x;
+        for (int64_t t = 0; t < P; ++t) {
+            double z = (Z && Z->data) ? Z->data[t*M + c] : 0.0;
+            x *= exp(adrift + sigma * sqdt * z);
+            paths->data[(t + 1)*M + c] = x;
+        }
+    }
+    return paths;
+}

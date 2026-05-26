@@ -2349,6 +2349,11 @@ static std::string buildReplPrelude(const std::string &Src) {
     {false, "fitmodel",             "finance_classdefs.m"},
     {false, "probdefault",          "finance_classdefs.m"},
     {false, "setScenarios",         "finance_classdefs.m"},
+    {false, "gbm",                  "finance_classdefs.m"},
+    {false, "cir",                  "finance_classdefs.m"},
+    {false, "hwv",                  "finance_classdefs.m"},
+    {false, "simByEuler",           "finance_classdefs.m"},
+    {false, "simBySolution",        "finance_classdefs.m"},
     {false, "setAssetMoments",      "finance_classdefs.m"},
     {false, "setBounds",            "finance_classdefs.m"},
     {false, "setBudget",            "finance_classdefs.m"},
@@ -11363,6 +11368,8 @@ int main(int Argc, char **Argv) {
       /* Financial Toolbox Tier-5 — CVaR / MAD portfolio classdefs. */
       "PortfolioCVaR", "PortfolioMAD", "setScenarios",
       "setProbabilityLevel", "estimatePortVaR",
+      /* Financial Toolbox Tier-6 — SDE Monte Carlo. */
+      "gbm", "cir", "hwv", "simByEuler", "simBySolution",
       /* GPU Coder T5 design-pattern helpers — runtime entries, no
        * prelude file needed.  Listed here only for the AOT-prelude
        * scanner's awareness (no leaf to map). */
@@ -11552,7 +11559,9 @@ int main(int Argc, char **Argv) {
         ClsName == "probdefault" ||
         ClsName == "PortfolioCVaR" || ClsName == "PortfolioMAD" ||
         ClsName == "setScenarios" || ClsName == "setProbabilityLevel" ||
-        ClsName == "estimatePortVaR")
+        ClsName == "estimatePortVaR" ||
+        ClsName == "gbm" || ClsName == "cir" || ClsName == "hwv" ||
+        ClsName == "simByEuler" || ClsName == "simBySolution")
       return "finance_classdefs.m";
     /* GPU Coder T5 design-pattern helpers are C runtime entries; no
      * classdef file to pull in. */

@@ -6656,6 +6656,9 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"estimatePortVaR",     "matlab_portfoliocvar_estimate_port_var",0, "pp"},
       {"backtest",            "matlab_backtest",          1, "ppf"},
       {"backtestSummary",     "matlab_backtest_summary",  1, "p"},
+      /* Financial Toolbox Tier-6: SDE Monte Carlo. */
+      {"simByEuler",    "matlab_sde_sim_euler",    1, "pfff"},
+      {"simBySolution", "matlab_sde_sim_solution", 1, "pfff"},
     };
 
     // Pick the first entry with name + arity + TYPE match so overloaded

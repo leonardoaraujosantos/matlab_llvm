@@ -102,6 +102,8 @@ void Resolver::registerBuiltins() {
     "PortfolioCVaR", "PortfolioMAD", "setScenarios",
     "setProbabilityLevel", "estimatePortVaR",
     "backtest", "backtestSummary",
+    /* Tier-6: SDE Monte Carlo. */
+    "gbm", "bm", "cir", "hwv", "simByEuler", "simBySolution",
     /* Phase 6 — Symbolic Math Toolbox via SymPP. The link target
      * (matlab_sym_* runtime) is only present when the build was
      * configured -DMATLAB_LLVM_WITH_SYM=ON; without that the JIT/-emit-c
