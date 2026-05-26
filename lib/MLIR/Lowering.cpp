@@ -486,6 +486,9 @@ private:
    * `timetable(col1, ..., 'RowTimes', dt)` or `table2timetable(T,
    * 'RowTimes', dt)`. */
   std::unordered_set<Binding *> TimetableBindings;
+  /* matlab_timerange * — time-interval row subscript. Produced by
+   * `tr = timerange(t1, t2, 'closed')`; consumed by `TT(tr, :)`. */
+  std::unordered_set<Binding *> TimerangeBindings;
   /* Bindings tagged as holding a plain matlab_struct* (vs class
    * instance or matrix).  Populated by the AssignStmt RhsIsStruct
    * tagging block when the RHS is a known struct-returning builtin
@@ -2432,6 +2435,7 @@ void Lowerer::lowerStmt(const Stmt &St) {
     bool RhsIsCategorical = false;
     bool RhsIsTable = false;
     bool RhsIsTimetable = false;
+    bool RhsIsTimerange = false;
     /* Plain matlab_struct* RHS — needs a dedicated workspace setter
      * (matlab_ws_set_struct, kind=9) so field-access dispatch sees
      * `s` as struct rather than mat on subsequent REPL turns.  RHS
@@ -2463,6 +2467,7 @@ void Lowerer::lowerStmt(const Stmt &St) {
          * timetable, so the LHS slot inherits the tag. */
         if (NE->Ref && TimetableBindings.count(NE->Ref))
           RhsIsTimetable = true;
+        if (NE->Name == "timerange") RhsIsTimerange = true;
         /* Known struct-returning builtins. struct() is the textbook
          * literal; linkBudget is the PROP-Tier-2b struct return; stepinfo
          * returns the CST step-response-metrics struct. Adding more is a
@@ -3299,6 +3304,11 @@ void Lowerer::lowerStmt(const Stmt &St) {
       for (const Expr *L : A.LHS)
         if (auto *N = dynamic_cast<const NameExpr *>(L))
           if (N->Ref) TimetableBindings.insert(N->Ref);
+    }
+    if (RhsIsTimerange) {
+      for (const Expr *L : A.LHS)
+        if (auto *N = dynamic_cast<const NameExpr *>(L))
+          if (N->Ref) TimerangeBindings.insert(N->Ref);
     }
     if (RhsIsStruct) {
       /* Tag for workspace-setter routing.  We use a separate set
@@ -5173,14 +5183,27 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                                PtrTy, L, {Cal});
             }
           }
-          /* Row-by-mask form: TMW(idx, :) where idx lowers as a
-           * matlab_mat * (numeric 1-based indices OR logical). */
+          /* Row-subscript forms: TMW(rowSel, :).
+           *   rowSel is a Timerange binding   -> matlab_timetable_select_rows_timerange
+           *   rowSel is anything else (mat)   -> matlab_timetable_select_rows_mat
+           *                                      (numeric 1-based OR logical, runtime-detected)
+           */
           if (dynamic_cast<const ColonExpr *>(C.Args[1])) {
+            bool RowIsTimerange = false;
+            if (auto *RN = dynamic_cast<const NameExpr *>(C.Args[0]))
+              if (RN->Ref && TimerangeBindings.count(RN->Ref))
+                RowIsTimerange = true;
+            if (auto *RC = dynamic_cast<const CallOrIndex *>(C.Args[0]))
+              if (auto *RCN = dynamic_cast<const NameExpr *>(RC->Callee))
+                if (RCN->Name == "timerange") RowIsTimerange = true;
             mlir::Value Tv  = lowerExpr(*C.Callee);
             mlir::Value Idx = lowerExpr(*C.Args[0]);
+            const char *Callee = RowIsTimerange
+                ? "matlab_timetable_select_rows_timerange"
+                : "matlab_timetable_select_rows_mat";
             mlir::NamedAttribute Cal(
                 mlir::StringAttr::get(&MCtx, "callee"),
-                mlir::StringAttr::get(&MCtx, "matlab_timetable_select_rows_mat"));
+                mlir::StringAttr::get(&MCtx, Callee));
             return emitUnreg("matlab.call_builtin", {Tv, Idx},
                              PtrTy, L, {Cal});
           }
@@ -9735,6 +9758,40 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             mlir::StringAttr::get(&MCtx, "callee"),
             mlir::StringAttr::get(&MCtx, "matlab_table2timetable"));
         return emitUnreg("matlab.call_builtin", {TB, RT}, PtrTy, L, {Cal});
+      }
+      /* timerange(t1, t2)            -> closed   (mode 0)
+       * timerange(t1, t2, 'closed')  -> closed
+       * timerange(t1, t2, 'openright') / 'open' / 'openleft' similarly.
+       * Returns a matlab_timerange * used as a row index on TT(tr,:).
+       * MATLAB's default is 'openright'; we keep 'closed' as the
+       * no-mode default for the doc-page example which passes
+       * 'closed' explicitly. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "timerange" &&
+          (C.Args.size() == 2 || C.Args.size() == 3)) {
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        auto I32 = mlir::IntegerType::get(&MCtx, 32);
+        int32_t modeCode = 0; /* closed */
+        if (C.Args.size() == 3 && C.Args[2]) {
+          std::string ModeStr;
+          if (auto *CL = dynamic_cast<const CharLiteral *>(C.Args[2]))
+            ModeStr = std::string(CL->Value);
+          else if (auto *SL = dynamic_cast<const StringLiteral *>(C.Args[2]))
+            ModeStr = std::string(SL->Value);
+          if      (ModeStr == "closed")    modeCode = 0;
+          else if (ModeStr == "openright") modeCode = 1;
+          else if (ModeStr == "openleft")  modeCode = 2;
+          else if (ModeStr == "open")      modeCode = 3;
+        }
+        mlir::Value T1 = lowerExpr(*C.Args[0]);
+        mlir::Value T2 = lowerExpr(*C.Args[1]);
+        mlir::Value ModeV = mlir::arith::ConstantOp::create(
+            B, L, I32, mlir::IntegerAttr::get(I32, modeCode));
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_timerange_new"));
+        return emitUnreg("matlab.call_builtin", {T1, T2, ModeV},
+                         PtrTy, L, {Cal});
       }
       /* Phase 5.2: categorical([str, str, ...]) — construct from a
        * single argument that's a 1-row MatrixLiteral of string /

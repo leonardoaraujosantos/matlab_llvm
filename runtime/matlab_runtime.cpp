@@ -10242,6 +10242,76 @@ extern "C" const char *matlab_timetable_get_description(matlab_timetable *tt) {
     return tt->description;
 }
 
+/* Timerange — a closed / half-open / open interval used as a row
+ * index on a timetable. Mode encodes which endpoints are included
+ * (see header). The select arm walks RowTimes and copies rows whose
+ * timestamp falls in the interval. */
+struct matlab_timerange_s {
+    double t_start;
+    double t_end;
+    int32_t mode;
+};
+typedef struct matlab_timerange_s matlab_timerange;
+
+extern "C" matlab_timerange *matlab_timerange_new(matlab_datetime *t1,
+                                                   matlab_datetime *t2,
+                                                   int32_t mode) {
+    matlab_timerange *tr = (matlab_timerange *)calloc(1, sizeof(*tr));
+    tr->t_start = t1 ? t1->seconds : 0.0;
+    tr->t_end   = t2 ? t2->seconds : 0.0;
+    tr->mode    = mode;
+    return tr;
+}
+
+static inline bool tr_contains(double t, double s, double e, int mode) {
+    switch (mode) {
+        case 0: /* closed     */ return t >= s && t <= e;
+        case 1: /* openright  */ return t >= s && t <  e;
+        case 2: /* openleft   */ return t >  s && t <= e;
+        case 3: /* open       */ return t >  s && t <  e;
+    }
+    return t >= s && t <  e;
+}
+
+extern "C" matlab_timetable *matlab_timetable_select_rows_timerange(
+        matlab_timetable *tt, matlab_timerange *tr) {
+    matlab_timetable *out = matlab_timetable_new();
+    if (!tt || !tr || !tt->row_times) return out;
+    int64_t src_n = tt->row_times->n;
+    int64_t out_n = 0;
+    int64_t *map = (int64_t *)calloc((size_t)(src_n > 0 ? src_n : 1),
+                                      sizeof(int64_t));
+    for (int64_t i = 0; i < src_n; ++i) {
+        if (tr_contains(tt->row_times->secs[i],
+                         tr->t_start, tr->t_end, tr->mode))
+            map[out_n++] = i;
+    }
+    matlab_datetime_vec *rt = dt_vec_alloc(out_n);
+    for (int64_t i = 0; i < out_n; ++i)
+        rt->secs[i] = tt->row_times->secs[map[i]];
+    out->row_times = rt;
+    out->nrows = (int32_t)out_n;
+    for (int32_t c = 0; c < tt->nvars; ++c) {
+        int kind = tt->kinds ? tt->kinds[c] : 0;
+        const char *cname = tt->names[c];
+        int64_t cnl = (int64_t)strlen(cname);
+        if (kind == MATLAB_TABLE_KIND_NUMERIC) {
+            matlab_mat *src = (matlab_mat *)tt->data[c];
+            matlab_mat *dst = mat_alloc(out_n, 1);
+            if (src && src->data)
+                for (int64_t i = 0; i < out_n; ++i)
+                    dst->data[i] = src->data[map[i]];
+            matlab_timetable_add_column(out, cname, cnl, dst);
+        } else {
+            matlab_timetable_add_column_kind(out, cname, cnl,
+                                              tt->data[c], (int32_t)kind,
+                                              out_n);
+        }
+    }
+    free(map);
+    return out;
+}
+
 /* table2timetable: take ownership of the table's columns and attach
  * a RowTimes axis. We move (not copy) so the source table becomes
  * stale; the test harness keeps no further reference. */

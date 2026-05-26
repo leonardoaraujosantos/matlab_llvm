@@ -1530,6 +1530,25 @@ matlab_timetable *matlab_timetable_select_rows_mat(matlab_timetable *tt,
                                                      matlab_mat *idx);
 const char       *matlab_timetable_get_description(matlab_timetable *tt);
 
+/* Phase 5.4 (cont.) — timerange descriptor. A half-open or closed
+ * interval [t_start, t_end] used as a row index on a timetable:
+ *   tr = timerange(t1, t2, 'closed' | 'open' |
+ *                  'openleft' | 'openright')
+ *   TT(tr, :)                  -> rows whose RowTime falls in tr
+ * Mode codes match MATLAB:
+ *   0 = closed     [t1, t2]
+ *   1 = openright  [t1, t2)
+ *   2 = openleft   (t1, t2]
+ *   3 = open       (t1, t2)
+ * (MATLAB default is "openright" — t2 exclusive — but the doc-page
+ * example asks for 'closed' explicitly.) */
+typedef struct matlab_timerange_s matlab_timerange;
+matlab_timerange *matlab_timerange_new(matlab_datetime *t1,
+                                        matlab_datetime *t2,
+                                        int32_t mode);
+matlab_timetable *matlab_timetable_select_rows_timerange(matlab_timetable *tt,
+                                                          matlab_timerange *tr);
+
 /* Phase 4 — containers.Map / dictionary. A flat key/value table with
  * mixed key types (f64 or matlab_string *) and value types (f64 or
  * matlab_mat *). v1 backs both `containers.Map` and `dictionary` with

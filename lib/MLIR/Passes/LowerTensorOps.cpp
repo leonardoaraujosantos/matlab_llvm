@@ -2472,6 +2472,37 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase(); Changed = true; continue;
     }
+    /* timerange + timerange-row subscript. */
+    if (Name == "matlab_timerange_new" &&
+        Call->getNumResults() == 1 && Call->getNumOperands() == 3 &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == PtrTy) {
+      auto I32 = IntegerType::get(B.getContext(), 32);
+      if (Call->getOperand(2).getType() == I32) {
+        B.setInsertionPoint(Call);
+        auto Fn = rt(Name, PtrTy, {PtrTy, PtrTy, I32});
+        auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                        ValueRange{Call->getOperand(0),
+                                                   Call->getOperand(1),
+                                                   Call->getOperand(2)});
+        carryName(Call, NC);
+        Call->getResult(0).replaceAllUsesWith(NC.getResult());
+        Call->erase(); Changed = true; continue;
+      }
+    }
+    if (Name == "matlab_timetable_select_rows_timerange" &&
+        Call->getNumResults() == 1 && Call->getNumOperands() == 2 &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, PtrTy, {PtrTy, PtrTy});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Call->getOperand(0),
+                                                 Call->getOperand(1)});
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase(); Changed = true; continue;
+    }
     /* matlab_timetable_set_description(ptr, char*, i64) via the
      * fieldNameAddr bridge — the RHS string literal arrives as a
      * matlab.const_char op. */
