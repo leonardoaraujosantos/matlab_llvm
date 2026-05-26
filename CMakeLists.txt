@@ -25,7 +25,7 @@ option(MATLAB_LLVM_WITH_MLIR "Enable MLIR-based lowering stack" ON)
 # transitive deps. Adds the matlab_sym opaque runtime type and the
 # corresponding sym/syms/diff/int/simplify/solve builtins. Point at a
 # specific SymPP install with -DSymPP_DIR=/path/to/SymPP/build.
-option(MATLAB_LLVM_WITH_SYM "Enable Symbolic Math Toolbox via SymPP" OFF)
+option(MATLAB_LLVM_WITH_SYM "Build the matlab_sym SymPP-backed shared library" OFF)
 if(MATLAB_LLVM_WITH_SYM)
   if(NOT DEFINED SymPP_DIR)
     # Prefer the install tree (ships FindGMP / FindMPFR alongside the
@@ -42,7 +42,21 @@ if(MATLAB_LLVM_WITH_SYM)
     endforeach()
   endif()
   find_package(SymPP CONFIG REQUIRED)
-  message(STATUS "Found SymPP — Symbolic Math Toolbox enabled")
+  message(STATUS "Found SymPP — building libmatlab_sym shared library")
+  # #50 Phase 3 — build the SymPP-backed shared library that the
+  # runtime_sym_stub.cpp wrappers dlopen at first sym call.  The
+  # shared lib statically pulls SymPP::sympp so users only need
+  # libmatlab_sym.dylib (and its transitive GMP/MPFR deps) at runtime,
+  # not the SymPP install tree.  matlabc itself NO LONGER links
+  # libsympp — the stub layer is sufficient.
+  add_library(matlab_sym SHARED runtime/toolbox/sym/runtime_sym.cpp)
+  target_include_directories(matlab_sym PRIVATE ${CMAKE_SOURCE_DIR}/runtime)
+  target_link_libraries(matlab_sym PRIVATE SymPP::sympp)
+  # Ship the .dylib next to matlabc so the dlopen's @executable_path
+  # probe finds it.  On Linux, $ORIGIN-relative lookup does the same.
+  set_target_properties(matlab_sym PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+      LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 endif()
 
 # --- Plotting (Cairo backend) ----------------------------------------------
@@ -327,9 +341,16 @@ add_library(MatlabRuntime STATIC
     runtime/toolbox/dsp/runtime_dsp.cpp
     runtime/toolbox/stateflow/runtime_mstateflow.cpp
     runtime/gpu/runtime_gpu.cpp
-    runtime/toolbox/gpu/runtime_gpu_helpers.cpp)
+    runtime/toolbox/gpu/runtime_gpu_helpers.cpp
+    # #50 Phase 3 — Symbolic Math Toolbox dlopen stub.  Always
+    # compiled into MatlabRuntime; on first sym call the stub
+    # dlopens libmatlab_sym.dylib (built when MATLAB_LLVM_WITH_SYM=ON).
+    # When the user's program doesn't use sym, dead-strip drops every
+    # stub and no dlopen runs.  matlabc no longer needs the libsympp
+    # link at all.
+    runtime/toolbox/sym/runtime_sym_stub.cpp)
 target_include_directories(MatlabRuntime PUBLIC ${CMAKE_SOURCE_DIR}/runtime)
-target_link_libraries(MatlabRuntime PUBLIC m)
+target_link_libraries(MatlabRuntime PUBLIC m ${CMAKE_DL_LIBS})
 # -ffunction-sections + -fdata-sections give the linker per-symbol
 # granularity so external callers' dead-strip pass can drop unused
 # toolboxes one function at a time.  Mac's ld64 is per-symbol by
@@ -384,8 +405,11 @@ if(MATLAB_LLVM_WITH_MLIR)
   target_link_libraries(matlabc PRIVATE MatlabRuntime)
   matlab_runtime_force_load(matlabc)
   if(MATLAB_LLVM_WITH_SYM)
-    target_sources(matlabc PRIVATE runtime/toolbox/sym/runtime_sym.cpp)
-    target_link_libraries(matlabc PRIVATE SymPP::sympp)
+    # #50 Phase 3: matlabc only depends on the matlab_sym SHARED library
+    # via dlopen (the stub in MatlabRuntime handles the load lazily).
+    # Add an order-only dep so the .dylib is built before matlabc — the
+    # @executable_path dlopen probes find it next to the binary.
+    add_dependencies(matlabc matlab_sym)
     target_compile_definitions(matlabc PRIVATE MATLAB_LLVM_WITH_SYM=1)
   endif()
   # LAPACK acceleration epic (#45). When ON, the runtime's hand-rolled

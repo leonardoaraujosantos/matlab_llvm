@@ -33,8 +33,8 @@ cmake --install build --prefix /tmp/sympp_install   # any prefix works
 
 # Now build matlab_llvm with sym enabled.
 cd /path/to/matlab_llvm
-cmake -S . -B build-sym -DMATLAB_LLVM_WITH_SYM=ON
-cmake --build build-sym
+cmake -S . -B build -DMATLAB_LLVM_WITH_SYM=ON
+cmake --build build
 ```
 
 CMake auto-detects SymPP at `/tmp/sympp_install`, `/opt/homebrew/lib/cmake/SymPP`,

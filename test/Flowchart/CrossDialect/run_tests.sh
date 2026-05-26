@@ -29,9 +29,44 @@ cp "$ROOT/examples/mflowlink/lowpass.mflow" \
 
 cd "$SCRATCH"
 
-if ! "$ROOT/runtime/scripts/build_and_run.sh" "$SCRATCH/cross_dialect.m" \
-     "$SCRATCH/cd" > "$SCRATCH/build.log" 2>&1; then
-  echo "FAIL build_and_run.sh exit non-zero"
+# #50 Phases 1+2+3 — the matlab_llvm build now ships libMatlabRuntime.a
+# (consolidated static archive) + libmatlab_sym.dylib (dlopen'd lazily,
+# absent here since cross_dialect.m doesn't use sym).  The build-and-run
+# step collapses to a fixed two-command invocation: matlabc -emit-llvm
+# → clang++ link.  No grep-based toolbox detection, no script wrapper.
+LIB="$(dirname "$MATLABC")/libMatlabRuntime.a"
+if [[ ! -f "$LIB" ]]; then
+  echo "FAIL libMatlabRuntime.a not found next to matlabc ($LIB)"
+  exit 1
+fi
+CXX="${CXX:-$(command -v clang++ || command -v c++)}"
+# cross_dialect.m calls mflowlink_run() — provided by
+# runtime/mflowlink/runtime_mflowlink_call.cpp (uses Flowchart
+# static libs internally).  Compile that TU alongside the user .ll
+# and link against the Flowchart libs (next to libMatlabRuntime.a
+# in the CMake build).  Dead-strip drops them for non-mflow
+# programs.  Mirrors what the pre-#50 build_and_run.sh used to do
+# for the USES_MFLOWLINK branch.
+LIB_DIR="$(dirname "$MATLABC")"
+{
+  set -e
+  "$MATLABC" -emit-llvm "$SCRATCH/cross_dialect.m" > "$SCRATCH/cd.ll"
+  "$CXX" -std=c++20 -O2 -Wno-override-module \
+      -I "$ROOT/include" \
+      -I "$ROOT/runtime" \
+      "$SCRATCH/cd.ll" \
+      "$ROOT/runtime/mflowlink/runtime_mflowlink_call.cpp" \
+      "$LIB" \
+      "$LIB_DIR/libMatlabFlowchart.a" \
+      "$LIB_DIR/libMatlabParse.a" \
+      "$LIB_DIR/libMatlabLex.a" \
+      "$LIB_DIR/libMatlabAST.a" \
+      "$LIB_DIR/libMatlabBasic.a" \
+      -ldl -lpthread \
+      -o "$SCRATCH/cd"
+} > "$SCRATCH/build.log" 2>&1
+if [[ $? -ne 0 ]]; then
+  echo "FAIL build pipeline (matlabc -emit-llvm | clang++ link)"
   sed 's/^/  /' "$SCRATCH/build.log" | tail -20
   exit 1
 fi

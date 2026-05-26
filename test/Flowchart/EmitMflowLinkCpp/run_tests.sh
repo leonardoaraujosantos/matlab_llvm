@@ -18,10 +18,23 @@ fi
 MATLABC="$(cd "$(dirname "$MATLABC")" && pwd)/$(basename "$MATLABC")"
 
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-BUILDER="$ROOT/runtime/scripts/build_mflowlink.sh"
 EX="$ROOT/examples/mflowlink"
 SCRATCH="$(mktemp -d)"
 trap 'rm -rf "$SCRATCH"' EXIT
+
+# #50 Phase 5 — inline the former runtime/scripts/build_mflowlink.sh
+# script.  The mflowlink C++ output links against the Flowchart static
+# libs already produced by the CMake build (next to matlabc).  No
+# wrapper shell script needed.
+LIB="$(dirname "$MATLABC")"
+CXX="${CXX:-$(command -v clang++ || command -v c++)}"
+build_one_cpp() {
+  local src="$1" out="$2"
+  "$CXX" -std=c++17 -O2 -I "$ROOT/include" "$src" \
+      "$LIB/libMatlabFlowchart.a" "$LIB/libMatlabParse.a" \
+      "$LIB/libMatlabLex.a" "$LIB/libMatlabAST.a" \
+      "$LIB/libMatlabBasic.a" -o "$out"
+}
 
 pass=0
 fail=0
@@ -41,7 +54,7 @@ run_one() {
     sed 's/^/  /' "$SCRATCH/emit.err"
     return
   fi
-  if ! "$BUILDER" "$cpp" "$bin" > "$SCRATCH/build.log" 2>&1; then
+  if ! build_one_cpp "$cpp" "$bin" > "$SCRATCH/build.log" 2>&1; then
     fail=$((fail+1)); failed_names+=("$name (build)")
     echo "FAIL $name (build)"
     sed 's/^/  /' "$SCRATCH/build.log"
