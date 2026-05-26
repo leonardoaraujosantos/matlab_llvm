@@ -1441,6 +1441,189 @@ matlab_datetime *matlab_datetime_sub_duration(matlab_datetime *a, matlab_duratio
 matlab_duration *matlab_duration_add(matlab_duration *a, matlab_duration *b);
 matlab_duration *matlab_duration_sub(matlab_duration *a, matlab_duration *b);
 
+/* Phase 5.4 — vector datetime / duration. Both descriptors carry a
+ * length plus a flat double array (seconds-since-Unix-epoch for
+ * datetime, relative seconds for duration). They form the index
+ * axis of a timetable's RowTimes plus the natural product of a
+ * vector unit constructor like `days(0:251)`. Arithmetic dispatch
+ * (scalar+vec, vec+scalar, vec+vec, vec-vec) lives below; the
+ * scalar-only ABI above is preserved unchanged. */
+typedef struct matlab_datetime_vec_s matlab_datetime_vec;
+typedef struct matlab_duration_vec_s matlab_duration_vec;
+matlab_duration_vec *matlab_duration_seconds_vec(matlab_mat *m);
+matlab_duration_vec *matlab_duration_minutes_vec(matlab_mat *m);
+matlab_duration_vec *matlab_duration_hours_vec  (matlab_mat *m);
+matlab_duration_vec *matlab_duration_days_vec   (matlab_mat *m);
+matlab_duration_vec *matlab_duration_years_vec  (matlab_mat *m);
+void                 matlab_duration_vec_disp(matlab_duration_vec *v);
+double               matlab_duration_vec_length(matlab_duration_vec *v);
+matlab_datetime_vec *matlab_datetime_add_duration_vec(matlab_datetime *a, matlab_duration_vec *d);
+matlab_datetime_vec *matlab_datetime_vec_add_duration(matlab_datetime_vec *a, matlab_duration *d);
+matlab_datetime_vec *matlab_datetime_vec_sub_duration(matlab_datetime_vec *a, matlab_duration *d);
+matlab_datetime_vec *matlab_datetime_vec_add_duration_vec(matlab_datetime_vec *a, matlab_duration_vec *d);
+matlab_duration_vec *matlab_datetime_vec_sub_datetime_vec(matlab_datetime_vec *a, matlab_datetime_vec *b);
+matlab_duration_vec *matlab_datetime_vec_sub_datetime    (matlab_datetime_vec *a, matlab_datetime *b);
+void                 matlab_datetime_vec_disp(matlab_datetime_vec *v);
+double               matlab_datetime_vec_length(matlab_datetime_vec *v);
+double               matlab_datetime_vec_size_dim(matlab_datetime_vec *v, double dim);
+matlab_datetime     *matlab_datetime_vec_get(matlab_datetime_vec *v, double idx);
+/* Direct accessor used by timetable / DAP — exposes the raw second-
+ * count and length without leaking the struct layout. */
+const double        *matlab_datetime_vec_secs(matlab_datetime_vec *v,
+                                               int64_t *out_n);
+/* Convert a datetime_vec to a column matlab_mat of days-since-first
+ * element — the form plot() needs for a sensible numeric x-axis.
+ * The first element maps to 0 so the chart starts at the origin.   */
+matlab_mat          *matlab_datetime_vec_to_mat(matlab_datetime_vec *v);
+
+/* Phase 5.4 (cont.) — timetable. A column-store table indexed by a
+ * datetime_vec RowTimes axis. Builds on matlab_table's parallel-array
+ * column store (names + data + kinds) and adds the RowTimes column
+ * and the Properties.Description string. The data layout is
+ * intentionally separate from matlab_table so a `timetable` arg can
+ * carry its own kind tag without inheriting `table`'s lookup paths
+ * verbatim (retime / synchronize / time-row indexing need their own
+ * fast paths). The constructor surface matches MATLAB:
+ *   TT = timetable(c1, c2, ..., 'VariableNames', {n1,n2,...},
+ *                                'RowTimes', dt)
+ *   TT = table2timetable(T, 'RowTimes', dt)
+ * with a column-kind variant for string / datetime columns.        */
+typedef struct matlab_timetable_s matlab_timetable;
+struct matlab_table_s;     /* forward — declared further up */
+matlab_timetable *matlab_timetable_new(void);
+void              matlab_timetable_set_row_times(matlab_timetable *tt,
+                                                  matlab_datetime_vec *rt);
+matlab_datetime_vec *matlab_timetable_get_row_times(matlab_timetable *tt);
+void              matlab_timetable_set_description(matlab_timetable *tt,
+                                                    const char *desc,
+                                                    int64_t len);
+void              matlab_timetable_add_column(matlab_timetable *tt,
+                                               const char *name, int64_t namelen,
+                                               matlab_mat *col);
+void              matlab_timetable_add_column_kind(matlab_timetable *tt,
+                                                    const char *name,
+                                                    int64_t namelen,
+                                                    void *col, int32_t kind,
+                                                    int64_t nrows_hint);
+matlab_mat       *matlab_timetable_get_column(matlab_timetable *tt,
+                                               const char *name,
+                                               int64_t namelen);
+double            matlab_timetable_get_kind(matlab_timetable *tt,
+                                             const char *name,
+                                             int64_t namelen);
+double            matlab_timetable_height(matlab_timetable *tt);
+double            matlab_timetable_width (matlab_timetable *tt);
+double            matlab_timetable_numel (matlab_timetable *tt);
+double            matlab_timetable_size_dim(matlab_timetable *tt, double dim);
+void              matlab_timetable_disp  (matlab_timetable *tt);
+/* Promote a plain table to a timetable by attaching the RowTimes
+ * axis. The table is consumed (ownership transfers to the new
+ * timetable; the caller must not free it). */
+matlab_timetable *matlab_table2timetable(struct matlab_table_s *t,
+                                          matlab_datetime_vec *rt);
+/* Subscripting helpers.
+ *   _select_var       : TT(:,'colName') -> new TT with just that
+ *                        column (RowTimes preserved)
+ *   _select_rows_mat  : TT(idx,:) where idx is a matlab_mat of
+ *                        1-based numeric indices (or 0/1 logical)
+ *   _description      : property read (returns char* or "")        */
+matlab_timetable *matlab_timetable_select_var(matlab_timetable *tt,
+                                                const char *name,
+                                                int64_t namelen);
+matlab_timetable *matlab_timetable_select_rows_mat(matlab_timetable *tt,
+                                                     matlab_mat *idx);
+const char       *matlab_timetable_get_description(matlab_timetable *tt);
+
+/* Phase 5.4 (cont.) — timerange descriptor. A half-open or closed
+ * interval [t_start, t_end] used as a row index on a timetable:
+ *   tr = timerange(t1, t2, 'closed' | 'open' |
+ *                  'openleft' | 'openright')
+ *   TT(tr, :)                  -> rows whose RowTime falls in tr
+ * Mode codes match MATLAB:
+ *   0 = closed     [t1, t2]
+ *   1 = openright  [t1, t2)
+ *   2 = openleft   (t1, t2]
+ *   3 = open       (t1, t2)
+ * (MATLAB default is "openright" — t2 exclusive — but the doc-page
+ * example asks for 'closed' explicitly.) */
+typedef struct matlab_timerange_s matlab_timerange;
+matlab_timerange *matlab_timerange_new(matlab_datetime *t1,
+                                        matlab_datetime *t2,
+                                        int32_t mode);
+matlab_timetable *matlab_timetable_select_rows_timerange(matlab_timetable *tt,
+                                                          matlab_timerange *tr);
+
+/* Phase 5.4 (cont.) — retime. Resample TT onto a regular cadence.
+ *   retime(TT, 'daily' | 'weekly' | 'monthly' | 'yearly', method)
+ * where method is one of:
+ *   'firstvalue' | 'lastvalue' | 'max' | 'min' | 'sum' | 'mean'
+ * Each bucket's RowTime is the start of the period; bucketing is
+ * calendar-aligned (Monday-start weeks; UTC-midnight daily). The
+ * cadence and method are passed as integer codes from the
+ * Lowering arm (see retime_cadence / retime_aggregator above).  */
+enum {
+    MATLAB_RETIME_DAILY   = 0,
+    MATLAB_RETIME_WEEKLY  = 1,
+    MATLAB_RETIME_MONTHLY = 2,
+    MATLAB_RETIME_YEARLY  = 3,
+};
+enum {
+    MATLAB_AGG_FIRSTVALUE = 0,
+    MATLAB_AGG_LASTVALUE  = 1,
+    MATLAB_AGG_MAX        = 2,
+    MATLAB_AGG_MIN        = 3,
+    MATLAB_AGG_SUM        = 4,
+    MATLAB_AGG_MEAN       = 5,
+};
+matlab_timetable *matlab_timetable_retime(matlab_timetable *tt,
+                                           int32_t cadence,
+                                           int32_t aggregator);
+/* Phase 5.4 (cont.) — horz-cat + synchronize.
+ *   [TT1 TT2 ... TTN]                 -> matlab_timetable_horzcat
+ *                                          (pairwise reduce; RowTimes
+ *                                          carried from TT1)
+ *   synchronize(TT1, TT2, cadence, method)
+ *                                      -> retime each onto cadence,
+ *                                          then horz-cat                */
+matlab_timetable *matlab_timetable_horzcat(matlab_timetable *a,
+                                            matlab_timetable *b);
+matlab_timetable *matlab_timetable_synchronize(matlab_timetable *a,
+                                                matlab_timetable *b,
+                                                int32_t cadence,
+                                                int32_t aggregator);
+/* Utilities. fillmissing operates per-column with one of:
+ *   0 = linear interpolation between neighbour non-NaNs (boundary
+ *       NaNs are carried from the closest non-NaN)
+ *   1 = previous (carry-forward; leading NaNs stay NaN)
+ *   2 = next     (carry-back;   trailing NaNs stay NaN)
+ * Methods 3 (constant) etc. land later when a test needs them.
+ * Returns a fresh timetable. summary / head are display-only and
+ * return void; n=0 in head means "default 8 rows".              */
+enum {
+    MATLAB_FILL_LINEAR   = 0,
+    MATLAB_FILL_PREVIOUS = 1,
+    MATLAB_FILL_NEXT     = 2,
+};
+matlab_timetable *matlab_timetable_fillmissing(matlab_timetable *tt,
+                                                int32_t method);
+void              matlab_timetable_summary(matlab_timetable *tt);
+void              matlab_timetable_head   (matlab_timetable *tt, double n);
+
+/* Phase 5.4 (cont.) — financial indicators on timetables.
+ *
+ * movavg type codes:
+ *   0 = simple (SMA)          y[i] = mean(x[i-N+1..i])
+ *   1 = exponential (EMA)     y[i] = a*x[i] + (1-a)*y[i-1], a = 2/(N+1)
+ * macd uses fixed default periods (12 fast, 26 slow, 9 signal) and
+ * returns a 3-column timetable {MACD, Signal, Histogram}.
+ *
+ * Both helpers operate on the first numeric column of the input
+ * timetable — the canonical usage is TMW(:, 'Close') as input.    */
+enum { MATLAB_MA_SIMPLE = 0, MATLAB_MA_EXPONENTIAL = 1 };
+matlab_timetable *matlab_timetable_movavg(matlab_timetable *tt,
+                                            int32_t type, int32_t period);
+matlab_timetable *matlab_timetable_macd  (matlab_timetable *tt);
+
 /* Phase 4 — containers.Map / dictionary. A flat key/value table with
  * mixed key types (f64 or matlab_string *) and value types (f64 or
  * matlab_mat *). v1 backs both `containers.Map` and `dictionary` with
