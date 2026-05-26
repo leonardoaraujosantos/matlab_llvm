@@ -3,6 +3,28 @@
 % entries); this file is the umbrella the parser pulls in whenever a
 % Portfolio constructor or method name appears in the user input.
 
+% creditscorecard — logistic-regression credit model. Carries the
+% training predictors X (N×p), the default flags Y (N×1, 0/1), and
+% the fitted Beta ((p+1)×1, intercept first) after fitmodel. WoE/IV
+% binning is a documented follow-on; this fits logistic regression
+% on the raw predictors.
+classdef creditscorecard
+    properties
+        X matrix
+        Y matrix
+        Beta matrix
+    end
+    methods
+        function obj = creditscorecard(X, y)
+            if nargin < 1, X = zeros(1, 1); end
+            if nargin < 2, y = zeros(1, 1); end
+            obj.X = X;
+            obj.Y = y;
+            obj.Beta = zeros(1, 1);
+        end
+    end
+end
+
 classdef Portfolio
     properties
         NumAssets         % scalar (count)

@@ -1605,3 +1605,96 @@ extern "C" double matlab_cdsprice(double s_market, double s_contract,
                                    double rpv01) {
     return (s_market - s_contract) * rpv01;
 }
+
+/* ============================================================================
+ * §T4.3 — Credit scorecard (logistic-regression core)
+ *
+ * Simplified scorecard: logistic regression on the raw predictors (the
+ * WoE/IV binning transform is a documented follow-on). The classdef
+ * carries X (N×p predictors), Y (N×1 default flags 0/1), and the fitted
+ * Beta ((p+1)×1, intercept first). fitmodel runs IRLS; probdefault and
+ * score evaluate on new data.
+ * ==========================================================================*/
+
+/* IRLS logistic fit with an auto-prepended intercept. X is N×p row-major;
+ * y is N×1. Writes (p+1)×1 beta (beta[0] = intercept). */
+static void logistic_irls(const double *X, const double *y,
+                           int64_t N, int64_t p, double *beta) {
+    int64_t k = p + 1;                  /* +1 for intercept */
+    for (int64_t j = 0; j < k; ++j) beta[j] = 0.0;
+    std::vector<double> XtWX(static_cast<size_t>(k*k));
+    std::vector<double> XtWz(static_cast<size_t>(k));
+    std::vector<double> row(static_cast<size_t>(k));
+    for (int it = 0; it < 50; ++it) {
+        for (int64_t a = 0; a < k*k; ++a) XtWX[static_cast<size_t>(a)] = 0.0;
+        for (int64_t a = 0; a < k; ++a)   XtWz[static_cast<size_t>(a)] = 0.0;
+        for (int64_t i = 0; i < N; ++i) {
+            row[0] = 1.0;
+            for (int64_t j = 0; j < p; ++j) row[static_cast<size_t>(j+1)] = X[i*p + j];
+            double eta = 0.0;
+            for (int64_t j = 0; j < k; ++j) eta += beta[j] * row[static_cast<size_t>(j)];
+            double mu = 1.0 / (1.0 + exp(-eta));
+            double w  = mu * (1.0 - mu);
+            if (w < 1e-9) w = 1e-9;
+            double z = eta + (y[i] - mu) / w;     /* working response */
+            for (int64_t a = 0; a < k; ++a) {
+                XtWz[static_cast<size_t>(a)] += row[static_cast<size_t>(a)] * w * z;
+                for (int64_t b = 0; b < k; ++b)
+                    XtWX[static_cast<size_t>(a*k + b)] += row[static_cast<size_t>(a)] * w * row[static_cast<size_t>(b)];
+            }
+        }
+        std::vector<double> nb(static_cast<size_t>(k), 0.0);
+        if (!spd_solve(XtWX.data(), XtWz.data(), nb.data(), k)) break;
+        double delta = 0.0;
+        for (int64_t j = 0; j < k; ++j) delta += fabs(nb[static_cast<size_t>(j)] - beta[j]);
+        for (int64_t j = 0; j < k; ++j) beta[j] = nb[static_cast<size_t>(j)];
+        if (delta < 1e-10) break;
+    }
+}
+
+extern "C" struct matlab_obj_s *matlab_creditscorecard_fitmodel(
+        struct matlab_obj_s *sc) {
+    if (!sc) return sc;
+    matlab_mat *X = matlab_obj_get_mat(sc, "X", 1);
+    matlab_mat *Y = matlab_obj_get_mat(sc, "Y", 1);
+    if (!X || !X->data || !Y || !Y->data) return sc;
+    int64_t N = X->rows, p = X->cols;
+    matlab_mat *beta = mat_alloc(p + 1, 1);
+    logistic_irls(X->data, Y->data, N, p, beta->data);
+    matlab_obj_set_mat(sc, "Beta", 4, beta);
+    return sc;
+}
+
+/* probdefault(sc, Xnew) -> M×1 default probabilities (sigmoid of the
+ * linear predictor). */
+extern "C" matlab_mat *matlab_creditscorecard_probdefault(
+        struct matlab_obj_s *sc, matlab_mat *Xnew) {
+    if (!sc || !Xnew || !Xnew->data) return mat_alloc(0, 0);
+    matlab_mat *beta = matlab_obj_get_mat(sc, "Beta", 4);
+    if (!beta || !beta->data) return mat_alloc(0, 0);
+    int64_t M = Xnew->rows, p = Xnew->cols;
+    matlab_mat *pd = mat_alloc(M, 1);
+    for (int64_t i = 0; i < M; ++i) {
+        double eta = beta->data[0];
+        for (int64_t j = 0; j < p; ++j) eta += beta->data[j + 1] * Xnew->data[i*p + j];
+        pd->data[i] = 1.0 / (1.0 + exp(-eta));
+    }
+    return pd;
+}
+
+/* score(sc, Xnew) -> M×1 log-odds (the credit "score" before any
+ * points-scaling transform). */
+extern "C" matlab_mat *matlab_creditscorecard_score(
+        struct matlab_obj_s *sc, matlab_mat *Xnew) {
+    if (!sc || !Xnew || !Xnew->data) return mat_alloc(0, 0);
+    matlab_mat *beta = matlab_obj_get_mat(sc, "Beta", 4);
+    if (!beta || !beta->data) return mat_alloc(0, 0);
+    int64_t M = Xnew->rows, p = Xnew->cols;
+    matlab_mat *sco = mat_alloc(M, 1);
+    for (int64_t i = 0; i < M; ++i) {
+        double eta = beta->data[0];
+        for (int64_t j = 0; j < p; ++j) eta += beta->data[j + 1] * Xnew->data[i*p + j];
+        sco->data[i] = eta;
+    }
+    return sco;
+}

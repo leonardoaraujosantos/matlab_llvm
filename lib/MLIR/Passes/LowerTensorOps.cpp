@@ -6644,6 +6644,9 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"cdsbootstrap","matlab_cdsbootstrap",1, "pppf"},
       {"cdsspread",  "matlab_cdsspread",  0, "ff"},
       {"cdsprice",   "matlab_cdsprice",   0, "fff"},
+      {"fitmodel",   "matlab_creditscorecard_fitmodel",   1, "p"},
+      {"probdefault","matlab_creditscorecard_probdefault",1, "pp"},
+      {"score",      "matlab_creditscorecard_score",      1, "pp"},
     };
 
     // Pick the first entry with name + arity + TYPE match so overloaded
