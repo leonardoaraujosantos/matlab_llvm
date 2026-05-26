@@ -2173,3 +2173,53 @@ extern "C" matlab_mat *matlab_sde_sim_solution(struct matlab_obj_s *obj,
     }
     return paths;
 }
+
+/* ============================================================================
+ * §T6.3 — Quasi-Monte-Carlo: Halton low-discrepancy sequence
+ *
+ * haltonseq(n, d) -> n×d matrix of quasi-random points in [0,1), one
+ * coordinate per dimension using the radical inverse in the d-th prime
+ * base. Lower star-discrepancy than pseudo-random draws, so Monte Carlo
+ * estimators converge faster. Sobol is a documented follow-on.
+ * ==========================================================================*/
+
+static double radical_inverse(int64_t i, int64_t base) {
+    double f = 1.0 / static_cast<double>(base);
+    double r = 0.0;
+    while (i > 0) {
+        r += f * static_cast<double>(i % base);
+        i /= base;
+        f /= static_cast<double>(base);
+    }
+    return r;
+}
+extern "C" matlab_mat *matlab_haltonseq(double n_, double d_) {
+    int64_t n = static_cast<int64_t>(n_);
+    int64_t d = static_cast<int64_t>(d_);
+    if (n <= 0 || d <= 0) return mat_alloc(0, 0);
+    static const int64_t primes[] = { 2,3,5,7,11,13,17,19,23,29,31,37,41,43,47 };
+    int64_t np = static_cast<int64_t>(sizeof(primes)/sizeof(primes[0]));
+    matlab_mat *out = mat_alloc(n, d);
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t j = 0; j < d; ++j)
+            out->data[i*d + j] =
+                radical_inverse(i + 1, primes[j < np ? j : np - 1]);
+    return out;
+}
+
+/* optpricemc(terminalPrices, strike, r, T) — discounted Monte-Carlo
+ * European-call price = exp(-rT) * mean(max(S_T - K, 0)). A small
+ * helper so the headline avoids the elementwise max(mat, scalar)
+ * lowering gap. terminalPrices is any-shape (flattened). */
+extern "C" double matlab_optpricemc(matlab_mat *ST, double K,
+                                     double r, double T) {
+    if (!ST || !ST->data) return 0.0;
+    int64_t n = ST->rows * ST->cols;
+    if (n == 0) return 0.0;
+    double s = 0.0;
+    for (int64_t i = 0; i < n; ++i) {
+        double payoff = ST->data[i] - K;
+        if (payoff > 0.0) s += payoff;
+    }
+    return exp(-r * T) * s / static_cast<double>(n);
+}

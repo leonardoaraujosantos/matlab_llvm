@@ -6659,6 +6659,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
       /* Financial Toolbox Tier-6: SDE Monte Carlo. */
       {"simByEuler",    "matlab_sde_sim_euler",    1, "pfff"},
       {"simBySolution", "matlab_sde_sim_solution", 1, "pfff"},
+      {"haltonseq",     "matlab_haltonseq",        1, "ff"},
+      {"optpricemc",    "matlab_optpricemc",       0, "pfff"},
     };
 
     // Pick the first entry with name + arity + TYPE match so overloaded
