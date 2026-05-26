@@ -6598,6 +6598,12 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"prtbill",    "matlab_prtbill",    0, "ff"},
       {"ytbill",     "matlab_ytbill",     0, "ff"},
       {"beytbill",   "matlab_beytbill",   0, "ff"},
+      /* Financial Toolbox Tier-1: returns + indicator function-form. */
+      {"tick2ret",   "matlab_tick2ret",   1, "p"},
+      {"ret2tick",   "matlab_ret2tick",   1, "p"},
+      {"sma",        "matlab_sma",        1, "pf"},
+      {"bolling",    "matlab_bolling",    1, "pff"},
+      {"rsindex",    "matlab_rsindex",    1, "pf"},
     };
 
     // Pick the first entry with name + arity + TYPE match so overloaded

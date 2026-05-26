@@ -395,6 +395,115 @@ extern "C" matlab_mat *matlab_depsoyd(double cost, double salvage,
 }
 
 /* ============================================================================
+ * §T1.5 — Returns + technical indicators (function-form over matlab_mat)
+ * ==========================================================================*/
+
+/* tick2ret(prices) — simple per-period returns: r[i] = p[i+1]/p[i] - 1.
+ * Output length is N-1 for an N-row input.  Treats the input as a flat
+ * column.                                                                */
+extern "C" matlab_mat *matlab_tick2ret(matlab_mat *p) {
+    if (!p || !p->data) return mat_alloc(0, 0);
+    int64_t n = p->rows * p->cols;
+    if (n < 2) return mat_alloc(0, 0);
+    matlab_mat *r = mat_alloc(n - 1, 1);
+    for (int64_t i = 0; i < n - 1; ++i) {
+        double d = p->data[i];
+        r->data[i] = d != 0.0 ? p->data[i + 1] / d - 1.0 : 0.0;
+    }
+    return r;
+}
+
+/* ret2tick(returns[, start]) — cumulative price series from returns.
+ * Output length = N+1 (the first element is the starting price). */
+extern "C" matlab_mat *matlab_ret2tick(matlab_mat *r) {
+    if (!r || !r->data) return mat_alloc(0, 0);
+    int64_t n = r->rows * r->cols;
+    matlab_mat *p = mat_alloc(n + 1, 1);
+    p->data[0] = 1.0;
+    for (int64_t i = 0; i < n; ++i)
+        p->data[i + 1] = p->data[i] * (1.0 + r->data[i]);
+    return p;
+}
+
+/* sma(x, N) — simple moving average over a rolling window. Leading
+ * rows use a growing window (mean of available samples). */
+extern "C" matlab_mat *matlab_sma(matlab_mat *x, double N_) {
+    if (!x || !x->data) return mat_alloc(0, 0);
+    int64_t n = x->rows * x->cols;
+    int64_t N = static_cast<int64_t>(N_);
+    if (N <= 0) N = 1;
+    matlab_mat *y = mat_alloc(n, 1);
+    double acc = 0.0;
+    for (int64_t i = 0; i < n; ++i) {
+        acc += x->data[i];
+        if (i >= N) acc -= x->data[i - N];
+        int64_t window = i < N ? (i + 1) : N;
+        y->data[i] = acc / static_cast<double>(window);
+    }
+    return y;
+}
+
+/* bolling(x, N, K) — Bollinger bands: returns an Nx3 matrix
+ *   col 0: middle band (N-period SMA)
+ *   col 1: upper band  (middle + K * stddev)
+ *   col 2: lower band  (middle - K * stddev)
+ * Stddev is over the same rolling window.                              */
+extern "C" matlab_mat *matlab_bolling(matlab_mat *x, double N_, double K) {
+    if (!x || !x->data) return mat_alloc(0, 0);
+    int64_t n = x->rows * x->cols;
+    int64_t N = static_cast<int64_t>(N_);
+    if (N <= 0) N = 1;
+    matlab_mat *out = mat_alloc(n, 3);
+    for (int64_t i = 0; i < n; ++i) {
+        int64_t s = i >= N - 1 ? i - N + 1 : 0;
+        int64_t w = i - s + 1;
+        double sum = 0.0;
+        for (int64_t k = s; k <= i; ++k) sum += x->data[k];
+        double mean = sum / static_cast<double>(w);
+        double var = 0.0;
+        for (int64_t k = s; k <= i; ++k) {
+            double d = x->data[k] - mean;
+            var += d * d;
+        }
+        double sd = sqrt(var / static_cast<double>(w));
+        out->data[i*3 + 0] = mean;
+        out->data[i*3 + 1] = mean + K * sd;
+        out->data[i*3 + 2] = mean - K * sd;
+    }
+    return out;
+}
+
+/* rsindex(x, N) — Wilder's RSI over an N-period window.  Uses a
+ * simple moving average of gains/losses (not the EWMA variant).  */
+extern "C" matlab_mat *matlab_rsindex(matlab_mat *x, double N_) {
+    if (!x || !x->data) return mat_alloc(0, 0);
+    int64_t n = x->rows * x->cols;
+    int64_t N = static_cast<int64_t>(N_);
+    if (N <= 0) N = 14;
+    matlab_mat *out = mat_alloc(n, 1);
+    if (n == 0) return out;
+    out->data[0] = 50.0;
+    /* Walk the diff series, accumulate avg gain / avg loss in a
+     * rolling window. */
+    for (int64_t i = 1; i < n; ++i) {
+        int64_t s = i >= N ? i - N + 1 : 1;
+        double gain = 0.0, loss = 0.0;
+        for (int64_t k = s; k <= i; ++k) {
+            double d = x->data[k] - x->data[k - 1];
+            if (d > 0.0) gain += d;
+            else         loss += -d;
+        }
+        if (loss == 0.0) {
+            out->data[i] = gain == 0.0 ? 50.0 : 100.0;
+        } else {
+            double rs = gain / loss;
+            out->data[i] = 100.0 - (100.0 / (1.0 + rs));
+        }
+    }
+    return out;
+}
+
+/* ============================================================================
  * §T1.4 — Bond pricing
  *
  * Simplified API: take periods + freq directly rather than settle/maturity

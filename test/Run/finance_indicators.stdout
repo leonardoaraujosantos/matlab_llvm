@@ -1,0 +1,9 @@
+tick2ret length = 6
+  r(1) = 0.0200  (102/100 - 1)
+  r(6) = 0.0192  (106/104 - 1)
+ret2tick length = 7
+  t(1) = 1.0000 (start)
+  t(7) = 1.0600 (==1.06, since p(7)/p(1)=1.06)
+sma(p,3): s(3)=101.0000 s(7)=105.0000
+bolling last: mid=103.80 upper=107.24 lower=100.36
+rsindex(p,3) last = 80.00
