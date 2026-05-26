@@ -10173,9 +10173,17 @@ static void matlab_tf_poly_to_str(matlab_mat *coeffs, char var,
 extern "C" void matlab_tf_disp(matlab_obj *o) {
     matlab_mat *num = matlab_obj_get_mat(o, "Numerator", 9);
     matlab_mat *den = matlab_obj_get_mat(o, "Denominator", 11);
+    /* Ts decides whether the disp footer reads continuous or discrete.
+     * Property may be absent on older tf instances built before the
+     * 3-arg ctor landed; matlab_obj_get_f64 returns 0 in that case,
+     * which lands on the continuous footer — matching the previous
+     * behavior. */
+    double Ts = matlab_obj_get_f64(o, "Ts", 2);
+    bool Discrete = (Ts > 0.0) || (Ts < 0.0);  /* Ts == -1 = unspecified */
+    char var = Discrete ? 'z' : 's';
     std::string num_str, den_str;
-    matlab_tf_poly_to_str(num, 's', num_str);
-    matlab_tf_poly_to_str(den, 's', den_str);
+    matlab_tf_poly_to_str(num, var, num_str);
+    matlab_tf_poly_to_str(den, var, den_str);
     size_t width = std::max(num_str.size(), den_str.size());
     std::string bar(width + 2, '-');
     size_t pad_n = (bar.size() - num_str.size()) / 2;
@@ -10184,7 +10192,15 @@ extern "C" void matlab_tf_disp(matlab_obj *o) {
     std::printf("%*s%s\n", (int)pad_n, "", num_str.c_str());
     std::printf("  %s\n", bar.c_str());
     std::printf("%*s%s\n", (int)pad_d, "", den_str.c_str());
-    std::printf("\n  Continuous-time transfer function.\n\n");
+    if (!Discrete) {
+        std::printf("\n  Continuous-time transfer function.\n\n");
+    } else if (Ts > 0.0) {
+        std::printf("\n  Sample time: %g seconds\n", Ts);
+        std::printf("  Discrete-time transfer function.\n\n");
+    } else {
+        std::printf("\n  Sample time: unspecified\n");
+        std::printf("  Discrete-time transfer function.\n\n");
+    }
 }
 
 /* ---------------------------------------------------------------------- */

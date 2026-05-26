@@ -27,22 +27,37 @@ classdef tf
     properties
         Numerator
         Denominator
+        Ts
     end
     methods
-        function obj = tf(num, den)
+        function obj = tf(num, den, Ts)
             % Accept a single scalar / vector to box into a constant
             % transfer function `c → c/1`. MATLAB's convention so
             % `G + 2` boxes the right operand into `tf(2)` before
-            % dispatching to plus. The 1-arg `tf('s')` builder is a
-            % follow-on slice — char literals don't survive the
-            % AST→MLIR lowering through the constructor body today;
-            % users compose explicitly via `s = tf([1 0], 1)`.
+            % dispatching to plus.
+            %
+            % The 1-arg `tf('s')` / `tf('z')` variable-builder form is
+            % intercepted at lowering time (Lowering.cpp) — char
+            % literals don't survive the AST→MLIR lowering through the
+            % constructor body, so the call site rewrites
+            % `tf('s')` → `tf__tf([1 0], 1, 0)` directly.
+            %
+            % 3-arg form `tf(num, den, Ts)` carries a sample time.
+            % Continuous: Ts == 0 (default).  Discrete: Ts > 0.  Ts ==
+            % -1 marks a discrete model whose sample time is
+            % unspecified (used by `tf('z')`).
             if nargin == 1
                 obj.Numerator = num;
                 obj.Denominator = 1;
+                obj.Ts = 0;
             elseif nargin == 2
                 obj.Numerator = num;
                 obj.Denominator = den;
+                obj.Ts = 0;
+            elseif nargin == 3
+                obj.Numerator = num;
+                obj.Denominator = den;
+                obj.Ts = Ts;
             end
         end
 
@@ -78,6 +93,26 @@ classdef tf
             new_num = conv(a.Numerator, b.Denominator);
             new_den = conv(a.Denominator, b.Numerator);
             r = tf(new_num, new_den);
+        end
+
+        function r = mpower(a, n)
+            % `s^N` for integer N >= 1 — repeated mtimes.  Covers the
+            % polynomial-in-s composition pattern (`s^2 + 3*s + 5`)
+            % where `s = tf('s')`.  Negative / non-integer N is left
+            % to a future slice.
+            %
+            % `n` arrives boxed as `tf(N)` (the Lowering BoxScalars
+            % path wraps every non-class operand of a class-pinned
+            % binop into a 1-arg constructor call so the method body
+            % sees two class-pinned operands).  Extract the integer
+            % via the constant tf's Numerator(1).
+            nn = n.Numerator(1);
+            r = a;
+            k = 1;
+            while k < nn
+                r = r * a;
+                k = k + 1;
+            end
         end
 
         % [num, den] = tfdata(G) — unpack the numerator / denominator.
