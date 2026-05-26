@@ -2461,7 +2461,8 @@ void Lowerer::lowerStmt(const Stmt &St) {
         /* Phase 5.4 (cont.): timetable + table2timetable produce
          * matlab_timetable*. The LHS slot gets tagged so disp /
          * height / etc. route to matlab_timetable_*. */
-        if (NE->Name == "timetable" || NE->Name == "table2timetable")
+        if (NE->Name == "timetable" || NE->Name == "table2timetable" ||
+            NE->Name == "retime")
           RhsIsTimetable = true;
         /* TT(rowIdx, :) and TT(:, 'colName') both return a new
          * timetable, so the LHS slot inherits the tag. */
@@ -9758,6 +9759,46 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             mlir::StringAttr::get(&MCtx, "callee"),
             mlir::StringAttr::get(&MCtx, "matlab_table2timetable"));
         return emitUnreg("matlab.call_builtin", {TB, RT}, PtrTy, L, {Cal});
+      }
+      /* retime(TT, cadence, method) -> matlab_timetable.
+       * Cadence ∈ {'daily','weekly','monthly','yearly'};
+       * method  ∈ {'firstvalue','lastvalue','max','min','sum','mean'}.
+       * Both literal-string args fold to integer codes at lower time. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "retime" && C.Args.size() == 3 &&
+          C.Args[0] && C.Args[1] && C.Args[2]) {
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        auto I32 = mlir::IntegerType::get(&MCtx, 32);
+        auto strArg = [](const Expr *E, std::string &Out) -> bool {
+          if (auto *CL = dynamic_cast<const CharLiteral *>(E))  { Out = std::string(CL->Value); return true; }
+          if (auto *SL = dynamic_cast<const StringLiteral *>(E)){ Out = std::string(SL->Value); return true; }
+          return false;
+        };
+        std::string Cadence, Method;
+        if (strArg(C.Args[1], Cadence) && strArg(C.Args[2], Method)) {
+          int32_t cad = 0;
+          if      (Cadence == "daily")   cad = 0;
+          else if (Cadence == "weekly")  cad = 1;
+          else if (Cadence == "monthly") cad = 2;
+          else if (Cadence == "yearly")  cad = 3;
+          int32_t aggCode = 0;
+          if      (Method == "firstvalue") aggCode = 0;
+          else if (Method == "lastvalue")  aggCode = 1;
+          else if (Method == "max")        aggCode = 2;
+          else if (Method == "min")        aggCode = 3;
+          else if (Method == "sum")        aggCode = 4;
+          else if (Method == "mean")       aggCode = 5;
+          mlir::Value Tv = lowerExpr(*C.Args[0]);
+          mlir::Value CadV = mlir::arith::ConstantOp::create(
+              B, L, I32, mlir::IntegerAttr::get(I32, cad));
+          mlir::Value AggV = mlir::arith::ConstantOp::create(
+              B, L, I32, mlir::IntegerAttr::get(I32, aggCode));
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_timetable_retime"));
+          return emitUnreg("matlab.call_builtin", {Tv, CadV, AggV},
+                           PtrTy, L, {Cal});
+        }
       }
       /* timerange(t1, t2)            -> closed   (mode 0)
        * timerange(t1, t2, 'closed')  -> closed

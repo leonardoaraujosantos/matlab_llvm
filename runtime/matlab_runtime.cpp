@@ -10273,6 +10273,162 @@ static inline bool tr_contains(double t, double s, double e, int mode) {
     return t >= s && t <  e;
 }
 
+/* Cadence / aggregator codes — mirror the matlab_runtime.h enums.
+ * Keep these as plain ints (not enum class) so the LowerTensorOps
+ * pass can pass i32 constants directly. */
+enum { RETIME_DAILY = 0, RETIME_WEEKLY = 1,
+       RETIME_MONTHLY = 2, RETIME_YEARLY = 3 };
+enum { AGG_FIRSTVALUE = 0, AGG_LASTVALUE = 1,
+       AGG_MAX = 2, AGG_MIN = 3, AGG_SUM = 4, AGG_MEAN = 5 };
+
+/* Bucket key + bucket-start helpers. For daily / weekly we treat the
+ * input as a UTC time-of-day; the bucket key is the integer count
+ * of days/weeks since the Unix epoch. For monthly / yearly we
+ * decompose to civil (y,m) and key on year*12+month or year. */
+static int64_t bucket_key_for(double secs, int cadence,
+                               int *out_y, int *out_m, int *out_d) {
+    double days = floor(secs / 86400.0);
+    int64_t day = (int64_t)days;
+    switch (cadence) {
+        case RETIME_DAILY: {
+            return day;
+        }
+        case RETIME_WEEKLY: {
+            /* Unix epoch (1970-01-01) was a Thursday. Mondays satisfy
+             * (days + 3) % 7 == 0 in the same indexing. So
+             *   week_start_day = floor((day + 3) / 7) * 7 - 3
+             * and the key is that integer. */
+            int64_t wk = (day + 3) >= 0
+                ? (day + 3) / 7
+                : -((-(day + 3) + 6) / 7);
+            return wk;
+        }
+        case RETIME_MONTHLY:
+        case RETIME_YEARLY: {
+            int y, m, d, hh, mm; double ss;
+            epoch_to_civil(secs, &y, &m, &d, &hh, &mm, &ss);
+            if (out_y) *out_y = y;
+            if (out_m) *out_m = m;
+            if (out_d) *out_d = d;
+            if (cadence == RETIME_YEARLY) return y;
+            return (int64_t)y * 12 + m;
+        }
+    }
+    return day;
+}
+
+static double bucket_start_secs(int cadence, int64_t key) {
+    switch (cadence) {
+        case RETIME_DAILY:   return (double)key * 86400.0;
+        case RETIME_WEEKLY:  return ((double)key * 7.0 - 3.0) * 86400.0;
+        case RETIME_MONTHLY: {
+            int y = (int)(key / 12);
+            int m = (int)(key % 12);
+            if (m == 0) { y -= 1; m = 12; }
+            return civil_to_epoch(y, m, 1, 0, 0, 0.0);
+        }
+        case RETIME_YEARLY:
+            return civil_to_epoch((int)key, 1, 1, 0, 0, 0.0);
+    }
+    return (double)key * 86400.0;
+}
+
+extern "C" matlab_timetable *matlab_timetable_retime(matlab_timetable *tt,
+                                                      int32_t cadence,
+                                                      int32_t agg) {
+    matlab_timetable *out = matlab_timetable_new();
+    if (!tt || !tt->row_times || tt->row_times->n == 0) return out;
+    int64_t src_n = tt->row_times->n;
+
+    /* Per-row bucket key. */
+    int64_t *keys = (int64_t *)calloc((size_t)src_n, sizeof(int64_t));
+    for (int64_t i = 0; i < src_n; ++i)
+        keys[i] = bucket_key_for(tt->row_times->secs[i], cadence,
+                                  NULL, NULL, NULL);
+
+    /* Unique-key list, in source order. We assume RowTimes are
+     * sorted (MATLAB requires it for a sorted timetable). */
+    int64_t *uniq = (int64_t *)calloc((size_t)src_n, sizeof(int64_t));
+    int64_t *start_row = (int64_t *)calloc((size_t)src_n, sizeof(int64_t));
+    int64_t *end_row   = (int64_t *)calloc((size_t)src_n, sizeof(int64_t));
+    int64_t out_n = 0;
+    for (int64_t i = 0; i < src_n; ++i) {
+        if (out_n == 0 || keys[i] != uniq[out_n - 1]) {
+            uniq[out_n] = keys[i];
+            start_row[out_n] = i;
+            end_row[out_n]   = i;
+            out_n++;
+        } else {
+            end_row[out_n - 1] = i;
+        }
+    }
+
+    /* New RowTimes — bucket-start per unique key. */
+    matlab_datetime_vec *rt = dt_vec_alloc(out_n);
+    for (int64_t i = 0; i < out_n; ++i)
+        rt->secs[i] = bucket_start_secs(cadence, uniq[i]);
+    out->row_times = rt;
+    out->nrows = (int32_t)out_n;
+
+    /* Per numeric column, aggregate over each bucket. String and
+     * datetime columns aren't meaningful under aggregators like
+     * max/sum/mean, but firstvalue/lastvalue would be — keep
+     * those as a follow-on. */
+    for (int32_t c = 0; c < tt->nvars; ++c) {
+        int kind = tt->kinds ? tt->kinds[c] : 0;
+        const char *cname = tt->names[c];
+        int64_t cnl = (int64_t)strlen(cname);
+        if (kind != MATLAB_TABLE_KIND_NUMERIC) {
+            matlab_timetable_add_column_kind(out, cname, cnl,
+                                              tt->data[c], (int32_t)kind,
+                                              out_n);
+            continue;
+        }
+        matlab_mat *src = (matlab_mat *)tt->data[c];
+        matlab_mat *dst = mat_alloc(out_n, 1);
+        if (!src || !src->data) {
+            matlab_timetable_add_column(out, cname, cnl, dst);
+            continue;
+        }
+        for (int64_t b = 0; b < out_n; ++b) {
+            int64_t s = start_row[b], e = end_row[b];
+            double acc = 0.0;
+            double v;
+            switch (agg) {
+                case AGG_FIRSTVALUE:
+                    dst->data[b] = src->data[s]; break;
+                case AGG_LASTVALUE:
+                    dst->data[b] = src->data[e]; break;
+                case AGG_MAX:
+                    acc = src->data[s];
+                    for (int64_t k = s + 1; k <= e; ++k) {
+                        v = src->data[k];
+                        if (v > acc) acc = v;
+                    }
+                    dst->data[b] = acc; break;
+                case AGG_MIN:
+                    acc = src->data[s];
+                    for (int64_t k = s + 1; k <= e; ++k) {
+                        v = src->data[k];
+                        if (v < acc) acc = v;
+                    }
+                    dst->data[b] = acc; break;
+                case AGG_SUM:
+                    for (int64_t k = s; k <= e; ++k) acc += src->data[k];
+                    dst->data[b] = acc; break;
+                case AGG_MEAN:
+                    for (int64_t k = s; k <= e; ++k) acc += src->data[k];
+                    dst->data[b] = acc / (double)(e - s + 1); break;
+                default:
+                    dst->data[b] = src->data[s]; break;
+            }
+        }
+        matlab_timetable_add_column(out, cname, cnl, dst);
+    }
+    free(keys); free(uniq); free(start_row); free(end_row);
+    return out;
+}
+
 extern "C" matlab_timetable *matlab_timetable_select_rows_timerange(
         matlab_timetable *tt, matlab_timerange *tr) {
     matlab_timetable *out = matlab_timetable_new();

@@ -1549,6 +1549,32 @@ matlab_timerange *matlab_timerange_new(matlab_datetime *t1,
 matlab_timetable *matlab_timetable_select_rows_timerange(matlab_timetable *tt,
                                                           matlab_timerange *tr);
 
+/* Phase 5.4 (cont.) — retime. Resample TT onto a regular cadence.
+ *   retime(TT, 'daily' | 'weekly' | 'monthly' | 'yearly', method)
+ * where method is one of:
+ *   'firstvalue' | 'lastvalue' | 'max' | 'min' | 'sum' | 'mean'
+ * Each bucket's RowTime is the start of the period; bucketing is
+ * calendar-aligned (Monday-start weeks; UTC-midnight daily). The
+ * cadence and method are passed as integer codes from the
+ * Lowering arm (see retime_cadence / retime_aggregator above).  */
+enum {
+    MATLAB_RETIME_DAILY   = 0,
+    MATLAB_RETIME_WEEKLY  = 1,
+    MATLAB_RETIME_MONTHLY = 2,
+    MATLAB_RETIME_YEARLY  = 3,
+};
+enum {
+    MATLAB_AGG_FIRSTVALUE = 0,
+    MATLAB_AGG_LASTVALUE  = 1,
+    MATLAB_AGG_MAX        = 2,
+    MATLAB_AGG_MIN        = 3,
+    MATLAB_AGG_SUM        = 4,
+    MATLAB_AGG_MEAN       = 5,
+};
+matlab_timetable *matlab_timetable_retime(matlab_timetable *tt,
+                                           int32_t cadence,
+                                           int32_t aggregator);
+
 /* Phase 4 — containers.Map / dictionary. A flat key/value table with
  * mixed key types (f64 or matlab_string *) and value types (f64 or
  * matlab_mat *). v1 backs both `containers.Map` and `dictionary` with

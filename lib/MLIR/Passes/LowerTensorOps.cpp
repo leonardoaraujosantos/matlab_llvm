@@ -2490,6 +2490,23 @@ bool TensorLowering::rewriteBuiltinCalls() {
         Call->erase(); Changed = true; continue;
       }
     }
+    if (Name == "matlab_timetable_retime" &&
+        Call->getNumResults() == 1 && Call->getNumOperands() == 3 &&
+        Call->getOperand(0).getType() == PtrTy) {
+      auto I32 = IntegerType::get(B.getContext(), 32);
+      if (Call->getOperand(1).getType() == I32 &&
+          Call->getOperand(2).getType() == I32) {
+        B.setInsertionPoint(Call);
+        auto Fn = rt(Name, PtrTy, {PtrTy, I32, I32});
+        auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                        ValueRange{Call->getOperand(0),
+                                                   Call->getOperand(1),
+                                                   Call->getOperand(2)});
+        carryName(Call, NC);
+        Call->getResult(0).replaceAllUsesWith(NC.getResult());
+        Call->erase(); Changed = true; continue;
+      }
+    }
     if (Name == "matlab_timetable_select_rows_timerange" &&
         Call->getNumResults() == 1 && Call->getNumOperands() == 2 &&
         Call->getOperand(0).getType() == PtrTy &&
