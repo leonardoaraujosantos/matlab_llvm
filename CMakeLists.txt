@@ -53,14 +53,21 @@ endif()
 option(MATLAB_LLVM_WITH_PLOT "Enable matlab_plot runtime (Cairo backend)" OFF)
 if(MATLAB_LLVM_WITH_PLOT)
   find_package(PkgConfig REQUIRED)
-  pkg_check_modules(CAIRO REQUIRED IMPORTED_TARGET cairo cairo-svg cairo-pdf)
-  message(STATUS "Found Cairo ${CAIRO_VERSION} — matlab_plot enabled")
+  # Cairo headers are required at compile time for the type declarations
+  # used by cairo_dl.cpp + cairo_render.cpp.  The actual libcairo binary
+  # is loaded at runtime via dlopen (#50 Phase 2) — programs that don't
+  # plot never trigger the dlopen and ship without any libcairo dep.
+  pkg_check_modules(CAIRO REQUIRED cairo cairo-svg cairo-pdf)
+  message(STATUS "Found Cairo ${CAIRO_VERSION} — matlab_plot enabled "
+                 "(headers only; libcairo loaded via dlopen at runtime)")
   set(MATLAB_PLOT_SOURCES
     runtime/plot/c_api.cpp
     runtime/plot/figure.cpp
     runtime/plot/cairo_render.cpp
+    runtime/plot/cairo_dl.cpp
     runtime/plot/colormap.cpp
     runtime/plot/contour.cpp)
+  set(MATLAB_PLOT_INCLUDE_DIRS ${CAIRO_INCLUDE_DIRS})
 endif()
 
 # --- BLAS / LAPACK acceleration --------------------------------------------
@@ -421,7 +428,8 @@ if(MATLAB_LLVM_WITH_MLIR)
   endif()
   if(MATLAB_LLVM_WITH_PLOT)
     target_sources(matlabc PRIVATE ${MATLAB_PLOT_SOURCES})
-    target_link_libraries(matlabc PRIVATE PkgConfig::CAIRO)
+    target_include_directories(matlabc PRIVATE ${MATLAB_PLOT_INCLUDE_DIRS})
+    target_link_libraries(matlabc PRIVATE ${CMAKE_DL_LIBS})
     target_compile_definitions(matlabc PRIVATE MATLAB_LLVM_WITH_PLOT=1)
   endif()
   # GPU Coder — Metal backend (T2).  Auto-on on macOS, off elsewhere.
@@ -557,7 +565,8 @@ if(MATLAB_LLVM_WITH_PLOT)
     add_executable(${_plot_target}
       test/Runtime/test_plot_${_plot_test}.cpp
       ${MATLAB_PLOT_SOURCES})
-    target_link_libraries(${_plot_target} PRIVATE MatlabRuntime PkgConfig::CAIRO)
+    target_include_directories(${_plot_target} PRIVATE ${MATLAB_PLOT_INCLUDE_DIRS})
+    target_link_libraries(${_plot_target} PRIVATE MatlabRuntime ${CMAKE_DL_LIBS})
     matlab_runtime_force_load(${_plot_target})
     add_test(NAME runtime-plot-${_plot_test}
              COMMAND $<TARGET_FILE:${_plot_target}>)
