@@ -418,6 +418,22 @@ extern "C" matlab_mat *matlab_obj_get_mat(struct matlab_obj_s *o,
                                            const char *name, int64_t len);
 extern "C" void matlab_obj_set_f64(struct matlab_obj_s *o,
                                     const char *name, int64_t len, double v);
+
+/* Forward declarations for the runtime-polymorphic dispatch. The
+ * shared method names estimateFrontier / estimatePortRisk /
+ * setDefaultConstraints route on the object's RiskKind discriminant
+ * (0 = mean-variance, 1 = CVaR, 2 = MAD) so a single Spec-table
+ * entry serves all three Portfolio classes. */
+extern "C" matlab_mat *matlab_portfoliocvar_estimate_frontier(
+        struct matlab_obj_s *p, double n_pts);
+extern "C" double matlab_portfoliocvar_estimate_port_risk(
+        struct matlab_obj_s *p, matlab_mat *w);
+extern "C" struct matlab_obj_s *matlab_portfoliocvar_set_default(
+        struct matlab_obj_s *p);
+extern "C" matlab_mat *matlab_portfoliomad_estimate_frontier(
+        struct matlab_obj_s *p, double n_pts);
+extern "C" double matlab_portfoliomad_estimate_port_risk(
+        struct matlab_obj_s *p, matlab_mat *w);
 extern "C" void matlab_obj_set_mat(struct matlab_obj_s *o,
                                     const char *name, int64_t len,
                                     matlab_mat *m);
@@ -453,6 +469,9 @@ extern "C" struct matlab_obj_s *matlab_portfolio_set_budget(
 extern "C" struct matlab_obj_s *matlab_portfolio_set_default_constraints(
         struct matlab_obj_s *p) {
     if (!p) return p;
+    double kind = matlab_obj_get_f64(p, "RiskKind", 8);
+    if (kind == 1.0 || kind == 2.0)
+        return matlab_portfoliocvar_set_default(p);
     matlab_mat *m = matlab_obj_get_mat(p, "AssetMean", 9);
     if (!m || !m->data) return p;
     int64_t N = m->rows * m->cols;
@@ -622,6 +641,9 @@ extern "C" struct matlab_obj_s *matlab_portfolio_set_default(
 extern "C" matlab_mat *matlab_portfolio_estimate_frontier(
         struct matlab_obj_s *p, double n_pts) {
     if (!p) return mat_alloc(0, 0);
+    double kind = matlab_obj_get_f64(p, "RiskKind", 8);
+    if (kind == 1.0) return matlab_portfoliocvar_estimate_frontier(p, n_pts);
+    if (kind == 2.0) return matlab_portfoliomad_estimate_frontier(p, n_pts);
     matlab_mat *m_mean   = matlab_obj_get_mat(p, "AssetMean",  9);
     matlab_mat *m_cov    = matlab_obj_get_mat(p, "AssetCovar", 10);
     matlab_mat *m_lb     = matlab_obj_get_mat(p, "LowerBound", 10);
@@ -694,6 +716,9 @@ extern "C" double matlab_portfolio_estimate_port_return(
 extern "C" double matlab_portfolio_estimate_port_risk(
         struct matlab_obj_s *p, matlab_mat *w) {
     if (!p || !w || !w->data) return 0.0;
+    double kind = matlab_obj_get_f64(p, "RiskKind", 8);
+    if (kind == 1.0) return matlab_portfoliocvar_estimate_port_risk(p, w);
+    if (kind == 2.0) return matlab_portfoliomad_estimate_port_risk(p, w);
     matlab_mat *m_cov = matlab_obj_get_mat(p, "AssetCovar", 10);
     if (!m_cov || !m_cov->data) return 0.0;
     int64_t N = w->rows * w->cols;
@@ -1697,4 +1722,279 @@ extern "C" matlab_mat *matlab_creditscorecard_score(
         sco->data[i] = eta;
     }
     return sco;
+}
+
+/* ============================================================================
+ * §T5.1 — PortfolioCVaR (scenario-based Conditional Value-at-Risk)
+ *
+ * The CVaR of a weight vector over S scenarios is the mean of the worst
+ * (1-alpha) fraction of portfolio losses (loss = -scenario·w). This is a
+ * convex function of w, so the frontier is computed by projected
+ * subgradient descent rather than pulling in a full LP solver:
+ *   g = -(1/k) Σ_{s in tail} scenario_s
+ * with alternating projection onto the budget+box set and (for the
+ * return-targeted frontier) the mean-return hyperplane.
+ * ==========================================================================*/
+
+#include <algorithm>
+
+static double cvar_of_weights(const double *scen, int64_t S, int64_t N,
+                               const double *w, double alpha,
+                               double *out_var) {
+    std::vector<double> loss(static_cast<size_t>(S));
+    for (int64_t s = 0; s < S; ++s) {
+        double r = 0.0;
+        for (int64_t j = 0; j < N; ++j) r += scen[s*N + j] * w[j];
+        loss[static_cast<size_t>(s)] = -r;                 /* loss = -return */
+    }
+    std::sort(loss.begin(), loss.end());           /* ascending */
+    int64_t k = static_cast<int64_t>(ceil((1.0 - alpha) * static_cast<double>(S)));
+    if (k < 1) k = 1;
+    if (k > S) k = S;
+    /* worst k losses are the largest k (tail of the sorted array). */
+    double tail = 0.0;
+    for (int64_t i = S - k; i < S; ++i) tail += loss[static_cast<size_t>(i)];
+    if (out_var) *out_var = loss[static_cast<size_t>(S - k)];  /* VaR ~ quantile */
+    return tail / static_cast<double>(k);
+}
+
+extern "C" double matlab_portfoliocvar_estimate_port_risk(
+        struct matlab_obj_s *p, matlab_mat *w) {
+    if (!p || !w || !w->data) return 0.0;
+    matlab_mat *scen = matlab_obj_get_mat(p, "Scenarios", 9);
+    double alpha = matlab_obj_get_f64(p, "ProbabilityLevel", 16);
+    if (!scen || !scen->data) return 0.0;
+    int64_t S = scen->rows, N = scen->cols;
+    if ((w->rows * w->cols) != N) return 0.0;
+    return cvar_of_weights(scen->data, S, N, w->data, alpha, nullptr);
+}
+extern "C" double matlab_portfoliocvar_estimate_port_var(
+        struct matlab_obj_s *p, matlab_mat *w) {
+    if (!p || !w || !w->data) return 0.0;
+    matlab_mat *scen = matlab_obj_get_mat(p, "Scenarios", 9);
+    double alpha = matlab_obj_get_f64(p, "ProbabilityLevel", 16);
+    if (!scen || !scen->data) return 0.0;
+    int64_t S = scen->rows, N = scen->cols;
+    double var = 0.0;
+    cvar_of_weights(scen->data, S, N, w->data, alpha, &var);
+    return var;
+}
+
+/* scenario mean return per asset (column means of the scenario matrix). */
+static void scenario_mean(const double *scen, int64_t S, int64_t N,
+                           double *mean) {
+    for (int64_t j = 0; j < N; ++j) {
+        double s = 0.0;
+        for (int64_t i = 0; i < S; ++i) s += scen[i*N + j];
+        mean[j] = s / static_cast<double>(S);
+    }
+}
+
+/* Minimise CVaR for a target return via projected subgradient. */
+static void cvar_min_for_return(const double *scen, int64_t S, int64_t N,
+                                 const double *mean, const double *lb,
+                                 const double *ub, double budget,
+                                 double r_target, bool use_return,
+                                 double alpha, double *w_out) {
+    for (int64_t j = 0; j < N; ++j) w_out[j] = budget / static_cast<double>(N);
+    std::vector<double> loss(static_cast<size_t>(S));
+    std::vector<std::pair<double,int64_t>> idx(static_cast<size_t>(S));
+    double step = 0.5;
+    for (int it = 0; it < 400; ++it) {
+        for (int64_t s = 0; s < S; ++s) {
+            double r = 0.0;
+            for (int64_t j = 0; j < N; ++j) r += scen[s*N + j] * w_out[j];
+            idx[static_cast<size_t>(s)] = { -r, s };
+        }
+        std::sort(idx.begin(), idx.end());
+        int64_t k = static_cast<int64_t>(ceil((1.0 - alpha) * static_cast<double>(S)));
+        if (k < 1) k = 1;
+        /* subgradient = -(1/k) Σ_{tail} scenario_s */
+        std::vector<double> g(static_cast<size_t>(N), 0.0);
+        for (int64_t t = S - k; t < S; ++t) {
+            int64_t s = idx[static_cast<size_t>(t)].second;
+            for (int64_t j = 0; j < N; ++j) g[static_cast<size_t>(j)] -= scen[s*N + j];
+        }
+        for (int64_t j = 0; j < N; ++j) g[static_cast<size_t>(j)] /= static_cast<double>(k);
+        double sk = step / (1.0 + 0.01 * it);
+        for (int64_t j = 0; j < N; ++j) w_out[j] -= sk * g[static_cast<size_t>(j)];
+        /* Alternating projection: return hyperplane, then budget+box. */
+        for (int proj = 0; proj < 3; ++proj) {
+            if (use_return) {
+                double mw = 0.0, mm = 0.0;
+                for (int64_t j = 0; j < N; ++j) { mw += mean[j]*w_out[j]; mm += mean[j]*mean[j]; }
+                if (mm > 1e-20) {
+                    double adj = (r_target - mw) / mm;
+                    for (int64_t j = 0; j < N; ++j) w_out[j] += adj * mean[j];
+                }
+            }
+            project_to_bounds_budget(w_out, lb, ub, budget, N);
+        }
+    }
+}
+
+extern "C" matlab_mat *matlab_portfoliocvar_estimate_frontier(
+        struct matlab_obj_s *p, double n_pts) {
+    if (!p) return mat_alloc(0, 0);
+    matlab_mat *scen = matlab_obj_get_mat(p, "Scenarios", 9);
+    matlab_mat *m_lb = matlab_obj_get_mat(p, "LowerBound", 10);
+    matlab_mat *m_ub = matlab_obj_get_mat(p, "UpperBound", 10);
+    double alpha = matlab_obj_get_f64(p, "ProbabilityLevel", 16);
+    double budget = matlab_obj_get_f64(p, "LowerBudget", 11);
+    if (budget <= 0.0) budget = 1.0;
+    if (!scen || !scen->data) return mat_alloc(0, 0);
+    int64_t S = scen->rows, N = scen->cols;
+    int64_t K = static_cast<int64_t>(n_pts);
+    if (K < 2) K = 10;
+    std::vector<double> mean(static_cast<size_t>(N));
+    scenario_mean(scen->data, S, N, mean.data());
+    std::vector<double> lb(static_cast<size_t>(N), 0.0), ub(static_cast<size_t>(N), 1.0);
+    if (m_lb && m_lb->data && (m_lb->rows*m_lb->cols) == N)
+        for (int64_t i = 0; i < N; ++i) lb[static_cast<size_t>(i)] = m_lb->data[i];
+    if (m_ub && m_ub->data && (m_ub->rows*m_ub->cols) == N)
+        for (int64_t i = 0; i < N; ++i) ub[static_cast<size_t>(i)] = m_ub->data[i];
+    double r_min = *std::min_element(mean.begin(), mean.end());
+    double r_max = *std::max_element(mean.begin(), mean.end());
+    matlab_mat *W = mat_alloc(N, K);
+    std::vector<double> w(static_cast<size_t>(N));
+    for (int64_t kk = 0; kk < K; ++kk) {
+        double t = K == 1 ? 0.0 : static_cast<double>(kk)/static_cast<double>(K-1);
+        double r = r_min + t * (r_max - r_min);
+        cvar_min_for_return(scen->data, S, N, mean.data(), lb.data(),
+                             ub.data(), budget, r, true, alpha, w.data());
+        for (int64_t i = 0; i < N; ++i) W->data[i*K + kk] = w[static_cast<size_t>(i)];
+    }
+    return W;
+}
+
+/* Setters. */
+extern "C" struct matlab_obj_s *matlab_portfoliocvar_set_scenarios(
+        struct matlab_obj_s *p, matlab_mat *S) {
+    if (!p) return p;
+    matlab_obj_set_mat(p, "Scenarios", 9, S);
+    if (S) matlab_obj_set_f64(p, "NumAssets", 9, static_cast<double>(S->cols));
+    return p;
+}
+extern "C" struct matlab_obj_s *matlab_portfoliocvar_set_prob_level(
+        struct matlab_obj_s *p, double alpha) {
+    if (!p) return p;
+    matlab_obj_set_f64(p, "ProbabilityLevel", 16, alpha);
+    return p;
+}
+extern "C" struct matlab_obj_s *matlab_portfoliocvar_set_default(
+        struct matlab_obj_s *p) {
+    if (!p) return p;
+    matlab_mat *S = matlab_obj_get_mat(p, "Scenarios", 9);
+    if (!S || !S->data) return p;
+    int64_t N = S->cols;
+    matlab_mat *lb = mat_alloc(N, 1), *ub = mat_alloc(N, 1);
+    for (int64_t i = 0; i < N; ++i) { lb->data[i] = 0.0; ub->data[i] = 1.0; }
+    matlab_obj_set_mat(p, "LowerBound", 10, lb);
+    matlab_obj_set_mat(p, "UpperBound", 10, ub);
+    matlab_obj_set_f64(p, "LowerBudget", 11, 1.0);
+    matlab_obj_set_f64(p, "UpperBudget", 11, 1.0);
+    return p;
+}
+
+/* ============================================================================
+ * §T5.2 — PortfolioMAD (Mean-Absolute-Deviation, Konno-Yamazaki)
+ *
+ * MAD risk of a weight vector over S scenarios:
+ *   MAD(w) = (1/S) Σ_s | r_s·w - mean_s(r·w) |
+ * Convex in w; minimised by projected subgradient with the same
+ * return-hyperplane + budget/box alternating projection as CVaR.
+ * ==========================================================================*/
+
+static double mad_of_weights(const double *scen, int64_t S, int64_t N,
+                              const double *w) {
+    std::vector<double> pr(static_cast<size_t>(S));
+    double mean = 0.0;
+    for (int64_t s = 0; s < S; ++s) {
+        double r = 0.0;
+        for (int64_t j = 0; j < N; ++j) r += scen[s*N + j] * w[j];
+        pr[static_cast<size_t>(s)] = r;
+        mean += r;
+    }
+    mean /= static_cast<double>(S);
+    double mad = 0.0;
+    for (int64_t s = 0; s < S; ++s) mad += fabs(pr[static_cast<size_t>(s)] - mean);
+    return mad / static_cast<double>(S);
+}
+
+extern "C" double matlab_portfoliomad_estimate_port_risk(
+        struct matlab_obj_s *p, matlab_mat *w) {
+    if (!p || !w || !w->data) return 0.0;
+    matlab_mat *scen = matlab_obj_get_mat(p, "Scenarios", 9);
+    if (!scen || !scen->data) return 0.0;
+    int64_t S = scen->rows, N = scen->cols;
+    if ((w->rows * w->cols) != N) return 0.0;
+    return mad_of_weights(scen->data, S, N, w->data);
+}
+
+extern "C" matlab_mat *matlab_portfoliomad_estimate_frontier(
+        struct matlab_obj_s *p, double n_pts) {
+    if (!p) return mat_alloc(0, 0);
+    matlab_mat *scen = matlab_obj_get_mat(p, "Scenarios", 9);
+    matlab_mat *m_lb = matlab_obj_get_mat(p, "LowerBound", 10);
+    matlab_mat *m_ub = matlab_obj_get_mat(p, "UpperBound", 10);
+    double budget = matlab_obj_get_f64(p, "LowerBudget", 11);
+    if (budget <= 0.0) budget = 1.0;
+    if (!scen || !scen->data) return mat_alloc(0, 0);
+    int64_t S = scen->rows, N = scen->cols;
+    int64_t K = static_cast<int64_t>(n_pts);
+    if (K < 2) K = 10;
+    std::vector<double> mean(static_cast<size_t>(N));
+    scenario_mean(scen->data, S, N, mean.data());
+    std::vector<double> lb(static_cast<size_t>(N), 0.0), ub(static_cast<size_t>(N), 1.0);
+    if (m_lb && m_lb->data && (m_lb->rows*m_lb->cols) == N)
+        for (int64_t i = 0; i < N; ++i) lb[static_cast<size_t>(i)] = m_lb->data[i];
+    if (m_ub && m_ub->data && (m_ub->rows*m_ub->cols) == N)
+        for (int64_t i = 0; i < N; ++i) ub[static_cast<size_t>(i)] = m_ub->data[i];
+    double r_min = *std::min_element(mean.begin(), mean.end());
+    double r_max = *std::max_element(mean.begin(), mean.end());
+    const double *sd = scen->data;
+    matlab_mat *W = mat_alloc(N, K);
+    std::vector<double> w(static_cast<size_t>(N));
+    std::vector<double> pr(static_cast<size_t>(S));
+    for (int64_t kk = 0; kk < K; ++kk) {
+        double t = K == 1 ? 0.0 : static_cast<double>(kk)/static_cast<double>(K-1);
+        double r_target = r_min + t * (r_max - r_min);
+        for (int64_t j = 0; j < N; ++j) w[static_cast<size_t>(j)] = budget / static_cast<double>(N);
+        for (int it = 0; it < 400; ++it) {
+            /* portfolio returns + mean */
+            double pmean = 0.0;
+            for (int64_t s = 0; s < S; ++s) {
+                double rr = 0.0;
+                for (int64_t j = 0; j < N; ++j) rr += sd[s*N + j] * w[static_cast<size_t>(j)];
+                pr[static_cast<size_t>(s)] = rr; pmean += rr;
+            }
+            pmean /= static_cast<double>(S);
+            /* subgradient of MAD: (1/S) Σ sign(pr_s - pmean) (scen_s - mean) */
+            std::vector<double> g(static_cast<size_t>(N), 0.0);
+            for (int64_t s = 0; s < S; ++s) {
+                double sgn = (pr[static_cast<size_t>(s)] - pmean) >= 0.0 ? 1.0 : -1.0;
+                for (int64_t j = 0; j < N; ++j)
+                    g[static_cast<size_t>(j)] += sgn * (sd[s*N + j] - mean[static_cast<size_t>(j)]);
+            }
+            for (int64_t j = 0; j < N; ++j) g[static_cast<size_t>(j)] /= static_cast<double>(S);
+            double sk = 0.5 / (1.0 + 0.01 * it);
+            for (int64_t j = 0; j < N; ++j) w[static_cast<size_t>(j)] -= sk * g[static_cast<size_t>(j)];
+            for (int proj = 0; proj < 3; ++proj) {
+                double mw = 0.0, mm = 0.0;
+                for (int64_t j = 0; j < N; ++j) { mw += mean[static_cast<size_t>(j)]*w[static_cast<size_t>(j)]; mm += mean[static_cast<size_t>(j)]*mean[static_cast<size_t>(j)]; }
+                if (mm > 1e-20) {
+                    double adj = (r_target - mw) / mm;
+                    for (int64_t j = 0; j < N; ++j) w[static_cast<size_t>(j)] += adj * mean[static_cast<size_t>(j)];
+                }
+                project_to_bounds_budget(w.data(), lb.data(), ub.data(), budget, N);
+            }
+        }
+        for (int64_t i = 0; i < N; ++i) W->data[i*K + kk] = w[static_cast<size_t>(i)];
+    }
+    return W;
+}
+
+extern "C" struct matlab_obj_s *matlab_portfoliomad_set_scenarios(
+        struct matlab_obj_s *p, matlab_mat *S) {
+    return matlab_portfoliocvar_set_scenarios(p, S);
 }

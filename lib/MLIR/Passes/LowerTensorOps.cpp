@@ -6647,6 +6647,13 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"fitmodel",   "matlab_creditscorecard_fitmodel",   1, "p"},
       {"probdefault","matlab_creditscorecard_probdefault",1, "pp"},
       {"score",      "matlab_creditscorecard_score",      1, "pp"},
+      /* Financial Toolbox Tier-5: PortfolioCVaR / PortfolioMAD. The
+       * shared estimateFrontier / estimatePortRisk / setDefaultConstraints
+       * names route through the matlab_portfolio_* dispatchers (RiskKind
+       * discriminant); these are the class-specific setters + readers. */
+      {"setScenarios",        "matlab_portfoliocvar_set_scenarios",   1, "pp"},
+      {"setProbabilityLevel", "matlab_portfoliocvar_set_prob_level",  1, "pf"},
+      {"estimatePortVaR",     "matlab_portfoliocvar_estimate_port_var",0, "pp"},
     };
 
     // Pick the first entry with name + arity + TYPE match so overloaded

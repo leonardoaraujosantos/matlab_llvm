@@ -97,6 +97,10 @@ void Resolver::registerBuiltins() {
     "transprob", "cdsbootstrap", "cdsspread", "cdsprice",
     "creditscorecard", "autobinning", "bininfo", "fitmodel",
     "score", "probdefault",
+    /* Tier-5: CVaR / MAD portfolio methods (shared names route on
+     * the RiskKind discriminant inside the runtime). */
+    "PortfolioCVaR", "PortfolioMAD", "setScenarios",
+    "setProbabilityLevel", "estimatePortVaR",
     /* Phase 6 — Symbolic Math Toolbox via SymPP. The link target
      * (matlab_sym_* runtime) is only present when the build was
      * configured -DMATLAB_LLVM_WITH_SYM=ON; without that the JIT/-emit-c

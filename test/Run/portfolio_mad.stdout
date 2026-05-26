@@ -1,0 +1,4 @@
+MAD(equal-weight) = 0.0248
+frontier: assets=3, points=5
+mid-frontier MAD = 0.0194
+weights sum = 1.0000
