@@ -1523,3 +1523,85 @@ extern "C" matlab_mat *matlab_capm(matlab_mat *asset, matlab_mat *market,
     out->data[1] = beta;
     return out;
 }
+
+/* ============================================================================
+ * §T4.2 — Credit transition probabilities + CDS bootstrap
+ * ==========================================================================*/
+
+/* transprob(counts) — cohort-method transition probability matrix from a
+ * square count matrix. Each row is normalised to sum to 1; an all-zero
+ * row maps to the identity row (absorbing). Counts is N×N row-major. */
+extern "C" matlab_mat *matlab_transprob(matlab_mat *counts) {
+    if (!counts || !counts->data) return mat_alloc(0, 0);
+    int64_t n = counts->rows;
+    matlab_mat *P = mat_alloc(n, n);
+    for (int64_t i = 0; i < n; ++i) {
+        double row = 0.0;
+        for (int64_t j = 0; j < n; ++j) row += counts->data[i*n + j];
+        if (row <= 0.0) {
+            for (int64_t j = 0; j < n; ++j) P->data[i*n + j] = (i == j) ? 1.0 : 0.0;
+        } else {
+            for (int64_t j = 0; j < n; ++j) P->data[i*n + j] = counts->data[i*n + j] / row;
+        }
+    }
+    return P;
+}
+
+/* cdsbootstrap(zeroRates, spreads, times, recovery) -> N×1 survival
+ * probabilities. Piecewise-constant-hazard bootstrap (JP-Morgan style):
+ * for each maturity, solve the par condition premium-leg == protection-
+ * leg for P_i given P_1..P_{i-1}. zeroRates / spreads / times are
+ * column vectors of length N; spreads are decimal (200 bp = 0.02).     */
+extern "C" matlab_mat *matlab_cdsbootstrap(matlab_mat *zeroRates,
+                                            matlab_mat *spreads,
+                                            matlab_mat *times,
+                                            double recovery) {
+    if (!zeroRates || !spreads || !times ||
+        !zeroRates->data || !spreads->data || !times->data)
+        return mat_alloc(0, 0);
+    int64_t n = times->rows * times->cols;
+    matlab_mat *surv = mat_alloc(n, 1);
+    double R = recovery;
+    std::vector<double> P(static_cast<size_t>(n + 1));
+    std::vector<double> DF(static_cast<size_t>(n + 1));
+    std::vector<double> T(static_cast<size_t>(n + 1));
+    P[0] = 1.0; T[0] = 0.0; DF[0] = 1.0;
+    for (int64_t i = 1; i <= n; ++i) {
+        T[static_cast<size_t>(i)]  = times->data[i - 1];
+        DF[static_cast<size_t>(i)] = exp(-zeroRates->data[i - 1] * T[static_cast<size_t>(i)]);
+    }
+    for (int64_t i = 1; i <= n; ++i) {
+        double s = spreads->data[i - 1];
+        double premium_known = 0.0, protection_known = 0.0;
+        for (int64_t j = 1; j < i; ++j) {
+            double dt = T[static_cast<size_t>(j)] - T[static_cast<size_t>(j-1)];
+            premium_known    += s * DF[static_cast<size_t>(j)] * dt * P[static_cast<size_t>(j)];
+            protection_known += (1.0 - R) * DF[static_cast<size_t>(j)] *
+                                (P[static_cast<size_t>(j-1)] - P[static_cast<size_t>(j)]);
+        }
+        double dti = T[static_cast<size_t>(i)] - T[static_cast<size_t>(i-1)];
+        double A = s * DF[static_cast<size_t>(i)] * dti;            /* coeff of P_i in premium */
+        double B = (1.0 - R) * DF[static_cast<size_t>(i)];         /* coeff in protection */
+        double Pi = (protection_known + B * P[static_cast<size_t>(i-1)] - premium_known) / (A + B);
+        if (Pi < 0.0) Pi = 0.0;
+        if (Pi > P[static_cast<size_t>(i-1)]) Pi = P[static_cast<size_t>(i-1)];
+        P[static_cast<size_t>(i)] = Pi;
+        surv->data[i - 1] = Pi;
+    }
+    return surv;
+}
+
+/* cdsspread(hazard, recovery) — credit-triangle par spread for a flat
+ * hazard rate: s ≈ hazard * (1 - recovery). */
+extern "C" double matlab_cdsspread(double hazard, double recovery) {
+    return hazard * (1.0 - recovery);
+}
+
+/* cdsprice(spreadMarket, spreadContract, rpv01) — mark-to-market value
+ * of an existing CDS position (per unit notional, protection buyer):
+ *   MTM = (s_market - s_contract) * RPV01
+ * RPV01 is the risky annuity (caller-supplied or from a curve).        */
+extern "C" double matlab_cdsprice(double s_market, double s_contract,
+                                   double rpv01) {
+    return (s_market - s_contract) * rpv01;
+}

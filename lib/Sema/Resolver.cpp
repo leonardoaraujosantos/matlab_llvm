@@ -94,6 +94,9 @@ void Resolver::registerBuiltins() {
     "estimateMaxSharpeRatio", "estimateAssetMoments", "plotFrontier",
     /* Tier-4: regression with missing data + credit risk. */
     "ecmnmle", "ecmncov", "mvnrmle", "capm",
+    "transprob", "cdsbootstrap", "cdsspread", "cdsprice",
+    "creditscorecard", "autobinning", "bininfo", "fitmodel",
+    "score", "probdefault",
     /* Phase 6 — Symbolic Math Toolbox via SymPP. The link target
      * (matlab_sym_* runtime) is only present when the build was
      * configured -DMATLAB_LLVM_WITH_SYM=ON; without that the JIT/-emit-c

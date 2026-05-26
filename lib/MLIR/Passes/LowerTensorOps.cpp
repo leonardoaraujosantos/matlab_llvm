@@ -6640,6 +6640,10 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"ecmncov",    "matlab_ecmncov",    1, "p"},
       {"mvnrmle",    "matlab_mvnrmle",    1, "pp"},
       {"capm",       "matlab_capm",       1, "ppf"},
+      {"transprob",  "matlab_transprob",  1, "p"},
+      {"cdsbootstrap","matlab_cdsbootstrap",1, "pppf"},
+      {"cdsspread",  "matlab_cdsspread",  0, "ff"},
+      {"cdsprice",   "matlab_cdsprice",   0, "fff"},
     };
 
     // Pick the first entry with name + arity + TYPE match so overloaded
