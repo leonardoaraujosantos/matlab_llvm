@@ -10429,6 +10429,78 @@ extern "C" matlab_timetable *matlab_timetable_retime(matlab_timetable *tt,
     return out;
 }
 
+/* Horizontal concat: produce a fresh timetable whose RowTimes are
+ * taken from `a` and whose columns are the union of `a`'s and `b`'s.
+ * Mismatched RowTimes are silently truncated (we copy min(a->nrows,
+ * b->nrows) rows from each — the doc-page workflow already aligned
+ * both inputs via retime onto the same grid before concatenating). */
+extern "C" matlab_timetable *matlab_timetable_horzcat(matlab_timetable *a,
+                                                       matlab_timetable *b) {
+    matlab_timetable *out = matlab_timetable_new();
+    if (!a && !b) return out;
+    if (!a) { a = b; b = NULL; }
+    /* RowTimes from `a` (we trust the caller to have aligned). */
+    int64_t nrows = a->nrows;
+    if (b && b->nrows < nrows) nrows = b->nrows;
+    if (a->row_times) {
+        matlab_datetime_vec *rt = dt_vec_alloc(nrows);
+        for (int64_t i = 0; i < nrows; ++i)
+            rt->secs[i] = a->row_times->secs[i];
+        out->row_times = rt;
+    }
+    out->nrows = (int32_t)nrows;
+    /* Copy a's columns. */
+    for (int32_t c = 0; c < a->nvars; ++c) {
+        int kind = a->kinds ? a->kinds[c] : 0;
+        const char *cn = a->names[c];
+        int64_t cnl = (int64_t)strlen(cn);
+        if (kind == MATLAB_TABLE_KIND_NUMERIC) {
+            matlab_mat *src = (matlab_mat *)a->data[c];
+            matlab_mat *dst = mat_alloc(nrows, 1);
+            if (src && src->data)
+                for (int64_t i = 0; i < nrows; ++i)
+                    dst->data[i] = src->data[i];
+            matlab_timetable_add_column(out, cn, cnl, dst);
+        } else {
+            matlab_timetable_add_column_kind(out, cn, cnl,
+                                              a->data[c], (int32_t)kind,
+                                              nrows);
+        }
+    }
+    /* Then b's columns. */
+    if (b) {
+        for (int32_t c = 0; c < b->nvars; ++c) {
+            int kind = b->kinds ? b->kinds[c] : 0;
+            const char *cn = b->names[c];
+            int64_t cnl = (int64_t)strlen(cn);
+            if (kind == MATLAB_TABLE_KIND_NUMERIC) {
+                matlab_mat *src = (matlab_mat *)b->data[c];
+                matlab_mat *dst = mat_alloc(nrows, 1);
+                if (src && src->data)
+                    for (int64_t i = 0; i < nrows; ++i)
+                        dst->data[i] = src->data[i];
+                matlab_timetable_add_column(out, cn, cnl, dst);
+            } else {
+                matlab_timetable_add_column_kind(out, cn, cnl,
+                                                  b->data[c], (int32_t)kind,
+                                                  nrows);
+            }
+        }
+    }
+    return out;
+}
+
+/* synchronize: retime both inputs onto the same cadence + aggregator,
+ * then horz-cat. The result has one row per cadence bucket and
+ * carries all columns from both inputs. */
+extern "C" matlab_timetable *matlab_timetable_synchronize(
+        matlab_timetable *a, matlab_timetable *b,
+        int32_t cadence, int32_t aggregator) {
+    matlab_timetable *ra = matlab_timetable_retime(a, cadence, aggregator);
+    matlab_timetable *rb = matlab_timetable_retime(b, cadence, aggregator);
+    return matlab_timetable_horzcat(ra, rb);
+}
+
 extern "C" matlab_timetable *matlab_timetable_select_rows_timerange(
         matlab_timetable *tt, matlab_timerange *tr) {
     matlab_timetable *out = matlab_timetable_new();

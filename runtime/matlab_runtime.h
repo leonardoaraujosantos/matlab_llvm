@@ -1574,6 +1574,19 @@ enum {
 matlab_timetable *matlab_timetable_retime(matlab_timetable *tt,
                                            int32_t cadence,
                                            int32_t aggregator);
+/* Phase 5.4 (cont.) — horz-cat + synchronize.
+ *   [TT1 TT2 ... TTN]                 -> matlab_timetable_horzcat
+ *                                          (pairwise reduce; RowTimes
+ *                                          carried from TT1)
+ *   synchronize(TT1, TT2, cadence, method)
+ *                                      -> retime each onto cadence,
+ *                                          then horz-cat                */
+matlab_timetable *matlab_timetable_horzcat(matlab_timetable *a,
+                                            matlab_timetable *b);
+matlab_timetable *matlab_timetable_synchronize(matlab_timetable *a,
+                                                matlab_timetable *b,
+                                                int32_t cadence,
+                                                int32_t aggregator);
 
 /* Phase 4 — containers.Map / dictionary. A flat key/value table with
  * mixed key types (f64 or matlab_string *) and value types (f64 or

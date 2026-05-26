@@ -2462,7 +2462,7 @@ void Lowerer::lowerStmt(const Stmt &St) {
          * matlab_timetable*. The LHS slot gets tagged so disp /
          * height / etc. route to matlab_timetable_*. */
         if (NE->Name == "timetable" || NE->Name == "table2timetable" ||
-            NE->Name == "retime")
+            NE->Name == "retime" || NE->Name == "synchronize")
           RhsIsTimetable = true;
         /* TT(rowIdx, :) and TT(:, 'colName') both return a new
          * timetable, so the LHS slot inherits the tag. */
@@ -2626,6 +2626,21 @@ void Lowerer::lowerStmt(const Stmt &St) {
         if (!All) break;
       }
       if (All) RhsIsCellLit = true;
+    }
+    /* Phase 5.4 (cont.): [TT1 TT2 ...] over timetable bindings -> the
+     * matlab_timetable_horzcat chain returns a fresh timetable. */
+    if (A.RHS && A.RHS->Kind == NodeKind::MatrixLiteral) {
+      auto *MM = static_cast<const MatrixLiteral *>(A.RHS);
+      if (MM->Rows.size() == 1 && !MM->Rows[0].empty()) {
+        bool AllTT = true;
+        for (const Expr *X : MM->Rows[0]) {
+          auto *NE = dynamic_cast<const NameExpr *>(X);
+          if (!NE || !NE->Ref || !TimetableBindings.count(NE->Ref)) {
+            AllTT = false; break;
+          }
+        }
+        if (AllTT) RhsIsTimetable = true;
+      }
     }
     /* Track string-typed bindings (from "..." literals, string-
      * returning builtins, or `+` chains where either operand is a
@@ -9760,6 +9775,46 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             mlir::StringAttr::get(&MCtx, "matlab_table2timetable"));
         return emitUnreg("matlab.call_builtin", {TB, RT}, PtrTy, L, {Cal});
       }
+      /* synchronize(TT1, TT2, cadence, method) -> matlab_timetable.
+       * Aligns both inputs onto the same cadence with the given
+       * aggregator then horz-cats. Same cadence/method codes as
+       * retime. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "synchronize" && C.Args.size() == 4 &&
+          C.Args[0] && C.Args[1] && C.Args[2] && C.Args[3]) {
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        auto I32 = mlir::IntegerType::get(&MCtx, 32);
+        auto strArg = [](const Expr *E, std::string &Out) -> bool {
+          if (auto *CL = dynamic_cast<const CharLiteral *>(E))  { Out = std::string(CL->Value); return true; }
+          if (auto *SL = dynamic_cast<const StringLiteral *>(E)){ Out = std::string(SL->Value); return true; }
+          return false;
+        };
+        std::string Cadence, Method;
+        if (strArg(C.Args[2], Cadence) && strArg(C.Args[3], Method)) {
+          int32_t cad = 0, aggCode = 0;
+          if      (Cadence == "daily")   cad = 0;
+          else if (Cadence == "weekly")  cad = 1;
+          else if (Cadence == "monthly") cad = 2;
+          else if (Cadence == "yearly")  cad = 3;
+          if      (Method == "firstvalue") aggCode = 0;
+          else if (Method == "lastvalue")  aggCode = 1;
+          else if (Method == "max")        aggCode = 2;
+          else if (Method == "min")        aggCode = 3;
+          else if (Method == "sum")        aggCode = 4;
+          else if (Method == "mean")       aggCode = 5;
+          mlir::Value T1 = lowerExpr(*C.Args[0]);
+          mlir::Value T2 = lowerExpr(*C.Args[1]);
+          mlir::Value CadV = mlir::arith::ConstantOp::create(
+              B, L, I32, mlir::IntegerAttr::get(I32, cad));
+          mlir::Value AggV = mlir::arith::ConstantOp::create(
+              B, L, I32, mlir::IntegerAttr::get(I32, aggCode));
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_timetable_synchronize"));
+          return emitUnreg("matlab.call_builtin", {T1, T2, CadV, AggV},
+                           PtrTy, L, {Cal});
+        }
+      }
       /* retime(TT, cadence, method) -> matlab_timetable.
        * Cadence ∈ {'daily','weekly','monthly','yearly'};
        * method  ∈ {'firstvalue','lastvalue','max','min','sum','mean'}.
@@ -10949,6 +11004,32 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
   case NodeKind::MatrixLiteral: {
     auto &M = static_cast<const MatrixLiteral &>(E);
     bool SingleRow = M.Rows.size() == 1;
+    /* Phase 5.4 (cont.): [TT1 TT2 ... TTN] over timetable bindings —
+     * pairwise-reduce through matlab_timetable_horzcat. All entries
+     * must be NameExprs in TimetableBindings; mixed-type bracket
+     * concats fall through to the matrix lane. */
+    if (SingleRow && !M.Rows[0].empty()) {
+      bool AllTT = true;
+      for (const Expr *Cx : M.Rows[0]) {
+        auto *NE = dynamic_cast<const NameExpr *>(Cx);
+        if (!NE || !NE->Ref || !TimetableBindings.count(NE->Ref)) {
+          AllTT = false; break;
+        }
+      }
+      if (AllTT) {
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        mlir::Value Acc = lowerExpr(*M.Rows[0][0]);
+        for (size_t i = 1; i < M.Rows[0].size(); ++i) {
+          mlir::Value Rhs = lowerExpr(*M.Rows[0][i]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_timetable_horzcat"));
+          Acc = emitUnreg("matlab.call_builtin", {Acc, Rhs},
+                          PtrTy, L, {Cal});
+        }
+        return Acc;
+      }
+    }
     /* Char-array / string bracket concat: `['x = ', num2str(v), ' kg']`
      * is MATLAB's classic "build a string from pieces" idiom. If any
      * element of a single-row literal is a char/string, treat the
