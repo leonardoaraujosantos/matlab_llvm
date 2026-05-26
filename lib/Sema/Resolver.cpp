@@ -64,6 +64,14 @@ void Resolver::registerBuiltins() {
     "categorical", "iscategorical", "categories", "iscategory",
     /* Phase 5.3 — table. */
     "table", "istable", "height", "width", "rows2vars", "varfun",
+    /* Phase 5.4 — timetable. Constructor + table promotion; the
+     * subscripting / retime / synchronize entries live in the same
+     * timetable namespace and ride the same builtin registration. */
+    "timetable", "istimetable", "table2timetable", "timetable2table",
+    "timerange", "retime", "synchronize", "withtol",
+    "fillmissing", "summary", "head", "tail", "rowfun",
+    /* Phase 5.4 Financial indicators on timetables. */
+    "movavg", "macd", "sma", "ema", "highlow", "candle",
     /* Financial Toolbox Tier-1: date arithmetic. */
     "yearfrac", "daysdif", "daysadd", "daysact", "days360", "days365",
     "busdate", "isbusday", "eomdate", "lweekdate", "fweekdate",
@@ -76,7 +84,7 @@ void Resolver::registerBuiltins() {
     "bndconvy", "accrfrac", "cfdates", "cfamounts",
     "prdisc", "prtbill", "ytbill", "beytbill",
     /* Tier-1: returns + indicator function-form. */
-    "tick2ret", "ret2tick", "rsindex", "bolling", "movavg", "sma",
+    "tick2ret", "ret2tick", "rsindex", "bolling",
     /* Tier-2: performance metrics + Black-Scholes. */
     "sharpe", "sortino", "inforatio", "tracking", "maxdrawdown",
     "lpm", "elpm", "portalpha",

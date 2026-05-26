@@ -1,0 +1,3 @@
+rendered: /tmp/timetable_plot.png
+series   length = 30
+ema5     length = 30

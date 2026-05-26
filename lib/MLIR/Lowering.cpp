@@ -466,6 +466,14 @@ private:
    * pointer. Used by disp / arithmetic dispatch. */
   std::unordered_set<Binding *> DatetimeBindings;
   std::unordered_set<Binding *> DurationBindings;
+  /* Phase 5.4: bindings holding a matlab_datetime_vec * /
+   * matlab_duration_vec *. Produced by matrix-typed unit
+   * constructors (`days(0:251)`, `hours(v)`, ...), scalar+vec or
+   * vec+vec arithmetic, and timetable RowTimes access. Arithmetic
+   * dispatch routes the `_vec` runtime entries; disp / length /
+   * indexing follow the matlab_*_vec_ family. */
+  std::unordered_set<Binding *> DatetimeVecBindings;
+  std::unordered_set<Binding *> DurationVecBindings;
   /* Phase 5.2: bindings holding a matlab_categorical * — used to
    * dispatch disp / categories / iscategory / equality through the
    * dedicated runtime entries. */
@@ -473,6 +481,14 @@ private:
   /* Phase 5.3: bindings holding a matlab_table * — used to dispatch
    * column accessors (`T.x`), shape (height/width/size), and disp(T). */
   std::unordered_set<Binding *> TableBindings;
+  /* Phase 5.4 (cont.): bindings holding a matlab_timetable * — same
+   * column-store ABI as table, plus a RowTimes axis. Constructed by
+   * `timetable(col1, ..., 'RowTimes', dt)` or `table2timetable(T,
+   * 'RowTimes', dt)`. */
+  std::unordered_set<Binding *> TimetableBindings;
+  /* matlab_timerange * — time-interval row subscript. Produced by
+   * `tr = timerange(t1, t2, 'closed')`; consumed by `TT(tr, :)`. */
+  std::unordered_set<Binding *> TimerangeBindings;
   /* Bindings tagged as holding a plain matlab_struct* (vs class
    * instance or matrix).  Populated by the AssignStmt RhsIsStruct
    * tagging block when the RHS is a known struct-returning builtin
@@ -2265,14 +2281,19 @@ void Lowerer::lowerStmt(const Stmt &St) {
       /* Phase 5.1: datetime / duration disp dispatch.
        * Phase 5.2: categorical disp dispatch. */
       bool DispIsDatetime = false, DispIsDuration = false;
+      bool DispIsDatetimeVec = false, DispIsDurationVec = false;
       bool DispIsCategorical = false, DispIsTable = false;
+      bool DispIsTimetable = false;
       bool DispIsSym = exprIsSym(E.E);
       bool DispIsSymmat = exprIsSymmat(E.E);
       if (auto *NE = dynamic_cast<const NameExpr *>(E.E)) {
         if (NE->Ref && DatetimeBindings.count(NE->Ref)) DispIsDatetime = true;
         if (NE->Ref && DurationBindings.count(NE->Ref)) DispIsDuration = true;
+        if (NE->Ref && DatetimeVecBindings.count(NE->Ref)) DispIsDatetimeVec = true;
+        if (NE->Ref && DurationVecBindings.count(NE->Ref)) DispIsDurationVec = true;
         if (NE->Ref && CategoricalBindings.count(NE->Ref)) DispIsCategorical = true;
         if (NE->Ref && TableBindings.count(NE->Ref)) DispIsTable = true;
+        if (NE->Ref && TimetableBindings.count(NE->Ref)) DispIsTimetable = true;
       }
       llvm::StringRef IntSuf = Lowerer::intDtypeSuffixOf(E.E);
       if (DispIsString) {
@@ -2281,6 +2302,18 @@ void Lowerer::lowerStmt(const Stmt &St) {
             mlir::StringAttr::get(&MCtx, "matlab_string_disp"));
         emitUnregOp("matlab.call_builtin", {V},
                     {mlir::NoneType::get(&MCtx)}, loc(E.Range), {SCal});
+      } else if (DispIsDatetimeVec) {
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_datetime_vec_disp"));
+        emitUnregOp("matlab.call_builtin", {V},
+                    {mlir::NoneType::get(&MCtx)}, loc(E.Range), {Cal});
+      } else if (DispIsDurationVec) {
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_duration_vec_disp"));
+        emitUnregOp("matlab.call_builtin", {V},
+                    {mlir::NoneType::get(&MCtx)}, loc(E.Range), {Cal});
       } else if (DispIsDatetime) {
         mlir::NamedAttribute Cal(
             mlir::StringAttr::get(&MCtx, "callee"),
@@ -2297,6 +2330,12 @@ void Lowerer::lowerStmt(const Stmt &St) {
         mlir::NamedAttribute Cal(
             mlir::StringAttr::get(&MCtx, "callee"),
             mlir::StringAttr::get(&MCtx, "matlab_categorical_disp"));
+        emitUnregOp("matlab.call_builtin", {V},
+                    {mlir::NoneType::get(&MCtx)}, loc(E.Range), {Cal});
+      } else if (DispIsTimetable) {
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_timetable_disp"));
         emitUnregOp("matlab.call_builtin", {V},
                     {mlir::NoneType::get(&MCtx)}, loc(E.Range), {Cal});
       } else if (DispIsTable) {
@@ -2391,8 +2430,12 @@ void Lowerer::lowerStmt(const Stmt &St) {
      * respective sets via the BinaryOp emission below. */
     bool RhsIsDatetime = false;
     bool RhsIsDuration = false;
+    bool RhsIsDatetimeVec = false;
+    bool RhsIsDurationVec = false;
     bool RhsIsCategorical = false;
     bool RhsIsTable = false;
+    bool RhsIsTimetable = false;
+    bool RhsIsTimerange = false;
     /* Plain matlab_struct* RHS — needs a dedicated workspace setter
      * (matlab_ws_set_struct, kind=9) so field-access dispatch sees
      * `s` as struct rather than mat on subsequent REPL turns.  RHS
@@ -2415,6 +2458,19 @@ void Lowerer::lowerStmt(const Stmt &St) {
          * gets the same dispatch as `T = table(...)`. */
         if (NE->Name == "table" || NE->Name == "readtable")
           RhsIsTable = true;
+        /* Phase 5.4 (cont.): timetable + table2timetable produce
+         * matlab_timetable*. The LHS slot gets tagged so disp /
+         * height / etc. route to matlab_timetable_*. */
+        if (NE->Name == "timetable" || NE->Name == "table2timetable" ||
+            NE->Name == "retime" || NE->Name == "synchronize" ||
+            NE->Name == "fillmissing" ||
+            NE->Name == "movavg" || NE->Name == "macd")
+          RhsIsTimetable = true;
+        /* TT(rowIdx, :) and TT(:, 'colName') both return a new
+         * timetable, so the LHS slot inherits the tag. */
+        if (NE->Ref && TimetableBindings.count(NE->Ref))
+          RhsIsTimetable = true;
+        if (NE->Name == "timerange") RhsIsTimerange = true;
         /* Known struct-returning builtins. struct() is the textbook
          * literal; linkBudget is the PROP-Tier-2b struct return; stepinfo
          * returns the CST step-response-metrics struct. Adding more is a
@@ -2429,9 +2485,19 @@ void Lowerer::lowerStmt(const Stmt &St) {
         RhsIsCategorical = true;
       if (NE->Ref && TableBindings.count(NE->Ref))
         RhsIsTable = true;
+      if (NE->Ref && TimetableBindings.count(NE->Ref))
+        RhsIsTimetable = true;
       if (NE->Ref &&
           (StructInitialised.count(NE->Ref) || NE->Ref->IsStruct))
         RhsIsStruct = true;
+    } else if (A.RHS && A.RHS->Kind == NodeKind::FieldAccess) {
+      /* Phase 5.4: TT.Time produces a matlab_datetime_vec *. TT.<col>
+       * is a plain matlab_mat — the default lane handles it. */
+      auto *FA = static_cast<const FieldAccess *>(A.RHS);
+      if (auto *BN = dynamic_cast<const NameExpr *>(FA->Base))
+        if (BN->Ref && TimetableBindings.count(BN->Ref) &&
+            FA->Field == "Time")
+          RhsIsDatetimeVec = true;
     }
     if (A.RHS && A.RHS->Kind == NodeKind::CallOrIndex) {
       auto *Cx = static_cast<const CallOrIndex *>(A.RHS);
@@ -2446,13 +2512,26 @@ void Lowerer::lowerStmt(const Stmt &St) {
           RhsIsDatetime = true;
         else if (NE->Name == "seconds" || NE->Name == "minutes" ||
                  NE->Name == "hours"   || NE->Name == "days"    ||
-                 NE->Name == "years"   || NE->Name == "duration")
-          RhsIsDuration = true;
+                 NE->Name == "years"   || NE->Name == "duration") {
+          /* Phase 5.4: `days(0:251)` etc. → duration_vec; scalar
+           * f64 arg → scalar duration. Detect the colon-range form
+           * syntactically so we don't depend on the lowered Value's
+           * runtime type. */
+          if (!Cx->Args.empty() && Cx->Args[0] &&
+              (dynamic_cast<const RangeExpr *>(Cx->Args[0]) ||
+               dynamic_cast<const ColonExpr *>(Cx->Args[0]) ||
+               dynamic_cast<const MatrixLiteral *>(Cx->Args[0])))
+            RhsIsDurationVec = true;
+          else
+            RhsIsDuration = true;
+        }
       }
     } else if (A.RHS && A.RHS->Kind == NodeKind::NameExpr) {
       auto *NE = static_cast<const NameExpr *>(A.RHS);
-      if (NE->Ref && DatetimeBindings.count(NE->Ref)) RhsIsDatetime = true;
-      if (NE->Ref && DurationBindings.count(NE->Ref)) RhsIsDuration = true;
+      if (NE->Ref && DatetimeBindings.count(NE->Ref))    RhsIsDatetime    = true;
+      if (NE->Ref && DurationBindings.count(NE->Ref))    RhsIsDuration    = true;
+      if (NE->Ref && DatetimeVecBindings.count(NE->Ref)) RhsIsDatetimeVec = true;
+      if (NE->Ref && DurationVecBindings.count(NE->Ref)) RhsIsDurationVec = true;
     } else if (A.RHS && A.RHS->Kind == NodeKind::BinaryOp) {
       auto *BX = static_cast<const BinaryOpExpr *>(A.RHS);
       auto isDt = [&](const Expr *X) -> bool {
@@ -2463,6 +2542,12 @@ void Lowerer::lowerStmt(const Stmt &St) {
             if (NE->Name == "datetime") return true;
         return false;
       };
+      auto argIsRange = [](const CallOrIndex *CX) -> bool {
+        return !CX->Args.empty() && CX->Args[0] &&
+               (dynamic_cast<const RangeExpr *>(CX->Args[0]) ||
+                dynamic_cast<const ColonExpr *>(CX->Args[0]) ||
+                dynamic_cast<const MatrixLiteral *>(CX->Args[0]));
+      };
       auto isDur = [&](const Expr *X) -> bool {
         if (auto *NE = dynamic_cast<const NameExpr *>(X))
           return NE->Ref && DurationBindings.count(NE->Ref);
@@ -2470,11 +2555,49 @@ void Lowerer::lowerStmt(const Stmt &St) {
           if (auto *NE = dynamic_cast<const NameExpr *>(CX->Callee))
             if (NE->Name == "seconds" || NE->Name == "minutes" ||
                 NE->Name == "hours"   || NE->Name == "days"    ||
-                NE->Name == "years"   || NE->Name == "duration")
+                NE->Name == "years"   || NE->Name == "duration") {
+              if (argIsRange(CX))
+                return false;       /* duration_vec, handled below */
               return true;
+            }
         return false;
       };
-      if (BX->Op == BinOp::Sub && isDt(BX->LHS) && isDt(BX->RHS))
+      auto isDtVec = [&](const Expr *X) -> bool {
+        if (auto *NE = dynamic_cast<const NameExpr *>(X))
+          return NE->Ref && DatetimeVecBindings.count(NE->Ref);
+        return false;
+      };
+      auto isDurVec = [&](const Expr *X) -> bool {
+        if (auto *NE = dynamic_cast<const NameExpr *>(X))
+          return NE->Ref && DurationVecBindings.count(NE->Ref);
+        if (auto *CX = dynamic_cast<const CallOrIndex *>(X))
+          if (auto *NE = dynamic_cast<const NameExpr *>(CX->Callee))
+            if (NE->Name == "seconds" || NE->Name == "minutes" ||
+                NE->Name == "hours"   || NE->Name == "days"    ||
+                NE->Name == "years")
+              if (argIsRange(CX))
+                return true;
+        return false;
+      };
+      /* Vec-producing forms first. */
+      if (BX->Op == BinOp::Add &&
+          ((isDt(BX->LHS) && isDurVec(BX->RHS)) ||
+           (isDurVec(BX->LHS) && isDt(BX->RHS))))
+        RhsIsDatetimeVec = true;
+      else if (BX->Op == BinOp::Add &&
+               ((isDtVec(BX->LHS) && isDur(BX->RHS)) ||
+                (isDur(BX->LHS) && isDtVec(BX->RHS))))
+        RhsIsDatetimeVec = true;
+      else if (BX->Op == BinOp::Sub && isDtVec(BX->LHS) && isDur(BX->RHS))
+        RhsIsDatetimeVec = true;
+      else if (BX->Op == BinOp::Add && isDtVec(BX->LHS) && isDurVec(BX->RHS))
+        RhsIsDatetimeVec = true;
+      else if (BX->Op == BinOp::Sub &&
+               ((isDtVec(BX->LHS) && isDtVec(BX->RHS)) ||
+                (isDtVec(BX->LHS) && isDt(BX->RHS))))
+        RhsIsDurationVec = true;
+      /* Scalar forms (unchanged). */
+      else if (BX->Op == BinOp::Sub && isDt(BX->LHS) && isDt(BX->RHS))
         RhsIsDuration = true;
       else if (BX->Op == BinOp::Add &&
                ((isDt(BX->LHS) && isDur(BX->RHS)) ||
@@ -2512,6 +2635,21 @@ void Lowerer::lowerStmt(const Stmt &St) {
         if (!All) break;
       }
       if (All) RhsIsCellLit = true;
+    }
+    /* Phase 5.4 (cont.): [TT1 TT2 ...] over timetable bindings -> the
+     * matlab_timetable_horzcat chain returns a fresh timetable. */
+    if (A.RHS && A.RHS->Kind == NodeKind::MatrixLiteral) {
+      auto *MM = static_cast<const MatrixLiteral *>(A.RHS);
+      if (MM->Rows.size() == 1 && !MM->Rows[0].empty()) {
+        bool AllTT = true;
+        for (const Expr *X : MM->Rows[0]) {
+          auto *NE = dynamic_cast<const NameExpr *>(X);
+          if (!NE || !NE->Ref || !TimetableBindings.count(NE->Ref)) {
+            AllTT = false; break;
+          }
+        }
+        if (AllTT) RhsIsTimetable = true;
+      }
     }
     /* Track string-typed bindings (from "..." literals, string-
      * returning builtins, or `+` chains where either operand is a
@@ -3167,6 +3305,16 @@ void Lowerer::lowerStmt(const Stmt &St) {
         if (auto *N = dynamic_cast<const NameExpr *>(L))
           if (N->Ref) DurationBindings.insert(N->Ref);
     }
+    if (RhsIsDatetimeVec) {
+      for (const Expr *L : A.LHS)
+        if (auto *N = dynamic_cast<const NameExpr *>(L))
+          if (N->Ref) DatetimeVecBindings.insert(N->Ref);
+    }
+    if (RhsIsDurationVec) {
+      for (const Expr *L : A.LHS)
+        if (auto *N = dynamic_cast<const NameExpr *>(L))
+          if (N->Ref) DurationVecBindings.insert(N->Ref);
+    }
     if (RhsIsCategorical) {
       for (const Expr *L : A.LHS)
         if (auto *N = dynamic_cast<const NameExpr *>(L))
@@ -3176,6 +3324,16 @@ void Lowerer::lowerStmt(const Stmt &St) {
       for (const Expr *L : A.LHS)
         if (auto *N = dynamic_cast<const NameExpr *>(L))
           if (N->Ref) TableBindings.insert(N->Ref);
+    }
+    if (RhsIsTimetable) {
+      for (const Expr *L : A.LHS)
+        if (auto *N = dynamic_cast<const NameExpr *>(L))
+          if (N->Ref) TimetableBindings.insert(N->Ref);
+    }
+    if (RhsIsTimerange) {
+      for (const Expr *L : A.LHS)
+        if (auto *N = dynamic_cast<const NameExpr *>(L))
+          if (N->Ref) TimerangeBindings.insert(N->Ref);
     }
     if (RhsIsStruct) {
       /* Tag for workspace-setter routing.  We use a separate set
@@ -3256,6 +3414,18 @@ void Lowerer::lowerStmt(const Stmt &St) {
             mlir::StringAttr::get(&MCtx, "matlab_string_disp"));
         emitUnregOp("matlab.call_builtin", {Rhs},
                     {mlir::NoneType::get(&MCtx)}, loc(A.Range), {SCal});
+      } else if (RhsIsDatetimeVec) {
+        mlir::NamedAttribute Cal2(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_datetime_vec_disp"));
+        emitUnregOp("matlab.call_builtin", {Rhs},
+                    {mlir::NoneType::get(&MCtx)}, loc(A.Range), {Cal2});
+      } else if (RhsIsDurationVec) {
+        mlir::NamedAttribute Cal2(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_duration_vec_disp"));
+        emitUnregOp("matlab.call_builtin", {Rhs},
+                    {mlir::NoneType::get(&MCtx)}, loc(A.Range), {Cal2});
       } else if (RhsIsDatetime) {
         mlir::NamedAttribute Cal2(
             mlir::StringAttr::get(&MCtx, "callee"),
@@ -3266,6 +3436,18 @@ void Lowerer::lowerStmt(const Stmt &St) {
         mlir::NamedAttribute Cal2(
             mlir::StringAttr::get(&MCtx, "callee"),
             mlir::StringAttr::get(&MCtx, "matlab_duration_disp"));
+        emitUnregOp("matlab.call_builtin", {Rhs},
+                    {mlir::NoneType::get(&MCtx)}, loc(A.Range), {Cal2});
+      } else if (RhsIsTimetable) {
+        mlir::NamedAttribute Cal2(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_timetable_disp"));
+        emitUnregOp("matlab.call_builtin", {Rhs},
+                    {mlir::NoneType::get(&MCtx)}, loc(A.Range), {Cal2});
+      } else if (RhsIsTable) {
+        mlir::NamedAttribute Cal2(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_table_disp"));
         emitUnregOp("matlab.call_builtin", {Rhs},
                     {mlir::NoneType::get(&MCtx)}, loc(A.Range), {Cal2});
       } else if (!IntSuf.empty()) {
@@ -4146,6 +4328,40 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
                     {mlir::NoneType::get(&MCtx)}, loc(F.Range), {Cal});
         return;
       }
+    /* Phase 5.4 (cont.): TT.<colName> = Rhs on a timetable binding.
+     * Same shape as table column write — _add_column auto-replaces. */
+    if (auto *BN = dynamic_cast<const NameExpr *>(F.Base))
+      if (BN->Ref && TimetableBindings.count(BN->Ref)) {
+        mlir::Value Tv = lowerExpr(*F.Base);
+        mlir::Value NameV = emitFieldNameChar(F.Field, loc(F.Range));
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_timetable_add_column"));
+        emitUnregOp("matlab.call_builtin", {Tv, NameV, Rhs},
+                    {mlir::NoneType::get(&MCtx)}, loc(F.Range), {Cal});
+        return;
+      }
+    /* TT.Properties.Description = 'literal' — nested FieldAccess.
+     * Match exactly that two-level shape; defer other Properties
+     * write targets (VariableNames rename, etc.) to later tasks. */
+    if (auto *Inner = dynamic_cast<const FieldAccess *>(F.Base))
+      if (auto *BN = dynamic_cast<const NameExpr *>(Inner->Base))
+        if (BN->Ref && TimetableBindings.count(BN->Ref) &&
+            Inner->Field == "Properties" && F.Field == "Description") {
+          mlir::Value Tv = lowerExpr(*Inner->Base);
+          mlir::NamedAttribute VA(
+              mlir::StringAttr::get(&MCtx, "value"),
+              mlir::StringAttr::get(&MCtx, ""));
+          /* Rhs may be a char literal (matlab.const_char) or a
+           * string descriptor. We accept the const_char form
+           * directly — the runtime entry takes (ptr, char*, i64). */
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_timetable_set_description"));
+          emitUnregOp("matlab.call_builtin", {Tv, Rhs},
+                      {mlir::NoneType::get(&MCtx)}, loc(F.Range), {Cal});
+          return;
+        }
     if (auto *CI = dynamic_cast<const CallOrIndex *>(F.Base)) {
       auto *NE = dynamic_cast<const NameExpr *>(CI->Callee);
       if (NE && NE->Ref &&
@@ -4715,16 +4931,65 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             return true;
       return false;
     };
+    /* Phase 5.4: vec equivalents. A unit-constructor call counts as a
+     * vec when its single arg is a ColonExpr (the `0:251` form that
+     * drives `datetime(...) + days(0:251)`); for NameExpr LHS / RHS
+     * the *Vec*Bindings set carries the tag set by AssignStmt. */
+    auto isDtVecName = [&](const Expr *X) -> bool {
+      if (auto *NE = dynamic_cast<const NameExpr *>(X))
+        return NE->Ref && DatetimeVecBindings.count(NE->Ref);
+      return false;
+    };
+    auto isDurVecName = [&](const Expr *X) -> bool {
+      if (auto *NE = dynamic_cast<const NameExpr *>(X))
+        return NE->Ref && DurationVecBindings.count(NE->Ref);
+      if (auto *CX = dynamic_cast<const CallOrIndex *>(X))
+        if (auto *NE = dynamic_cast<const NameExpr *>(CX->Callee))
+          if (NE->Name == "seconds" || NE->Name == "minutes" ||
+              NE->Name == "hours"   || NE->Name == "days"    ||
+              NE->Name == "years")
+            if (!CX->Args.empty() && CX->Args[0] &&
+                (dynamic_cast<const RangeExpr *>(CX->Args[0]) ||
+                 dynamic_cast<const ColonExpr *>(CX->Args[0]) ||
+                 dynamic_cast<const MatrixLiteral *>(CX->Args[0])))
+              return true;
+      return false;
+    };
     {
       auto PtrTy2 = mlir::LLVM::LLVMPointerType::get(&MCtx);
       llvm::StringRef DtCallee;
-      if (Bi.Op == BinOp::Sub && isDtName(Bi.LHS) && isDtName(Bi.RHS))
+      bool SwapOperands = false;
+      /* Phase 5.4 vec dispatch — check vec combos first so a single
+       * NameExpr binding can be scalar or vec without ambiguity. */
+      if (Bi.Op == BinOp::Add && isDtName(Bi.LHS) && isDurVecName(Bi.RHS))
+        DtCallee = "matlab_datetime_add_duration_vec";
+      else if (Bi.Op == BinOp::Add && isDurVecName(Bi.LHS) && isDtName(Bi.RHS)) {
+        DtCallee = "matlab_datetime_add_duration_vec";
+        SwapOperands = true;
+      }
+      else if (Bi.Op == BinOp::Add && isDtVecName(Bi.LHS) && isDurName(Bi.RHS))
+        DtCallee = "matlab_datetime_vec_add_duration";
+      else if (Bi.Op == BinOp::Add && isDurName(Bi.LHS) && isDtVecName(Bi.RHS)) {
+        DtCallee = "matlab_datetime_vec_add_duration";
+        SwapOperands = true;
+      }
+      else if (Bi.Op == BinOp::Sub && isDtVecName(Bi.LHS) && isDurName(Bi.RHS))
+        DtCallee = "matlab_datetime_vec_sub_duration";
+      else if (Bi.Op == BinOp::Add && isDtVecName(Bi.LHS) && isDurVecName(Bi.RHS))
+        DtCallee = "matlab_datetime_vec_add_duration_vec";
+      else if (Bi.Op == BinOp::Sub && isDtVecName(Bi.LHS) && isDtVecName(Bi.RHS))
+        DtCallee = "matlab_datetime_vec_sub_datetime_vec";
+      else if (Bi.Op == BinOp::Sub && isDtVecName(Bi.LHS) && isDtName(Bi.RHS))
+        DtCallee = "matlab_datetime_vec_sub_datetime";
+      /* Scalar fall-through (matches the original block). */
+      else if (Bi.Op == BinOp::Sub && isDtName(Bi.LHS) && isDtName(Bi.RHS))
         DtCallee = "matlab_datetime_sub_datetime";
       else if (Bi.Op == BinOp::Add && isDtName(Bi.LHS) && isDurName(Bi.RHS))
         DtCallee = "matlab_datetime_add_duration";
-      else if (Bi.Op == BinOp::Add && isDurName(Bi.LHS) && isDtName(Bi.RHS))
-        /* duration + datetime: swap operands. */
+      else if (Bi.Op == BinOp::Add && isDurName(Bi.LHS) && isDtName(Bi.RHS)) {
         DtCallee = "matlab_datetime_add_duration";
+        SwapOperands = true;
+      }
       else if (Bi.Op == BinOp::Sub && isDtName(Bi.LHS) && isDurName(Bi.RHS))
         DtCallee = "matlab_datetime_sub_duration";
       else if (Bi.Op == BinOp::Add && isDurName(Bi.LHS) && isDurName(Bi.RHS))
@@ -4733,8 +4998,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         DtCallee = "matlab_duration_sub";
       if (!DtCallee.empty()) {
         mlir::Value LO = LHS, RO = RHS;
-        if (Bi.Op == BinOp::Add && isDurName(Bi.LHS) && isDtName(Bi.RHS))
-          std::swap(LO, RO);
+        if (SwapOperands) std::swap(LO, RO);
         mlir::NamedAttribute Cal(
             mlir::StringAttr::get(&MCtx, "callee"),
             mlir::StringAttr::get(&MCtx, std::string(DtCallee)));
@@ -4913,6 +5177,99 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
               mlir::StringAttr::get(&MCtx, "callee"),
               mlir::StringAttr::get(&MCtx, "matlab_dict_new"));
           return emitUnreg("matlab.call_builtin", {}, PtrTy, L, {Cal});
+        }
+    /* Phase 5.4 (cont.): plot(dt_vec, y, ...) — auto-wrap the
+     * first arg with matlab_datetime_vec_to_mat so the existing
+     * matrix-only plot backend gets a usable numeric x-axis (days
+     * from start). Date-formatted tick labels live downstream.    */
+    if (auto *PNE = dynamic_cast<const NameExpr *>(C.Callee))
+      if (PNE->Ref && PNE->Ref->Kind == BindingKind::Builtin &&
+          PNE->Name == "plot" && !C.Args.empty() && C.Args[0]) {
+        bool FirstIsDtVec = false;
+        if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]))
+          if (ArgN->Ref && DatetimeVecBindings.count(ArgN->Ref))
+            FirstIsDtVec = true;
+        if (auto *FA = dynamic_cast<const FieldAccess *>(C.Args[0]))
+          if (auto *BN = dynamic_cast<const NameExpr *>(FA->Base))
+            if (BN->Ref && TimetableBindings.count(BN->Ref) &&
+                FA->Field == "Time")
+              FirstIsDtVec = true;
+        if (FirstIsDtVec) {
+          auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+          auto F64 = mlir::Float64Type::get(&MCtx);
+          /* Lower all args; replace arg 0 with the to_mat conversion. */
+          llvm::SmallVector<mlir::Value, 8> Args;
+          mlir::Value DtV = lowerExpr(*C.Args[0]);
+          mlir::NamedAttribute ConvCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_datetime_vec_to_mat"));
+          mlir::Value XMat = emitUnreg("matlab.call_builtin", {DtV},
+                                       PtrTy, L, {ConvCal});
+          Args.push_back(XMat);
+          for (size_t i = 1; i < C.Args.size(); ++i)
+            if (C.Args[i]) Args.push_back(lowerExpr(*C.Args[i]));
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "plot"));
+          return emitUnreg("matlab.call_builtin", Args,
+                           mlir::NoneType::get(&MCtx), L, {Cal});
+          (void)F64;
+        }
+      }
+    /* Phase 5.4 (cont.): TMW(rowIdx, colSel) read on a timetable
+     * binding. Shape menu:
+     *   TMW(:, 'colName') | TMW(:, "colName")   -> matlab_timetable
+     *                                              with just that column
+     *   TMW(idx, :)                              -> matlab_timetable
+     *                                              with rows selected
+     * timerange() row-subscripting lives in Task 5; this arm rejects
+     * args it can't recognise and falls through to the polymorphic
+     * indexing path (which would error). */
+    if (C.Args.size() == 2 && C.Args[0] && C.Args[1])
+      if (auto *N = dynamic_cast<const NameExpr *>(C.Callee))
+        if (N->Ref && TimetableBindings.count(N->Ref)) {
+          auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+          /* Column-by-name form: TMW(:, 'colName'). */
+          if (dynamic_cast<const ColonExpr *>(C.Args[0])) {
+            std::string ColName;
+            if (auto *CL = dynamic_cast<const CharLiteral *>(C.Args[1]))
+              ColName = std::string(CL->Value);
+            else if (auto *SL = dynamic_cast<const StringLiteral *>(C.Args[1]))
+              ColName = std::string(SL->Value);
+            if (!ColName.empty()) {
+              mlir::Value Tv = lowerExpr(*C.Callee);
+              mlir::Value NameV = emitFieldNameChar(ColName, L);
+              mlir::NamedAttribute Cal(
+                  mlir::StringAttr::get(&MCtx, "callee"),
+                  mlir::StringAttr::get(&MCtx, "matlab_timetable_select_var"));
+              return emitUnreg("matlab.call_builtin", {Tv, NameV},
+                               PtrTy, L, {Cal});
+            }
+          }
+          /* Row-subscript forms: TMW(rowSel, :).
+           *   rowSel is a Timerange binding   -> matlab_timetable_select_rows_timerange
+           *   rowSel is anything else (mat)   -> matlab_timetable_select_rows_mat
+           *                                      (numeric 1-based OR logical, runtime-detected)
+           */
+          if (dynamic_cast<const ColonExpr *>(C.Args[1])) {
+            bool RowIsTimerange = false;
+            if (auto *RN = dynamic_cast<const NameExpr *>(C.Args[0]))
+              if (RN->Ref && TimerangeBindings.count(RN->Ref))
+                RowIsTimerange = true;
+            if (auto *RC = dynamic_cast<const CallOrIndex *>(C.Args[0]))
+              if (auto *RCN = dynamic_cast<const NameExpr *>(RC->Callee))
+                if (RCN->Name == "timerange") RowIsTimerange = true;
+            mlir::Value Tv  = lowerExpr(*C.Callee);
+            mlir::Value Idx = lowerExpr(*C.Args[0]);
+            const char *Callee = RowIsTimerange
+                ? "matlab_timetable_select_rows_timerange"
+                : "matlab_timetable_select_rows_mat";
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, Callee));
+            return emitUnreg("matlab.call_builtin", {Tv, Idx},
+                             PtrTy, L, {Cal});
+          }
         }
     /* Phase 4: m(k) read on a dict binding. Detect via DictBindings,
      * dispatch to matlab_dict_get_<str|num>_<f64|mat>. The expected
@@ -8904,38 +9261,65 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           (N->Name == "height" || N->Name == "width" ||
            N->Name == "numel"  || N->Name == "length") &&
           C.Args.size() == 1 && C.Args[0])
-        if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]))
-          if (ArgN->Ref && TableBindings.count(ArgN->Ref)) {
+        if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0])) {
+          bool IsTT = ArgN->Ref && TimetableBindings.count(ArgN->Ref);
+          bool IsT  = ArgN->Ref && TableBindings.count(ArgN->Ref);
+          if (IsT || IsTT) {
             auto F64 = mlir::Float64Type::get(&MCtx);
             mlir::Value V = lowerExpr(*C.Args[0]);
-            llvm::StringRef Callee;
-            if (N->Name == "height") Callee = "matlab_table_height";
-            else if (N->Name == "width") Callee = "matlab_table_width";
-            else if (N->Name == "numel") Callee = "matlab_table_numel";
-            else /* length */ Callee = "matlab_table_height";
+            const char *Prefix = IsTT ? "matlab_timetable_" : "matlab_table_";
+            std::string Callee;
+            if (N->Name == "height")      Callee = std::string(Prefix) + "height";
+            else if (N->Name == "width")  Callee = std::string(Prefix) + "width";
+            else if (N->Name == "numel")  Callee = std::string(Prefix) + "numel";
+            else /* length */             Callee = std::string(Prefix) + "height";
             mlir::NamedAttribute Cal(
                 mlir::StringAttr::get(&MCtx, "callee"),
-                mlir::StringAttr::get(&MCtx, std::string(Callee)));
+                mlir::StringAttr::get(&MCtx, Callee));
             return emitUnreg("matlab.call_builtin", {V}, F64, L, {Cal});
           }
+        }
       if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
           N->Name == "size" && C.Args.size() == 2 && C.Args[0])
-        if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]))
-          if (ArgN->Ref && TableBindings.count(ArgN->Ref)) {
+        if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0])) {
+          bool IsTT = ArgN->Ref && TimetableBindings.count(ArgN->Ref);
+          bool IsT  = ArgN->Ref && TableBindings.count(ArgN->Ref);
+          if (IsT || IsTT) {
             auto F64 = mlir::Float64Type::get(&MCtx);
             mlir::Value V = lowerExpr(*C.Args[0]);
             mlir::Value D = lowerExpr(*C.Args[1]);
+            const char *Callee = IsTT ? "matlab_timetable_size_dim"
+                                       : "matlab_table_size_dim";
             mlir::NamedAttribute Cal(
                 mlir::StringAttr::get(&MCtx, "callee"),
-                mlir::StringAttr::get(&MCtx, "matlab_table_size_dim"));
+                mlir::StringAttr::get(&MCtx, Callee));
             return emitUnreg("matlab.call_builtin", {V, D}, F64, L, {Cal});
           }
+        }
       /* Phase 5.1: disp(t) where t is a datetime / duration binding —
        * dispatch to the typed runtime.
        * Phase 5.2: disp(c) for categorical too. */
       if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
           N->Name == "disp" && C.Args.size() == 1 && C.Args[0]) {
         if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0])) {
+          /* Vec checks before scalar so a binding tagged as both
+           * scalar+vec (defensive) routes to the vec entry. */
+          if (ArgN->Ref && DatetimeVecBindings.count(ArgN->Ref)) {
+            mlir::Value V = lowerExpr(*C.Args[0]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_datetime_vec_disp"));
+            return emitUnreg("matlab.call_builtin", {V},
+                             mlir::NoneType::get(&MCtx), L, {Cal});
+          }
+          if (ArgN->Ref && DurationVecBindings.count(ArgN->Ref)) {
+            mlir::Value V = lowerExpr(*C.Args[0]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_duration_vec_disp"));
+            return emitUnreg("matlab.call_builtin", {V},
+                             mlir::NoneType::get(&MCtx), L, {Cal});
+          }
           if (ArgN->Ref && DatetimeBindings.count(ArgN->Ref)) {
             mlir::Value V = lowerExpr(*C.Args[0]);
             mlir::NamedAttribute Cal(
@@ -8965,6 +9349,14 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             mlir::NamedAttribute Cal(
                 mlir::StringAttr::get(&MCtx, "callee"),
                 mlir::StringAttr::get(&MCtx, "matlab_table_disp"));
+            return emitUnreg("matlab.call_builtin", {V},
+                             mlir::NoneType::get(&MCtx), L, {Cal});
+          }
+          if (ArgN->Ref && TimetableBindings.count(ArgN->Ref)) {
+            mlir::Value V = lowerExpr(*C.Args[0]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_timetable_disp"));
             return emitUnreg("matlab.call_builtin", {V},
                              mlir::NoneType::get(&MCtx), L, {Cal});
           }
@@ -9324,6 +9716,346 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         }
         return T;
       }
+      /* Phase 5.4 (cont.): timetable(col1, ..., 'VariableNames',
+       * {n1,n2,...}, 'RowTimes', dt). Mirrors the table arm above
+       * but folds the trailing 'RowTimes' name-value pair and emits
+       * matlab_timetable_new + matlab_timetable_add_column +
+       * matlab_timetable_set_row_times. The 'VariableNames' arg is
+       * still optional. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "timetable") {
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        size_t NCol = C.Args.size();
+        const CellLiteral *NamesCell = nullptr;
+        const Expr *RowTimesExpr = nullptr;
+        auto matchKey = [](const Expr *AE, const char *Key) -> bool {
+          if (auto *CL = dynamic_cast<const CharLiteral *>(AE))
+            return CL->Value == Key;
+          if (auto *SL = dynamic_cast<const StringLiteral *>(AE))
+            return SL->Value == Key;
+          return false;
+        };
+        /* Scan from the back for both name-value pairs and shrink
+         * NCol so the column-arg loop stops before them. */
+        for (size_t i = 0; i + 1 < C.Args.size(); ++i) {
+          const Expr *AE = C.Args[i];
+          if (!AE) continue;
+          if (matchKey(AE, "VariableNames")) {
+            if (auto *NL = dynamic_cast<const CellLiteral *>(C.Args[i + 1])) {
+              NamesCell = NL;
+              if (NCol > i) NCol = i;
+            }
+          } else if (matchKey(AE, "RowTimes")) {
+            RowTimesExpr = C.Args[i + 1];
+            if (NCol > i) NCol = i;
+          }
+        }
+        mlir::NamedAttribute NewC(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_timetable_new"));
+        mlir::Value TT = emitUnreg("matlab.call_builtin", {},
+                                    PtrTy, L, {NewC});
+        if (RowTimesExpr) {
+          mlir::Value RT = lowerExpr(*RowTimesExpr);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_timetable_set_row_times"));
+          emitUnregOp("matlab.call_builtin", {TT, RT},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+        }
+        for (size_t i = 0; i < NCol; ++i) {
+          if (!C.Args[i]) continue;
+          std::string ColName;
+          if (NamesCell && !NamesCell->Rows.empty() &&
+              i < NamesCell->Rows[0].size()) {
+            const Expr *NE = NamesCell->Rows[0][i];
+            if (auto *CL = dynamic_cast<const CharLiteral *>(NE))
+              ColName = std::string(CL->Value);
+            else if (auto *SL = dynamic_cast<const StringLiteral *>(NE))
+              ColName = std::string(SL->Value);
+          }
+          if (ColName.empty()) ColName = "Var" + std::to_string(i + 1);
+          mlir::Value Col = lowerExpr(*C.Args[i]);
+          mlir::Value NameV = emitFieldNameChar(ColName, L);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_timetable_add_column"));
+          emitUnregOp("matlab.call_builtin", {TT, NameV, Col},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+        }
+        return TT;
+      }
+      /* table2timetable(T, 'RowTimes', dt) — promote a plain table
+       * to a timetable. The table is consumed. Other Name=Value
+       * pairs (StartTime, SampleRate, TimeStep) are deferred. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "table2timetable" && C.Args.size() >= 1) {
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        const Expr *RowTimesExpr = nullptr;
+        for (size_t i = 1; i + 1 < C.Args.size(); ++i) {
+          const Expr *AE = C.Args[i];
+          if (!AE) continue;
+          if (auto *CL = dynamic_cast<const CharLiteral *>(AE))
+            if (CL->Value == "RowTimes") { RowTimesExpr = C.Args[i + 1]; break; }
+          if (auto *SL = dynamic_cast<const StringLiteral *>(AE))
+            if (SL->Value == "RowTimes") { RowTimesExpr = C.Args[i + 1]; break; }
+        }
+        mlir::Value TB = lowerExpr(*C.Args[0]);
+        mlir::Value RT;
+        if (RowTimesExpr) {
+          RT = lowerExpr(*RowTimesExpr);
+        } else {
+          /* No RowTimes given — produce a NULL pointer so the runtime
+           * conversion still completes (timetable with empty
+           * RowTimes). LLVM's ConstantPointerNull is the cheapest
+           * way to get that. */
+          auto NullAttr = mlir::IntegerAttr::get(
+              mlir::IntegerType::get(&MCtx, 64), 0);
+          (void)NullAttr;
+          mlir::Value Zero = mlir::arith::ConstantOp::create(
+              B, L, mlir::IntegerType::get(&MCtx, 64),
+              mlir::IntegerAttr::get(mlir::IntegerType::get(&MCtx, 64), 0));
+          RT = mlir::LLVM::IntToPtrOp::create(B, L, PtrTy, Zero).getResult();
+        }
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_table2timetable"));
+        return emitUnreg("matlab.call_builtin", {TB, RT}, PtrTy, L, {Cal});
+      }
+      /* Predicate: does this expression yield a matlab_timetable *?
+       * Covers NameExpr bindings, TT-subscript CallOrIndex (TMW(...) -> TT),
+       * and the TT-returning builtins (timetable, table2timetable,
+       * retime, synchronize, fillmissing, movavg, macd). Used by
+       * the head/summary/fillmissing/movavg/macd dispatches below so
+       * `head(TMW(idx, :), 4)` style nested-subscript args work. */
+      auto exprIsTimetable = [&](const Expr *E) -> bool {
+        if (!E) return false;
+        if (auto *NE = dynamic_cast<const NameExpr *>(E))
+          return NE->Ref && TimetableBindings.count(NE->Ref);
+        if (auto *CX = dynamic_cast<const CallOrIndex *>(E))
+          if (auto *NE = dynamic_cast<const NameExpr *>(CX->Callee)) {
+            if (NE->Ref && TimetableBindings.count(NE->Ref)) return true;
+            if (NE->Name == "timetable" || NE->Name == "table2timetable" ||
+                NE->Name == "retime" || NE->Name == "synchronize" ||
+                NE->Name == "fillmissing" || NE->Name == "movavg" ||
+                NE->Name == "macd")
+              return true;
+          }
+        return false;
+      };
+      /* movavg(TT, 'simple'|'exponential', period) -> matlab_timetable.
+       * Operates on the first numeric column of TT (the canonical
+       * TMW(:, 'Close') input). */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "movavg" && C.Args.size() == 3 &&
+          C.Args[0] && C.Args[1] && C.Args[2]) {
+        if (exprIsTimetable(C.Args[0])) {
+          auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+          auto I32 = mlir::IntegerType::get(&MCtx, 32);
+          std::string Type;
+          if (auto *CL = dynamic_cast<const CharLiteral *>(C.Args[1]))  Type = std::string(CL->Value);
+          else if (auto *SL = dynamic_cast<const StringLiteral *>(C.Args[1])) Type = std::string(SL->Value);
+          int32_t code = 0;
+          if      (Type == "simple")      code = 0;
+          else if (Type == "exponential") code = 1;
+          mlir::Value Tv = lowerExpr(*C.Args[0]);
+          mlir::Value Tc = mlir::arith::ConstantOp::create(
+              B, L, I32, mlir::IntegerAttr::get(I32, code));
+          mlir::Value Pv = lowerExpr(*C.Args[2]);
+          /* Period arrives as f64; convert to i32. */
+          mlir::Value Pi = mlir::arith::FPToSIOp::create(B, L, I32, Pv);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_timetable_movavg"));
+          return emitUnreg("matlab.call_builtin", {Tv, Tc, Pi},
+                           PtrTy, L, {Cal});
+        }
+      }
+      /* macd(TT) -> 3-column matlab_timetable {MACD, Signal, Histogram}. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "macd" && C.Args.size() == 1 && C.Args[0]) {
+        if (exprIsTimetable(C.Args[0])) {
+          auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+          mlir::Value Tv = lowerExpr(*C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_timetable_macd"));
+          return emitUnreg("matlab.call_builtin", {Tv}, PtrTy, L, {Cal});
+        }
+      }
+      /* fillmissing(TT, 'linear'|'previous'|'next') -> matlab_timetable.
+       * The constant-replacement form (fillmissing(TT, k) with k
+       * numeric) lands later. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "fillmissing" && C.Args.size() == 2 &&
+          C.Args[0] && C.Args[1]) {
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        auto I32 = mlir::IntegerType::get(&MCtx, 32);
+        if (exprIsTimetable(C.Args[0])) {
+          std::string Method;
+          if (auto *CL = dynamic_cast<const CharLiteral *>(C.Args[1]))
+            Method = std::string(CL->Value);
+          else if (auto *SL = dynamic_cast<const StringLiteral *>(C.Args[1]))
+            Method = std::string(SL->Value);
+          int32_t code = 0;
+          if      (Method == "linear")   code = 0;
+          else if (Method == "previous") code = 1;
+          else if (Method == "next")     code = 2;
+          mlir::Value Tv = lowerExpr(*C.Args[0]);
+          mlir::Value Mv = mlir::arith::ConstantOp::create(
+              B, L, I32, mlir::IntegerAttr::get(I32, code));
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_timetable_fillmissing"));
+          return emitUnreg("matlab.call_builtin", {Tv, Mv},
+                           PtrTy, L, {Cal});
+        }
+      }
+      /* summary(TT) / head(TT[, n]) — display-only on a timetable. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "summary" && C.Args.size() == 1 && C.Args[0]) {
+        if (exprIsTimetable(C.Args[0])) {
+          mlir::Value Tv = lowerExpr(*C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_timetable_summary"));
+          return emitUnreg("matlab.call_builtin", {Tv},
+                           mlir::NoneType::get(&MCtx), L, {Cal});
+        }
+      }
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "head" && C.Args.size() >= 1 && C.Args[0]) {
+        if (exprIsTimetable(C.Args[0])) {
+          auto F64 = mlir::Float64Type::get(&MCtx);
+          mlir::Value Tv = lowerExpr(*C.Args[0]);
+          mlir::Value NV;
+          if (C.Args.size() == 2 && C.Args[1]) {
+            NV = lowerExpr(*C.Args[1]);
+          } else {
+            NV = mlir::arith::ConstantOp::create(
+                B, L, F64, mlir::FloatAttr::get(F64, 0.0));
+          }
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_timetable_head"));
+          return emitUnreg("matlab.call_builtin", {Tv, NV},
+                           mlir::NoneType::get(&MCtx), L, {Cal});
+        }
+      }
+      /* synchronize(TT1, TT2, cadence, method) -> matlab_timetable.
+       * Aligns both inputs onto the same cadence with the given
+       * aggregator then horz-cats. Same cadence/method codes as
+       * retime. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "synchronize" && C.Args.size() == 4 &&
+          C.Args[0] && C.Args[1] && C.Args[2] && C.Args[3]) {
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        auto I32 = mlir::IntegerType::get(&MCtx, 32);
+        auto strArg = [](const Expr *E, std::string &Out) -> bool {
+          if (auto *CL = dynamic_cast<const CharLiteral *>(E))  { Out = std::string(CL->Value); return true; }
+          if (auto *SL = dynamic_cast<const StringLiteral *>(E)){ Out = std::string(SL->Value); return true; }
+          return false;
+        };
+        std::string Cadence, Method;
+        if (strArg(C.Args[2], Cadence) && strArg(C.Args[3], Method)) {
+          int32_t cad = 0, aggCode = 0;
+          if      (Cadence == "daily")   cad = 0;
+          else if (Cadence == "weekly")  cad = 1;
+          else if (Cadence == "monthly") cad = 2;
+          else if (Cadence == "yearly")  cad = 3;
+          if      (Method == "firstvalue") aggCode = 0;
+          else if (Method == "lastvalue")  aggCode = 1;
+          else if (Method == "max")        aggCode = 2;
+          else if (Method == "min")        aggCode = 3;
+          else if (Method == "sum")        aggCode = 4;
+          else if (Method == "mean")       aggCode = 5;
+          mlir::Value T1 = lowerExpr(*C.Args[0]);
+          mlir::Value T2 = lowerExpr(*C.Args[1]);
+          mlir::Value CadV = mlir::arith::ConstantOp::create(
+              B, L, I32, mlir::IntegerAttr::get(I32, cad));
+          mlir::Value AggV = mlir::arith::ConstantOp::create(
+              B, L, I32, mlir::IntegerAttr::get(I32, aggCode));
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_timetable_synchronize"));
+          return emitUnreg("matlab.call_builtin", {T1, T2, CadV, AggV},
+                           PtrTy, L, {Cal});
+        }
+      }
+      /* retime(TT, cadence, method) -> matlab_timetable.
+       * Cadence ∈ {'daily','weekly','monthly','yearly'};
+       * method  ∈ {'firstvalue','lastvalue','max','min','sum','mean'}.
+       * Both literal-string args fold to integer codes at lower time. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "retime" && C.Args.size() == 3 &&
+          C.Args[0] && C.Args[1] && C.Args[2]) {
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        auto I32 = mlir::IntegerType::get(&MCtx, 32);
+        auto strArg = [](const Expr *E, std::string &Out) -> bool {
+          if (auto *CL = dynamic_cast<const CharLiteral *>(E))  { Out = std::string(CL->Value); return true; }
+          if (auto *SL = dynamic_cast<const StringLiteral *>(E)){ Out = std::string(SL->Value); return true; }
+          return false;
+        };
+        std::string Cadence, Method;
+        if (strArg(C.Args[1], Cadence) && strArg(C.Args[2], Method)) {
+          int32_t cad = 0;
+          if      (Cadence == "daily")   cad = 0;
+          else if (Cadence == "weekly")  cad = 1;
+          else if (Cadence == "monthly") cad = 2;
+          else if (Cadence == "yearly")  cad = 3;
+          int32_t aggCode = 0;
+          if      (Method == "firstvalue") aggCode = 0;
+          else if (Method == "lastvalue")  aggCode = 1;
+          else if (Method == "max")        aggCode = 2;
+          else if (Method == "min")        aggCode = 3;
+          else if (Method == "sum")        aggCode = 4;
+          else if (Method == "mean")       aggCode = 5;
+          mlir::Value Tv = lowerExpr(*C.Args[0]);
+          mlir::Value CadV = mlir::arith::ConstantOp::create(
+              B, L, I32, mlir::IntegerAttr::get(I32, cad));
+          mlir::Value AggV = mlir::arith::ConstantOp::create(
+              B, L, I32, mlir::IntegerAttr::get(I32, aggCode));
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_timetable_retime"));
+          return emitUnreg("matlab.call_builtin", {Tv, CadV, AggV},
+                           PtrTy, L, {Cal});
+        }
+      }
+      /* timerange(t1, t2)            -> closed   (mode 0)
+       * timerange(t1, t2, 'closed')  -> closed
+       * timerange(t1, t2, 'openright') / 'open' / 'openleft' similarly.
+       * Returns a matlab_timerange * used as a row index on TT(tr,:).
+       * MATLAB's default is 'openright'; we keep 'closed' as the
+       * no-mode default for the doc-page example which passes
+       * 'closed' explicitly. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "timerange" &&
+          (C.Args.size() == 2 || C.Args.size() == 3)) {
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        auto I32 = mlir::IntegerType::get(&MCtx, 32);
+        int32_t modeCode = 0; /* closed */
+        if (C.Args.size() == 3 && C.Args[2]) {
+          std::string ModeStr;
+          if (auto *CL = dynamic_cast<const CharLiteral *>(C.Args[2]))
+            ModeStr = std::string(CL->Value);
+          else if (auto *SL = dynamic_cast<const StringLiteral *>(C.Args[2]))
+            ModeStr = std::string(SL->Value);
+          if      (ModeStr == "closed")    modeCode = 0;
+          else if (ModeStr == "openright") modeCode = 1;
+          else if (ModeStr == "openleft")  modeCode = 2;
+          else if (ModeStr == "open")      modeCode = 3;
+        }
+        mlir::Value T1 = lowerExpr(*C.Args[0]);
+        mlir::Value T2 = lowerExpr(*C.Args[1]);
+        mlir::Value ModeV = mlir::arith::ConstantOp::create(
+            B, L, I32, mlir::IntegerAttr::get(I32, modeCode));
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_timerange_new"));
+        return emitUnreg("matlab.call_builtin", {T1, T2, ModeV},
+                         PtrTy, L, {Cal});
+      }
       /* Phase 5.2: categorical([str, str, ...]) — construct from a
        * single argument that's a 1-row MatrixLiteral of string /
        * char literals (the natural `categorical(["a","b","a"])`
@@ -9407,7 +10139,13 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         }
       }
       /* duration unit constructors: seconds(n), minutes(n), hours(n),
-       * days(n), years(n) — each takes one f64 and returns a duration. */
+       * days(n), years(n).
+       *   - scalar f64 arg → matlab_duration_<unit>      → matlab_duration *
+       *   - matrix arg     → matlab_duration_<unit>_vec  → matlab_duration_vec *
+       * The matrix arm covers `days(0:251)` and the natural row-times
+       * recipe `datetime(2014,1,1) + days(0:251)`. The vec descriptor
+       * is tagged by the caller via DurationVecBindings on the LHS so
+       * downstream arithmetic / disp dispatch through the vec ABI. */
       if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
           (N->Name == "seconds" || N->Name == "minutes" ||
            N->Name == "hours"   || N->Name == "days"    ||
@@ -9415,11 +10153,51 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           C.Args.size() == 1 && C.Args[0]) {
         auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
         mlir::Value V = lowerExpr(*C.Args[0]);
+        bool IsMat = V && (V.getType() == PtrTy ||
+                           mlir::isa<mlir::RankedTensorType,
+                                     mlir::UnrankedTensorType>(V.getType()));
         std::string Callee = "matlab_duration_" + std::string(N->Name);
+        if (IsMat) Callee += "_vec";
         mlir::NamedAttribute Cal(
             mlir::StringAttr::get(&MCtx, "callee"),
             mlir::StringAttr::get(&MCtx, Callee));
         return emitUnreg("matlab.call_builtin", {V}, PtrTy, L, {Cal});
+      }
+      /* Phase 5.4: length / numel / size on a datetime_vec or
+       * duration_vec binding. Routes to the matlab_*_vec_length /
+       * _size_dim runtime entries; without this the polymorphic
+       * length() would treat the descriptor pointer as a matlab_mat
+       * and return 0. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          (N->Name == "length" || N->Name == "numel") &&
+          C.Args.size() == 1) {
+        if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]))
+          if (ArgN->Ref &&
+              (DatetimeVecBindings.count(ArgN->Ref) ||
+               DurationVecBindings.count(ArgN->Ref))) {
+            auto F64 = mlir::Float64Type::get(&MCtx);
+            mlir::Value V = lowerExpr(*C.Args[0]);
+            const char *Callee = DatetimeVecBindings.count(ArgN->Ref)
+                ? "matlab_datetime_vec_length"
+                : "matlab_duration_vec_length";
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, Callee));
+            return emitUnreg("matlab.call_builtin", {V}, F64, L, {Cal});
+          }
+      }
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "size" && C.Args.size() == 2) {
+        if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]))
+          if (ArgN->Ref && DatetimeVecBindings.count(ArgN->Ref)) {
+            auto F64 = mlir::Float64Type::get(&MCtx);
+            mlir::Value V = lowerExpr(*C.Args[0]);
+            mlir::Value D = lowerExpr(*C.Args[1]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_datetime_vec_size_dim"));
+            return emitUnreg("matlab.call_builtin", {V, D}, F64, L, {Cal});
+          }
       }
       /* Phase 4: dictionary() / dictionary(k1, v1, k2, v2, ...) ->
        * matlab_dict_new + per-pair set. v1 supports zero-arg and an
@@ -10159,6 +10937,29 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         return emitUnreg("matlab.call_builtin", {Tv, NameV},
                          PtrTy, L, {Cal});
       }
+    /* Phase 5.4 (cont.): TMW.<name> read on a timetable binding.
+     *   TMW.Time              -> matlab_datetime_vec * (RowTimes)
+     *   TMW.<colName>         -> matlab_mat * (numeric column)
+     * The implicit-display + arithmetic dispatch for the returned
+     * value follows the same datetime_vec / matrix flow as the
+     * standalone constructors. */
+    if (auto *BN = dynamic_cast<const NameExpr *>(F.Base))
+      if (BN->Ref && TimetableBindings.count(BN->Ref)) {
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        mlir::Value Tv = lowerExpr(*F.Base);
+        if (F.Field == "Time") {
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_timetable_get_row_times"));
+          return emitUnreg("matlab.call_builtin", {Tv}, PtrTy, L, {Cal});
+        }
+        mlir::Value NameV = emitFieldNameChar(F.Field, L);
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_timetable_get_column"));
+        return emitUnreg("matlab.call_builtin", {Tv, NameV},
+                         PtrTy, L, {Cal});
+      }
     /* Phase 2: s(i).x read — Base is `CallOrIndex(NameExpr s, [i])`
      * where s is a struct-array binding. Pull the i-th element via
      * matlab_struct_arr_get and field-get on the result. */
@@ -10370,6 +11171,32 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
   case NodeKind::MatrixLiteral: {
     auto &M = static_cast<const MatrixLiteral &>(E);
     bool SingleRow = M.Rows.size() == 1;
+    /* Phase 5.4 (cont.): [TT1 TT2 ... TTN] over timetable bindings —
+     * pairwise-reduce through matlab_timetable_horzcat. All entries
+     * must be NameExprs in TimetableBindings; mixed-type bracket
+     * concats fall through to the matrix lane. */
+    if (SingleRow && !M.Rows[0].empty()) {
+      bool AllTT = true;
+      for (const Expr *Cx : M.Rows[0]) {
+        auto *NE = dynamic_cast<const NameExpr *>(Cx);
+        if (!NE || !NE->Ref || !TimetableBindings.count(NE->Ref)) {
+          AllTT = false; break;
+        }
+      }
+      if (AllTT) {
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        mlir::Value Acc = lowerExpr(*M.Rows[0][0]);
+        for (size_t i = 1; i < M.Rows[0].size(); ++i) {
+          mlir::Value Rhs = lowerExpr(*M.Rows[0][i]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_timetable_horzcat"));
+          Acc = emitUnreg("matlab.call_builtin", {Acc, Rhs},
+                          PtrTy, L, {Cal});
+        }
+        return Acc;
+      }
+    }
     /* Char-array / string bracket concat: `['x = ', num2str(v), ' kg']`
      * is MATLAB's classic "build a string from pieces" idiom. If any
      * element of a single-row literal is a char/string, treat the
