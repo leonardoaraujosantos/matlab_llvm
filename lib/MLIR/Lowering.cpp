@@ -2463,7 +2463,8 @@ void Lowerer::lowerStmt(const Stmt &St) {
          * height / etc. route to matlab_timetable_*. */
         if (NE->Name == "timetable" || NE->Name == "table2timetable" ||
             NE->Name == "retime" || NE->Name == "synchronize" ||
-            NE->Name == "fillmissing")
+            NE->Name == "fillmissing" ||
+            NE->Name == "movavg" || NE->Name == "macd")
           RhsIsTimetable = true;
         /* TT(rowIdx, :) and TT(:, 'colName') both return a new
          * timetable, so the LHS slot inherits the tag. */
@@ -9775,6 +9776,48 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             mlir::StringAttr::get(&MCtx, "callee"),
             mlir::StringAttr::get(&MCtx, "matlab_table2timetable"));
         return emitUnreg("matlab.call_builtin", {TB, RT}, PtrTy, L, {Cal});
+      }
+      /* movavg(TT, 'simple'|'exponential', period) -> matlab_timetable.
+       * Operates on the first numeric column of TT (the canonical
+       * TMW(:, 'Close') input). */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "movavg" && C.Args.size() == 3 &&
+          C.Args[0] && C.Args[1] && C.Args[2]) {
+        if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]))
+          if (ArgN->Ref && TimetableBindings.count(ArgN->Ref)) {
+            auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+            auto I32 = mlir::IntegerType::get(&MCtx, 32);
+            std::string Type;
+            if (auto *CL = dynamic_cast<const CharLiteral *>(C.Args[1]))  Type = std::string(CL->Value);
+            else if (auto *SL = dynamic_cast<const StringLiteral *>(C.Args[1])) Type = std::string(SL->Value);
+            int32_t code = 0;
+            if      (Type == "simple")      code = 0;
+            else if (Type == "exponential") code = 1;
+            mlir::Value Tv = lowerExpr(*C.Args[0]);
+            mlir::Value Tc = mlir::arith::ConstantOp::create(
+                B, L, I32, mlir::IntegerAttr::get(I32, code));
+            mlir::Value Pv = lowerExpr(*C.Args[2]);
+            /* Period arrives as f64; convert to i32. */
+            mlir::Value Pi = mlir::arith::FPToSIOp::create(B, L, I32, Pv);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_timetable_movavg"));
+            return emitUnreg("matlab.call_builtin", {Tv, Tc, Pi},
+                             PtrTy, L, {Cal});
+          }
+      }
+      /* macd(TT) -> 3-column matlab_timetable {MACD, Signal, Histogram}. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "macd" && C.Args.size() == 1 && C.Args[0]) {
+        if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]))
+          if (ArgN->Ref && TimetableBindings.count(ArgN->Ref)) {
+            auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+            mlir::Value Tv = lowerExpr(*C.Args[0]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_timetable_macd"));
+            return emitUnreg("matlab.call_builtin", {Tv}, PtrTy, L, {Cal});
+          }
       }
       /* fillmissing(TT, 'linear'|'previous'|'next') -> matlab_timetable.
        * The constant-replacement form (fillmissing(TT, k) with k

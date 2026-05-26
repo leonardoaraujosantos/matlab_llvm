@@ -1605,6 +1605,21 @@ matlab_timetable *matlab_timetable_fillmissing(matlab_timetable *tt,
 void              matlab_timetable_summary(matlab_timetable *tt);
 void              matlab_timetable_head   (matlab_timetable *tt, double n);
 
+/* Phase 5.4 (cont.) — financial indicators on timetables.
+ *
+ * movavg type codes:
+ *   0 = simple (SMA)          y[i] = mean(x[i-N+1..i])
+ *   1 = exponential (EMA)     y[i] = a*x[i] + (1-a)*y[i-1], a = 2/(N+1)
+ * macd uses fixed default periods (12 fast, 26 slow, 9 signal) and
+ * returns a 3-column timetable {MACD, Signal, Histogram}.
+ *
+ * Both helpers operate on the first numeric column of the input
+ * timetable — the canonical usage is TMW(:, 'Close') as input.    */
+enum { MATLAB_MA_SIMPLE = 0, MATLAB_MA_EXPONENTIAL = 1 };
+matlab_timetable *matlab_timetable_movavg(matlab_timetable *tt,
+                                            int32_t type, int32_t period);
+matlab_timetable *matlab_timetable_macd  (matlab_timetable *tt);
+
 /* Phase 4 — containers.Map / dictionary. A flat key/value table with
  * mixed key types (f64 or matlab_string *) and value types (f64 or
  * matlab_mat *). v1 backs both `containers.Map` and `dictionary` with

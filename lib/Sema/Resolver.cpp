@@ -70,6 +70,8 @@ void Resolver::registerBuiltins() {
     "timetable", "istimetable", "table2timetable", "timetable2table",
     "timerange", "retime", "synchronize", "withtol",
     "fillmissing", "summary", "head", "tail", "rowfun",
+    /* Phase 5.4 Financial indicators on timetables. */
+    "movavg", "macd", "sma", "ema", "highlow", "candle",
     /* Phase 6 — Symbolic Math Toolbox via SymPP. The link target
      * (matlab_sym_* runtime) is only present when the build was
      * configured -DMATLAB_LLVM_WITH_SYM=ON; without that the JIT/-emit-c

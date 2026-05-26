@@ -10579,6 +10579,97 @@ extern "C" void matlab_timetable_head(matlab_timetable *tt, double n) {
     tt->nrows = saved;
 }
 
+/* movavg over the first numeric column. Simple MA uses a running-
+ * window mean (over the available rows for the first N-1 elements);
+ * EMA uses MATLAB's a = 2/(N+1) smoothing factor with y[0] = x[0]. */
+enum { MA_SIMPLE = 0, MA_EXPONENTIAL = 1 };
+
+static matlab_mat *first_numeric_column(matlab_timetable *tt) {
+    if (!tt) return NULL;
+    for (int32_t c = 0; c < tt->nvars; ++c) {
+        int kind = tt->kinds ? tt->kinds[c] : 0;
+        if (kind == MATLAB_TABLE_KIND_NUMERIC) return (matlab_mat *)tt->data[c];
+    }
+    return NULL;
+}
+
+extern "C" matlab_timetable *matlab_timetable_movavg(matlab_timetable *tt,
+                                                      int32_t type,
+                                                      int32_t period) {
+    matlab_timetable *out = matlab_timetable_new();
+    if (!tt) return out;
+    matlab_mat *src = first_numeric_column(tt);
+    int64_t n = tt->nrows;
+    if (tt->row_times) {
+        matlab_datetime_vec *rt = dt_vec_alloc(n);
+        for (int64_t i = 0; i < n; ++i) rt->secs[i] = tt->row_times->secs[i];
+        out->row_times = rt;
+    }
+    out->nrows = (int32_t)n;
+    matlab_mat *dst = mat_alloc(n, 1);
+    if (src && src->data && n > 0) {
+        int64_t N = period > 0 ? period : 1;
+        if (type == MA_SIMPLE) {
+            double acc = 0.0;
+            for (int64_t i = 0; i < n; ++i) {
+                acc += src->data[i];
+                if (i >= N) acc -= src->data[i - N];
+                int64_t window = i < N ? (i + 1) : N;
+                dst->data[i] = acc / (double)window;
+            }
+        } else { /* exponential */
+            double a = 2.0 / (double)(N + 1);
+            dst->data[0] = src->data[0];
+            for (int64_t i = 1; i < n; ++i)
+                dst->data[i] = a * src->data[i] + (1.0 - a) * dst->data[i - 1];
+        }
+    }
+    /* Match MATLAB's movavg-on-timetable behaviour: the output
+     * column is named like the input column (so 'Close' stays
+     * 'Close' in the EMA timetable). */
+    const char *cn = "Var1";
+    if (tt->nvars > 0 && tt->names && tt->names[0]) cn = tt->names[0];
+    matlab_timetable_add_column(out, cn, (int64_t)strlen(cn), dst);
+    return out;
+}
+
+/* macd: fast=12 EMA, slow=26 EMA, signal=9 EMA of (fast - slow). */
+static void ema_inplace(const double *x, double *y, int64_t n, int64_t N) {
+    if (n == 0) return;
+    double a = 2.0 / (double)(N + 1);
+    y[0] = x[0];
+    for (int64_t i = 1; i < n; ++i)
+        y[i] = a * x[i] + (1.0 - a) * y[i - 1];
+}
+extern "C" matlab_timetable *matlab_timetable_macd(matlab_timetable *tt) {
+    matlab_timetable *out = matlab_timetable_new();
+    if (!tt) return out;
+    matlab_mat *src = first_numeric_column(tt);
+    int64_t n = tt->nrows;
+    if (tt->row_times) {
+        matlab_datetime_vec *rt = dt_vec_alloc(n);
+        for (int64_t i = 0; i < n; ++i) rt->secs[i] = tt->row_times->secs[i];
+        out->row_times = rt;
+    }
+    out->nrows = (int32_t)n;
+    matlab_mat *macd = mat_alloc(n, 1);
+    matlab_mat *signal = mat_alloc(n, 1);
+    matlab_mat *hist   = mat_alloc(n, 1);
+    if (src && src->data && n > 0) {
+        std::vector<double> fast(n), slow(n);
+        ema_inplace(src->data, fast.data(), n, 12);
+        ema_inplace(src->data, slow.data(), n, 26);
+        for (int64_t i = 0; i < n; ++i) macd->data[i] = fast[i] - slow[i];
+        ema_inplace(macd->data, signal->data, n, 9);
+        for (int64_t i = 0; i < n; ++i)
+            hist->data[i] = macd->data[i] - signal->data[i];
+    }
+    matlab_timetable_add_column(out, "MACD",      4, macd);
+    matlab_timetable_add_column(out, "Signal",    6, signal);
+    matlab_timetable_add_column(out, "Histogram", 9, hist);
+    return out;
+}
+
 /* Horizontal concat: produce a fresh timetable whose RowTimes are
  * taken from `a` and whose columns are the union of `a`'s and `b`'s.
  * Mismatched RowTimes are silently truncated (we copy min(a->nrows,
