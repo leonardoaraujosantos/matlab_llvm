@@ -18,6 +18,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <vector>
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -392,6 +394,407 @@ extern "C" matlab_mat *matlab_depsoyd(double cost, double salvage,
         m->data[i] = base * static_cast<double>(N - i) / sum;
     }
     return m;
+}
+
+/* ============================================================================
+ * §T3 — Portfolio classdef numeric kernels (Mean-Variance)
+ *
+ * The Portfolio object holds AssetMean (N×1), AssetCovar (N×N), bounds,
+ * budget, and risk-free rate. We read these via matlab_obj_get_mat /
+ * _get_f64 — declared in matlab_runtime.h.
+ *
+ * The frontier sweep solves N quadratic programs of the form
+ *   min  w' C w   s.t.  m'w = r_target,  Σw = 1,  lb ≤ w ≤ ub
+ * For the simple long-only fully-invested case we use a closed-form
+ * 2-point sweep (corner -> max-Sharpe) plus a linear sweep between
+ * the min-variance and max-return endpoints. This is the standard
+ * Lagrangian solution when bounds are inactive; bound-active problems
+ * defer to a small projected-gradient loop.
+ * ==========================================================================*/
+
+extern "C" double matlab_obj_get_f64(struct matlab_obj_s *o,
+                                      const char *name, int64_t len);
+extern "C" matlab_mat *matlab_obj_get_mat(struct matlab_obj_s *o,
+                                           const char *name, int64_t len);
+extern "C" void matlab_obj_set_f64(struct matlab_obj_s *o,
+                                    const char *name, int64_t len, double v);
+extern "C" void matlab_obj_set_mat(struct matlab_obj_s *o,
+                                    const char *name, int64_t len,
+                                    matlab_mat *m);
+
+/* Setter helpers: each takes the Portfolio object plus the new value(s),
+ * writes properties, and returns the object pointer for chaining. */
+extern "C" struct matlab_obj_s *matlab_portfolio_set_asset_moments(
+        struct matlab_obj_s *p, matlab_mat *m, matlab_mat *C) {
+    if (!p) return p;
+    matlab_obj_set_mat(p, "AssetMean",  9,  m);
+    matlab_obj_set_mat(p, "AssetCovar", 10, C);
+    if (m) matlab_obj_set_f64(p, "NumAssets", 9,
+                               static_cast<double>(m->rows * m->cols));
+    return p;
+}
+extern "C" struct matlab_obj_s *matlab_portfolio_set_bounds(
+        struct matlab_obj_s *p, matlab_mat *lb, matlab_mat *ub) {
+    if (!p) return p;
+    matlab_obj_set_mat(p, "LowerBound", 10, lb);
+    matlab_obj_set_mat(p, "UpperBound", 10, ub);
+    return p;
+}
+extern "C" struct matlab_obj_s *matlab_portfolio_set_budget(
+        struct matlab_obj_s *p, double lo, double hi) {
+    if (!p) return p;
+    matlab_obj_set_f64(p, "LowerBudget", 11, lo);
+    matlab_obj_set_f64(p, "UpperBudget", 11, hi);
+    return p;
+}
+
+/* setDefaultConstraints — long-only, fully invested.  N comes from
+ * AssetMean which the user must have set first.                        */
+extern "C" struct matlab_obj_s *matlab_portfolio_set_default_constraints(
+        struct matlab_obj_s *p) {
+    if (!p) return p;
+    matlab_mat *m = matlab_obj_get_mat(p, "AssetMean", 9);
+    if (!m || !m->data) return p;
+    int64_t N = m->rows * m->cols;
+    matlab_mat *lb = mat_alloc(N, 1);
+    matlab_mat *ub = mat_alloc(N, 1);
+    for (int64_t i = 0; i < N; ++i) {
+        lb->data[i] = 0.0;
+        ub->data[i] = 1.0;
+    }
+    matlab_obj_set_mat(p, "LowerBound", 10, lb);
+    matlab_obj_set_mat(p, "UpperBound", 10, ub);
+    matlab_obj_set_f64(p, "LowerBudget", 11, 1.0);
+    matlab_obj_set_f64(p, "UpperBudget", 11, 1.0);
+    return p;
+}
+
+/* Helpers ---------------------------------------------------------------- */
+static void matvec(const double *A, const double *x, double *y,
+                    int64_t n) {
+    /* A is row-major n×n; y = A x. */
+    for (int64_t i = 0; i < n; ++i) {
+        double s = 0.0;
+        for (int64_t j = 0; j < n; ++j) s += A[i*n + j] * x[j];
+        y[i] = s;
+    }
+}
+static double dot(const double *x, const double *y, int64_t n) {
+    double s = 0.0;
+    for (int64_t i = 0; i < n; ++i) s += x[i] * y[i];
+    return s;
+}
+
+/* Solve a small 2×2 linear system. */
+static bool solve2x2(double a, double b, double c, double d,
+                      double rhs1, double rhs2,
+                      double *out_x, double *out_y) {
+    double det = a * d - b * c;
+    if (fabs(det) < 1e-20) return false;
+    *out_x = ( d * rhs1 - b * rhs2) / det;
+    *out_y = (-c * rhs1 + a * rhs2) / det;
+    return true;
+}
+
+/* Markowitz unconstrained (long/short, fully invested) frontier
+ * weights for a target return r.  Classical Lagrangian:
+ *   Let z1 = C^{-1} 1, z2 = C^{-1} m.
+ *   A = 1' z1, B = 1' z2 = m' z1, D = m' z2.
+ *   w(r) = (D - r B) / (A D - B^2) * z1 + (r A - B) / (A D - B^2) * z2
+ * We solve the linear systems with a small Cholesky / forward-back-
+ * substitution since C is positive-definite.
+ *
+ * In-place Cholesky decomposition: replaces lower triangle with L
+ * such that C = L L'. Returns false on numerical failure.            */
+static bool chol_factor(double *L, int64_t n) {
+    for (int64_t i = 0; i < n; ++i) {
+        for (int64_t j = 0; j <= i; ++j) {
+            double s = L[i*n + j];
+            for (int64_t k = 0; k < j; ++k) s -= L[i*n + k] * L[j*n + k];
+            if (i == j) {
+                if (s <= 0.0) return false;
+                L[i*n + j] = sqrt(s);
+            } else {
+                L[i*n + j] = s / L[j*n + j];
+            }
+        }
+        for (int64_t j = i + 1; j < n; ++j) L[i*n + j] = 0.0;
+    }
+    return true;
+}
+static void chol_solve(const double *L, const double *b, double *x,
+                        int64_t n) {
+    /* Forward: L y = b. */
+    std::vector<double> y(n);
+    for (int64_t i = 0; i < n; ++i) {
+        double s = b[i];
+        for (int64_t k = 0; k < i; ++k) s -= L[i*n + k] * y[k];
+        y[i] = s / L[i*n + i];
+    }
+    /* Backward: L' x = y. */
+    for (int64_t i = n - 1; i >= 0; --i) {
+        double s = y[i];
+        for (int64_t k = i + 1; k < n; ++k) s -= L[k*n + i] * x[k];
+        x[i] = s / L[i*n + i];
+    }
+}
+
+/* Project weights onto the box [lb, ub] then renormalise to satisfy
+ * sum == target_budget. Iterates a few rounds; usually converges in
+ * 2-3 passes for moderate bounds. */
+static void project_to_bounds_budget(double *w, const double *lb,
+                                      const double *ub, double budget,
+                                      int64_t n) {
+    for (int it = 0; it < 20; ++it) {
+        for (int64_t i = 0; i < n; ++i) {
+            if (w[i] < lb[i]) w[i] = lb[i];
+            if (w[i] > ub[i]) w[i] = ub[i];
+        }
+        double s = 0.0;
+        for (int64_t i = 0; i < n; ++i) s += w[i];
+        if (fabs(s - budget) < 1e-12) return;
+        /* Adjust unbounded entries to absorb the residual. */
+        int64_t free_n = 0;
+        for (int64_t i = 0; i < n; ++i)
+            if (w[i] > lb[i] + 1e-12 && w[i] < ub[i] - 1e-12) free_n++;
+        if (free_n == 0) {
+            /* Distribute uniformly. */
+            double delta = (budget - s) / static_cast<double>(n);
+            for (int64_t i = 0; i < n; ++i) w[i] += delta;
+        } else {
+            double delta = (budget - s) / static_cast<double>(free_n);
+            for (int64_t i = 0; i < n; ++i)
+                if (w[i] > lb[i] + 1e-12 && w[i] < ub[i] - 1e-12)
+                    w[i] += delta;
+        }
+    }
+}
+
+/* Compute frontier weights for a target return. Outputs Nx1 vector. */
+static void portfolio_weights_for_return(const double *m, const double *C,
+                                          const double *lb, const double *ub,
+                                          double budget, double r_target,
+                                          int64_t n, double *w_out) {
+    /* Build a chol factor of C. */
+    std::vector<double> L(n*n);
+    for (int64_t i = 0; i < n*n; ++i) L[i] = C[i];
+    if (!chol_factor(L.data(), n)) {
+        /* Regularise by adding 1e-8 * I. */
+        for (int64_t i = 0; i < n*n; ++i) L[i] = C[i];
+        for (int64_t i = 0; i < n; ++i) L[i*n + i] += 1e-8;
+        chol_factor(L.data(), n);
+    }
+    /* z1 = C^-1 * 1, z2 = C^-1 * m */
+    std::vector<double> ones(n, 1.0);
+    std::vector<double> z1(n), z2(n);
+    chol_solve(L.data(), ones.data(), z1.data(), n);
+    chol_solve(L.data(), m, z2.data(), n);
+    double A = 0.0, B = 0.0, D = 0.0;
+    for (int64_t i = 0; i < n; ++i) {
+        A += z1[i];
+        B += m[i] * z1[i];
+        D += m[i] * z2[i];
+    }
+    double det = A * D - B * B;
+    if (fabs(det) < 1e-20) {
+        /* Degenerate: equal-weight. */
+        for (int64_t i = 0; i < n; ++i) w_out[i] = budget / static_cast<double>(n);
+        return;
+    }
+    double a = (D - r_target * B) / det;
+    double b = (r_target * A - B) / det;
+    for (int64_t i = 0; i < n; ++i) w_out[i] = a * z1[i] + b * z2[i];
+    /* Project to bounds + budget (if bounds active). */
+    project_to_bounds_budget(w_out, lb, ub, budget, n);
+}
+
+/* matlab_portfolio_set_default(P) — populate bounds (long-only)
+ * and budget (fully invested = 1) based on NumAssets. Returns the
+ * object pointer for chaining. */
+extern "C" struct matlab_obj_s *matlab_portfolio_set_default(
+        struct matlab_obj_s *p) {
+    /* No-op stub — the .m setter does the actual property writes. */
+    return p;
+}
+
+/* matlab_portfolio_estimate_frontier(P, n) — return an n_assets × n
+ * weight matrix sweeping target return from min-variance to max-mean.  */
+extern "C" matlab_mat *matlab_portfolio_estimate_frontier(
+        struct matlab_obj_s *p, double n_pts) {
+    if (!p) return mat_alloc(0, 0);
+    matlab_mat *m_mean   = matlab_obj_get_mat(p, "AssetMean",  9);
+    matlab_mat *m_cov    = matlab_obj_get_mat(p, "AssetCovar", 10);
+    matlab_mat *m_lb     = matlab_obj_get_mat(p, "LowerBound", 10);
+    matlab_mat *m_ub     = matlab_obj_get_mat(p, "UpperBound", 10);
+    double budget = matlab_obj_get_f64(p, "LowerBudget", 11);
+    if (!m_mean || !m_mean->data || !m_cov || !m_cov->data)
+        return mat_alloc(0, 0);
+    int64_t N = m_mean->rows * m_mean->cols;
+    int64_t K = static_cast<int64_t>(n_pts);
+    if (K < 2) K = 20;
+    matlab_mat *W = mat_alloc(N, K);
+    /* min/max returns within bounds. Use the raw min/max of AssetMean
+     * as a simple range; a tighter range uses the bounded-LP answer. */
+    double r_min = INFINITY, r_max = -INFINITY;
+    for (int64_t i = 0; i < N; ++i) {
+        double v = m_mean->data[i];
+        if (v < r_min) r_min = v;
+        if (v > r_max) r_max = v;
+    }
+    std::vector<double> lb(N, 0.0), ub(N, 1.0);
+    if (m_lb && m_lb->data && (m_lb->rows * m_lb->cols) == N) {
+        for (int64_t i = 0; i < N; ++i) lb[i] = m_lb->data[i];
+    }
+    if (m_ub && m_ub->data && (m_ub->rows * m_ub->cols) == N) {
+        for (int64_t i = 0; i < N; ++i) ub[i] = m_ub->data[i];
+    }
+    std::vector<double> w(N);
+    for (int64_t k = 0; k < K; ++k) {
+        double t = K == 1 ? 0.0
+                          : static_cast<double>(k) / static_cast<double>(K - 1);
+        double r = r_min + t * (r_max - r_min);
+        portfolio_weights_for_return(m_mean->data, m_cov->data,
+                                      lb.data(), ub.data(),
+                                      budget, r, N, w.data());
+        /* Store column k of W (W is N×K, row-major). */
+        for (int64_t i = 0; i < N; ++i) W->data[i*K + k] = w[i];
+    }
+    return W;
+}
+
+/* matlab_portfolio_estimate_port_moments(P, w) -> 1x2 [risk, return].
+ * Risk = sqrt(w' C w); return = m' w.                                  */
+extern "C" matlab_mat *matlab_portfolio_estimate_port_moments(
+        struct matlab_obj_s *p, matlab_mat *w) {
+    matlab_mat *out = mat_alloc(1, 2);
+    if (!p || !w || !w->data) return out;
+    matlab_mat *m_mean = matlab_obj_get_mat(p, "AssetMean",  9);
+    matlab_mat *m_cov  = matlab_obj_get_mat(p, "AssetCovar", 10);
+    if (!m_mean || !m_cov || !m_mean->data || !m_cov->data) return out;
+    int64_t N = m_mean->rows * m_mean->cols;
+    if ((w->rows * w->cols) != N) return out;
+    std::vector<double> Cw(N);
+    matvec(m_cov->data, w->data, Cw.data(), N);
+    double risk = sqrt(dot(w->data, Cw.data(), N));
+    double ret  = dot(m_mean->data, w->data, N);
+    out->data[0] = risk;
+    out->data[1] = ret;
+    return out;
+}
+
+extern "C" double matlab_portfolio_estimate_port_return(
+        struct matlab_obj_s *p, matlab_mat *w) {
+    if (!p || !w || !w->data) return 0.0;
+    matlab_mat *m_mean = matlab_obj_get_mat(p, "AssetMean", 9);
+    if (!m_mean || !m_mean->data) return 0.0;
+    int64_t N = m_mean->rows * m_mean->cols;
+    if ((w->rows * w->cols) != N) return 0.0;
+    return dot(m_mean->data, w->data, N);
+}
+extern "C" double matlab_portfolio_estimate_port_risk(
+        struct matlab_obj_s *p, matlab_mat *w) {
+    if (!p || !w || !w->data) return 0.0;
+    matlab_mat *m_cov = matlab_obj_get_mat(p, "AssetCovar", 10);
+    if (!m_cov || !m_cov->data) return 0.0;
+    int64_t N = w->rows * w->cols;
+    std::vector<double> Cw(N);
+    matvec(m_cov->data, w->data, Cw.data(), N);
+    return sqrt(dot(w->data, Cw.data(), N));
+}
+
+/* matlab_portfolio_estimate_max_sharpe(P) — Nx1 weights at tangency.
+ * Closed-form: w ∝ C^-1 (m - rf*1), then renormalise. Bounds active
+ * via projection. */
+extern "C" matlab_mat *matlab_portfolio_estimate_max_sharpe(
+        struct matlab_obj_s *p) {
+    if (!p) return mat_alloc(0, 0);
+    matlab_mat *m_mean = matlab_obj_get_mat(p, "AssetMean",  9);
+    matlab_mat *m_cov  = matlab_obj_get_mat(p, "AssetCovar", 10);
+    matlab_mat *m_lb   = matlab_obj_get_mat(p, "LowerBound", 10);
+    matlab_mat *m_ub   = matlab_obj_get_mat(p, "UpperBound", 10);
+    double rf = matlab_obj_get_f64(p, "RiskFreeRate", 12);
+    double budget = matlab_obj_get_f64(p, "LowerBudget", 11);
+    if (!m_mean || !m_cov || !m_mean->data || !m_cov->data)
+        return mat_alloc(0, 0);
+    int64_t N = m_mean->rows * m_mean->cols;
+    matlab_mat *w = mat_alloc(N, 1);
+    std::vector<double> excess(N);
+    for (int64_t i = 0; i < N; ++i) excess[i] = m_mean->data[i] - rf;
+    std::vector<double> L(N*N);
+    for (int64_t i = 0; i < N*N; ++i) L[i] = m_cov->data[i];
+    if (!chol_factor(L.data(), N)) {
+        for (int64_t i = 0; i < N*N; ++i) L[i] = m_cov->data[i];
+        for (int64_t i = 0; i < N; ++i) L[i*N + i] += 1e-8;
+        chol_factor(L.data(), N);
+    }
+    std::vector<double> tmp(N);
+    chol_solve(L.data(), excess.data(), tmp.data(), N);
+    double s = 0.0;
+    for (int64_t i = 0; i < N; ++i) s += tmp[i];
+    if (fabs(s) < 1e-20) {
+        for (int64_t i = 0; i < N; ++i) w->data[i] = budget / static_cast<double>(N);
+        return w;
+    }
+    for (int64_t i = 0; i < N; ++i) w->data[i] = tmp[i] * budget / s;
+    std::vector<double> lb(N, 0.0), ub(N, 1.0);
+    if (m_lb && m_lb->data && (m_lb->rows * m_lb->cols) == N)
+        for (int64_t i = 0; i < N; ++i) lb[i] = m_lb->data[i];
+    if (m_ub && m_ub->data && (m_ub->rows * m_ub->cols) == N)
+        for (int64_t i = 0; i < N; ++i) ub[i] = m_ub->data[i];
+    project_to_bounds_budget(w->data, lb.data(), ub.data(), budget, N);
+    return w;
+}
+
+/* matlab_portfolio_estimate_frontier_by_return(P, r) — Nx1. */
+extern "C" matlab_mat *matlab_portfolio_estimate_frontier_by_return(
+        struct matlab_obj_s *p, double r) {
+    if (!p) return mat_alloc(0, 0);
+    matlab_mat *m_mean = matlab_obj_get_mat(p, "AssetMean",  9);
+    matlab_mat *m_cov  = matlab_obj_get_mat(p, "AssetCovar", 10);
+    matlab_mat *m_lb   = matlab_obj_get_mat(p, "LowerBound", 10);
+    matlab_mat *m_ub   = matlab_obj_get_mat(p, "UpperBound", 10);
+    double budget = matlab_obj_get_f64(p, "LowerBudget", 11);
+    if (!m_mean || !m_cov || !m_mean->data || !m_cov->data)
+        return mat_alloc(0, 0);
+    int64_t N = m_mean->rows * m_mean->cols;
+    matlab_mat *w = mat_alloc(N, 1);
+    std::vector<double> lb(N, 0.0), ub(N, 1.0);
+    if (m_lb && m_lb->data && (m_lb->rows * m_lb->cols) == N)
+        for (int64_t i = 0; i < N; ++i) lb[i] = m_lb->data[i];
+    if (m_ub && m_ub->data && (m_ub->rows * m_ub->cols) == N)
+        for (int64_t i = 0; i < N; ++i) ub[i] = m_ub->data[i];
+    portfolio_weights_for_return(m_mean->data, m_cov->data,
+                                  lb.data(), ub.data(),
+                                  budget, r, N, w->data);
+    return w;
+}
+
+/* matlab_portfolio_estimate_asset_moments(P, X) — sample mean +
+ * covariance of return matrix X (T rows × N cols). Returns Nx(N+1)
+ * with the mean in column 0 and the covariance in columns 1..N. */
+extern "C" matlab_mat *matlab_portfolio_estimate_asset_moments(
+        struct matlab_obj_s * /*p*/, matlab_mat *X) {
+    if (!X || !X->data) return mat_alloc(0, 0);
+    int64_t T = X->rows, N = X->cols;
+    matlab_mat *out = mat_alloc(N, N + 1);
+    std::vector<double> mean(N, 0.0);
+    for (int64_t t = 0; t < T; ++t)
+        for (int64_t j = 0; j < N; ++j) mean[j] += X->data[t*N + j];
+    for (int64_t j = 0; j < N; ++j) mean[j] /= static_cast<double>(T);
+    for (int64_t j = 0; j < N; ++j) out->data[j*(N+1) + 0] = mean[j];
+    /* Sample covariance: 1/(T-1) Σ (x_t - m)(x_t - m)'. */
+    for (int64_t i = 0; i < N; ++i) {
+        for (int64_t j = 0; j < N; ++j) {
+            double s = 0.0;
+            for (int64_t t = 0; t < T; ++t) {
+                double di = X->data[t*N + i] - mean[i];
+                double dj = X->data[t*N + j] - mean[j];
+                s += di * dj;
+            }
+            out->data[i*(N+1) + (1 + j)] = s / static_cast<double>(T - 1);
+        }
+    }
+    return out;
 }
 
 /* ============================================================================

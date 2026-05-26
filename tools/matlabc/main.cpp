@@ -2148,7 +2148,7 @@ static std::string buildReplPrelude(const std::string &Src) {
   static const char *kToolboxDirs[] = {
     "comm", "rf", "optim", "mpc", "ident", "gads", "pde", "prop", "sym",
     "stateflow", "antenna", "control", "stats", "images", "curvefit",
-    "dsp", "gpu",
+    "dsp", "gpu", "finance",
   };
   std::vector<std::string> Files;
   auto add = [&](const std::string &Leaf) {
@@ -2340,6 +2340,23 @@ static std::string buildReplPrelude(const std::string &Src) {
     {false, "ppmak",             "curvefit_classdefs.m"},
     {false, "fnder",             "curvefit_classdefs.m"},
     {false, "fnint",             "curvefit_classdefs.m"},
+    /* Financial Toolbox Tier-3 — Portfolio classdef. Any mention of
+     * a Portfolio method or the constructor pulls in the umbrella. */
+    {false, "Portfolio",            "finance_classdefs.m"},
+    {false, "setAssetMoments",      "finance_classdefs.m"},
+    {false, "setBounds",            "finance_classdefs.m"},
+    {false, "setBudget",            "finance_classdefs.m"},
+    {false, "setEquality",          "finance_classdefs.m"},
+    {false, "setInequality",        "finance_classdefs.m"},
+    {false, "setDefaultConstraints","finance_classdefs.m"},
+    {false, "estimateFrontier",     "finance_classdefs.m"},
+    {false, "estimatePortMoments",  "finance_classdefs.m"},
+    {false, "estimatePortReturn",   "finance_classdefs.m"},
+    {false, "estimatePortRisk",     "finance_classdefs.m"},
+    {false, "estimateMaxSharpeRatio","finance_classdefs.m"},
+    {false, "estimateAssetMoments", "finance_classdefs.m"},
+    {false, "estimateFrontierByReturn","finance_classdefs.m"},
+    {false, "estimateFrontierByRisk", "finance_classdefs.m"},
     /* mStateflow Tier 4c — `mstateflow_helpers.m` exposes the small
      * MATLAB-level surface (emit / save-op / restore-op / active /
      * reset) that lets a REPL session drive a chart_tick function
@@ -11329,6 +11346,12 @@ int main(int Argc, char **Argv) {
       /* GPU Coder host-side carriers — see gpu_classdefs.m. */
       "gpuArray", "gather", "existsOnGPU", "gpuDevice",
       "coder.gpuConfig", "coder_gpuConfig",
+      /* Financial Toolbox Tier-3 — Portfolio classdef. */
+      "Portfolio", "setAssetMoments", "setBounds", "setBudget",
+      "setDefaultConstraints", "estimateFrontier", "estimatePortMoments",
+      "estimateMaxSharpeRatio", "estimateAssetMoments",
+      "estimateFrontierByReturn", "estimateFrontierByRisk",
+      "estimatePortReturn", "estimatePortRisk",
       /* GPU Coder T5 design-pattern helpers — runtime entries, no
        * prelude file needed.  Listed here only for the AOT-prelude
        * scanner's awareness (no leaf to map). */
@@ -11502,6 +11525,19 @@ int main(int Argc, char **Argv) {
       return "gpu_classdefs.m";
     if (ClsName == "coder.gpuConfig" || ClsName == "coder_gpuConfig")
       return "gpu_config_classdefs.m";
+    /* Financial Toolbox Tier-3 — Portfolio classdef umbrella. */
+    if (ClsName == "Portfolio" ||
+        ClsName == "setAssetMoments" || ClsName == "setBounds" ||
+        ClsName == "setBudget" || ClsName == "setDefaultConstraints" ||
+        ClsName == "estimateFrontier" ||
+        ClsName == "estimateFrontierByReturn" ||
+        ClsName == "estimateFrontierByRisk" ||
+        ClsName == "estimatePortMoments" ||
+        ClsName == "estimatePortReturn" ||
+        ClsName == "estimatePortRisk" ||
+        ClsName == "estimateMaxSharpeRatio" ||
+        ClsName == "estimateAssetMoments")
+      return "finance_classdefs.m";
     /* GPU Coder T5 design-pattern helpers are C runtime entries; no
      * classdef file to pull in. */
     return std::string();
@@ -11557,7 +11593,7 @@ int main(int Argc, char **Argv) {
     static const char *kToolboxDirs[] = {
       "comm", "rf", "optim", "mpc", "ident", "gads", "pde", "prop", "sym",
       "stateflow", "antenna", "control", "stats", "images", "curvefit",
-      "dsp", "gpu",
+      "dsp", "gpu", "finance",
     };
     std::vector<std::string> Cands;
     for (const char *Tb : kToolboxDirs) {

@@ -82,6 +82,16 @@ void Resolver::registerBuiltins() {
     "lpm", "elpm", "portalpha",
     "blsprice", "blsdelta", "blsgamma", "blsvega", "blsrho", "blstheta",
     "blslambda", "blsimpv",
+    /* Tier-3: Portfolio classdef methods. The class itself
+     * (`Portfolio`) is provided by finance_classdefs.m via the
+     * auto-prepend mechanism; the methods listed here become first-
+     * arg-class-pinned dispatches through the LowerTensorOps Spec
+     * table when called as `setAssetMoments(p, m, C)`. */
+    "setAssetMoments", "setBounds", "setBudget",
+    "setEquality", "setInequality", "setDefaultConstraints",
+    "estimateFrontier", "estimateFrontierByReturn", "estimateFrontierByRisk",
+    "estimatePortMoments", "estimatePortReturn", "estimatePortRisk",
+    "estimateMaxSharpeRatio", "estimateAssetMoments", "plotFrontier",
     /* Phase 6 — Symbolic Math Toolbox via SymPP. The link target
      * (matlab_sym_* runtime) is only present when the build was
      * configured -DMATLAB_LLVM_WITH_SYM=ON; without that the JIT/-emit-c

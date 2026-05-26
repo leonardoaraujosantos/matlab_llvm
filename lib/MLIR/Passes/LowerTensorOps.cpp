@@ -6621,6 +6621,20 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"blstheta",   "matlab_blstheta",   0, "fffff"},
       {"blslambda",  "matlab_blslambda",  0, "fffff"},
       {"blsimpv",    "matlab_blsimpv",    0, "fffff"},
+      /* Financial Toolbox Tier-3: Portfolio classdef methods. The
+       * first ptr arg is the Portfolio object (a class-pinned
+       * matlab_obj*). Setters return the same obj for chaining. */
+      {"setAssetMoments",         "matlab_portfolio_set_asset_moments",        1, "ppp"},
+      {"setBounds",               "matlab_portfolio_set_bounds",               1, "ppp"},
+      {"setBudget",               "matlab_portfolio_set_budget",               1, "pff"},
+      {"setDefaultConstraints",   "matlab_portfolio_set_default_constraints",  1, "p"},
+      {"estimateFrontier",        "matlab_portfolio_estimate_frontier",        1, "pf"},
+      {"estimateFrontierByReturn","matlab_portfolio_estimate_frontier_by_return",1, "pf"},
+      {"estimateMaxSharpeRatio",  "matlab_portfolio_estimate_max_sharpe",      1, "p"},
+      {"estimatePortMoments",     "matlab_portfolio_estimate_port_moments",    1, "pp"},
+      {"estimatePortReturn",      "matlab_portfolio_estimate_port_return",     0, "pp"},
+      {"estimatePortRisk",        "matlab_portfolio_estimate_port_risk",       0, "pp"},
+      {"estimateAssetMoments",    "matlab_portfolio_estimate_asset_moments",   1, "pp"},
     };
 
     // Pick the first entry with name + arity + TYPE match so overloaded
