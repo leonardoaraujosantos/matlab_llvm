@@ -9881,6 +9881,21 @@ extern "C" const double *matlab_datetime_vec_secs(matlab_datetime_vec *v,
     return v ? v->secs : nullptr;
 }
 
+/* Convert a datetime_vec to a column mat of days-since-first. This
+ * is the form plot() needs to render a chart with a sensible
+ * numeric x-axis — the first timestamp sits at x=0 and each
+ * subsequent point is offset by its day delta from the start. The
+ * full date-formatted tick lane lives downstream in the Cairo
+ * backend; for now this keeps the example end-to-end runnable. */
+extern "C" matlab_mat *matlab_datetime_vec_to_mat(matlab_datetime_vec *v) {
+    if (!v || v->n == 0) return mat_alloc(0, 0);
+    matlab_mat *m = mat_alloc(v->n, 1);
+    double base = v->secs[0];
+    for (int64_t i = 0; i < v->n; ++i)
+        m->data[i] = (v->secs[i] - base) / 86400.0;
+    return m;
+}
+
 /* 1-based; out-of-range returns a zero-epoch scalar (matches the
  * scalar OOB convention used elsewhere in this runtime). */
 extern "C" matlab_datetime *matlab_datetime_vec_get(matlab_datetime_vec *v,

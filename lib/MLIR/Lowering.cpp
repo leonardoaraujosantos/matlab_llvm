@@ -5171,6 +5171,44 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
               mlir::StringAttr::get(&MCtx, "matlab_dict_new"));
           return emitUnreg("matlab.call_builtin", {}, PtrTy, L, {Cal});
         }
+    /* Phase 5.4 (cont.): plot(dt_vec, y, ...) — auto-wrap the
+     * first arg with matlab_datetime_vec_to_mat so the existing
+     * matrix-only plot backend gets a usable numeric x-axis (days
+     * from start). Date-formatted tick labels live downstream.    */
+    if (auto *PNE = dynamic_cast<const NameExpr *>(C.Callee))
+      if (PNE->Ref && PNE->Ref->Kind == BindingKind::Builtin &&
+          PNE->Name == "plot" && !C.Args.empty() && C.Args[0]) {
+        bool FirstIsDtVec = false;
+        if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]))
+          if (ArgN->Ref && DatetimeVecBindings.count(ArgN->Ref))
+            FirstIsDtVec = true;
+        if (auto *FA = dynamic_cast<const FieldAccess *>(C.Args[0]))
+          if (auto *BN = dynamic_cast<const NameExpr *>(FA->Base))
+            if (BN->Ref && TimetableBindings.count(BN->Ref) &&
+                FA->Field == "Time")
+              FirstIsDtVec = true;
+        if (FirstIsDtVec) {
+          auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+          auto F64 = mlir::Float64Type::get(&MCtx);
+          /* Lower all args; replace arg 0 with the to_mat conversion. */
+          llvm::SmallVector<mlir::Value, 8> Args;
+          mlir::Value DtV = lowerExpr(*C.Args[0]);
+          mlir::NamedAttribute ConvCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_datetime_vec_to_mat"));
+          mlir::Value XMat = emitUnreg("matlab.call_builtin", {DtV},
+                                       PtrTy, L, {ConvCal});
+          Args.push_back(XMat);
+          for (size_t i = 1; i < C.Args.size(); ++i)
+            if (C.Args[i]) Args.push_back(lowerExpr(*C.Args[i]));
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "plot"));
+          return emitUnreg("matlab.call_builtin", Args,
+                           mlir::NoneType::get(&MCtx), L, {Cal});
+          (void)F64;
+        }
+      }
     /* Phase 5.4 (cont.): TMW(rowIdx, colSel) read on a timetable
      * binding. Shape menu:
      *   TMW(:, 'colName') | TMW(:, "colName")   -> matlab_timetable

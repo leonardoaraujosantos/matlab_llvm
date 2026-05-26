@@ -1471,6 +1471,10 @@ matlab_datetime     *matlab_datetime_vec_get(matlab_datetime_vec *v, double idx)
  * count and length without leaking the struct layout. */
 const double        *matlab_datetime_vec_secs(matlab_datetime_vec *v,
                                                int64_t *out_n);
+/* Convert a datetime_vec to a column matlab_mat of days-since-first
+ * element — the form plot() needs for a sensible numeric x-axis.
+ * The first element maps to 0 so the chart starts at the origin.   */
+matlab_mat          *matlab_datetime_vec_to_mat(matlab_datetime_vec *v);
 
 /* Phase 5.4 (cont.) — timetable. A column-store table indexed by a
  * datetime_vec RowTimes axis. Builds on matlab_table's parallel-array

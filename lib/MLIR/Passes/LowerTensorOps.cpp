@@ -2520,6 +2520,17 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase(); Changed = true; continue;
     }
+    if (Name == "matlab_datetime_vec_to_mat" &&
+        Call->getNumResults() == 1 && Call->getNumOperands() == 1 &&
+        Call->getOperand(0).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, PtrTy, {PtrTy});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Call->getOperand(0)});
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase(); Changed = true; continue;
+    }
     if (Name == "matlab_timetable_movavg" &&
         Call->getNumResults() == 1 && Call->getNumOperands() == 3 &&
         Call->getOperand(0).getType() == PtrTy) {
