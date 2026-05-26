@@ -466,6 +466,14 @@ private:
    * pointer. Used by disp / arithmetic dispatch. */
   std::unordered_set<Binding *> DatetimeBindings;
   std::unordered_set<Binding *> DurationBindings;
+  /* Phase 5.4: bindings holding a matlab_datetime_vec * /
+   * matlab_duration_vec *. Produced by matrix-typed unit
+   * constructors (`days(0:251)`, `hours(v)`, ...), scalar+vec or
+   * vec+vec arithmetic, and timetable RowTimes access. Arithmetic
+   * dispatch routes the `_vec` runtime entries; disp / length /
+   * indexing follow the matlab_*_vec_ family. */
+  std::unordered_set<Binding *> DatetimeVecBindings;
+  std::unordered_set<Binding *> DurationVecBindings;
   /* Phase 5.2: bindings holding a matlab_categorical * — used to
    * dispatch disp / categories / iscategory / equality through the
    * dedicated runtime entries. */
@@ -2265,12 +2273,15 @@ void Lowerer::lowerStmt(const Stmt &St) {
       /* Phase 5.1: datetime / duration disp dispatch.
        * Phase 5.2: categorical disp dispatch. */
       bool DispIsDatetime = false, DispIsDuration = false;
+      bool DispIsDatetimeVec = false, DispIsDurationVec = false;
       bool DispIsCategorical = false, DispIsTable = false;
       bool DispIsSym = exprIsSym(E.E);
       bool DispIsSymmat = exprIsSymmat(E.E);
       if (auto *NE = dynamic_cast<const NameExpr *>(E.E)) {
         if (NE->Ref && DatetimeBindings.count(NE->Ref)) DispIsDatetime = true;
         if (NE->Ref && DurationBindings.count(NE->Ref)) DispIsDuration = true;
+        if (NE->Ref && DatetimeVecBindings.count(NE->Ref)) DispIsDatetimeVec = true;
+        if (NE->Ref && DurationVecBindings.count(NE->Ref)) DispIsDurationVec = true;
         if (NE->Ref && CategoricalBindings.count(NE->Ref)) DispIsCategorical = true;
         if (NE->Ref && TableBindings.count(NE->Ref)) DispIsTable = true;
       }
@@ -2281,6 +2292,18 @@ void Lowerer::lowerStmt(const Stmt &St) {
             mlir::StringAttr::get(&MCtx, "matlab_string_disp"));
         emitUnregOp("matlab.call_builtin", {V},
                     {mlir::NoneType::get(&MCtx)}, loc(E.Range), {SCal});
+      } else if (DispIsDatetimeVec) {
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_datetime_vec_disp"));
+        emitUnregOp("matlab.call_builtin", {V},
+                    {mlir::NoneType::get(&MCtx)}, loc(E.Range), {Cal});
+      } else if (DispIsDurationVec) {
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_duration_vec_disp"));
+        emitUnregOp("matlab.call_builtin", {V},
+                    {mlir::NoneType::get(&MCtx)}, loc(E.Range), {Cal});
       } else if (DispIsDatetime) {
         mlir::NamedAttribute Cal(
             mlir::StringAttr::get(&MCtx, "callee"),
@@ -2391,6 +2414,8 @@ void Lowerer::lowerStmt(const Stmt &St) {
      * respective sets via the BinaryOp emission below. */
     bool RhsIsDatetime = false;
     bool RhsIsDuration = false;
+    bool RhsIsDatetimeVec = false;
+    bool RhsIsDurationVec = false;
     bool RhsIsCategorical = false;
     bool RhsIsTable = false;
     /* Plain matlab_struct* RHS — needs a dedicated workspace setter
@@ -2439,13 +2464,26 @@ void Lowerer::lowerStmt(const Stmt &St) {
         if (NE->Name == "datetime") RhsIsDatetime = true;
         else if (NE->Name == "seconds" || NE->Name == "minutes" ||
                  NE->Name == "hours"   || NE->Name == "days"    ||
-                 NE->Name == "years"   || NE->Name == "duration")
-          RhsIsDuration = true;
+                 NE->Name == "years"   || NE->Name == "duration") {
+          /* Phase 5.4: `days(0:251)` etc. → duration_vec; scalar
+           * f64 arg → scalar duration. Detect the colon-range form
+           * syntactically so we don't depend on the lowered Value's
+           * runtime type. */
+          if (!Cx->Args.empty() && Cx->Args[0] &&
+              (dynamic_cast<const RangeExpr *>(Cx->Args[0]) ||
+               dynamic_cast<const ColonExpr *>(Cx->Args[0]) ||
+               dynamic_cast<const MatrixLiteral *>(Cx->Args[0])))
+            RhsIsDurationVec = true;
+          else
+            RhsIsDuration = true;
+        }
       }
     } else if (A.RHS && A.RHS->Kind == NodeKind::NameExpr) {
       auto *NE = static_cast<const NameExpr *>(A.RHS);
-      if (NE->Ref && DatetimeBindings.count(NE->Ref)) RhsIsDatetime = true;
-      if (NE->Ref && DurationBindings.count(NE->Ref)) RhsIsDuration = true;
+      if (NE->Ref && DatetimeBindings.count(NE->Ref))    RhsIsDatetime    = true;
+      if (NE->Ref && DurationBindings.count(NE->Ref))    RhsIsDuration    = true;
+      if (NE->Ref && DatetimeVecBindings.count(NE->Ref)) RhsIsDatetimeVec = true;
+      if (NE->Ref && DurationVecBindings.count(NE->Ref)) RhsIsDurationVec = true;
     } else if (A.RHS && A.RHS->Kind == NodeKind::BinaryOp) {
       auto *BX = static_cast<const BinaryOpExpr *>(A.RHS);
       auto isDt = [&](const Expr *X) -> bool {
@@ -2456,6 +2494,12 @@ void Lowerer::lowerStmt(const Stmt &St) {
             if (NE->Name == "datetime") return true;
         return false;
       };
+      auto argIsRange = [](const CallOrIndex *CX) -> bool {
+        return !CX->Args.empty() && CX->Args[0] &&
+               (dynamic_cast<const RangeExpr *>(CX->Args[0]) ||
+                dynamic_cast<const ColonExpr *>(CX->Args[0]) ||
+                dynamic_cast<const MatrixLiteral *>(CX->Args[0]));
+      };
       auto isDur = [&](const Expr *X) -> bool {
         if (auto *NE = dynamic_cast<const NameExpr *>(X))
           return NE->Ref && DurationBindings.count(NE->Ref);
@@ -2463,11 +2507,49 @@ void Lowerer::lowerStmt(const Stmt &St) {
           if (auto *NE = dynamic_cast<const NameExpr *>(CX->Callee))
             if (NE->Name == "seconds" || NE->Name == "minutes" ||
                 NE->Name == "hours"   || NE->Name == "days"    ||
-                NE->Name == "years"   || NE->Name == "duration")
+                NE->Name == "years"   || NE->Name == "duration") {
+              if (argIsRange(CX))
+                return false;       /* duration_vec, handled below */
               return true;
+            }
         return false;
       };
-      if (BX->Op == BinOp::Sub && isDt(BX->LHS) && isDt(BX->RHS))
+      auto isDtVec = [&](const Expr *X) -> bool {
+        if (auto *NE = dynamic_cast<const NameExpr *>(X))
+          return NE->Ref && DatetimeVecBindings.count(NE->Ref);
+        return false;
+      };
+      auto isDurVec = [&](const Expr *X) -> bool {
+        if (auto *NE = dynamic_cast<const NameExpr *>(X))
+          return NE->Ref && DurationVecBindings.count(NE->Ref);
+        if (auto *CX = dynamic_cast<const CallOrIndex *>(X))
+          if (auto *NE = dynamic_cast<const NameExpr *>(CX->Callee))
+            if (NE->Name == "seconds" || NE->Name == "minutes" ||
+                NE->Name == "hours"   || NE->Name == "days"    ||
+                NE->Name == "years")
+              if (argIsRange(CX))
+                return true;
+        return false;
+      };
+      /* Vec-producing forms first. */
+      if (BX->Op == BinOp::Add &&
+          ((isDt(BX->LHS) && isDurVec(BX->RHS)) ||
+           (isDurVec(BX->LHS) && isDt(BX->RHS))))
+        RhsIsDatetimeVec = true;
+      else if (BX->Op == BinOp::Add &&
+               ((isDtVec(BX->LHS) && isDur(BX->RHS)) ||
+                (isDur(BX->LHS) && isDtVec(BX->RHS))))
+        RhsIsDatetimeVec = true;
+      else if (BX->Op == BinOp::Sub && isDtVec(BX->LHS) && isDur(BX->RHS))
+        RhsIsDatetimeVec = true;
+      else if (BX->Op == BinOp::Add && isDtVec(BX->LHS) && isDurVec(BX->RHS))
+        RhsIsDatetimeVec = true;
+      else if (BX->Op == BinOp::Sub &&
+               ((isDtVec(BX->LHS) && isDtVec(BX->RHS)) ||
+                (isDtVec(BX->LHS) && isDt(BX->RHS))))
+        RhsIsDurationVec = true;
+      /* Scalar forms (unchanged). */
+      else if (BX->Op == BinOp::Sub && isDt(BX->LHS) && isDt(BX->RHS))
         RhsIsDuration = true;
       else if (BX->Op == BinOp::Add &&
                ((isDt(BX->LHS) && isDur(BX->RHS)) ||
@@ -3160,6 +3242,16 @@ void Lowerer::lowerStmt(const Stmt &St) {
         if (auto *N = dynamic_cast<const NameExpr *>(L))
           if (N->Ref) DurationBindings.insert(N->Ref);
     }
+    if (RhsIsDatetimeVec) {
+      for (const Expr *L : A.LHS)
+        if (auto *N = dynamic_cast<const NameExpr *>(L))
+          if (N->Ref) DatetimeVecBindings.insert(N->Ref);
+    }
+    if (RhsIsDurationVec) {
+      for (const Expr *L : A.LHS)
+        if (auto *N = dynamic_cast<const NameExpr *>(L))
+          if (N->Ref) DurationVecBindings.insert(N->Ref);
+    }
     if (RhsIsCategorical) {
       for (const Expr *L : A.LHS)
         if (auto *N = dynamic_cast<const NameExpr *>(L))
@@ -3249,6 +3341,18 @@ void Lowerer::lowerStmt(const Stmt &St) {
             mlir::StringAttr::get(&MCtx, "matlab_string_disp"));
         emitUnregOp("matlab.call_builtin", {Rhs},
                     {mlir::NoneType::get(&MCtx)}, loc(A.Range), {SCal});
+      } else if (RhsIsDatetimeVec) {
+        mlir::NamedAttribute Cal2(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_datetime_vec_disp"));
+        emitUnregOp("matlab.call_builtin", {Rhs},
+                    {mlir::NoneType::get(&MCtx)}, loc(A.Range), {Cal2});
+      } else if (RhsIsDurationVec) {
+        mlir::NamedAttribute Cal2(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_duration_vec_disp"));
+        emitUnregOp("matlab.call_builtin", {Rhs},
+                    {mlir::NoneType::get(&MCtx)}, loc(A.Range), {Cal2});
       } else if (RhsIsDatetime) {
         mlir::NamedAttribute Cal2(
             mlir::StringAttr::get(&MCtx, "callee"),
@@ -4708,16 +4812,65 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             return true;
       return false;
     };
+    /* Phase 5.4: vec equivalents. A unit-constructor call counts as a
+     * vec when its single arg is a ColonExpr (the `0:251` form that
+     * drives `datetime(...) + days(0:251)`); for NameExpr LHS / RHS
+     * the *Vec*Bindings set carries the tag set by AssignStmt. */
+    auto isDtVecName = [&](const Expr *X) -> bool {
+      if (auto *NE = dynamic_cast<const NameExpr *>(X))
+        return NE->Ref && DatetimeVecBindings.count(NE->Ref);
+      return false;
+    };
+    auto isDurVecName = [&](const Expr *X) -> bool {
+      if (auto *NE = dynamic_cast<const NameExpr *>(X))
+        return NE->Ref && DurationVecBindings.count(NE->Ref);
+      if (auto *CX = dynamic_cast<const CallOrIndex *>(X))
+        if (auto *NE = dynamic_cast<const NameExpr *>(CX->Callee))
+          if (NE->Name == "seconds" || NE->Name == "minutes" ||
+              NE->Name == "hours"   || NE->Name == "days"    ||
+              NE->Name == "years")
+            if (!CX->Args.empty() && CX->Args[0] &&
+                (dynamic_cast<const RangeExpr *>(CX->Args[0]) ||
+                 dynamic_cast<const ColonExpr *>(CX->Args[0]) ||
+                 dynamic_cast<const MatrixLiteral *>(CX->Args[0])))
+              return true;
+      return false;
+    };
     {
       auto PtrTy2 = mlir::LLVM::LLVMPointerType::get(&MCtx);
       llvm::StringRef DtCallee;
-      if (Bi.Op == BinOp::Sub && isDtName(Bi.LHS) && isDtName(Bi.RHS))
+      bool SwapOperands = false;
+      /* Phase 5.4 vec dispatch — check vec combos first so a single
+       * NameExpr binding can be scalar or vec without ambiguity. */
+      if (Bi.Op == BinOp::Add && isDtName(Bi.LHS) && isDurVecName(Bi.RHS))
+        DtCallee = "matlab_datetime_add_duration_vec";
+      else if (Bi.Op == BinOp::Add && isDurVecName(Bi.LHS) && isDtName(Bi.RHS)) {
+        DtCallee = "matlab_datetime_add_duration_vec";
+        SwapOperands = true;
+      }
+      else if (Bi.Op == BinOp::Add && isDtVecName(Bi.LHS) && isDurName(Bi.RHS))
+        DtCallee = "matlab_datetime_vec_add_duration";
+      else if (Bi.Op == BinOp::Add && isDurName(Bi.LHS) && isDtVecName(Bi.RHS)) {
+        DtCallee = "matlab_datetime_vec_add_duration";
+        SwapOperands = true;
+      }
+      else if (Bi.Op == BinOp::Sub && isDtVecName(Bi.LHS) && isDurName(Bi.RHS))
+        DtCallee = "matlab_datetime_vec_sub_duration";
+      else if (Bi.Op == BinOp::Add && isDtVecName(Bi.LHS) && isDurVecName(Bi.RHS))
+        DtCallee = "matlab_datetime_vec_add_duration_vec";
+      else if (Bi.Op == BinOp::Sub && isDtVecName(Bi.LHS) && isDtVecName(Bi.RHS))
+        DtCallee = "matlab_datetime_vec_sub_datetime_vec";
+      else if (Bi.Op == BinOp::Sub && isDtVecName(Bi.LHS) && isDtName(Bi.RHS))
+        DtCallee = "matlab_datetime_vec_sub_datetime";
+      /* Scalar fall-through (matches the original block). */
+      else if (Bi.Op == BinOp::Sub && isDtName(Bi.LHS) && isDtName(Bi.RHS))
         DtCallee = "matlab_datetime_sub_datetime";
       else if (Bi.Op == BinOp::Add && isDtName(Bi.LHS) && isDurName(Bi.RHS))
         DtCallee = "matlab_datetime_add_duration";
-      else if (Bi.Op == BinOp::Add && isDurName(Bi.LHS) && isDtName(Bi.RHS))
-        /* duration + datetime: swap operands. */
+      else if (Bi.Op == BinOp::Add && isDurName(Bi.LHS) && isDtName(Bi.RHS)) {
         DtCallee = "matlab_datetime_add_duration";
+        SwapOperands = true;
+      }
       else if (Bi.Op == BinOp::Sub && isDtName(Bi.LHS) && isDurName(Bi.RHS))
         DtCallee = "matlab_datetime_sub_duration";
       else if (Bi.Op == BinOp::Add && isDurName(Bi.LHS) && isDurName(Bi.RHS))
@@ -4726,8 +4879,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         DtCallee = "matlab_duration_sub";
       if (!DtCallee.empty()) {
         mlir::Value LO = LHS, RO = RHS;
-        if (Bi.Op == BinOp::Add && isDurName(Bi.LHS) && isDtName(Bi.RHS))
-          std::swap(LO, RO);
+        if (SwapOperands) std::swap(LO, RO);
         mlir::NamedAttribute Cal(
             mlir::StringAttr::get(&MCtx, "callee"),
             mlir::StringAttr::get(&MCtx, std::string(DtCallee)));
@@ -8929,6 +9081,24 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
       if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
           N->Name == "disp" && C.Args.size() == 1 && C.Args[0]) {
         if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0])) {
+          /* Vec checks before scalar so a binding tagged as both
+           * scalar+vec (defensive) routes to the vec entry. */
+          if (ArgN->Ref && DatetimeVecBindings.count(ArgN->Ref)) {
+            mlir::Value V = lowerExpr(*C.Args[0]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_datetime_vec_disp"));
+            return emitUnreg("matlab.call_builtin", {V},
+                             mlir::NoneType::get(&MCtx), L, {Cal});
+          }
+          if (ArgN->Ref && DurationVecBindings.count(ArgN->Ref)) {
+            mlir::Value V = lowerExpr(*C.Args[0]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_duration_vec_disp"));
+            return emitUnreg("matlab.call_builtin", {V},
+                             mlir::NoneType::get(&MCtx), L, {Cal});
+          }
           if (ArgN->Ref && DatetimeBindings.count(ArgN->Ref)) {
             mlir::Value V = lowerExpr(*C.Args[0]);
             mlir::NamedAttribute Cal(
@@ -9400,7 +9570,13 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         }
       }
       /* duration unit constructors: seconds(n), minutes(n), hours(n),
-       * days(n), years(n) — each takes one f64 and returns a duration. */
+       * days(n), years(n).
+       *   - scalar f64 arg → matlab_duration_<unit>      → matlab_duration *
+       *   - matrix arg     → matlab_duration_<unit>_vec  → matlab_duration_vec *
+       * The matrix arm covers `days(0:251)` and the natural row-times
+       * recipe `datetime(2014,1,1) + days(0:251)`. The vec descriptor
+       * is tagged by the caller via DurationVecBindings on the LHS so
+       * downstream arithmetic / disp dispatch through the vec ABI. */
       if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
           (N->Name == "seconds" || N->Name == "minutes" ||
            N->Name == "hours"   || N->Name == "days"    ||
@@ -9408,11 +9584,51 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           C.Args.size() == 1 && C.Args[0]) {
         auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
         mlir::Value V = lowerExpr(*C.Args[0]);
+        bool IsMat = V && (V.getType() == PtrTy ||
+                           mlir::isa<mlir::RankedTensorType,
+                                     mlir::UnrankedTensorType>(V.getType()));
         std::string Callee = "matlab_duration_" + std::string(N->Name);
+        if (IsMat) Callee += "_vec";
         mlir::NamedAttribute Cal(
             mlir::StringAttr::get(&MCtx, "callee"),
             mlir::StringAttr::get(&MCtx, Callee));
         return emitUnreg("matlab.call_builtin", {V}, PtrTy, L, {Cal});
+      }
+      /* Phase 5.4: length / numel / size on a datetime_vec or
+       * duration_vec binding. Routes to the matlab_*_vec_length /
+       * _size_dim runtime entries; without this the polymorphic
+       * length() would treat the descriptor pointer as a matlab_mat
+       * and return 0. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          (N->Name == "length" || N->Name == "numel") &&
+          C.Args.size() == 1) {
+        if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]))
+          if (ArgN->Ref &&
+              (DatetimeVecBindings.count(ArgN->Ref) ||
+               DurationVecBindings.count(ArgN->Ref))) {
+            auto F64 = mlir::Float64Type::get(&MCtx);
+            mlir::Value V = lowerExpr(*C.Args[0]);
+            const char *Callee = DatetimeVecBindings.count(ArgN->Ref)
+                ? "matlab_datetime_vec_length"
+                : "matlab_duration_vec_length";
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, Callee));
+            return emitUnreg("matlab.call_builtin", {V}, F64, L, {Cal});
+          }
+      }
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "size" && C.Args.size() == 2) {
+        if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]))
+          if (ArgN->Ref && DatetimeVecBindings.count(ArgN->Ref)) {
+            auto F64 = mlir::Float64Type::get(&MCtx);
+            mlir::Value V = lowerExpr(*C.Args[0]);
+            mlir::Value D = lowerExpr(*C.Args[1]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_datetime_vec_size_dim"));
+            return emitUnreg("matlab.call_builtin", {V, D}, F64, L, {Cal});
+          }
       }
       /* Phase 4: dictionary() / dictionary(k1, v1, k2, v2, ...) ->
        * matlab_dict_new + per-pair set. v1 supports zero-arg and an

@@ -9779,6 +9779,223 @@ extern "C" matlab_duration *matlab_duration_sub(
 }
 
 /* ====================================================================== */
+/* Phase 5.4 — vector datetime / duration.
+ *
+ * `matlab_datetime_vec` is the natural product of `datetime(...) +
+ * days(0:251)` (or any other elementwise scalar-datetime + duration-
+ * vec expression) and the row-time axis of a timetable. The struct
+ * is small — a length plus a flat double array of seconds — and
+ * shares the same epoch-seconds representation as the scalar
+ * descriptor, so a `datetime_vec` slot `v` with `v->n == 1` is a
+ * cheap one-element view, not a different ABI.
+ *
+ * The unit constructors `seconds_vec`/`minutes_vec`/`hours_vec`/
+ * `days_vec`/`years_vec` accept a 1×N or N×1 matlab_mat and apply
+ * the same seconds-per-unit factor the scalar form already uses
+ * (years == 365.2425 days, the existing approximation — preserved
+ * for parity with `years(n)` on a scalar). Display / length /
+ * indexing / arithmetic dispatch live in the corresponding
+ * matlab_*_vec_ entries below.
+ * ====================================================================== */
+
+struct matlab_datetime_vec_s {
+    int64_t  n;
+    double  *secs;       /* unix-epoch seconds per element */
+};
+typedef struct matlab_datetime_vec_s matlab_datetime_vec;
+struct matlab_duration_vec_s {
+    int64_t  n;
+    double  *secs;       /* relative seconds per element */
+};
+typedef struct matlab_duration_vec_s matlab_duration_vec;
+
+static matlab_duration_vec *dur_vec_alloc(int64_t n) {
+    matlab_duration_vec *v = (matlab_duration_vec *)calloc(1, sizeof(*v));
+    v->n = n;
+    v->secs = (double *)calloc((size_t)(n > 0 ? n : 1), sizeof(double));
+    return v;
+}
+static matlab_datetime_vec *dt_vec_alloc(int64_t n) {
+    matlab_datetime_vec *v = (matlab_datetime_vec *)calloc(1, sizeof(*v));
+    v->n = n;
+    v->secs = (double *)calloc((size_t)(n > 0 ? n : 1), sizeof(double));
+    return v;
+}
+
+/* Per-unit seconds factors. Must match the scalar matlab_duration_*
+ * constructors in this TU; the years() factor mirrors the existing
+ * dur_make-based scalar entry (365.2425 days = 31556952 seconds). */
+static double duration_unit_factor(const char *unit) {
+    if (!unit) return 1.0;
+    if (strcmp(unit, "seconds") == 0) return 1.0;
+    if (strcmp(unit, "minutes") == 0) return 60.0;
+    if (strcmp(unit, "hours")   == 0) return 3600.0;
+    if (strcmp(unit, "days")    == 0) return 86400.0;
+    if (strcmp(unit, "years")   == 0) return 31556952.0;
+    return 1.0;
+}
+
+static matlab_duration_vec *dur_vec_from_mat(matlab_mat *m, const char *unit) {
+    int64_t n = (m && m->data) ? (int64_t)(m->rows * m->cols) : 0;
+    matlab_duration_vec *v = dur_vec_alloc(n > 0 ? n : 1);
+    double f = duration_unit_factor(unit);
+    if (m && m->data) {
+        for (int64_t i = 0; i < n; ++i) v->secs[i] = m->data[i] * f;
+    }
+    return v;
+}
+
+extern "C" matlab_duration_vec *matlab_duration_seconds_vec(matlab_mat *m) {
+    return dur_vec_from_mat(m, "seconds");
+}
+extern "C" matlab_duration_vec *matlab_duration_minutes_vec(matlab_mat *m) {
+    return dur_vec_from_mat(m, "minutes");
+}
+extern "C" matlab_duration_vec *matlab_duration_hours_vec(matlab_mat *m) {
+    return dur_vec_from_mat(m, "hours");
+}
+extern "C" matlab_duration_vec *matlab_duration_days_vec(matlab_mat *m) {
+    return dur_vec_from_mat(m, "days");
+}
+extern "C" matlab_duration_vec *matlab_duration_years_vec(matlab_mat *m) {
+    return dur_vec_from_mat(m, "years");
+}
+
+extern "C" double matlab_duration_vec_length(matlab_duration_vec *v) {
+    return v ? (double)v->n : 0.0;
+}
+extern "C" double matlab_datetime_vec_length(matlab_datetime_vec *v) {
+    return v ? (double)v->n : 0.0;
+}
+extern "C" double matlab_datetime_vec_size_dim(matlab_datetime_vec *v, double dim) {
+    if (!v) return 0.0;
+    int d = (int)dim;
+    if (d == 1) return (double)v->n;
+    if (d == 2) return 1.0;
+    return 1.0;
+}
+
+extern "C" const double *matlab_datetime_vec_secs(matlab_datetime_vec *v,
+                                                   int64_t *out_n) {
+    if (out_n) *out_n = v ? v->n : 0;
+    return v ? v->secs : nullptr;
+}
+
+/* 1-based; out-of-range returns a zero-epoch scalar (matches the
+ * scalar OOB convention used elsewhere in this runtime). */
+extern "C" matlab_datetime *matlab_datetime_vec_get(matlab_datetime_vec *v,
+                                                     double idx) {
+    int64_t i = (int64_t)idx - 1;
+    matlab_datetime *r = (matlab_datetime *)calloc(1, sizeof(*r));
+    if (v && i >= 0 && i < v->n) r->seconds = v->secs[i];
+    return r;
+}
+
+/* Display follows the scalar disp's "01-Jan-2014 00:00:00" form,
+ * compressing to one row per element with leading 3-space pad —
+ * matches MATLAB's column-of-datetimes default rendering. The vec
+ * size header is suppressed when n == 1 (degenerate scalar case). */
+extern "C" void matlab_datetime_vec_disp(matlab_datetime_vec *v) {
+    pthread_mutex_lock(&matlab_io_mutex);
+    if (!v || v->n == 0) {
+        printf("  0x0 datetime\n");
+        pthread_mutex_unlock(&matlab_io_mutex);
+        return;
+    }
+    static const char *months[] = {"Jan","Feb","Mar","Apr","May","Jun",
+                                    "Jul","Aug","Sep","Oct","Nov","Dec"};
+    for (int64_t i = 0; i < v->n; ++i) {
+        int y, m, dd, hh, mm; double ss;
+        epoch_to_civil(v->secs[i], &y, &m, &dd, &hh, &mm, &ss);
+        int mi = (m - 1) % 12; if (mi < 0) mi += 12;
+        int isec = (int)floor(ss + 0.5);
+        printf("   %02d-%s-%04d %02d:%02d:%02d\n",
+               dd, months[mi], y, hh, mm, isec);
+    }
+    pthread_mutex_unlock(&matlab_io_mutex);
+}
+
+/* duration vec display picks one sensible unit for the whole column
+ * and shows N rows of `xx unit` — matches MATLAB's smart-unit choice
+ * on the scalar disp. We pick from the largest-abs element so a
+ * `days(0:251)` column reads as "days" rather than seconds. */
+extern "C" void matlab_duration_vec_disp(matlab_duration_vec *v) {
+    pthread_mutex_lock(&matlab_io_mutex);
+    if (!v || v->n == 0) {
+        printf("  0x0 duration\n");
+        pthread_mutex_unlock(&matlab_io_mutex);
+        return;
+    }
+    double absmax = 0.0;
+    for (int64_t i = 0; i < v->n; ++i) {
+        double a = fabs(v->secs[i]);
+        if (a > absmax) absmax = a;
+    }
+    double f; const char *u;
+    if      (absmax >= 86400.0) { f = 86400.0; u = "days"; }
+    else if (absmax >= 3600.0)  { f = 3600.0;  u = "hr";   }
+    else if (absmax >= 60.0)    { f = 60.0;    u = "min";  }
+    else                        { f = 1.0;     u = "sec";  }
+    for (int64_t i = 0; i < v->n; ++i)
+        printf("   %.4f %s\n", v->secs[i] / f, u);
+    pthread_mutex_unlock(&matlab_io_mutex);
+}
+
+/* Arithmetic. Vec + scalar broadcasts the scalar across the vec;
+ * vec + vec is elementwise and pads to the longer operand by
+ * truncating to the shorter (mirrors MATLAB's broadcasting error
+ * — we silently truncate rather than raise, consistent with the
+ * runtime's existing dimension-mismatch behavior). */
+extern "C" matlab_datetime_vec *matlab_datetime_add_duration_vec(
+        matlab_datetime *a, matlab_duration_vec *d) {
+    int64_t n = d ? d->n : 0;
+    matlab_datetime_vec *r = dt_vec_alloc(n);
+    double base = a ? a->seconds : 0.0;
+    for (int64_t i = 0; i < n; ++i) r->secs[i] = base + d->secs[i];
+    return r;
+}
+extern "C" matlab_datetime_vec *matlab_datetime_vec_add_duration(
+        matlab_datetime_vec *a, matlab_duration *d) {
+    int64_t n = a ? a->n : 0;
+    matlab_datetime_vec *r = dt_vec_alloc(n);
+    double delta = d ? d->seconds : 0.0;
+    for (int64_t i = 0; i < n; ++i) r->secs[i] = a->secs[i] + delta;
+    return r;
+}
+extern "C" matlab_datetime_vec *matlab_datetime_vec_sub_duration(
+        matlab_datetime_vec *a, matlab_duration *d) {
+    int64_t n = a ? a->n : 0;
+    matlab_datetime_vec *r = dt_vec_alloc(n);
+    double delta = d ? d->seconds : 0.0;
+    for (int64_t i = 0; i < n; ++i) r->secs[i] = a->secs[i] - delta;
+    return r;
+}
+extern "C" matlab_datetime_vec *matlab_datetime_vec_add_duration_vec(
+        matlab_datetime_vec *a, matlab_duration_vec *d) {
+    int64_t na = a ? a->n : 0, nd = d ? d->n : 0;
+    int64_t n = na < nd ? na : nd;
+    matlab_datetime_vec *r = dt_vec_alloc(n);
+    for (int64_t i = 0; i < n; ++i) r->secs[i] = a->secs[i] + d->secs[i];
+    return r;
+}
+extern "C" matlab_duration_vec *matlab_datetime_vec_sub_datetime_vec(
+        matlab_datetime_vec *a, matlab_datetime_vec *b) {
+    int64_t na = a ? a->n : 0, nb = b ? b->n : 0;
+    int64_t n = na < nb ? na : nb;
+    matlab_duration_vec *r = dur_vec_alloc(n);
+    for (int64_t i = 0; i < n; ++i) r->secs[i] = a->secs[i] - b->secs[i];
+    return r;
+}
+extern "C" matlab_duration_vec *matlab_datetime_vec_sub_datetime(
+        matlab_datetime_vec *a, matlab_datetime *b) {
+    int64_t n = a ? a->n : 0;
+    matlab_duration_vec *r = dur_vec_alloc(n);
+    double base = b ? b->seconds : 0.0;
+    for (int64_t i = 0; i < n; ++i) r->secs[i] = a->secs[i] - base;
+    return r;
+}
+
+/* ====================================================================== */
 /* Phase 4 — containers.Map / dictionary.
  *
  * A simple key/value map. Keys are either f64 scalars or strings

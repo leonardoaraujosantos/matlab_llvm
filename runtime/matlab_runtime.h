@@ -1441,6 +1441,37 @@ matlab_datetime *matlab_datetime_sub_duration(matlab_datetime *a, matlab_duratio
 matlab_duration *matlab_duration_add(matlab_duration *a, matlab_duration *b);
 matlab_duration *matlab_duration_sub(matlab_duration *a, matlab_duration *b);
 
+/* Phase 5.4 — vector datetime / duration. Both descriptors carry a
+ * length plus a flat double array (seconds-since-Unix-epoch for
+ * datetime, relative seconds for duration). They form the index
+ * axis of a timetable's RowTimes plus the natural product of a
+ * vector unit constructor like `days(0:251)`. Arithmetic dispatch
+ * (scalar+vec, vec+scalar, vec+vec, vec-vec) lives below; the
+ * scalar-only ABI above is preserved unchanged. */
+typedef struct matlab_datetime_vec_s matlab_datetime_vec;
+typedef struct matlab_duration_vec_s matlab_duration_vec;
+matlab_duration_vec *matlab_duration_seconds_vec(matlab_mat *m);
+matlab_duration_vec *matlab_duration_minutes_vec(matlab_mat *m);
+matlab_duration_vec *matlab_duration_hours_vec  (matlab_mat *m);
+matlab_duration_vec *matlab_duration_days_vec   (matlab_mat *m);
+matlab_duration_vec *matlab_duration_years_vec  (matlab_mat *m);
+void                 matlab_duration_vec_disp(matlab_duration_vec *v);
+double               matlab_duration_vec_length(matlab_duration_vec *v);
+matlab_datetime_vec *matlab_datetime_add_duration_vec(matlab_datetime *a, matlab_duration_vec *d);
+matlab_datetime_vec *matlab_datetime_vec_add_duration(matlab_datetime_vec *a, matlab_duration *d);
+matlab_datetime_vec *matlab_datetime_vec_sub_duration(matlab_datetime_vec *a, matlab_duration *d);
+matlab_datetime_vec *matlab_datetime_vec_add_duration_vec(matlab_datetime_vec *a, matlab_duration_vec *d);
+matlab_duration_vec *matlab_datetime_vec_sub_datetime_vec(matlab_datetime_vec *a, matlab_datetime_vec *b);
+matlab_duration_vec *matlab_datetime_vec_sub_datetime    (matlab_datetime_vec *a, matlab_datetime *b);
+void                 matlab_datetime_vec_disp(matlab_datetime_vec *v);
+double               matlab_datetime_vec_length(matlab_datetime_vec *v);
+double               matlab_datetime_vec_size_dim(matlab_datetime_vec *v, double dim);
+matlab_datetime     *matlab_datetime_vec_get(matlab_datetime_vec *v, double idx);
+/* Direct accessor used by timetable / DAP — exposes the raw second-
+ * count and length without leaking the struct layout. */
+const double        *matlab_datetime_vec_secs(matlab_datetime_vec *v,
+                                               int64_t *out_n);
+
 /* Phase 4 — containers.Map / dictionary. A flat key/value table with
  * mixed key types (f64 or matlab_string *) and value types (f64 or
  * matlab_mat *). v1 backs both `containers.Map` and `dictionary` with

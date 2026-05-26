@@ -2256,6 +2256,79 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase(); Changed = true; continue;
     }
+    /* Phase 5.4: vec unit constructors take a matlab_mat * (PtrTy)
+     * and return a matlab_duration_vec *. */
+    if ((Name == "matlab_duration_seconds_vec" ||
+         Name == "matlab_duration_minutes_vec" ||
+         Name == "matlab_duration_hours_vec"   ||
+         Name == "matlab_duration_days_vec"    ||
+         Name == "matlab_duration_years_vec")  &&
+        Call->getNumResults() == 1 && Call->getNumOperands() == 1 &&
+        Call->getOperand(0).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, PtrTy, {PtrTy});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Call->getOperand(0)});
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase(); Changed = true; continue;
+    }
+    /* Phase 5.4: vec disp / length / size_dim and vec arithmetic.
+     * Disp is void; length / size_dim return F64; arithmetic
+     * combinations all take two PtrTy and return PtrTy. */
+    if ((Name == "matlab_datetime_vec_disp" ||
+         Name == "matlab_duration_vec_disp") &&
+        Call->getNumOperands() == 1 &&
+        Call->getOperand(0).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, VoidTy, {PtrTy});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                            ValueRange{Call->getOperand(0)});
+      Call->erase(); Changed = true; continue;
+    }
+    if ((Name == "matlab_datetime_vec_length" ||
+         Name == "matlab_duration_vec_length") &&
+        Call->getNumResults() == 1 && Call->getNumOperands() == 1 &&
+        Call->getOperand(0).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, F64, {PtrTy});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Call->getOperand(0)});
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase(); Changed = true; continue;
+    }
+    if (Name == "matlab_datetime_vec_size_dim" &&
+        Call->getNumResults() == 1 && Call->getNumOperands() == 2 &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == F64) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, F64, {PtrTy, F64});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Call->getOperand(0),
+                                                 Call->getOperand(1)});
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase(); Changed = true; continue;
+    }
+    if ((Name == "matlab_datetime_add_duration_vec"     ||
+         Name == "matlab_datetime_vec_add_duration"     ||
+         Name == "matlab_datetime_vec_sub_duration"     ||
+         Name == "matlab_datetime_vec_add_duration_vec" ||
+         Name == "matlab_datetime_vec_sub_datetime_vec" ||
+         Name == "matlab_datetime_vec_sub_datetime")    &&
+        Call->getNumResults() == 1 && Call->getNumOperands() == 2 &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, PtrTy, {PtrTy, PtrTy});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Call->getOperand(0),
+                                                 Call->getOperand(1)});
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase(); Changed = true; continue;
+    }
     if ((Name == "matlab_duration_to_seconds" ||
          Name == "matlab_duration_to_minutes" ||
          Name == "matlab_duration_to_hours" ||
