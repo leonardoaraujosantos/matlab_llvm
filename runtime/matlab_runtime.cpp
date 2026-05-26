@@ -9779,6 +9779,1143 @@ extern "C" matlab_duration *matlab_duration_sub(
 }
 
 /* ====================================================================== */
+/* Phase 5.4 — vector datetime / duration.
+ *
+ * `matlab_datetime_vec` is the natural product of `datetime(...) +
+ * days(0:251)` (or any other elementwise scalar-datetime + duration-
+ * vec expression) and the row-time axis of a timetable. The struct
+ * is small — a length plus a flat double array of seconds — and
+ * shares the same epoch-seconds representation as the scalar
+ * descriptor, so a `datetime_vec` slot `v` with `v->n == 1` is a
+ * cheap one-element view, not a different ABI.
+ *
+ * The unit constructors `seconds_vec`/`minutes_vec`/`hours_vec`/
+ * `days_vec`/`years_vec` accept a 1×N or N×1 matlab_mat and apply
+ * the same seconds-per-unit factor the scalar form already uses
+ * (years == 365.2425 days, the existing approximation — preserved
+ * for parity with `years(n)` on a scalar). Display / length /
+ * indexing / arithmetic dispatch live in the corresponding
+ * matlab_*_vec_ entries below.
+ * ====================================================================== */
+
+struct matlab_datetime_vec_s {
+    int64_t  n;
+    double  *secs;       /* unix-epoch seconds per element */
+};
+typedef struct matlab_datetime_vec_s matlab_datetime_vec;
+struct matlab_duration_vec_s {
+    int64_t  n;
+    double  *secs;       /* relative seconds per element */
+};
+typedef struct matlab_duration_vec_s matlab_duration_vec;
+
+static matlab_duration_vec *dur_vec_alloc(int64_t n) {
+    matlab_duration_vec *v = (matlab_duration_vec *)calloc(1, sizeof(*v));
+    v->n = n;
+    v->secs = (double *)calloc((size_t)(n > 0 ? n : 1), sizeof(double));
+    return v;
+}
+static matlab_datetime_vec *dt_vec_alloc(int64_t n) {
+    matlab_datetime_vec *v = (matlab_datetime_vec *)calloc(1, sizeof(*v));
+    v->n = n;
+    v->secs = (double *)calloc((size_t)(n > 0 ? n : 1), sizeof(double));
+    return v;
+}
+
+/* Per-unit seconds factors. Must match the scalar matlab_duration_*
+ * constructors in this TU; the years() factor mirrors the existing
+ * dur_make-based scalar entry (365.2425 days = 31556952 seconds). */
+static double duration_unit_factor(const char *unit) {
+    if (!unit) return 1.0;
+    if (strcmp(unit, "seconds") == 0) return 1.0;
+    if (strcmp(unit, "minutes") == 0) return 60.0;
+    if (strcmp(unit, "hours")   == 0) return 3600.0;
+    if (strcmp(unit, "days")    == 0) return 86400.0;
+    if (strcmp(unit, "years")   == 0) return 31556952.0;
+    return 1.0;
+}
+
+static matlab_duration_vec *dur_vec_from_mat(matlab_mat *m, const char *unit) {
+    int64_t n = (m && m->data) ? (int64_t)(m->rows * m->cols) : 0;
+    matlab_duration_vec *v = dur_vec_alloc(n > 0 ? n : 1);
+    double f = duration_unit_factor(unit);
+    if (m && m->data) {
+        for (int64_t i = 0; i < n; ++i) v->secs[i] = m->data[i] * f;
+    }
+    return v;
+}
+
+extern "C" matlab_duration_vec *matlab_duration_seconds_vec(matlab_mat *m) {
+    return dur_vec_from_mat(m, "seconds");
+}
+extern "C" matlab_duration_vec *matlab_duration_minutes_vec(matlab_mat *m) {
+    return dur_vec_from_mat(m, "minutes");
+}
+extern "C" matlab_duration_vec *matlab_duration_hours_vec(matlab_mat *m) {
+    return dur_vec_from_mat(m, "hours");
+}
+extern "C" matlab_duration_vec *matlab_duration_days_vec(matlab_mat *m) {
+    return dur_vec_from_mat(m, "days");
+}
+extern "C" matlab_duration_vec *matlab_duration_years_vec(matlab_mat *m) {
+    return dur_vec_from_mat(m, "years");
+}
+
+extern "C" double matlab_duration_vec_length(matlab_duration_vec *v) {
+    return v ? (double)v->n : 0.0;
+}
+extern "C" double matlab_datetime_vec_length(matlab_datetime_vec *v) {
+    return v ? (double)v->n : 0.0;
+}
+extern "C" double matlab_datetime_vec_size_dim(matlab_datetime_vec *v, double dim) {
+    if (!v) return 0.0;
+    int d = (int)dim;
+    if (d == 1) return (double)v->n;
+    if (d == 2) return 1.0;
+    return 1.0;
+}
+
+extern "C" const double *matlab_datetime_vec_secs(matlab_datetime_vec *v,
+                                                   int64_t *out_n) {
+    if (out_n) *out_n = v ? v->n : 0;
+    return v ? v->secs : nullptr;
+}
+
+/* Convert a datetime_vec to a column mat of days-since-first. This
+ * is the form plot() needs to render a chart with a sensible
+ * numeric x-axis — the first timestamp sits at x=0 and each
+ * subsequent point is offset by its day delta from the start. The
+ * full date-formatted tick lane lives downstream in the Cairo
+ * backend; for now this keeps the example end-to-end runnable. */
+extern "C" matlab_mat *matlab_datetime_vec_to_mat(matlab_datetime_vec *v) {
+    if (!v || v->n == 0) return mat_alloc(0, 0);
+    matlab_mat *m = mat_alloc(v->n, 1);
+    double base = v->secs[0];
+    for (int64_t i = 0; i < v->n; ++i)
+        m->data[i] = (v->secs[i] - base) / 86400.0;
+    return m;
+}
+
+/* 1-based; out-of-range returns a zero-epoch scalar (matches the
+ * scalar OOB convention used elsewhere in this runtime). */
+extern "C" matlab_datetime *matlab_datetime_vec_get(matlab_datetime_vec *v,
+                                                     double idx) {
+    int64_t i = (int64_t)idx - 1;
+    matlab_datetime *r = (matlab_datetime *)calloc(1, sizeof(*r));
+    if (v && i >= 0 && i < v->n) r->seconds = v->secs[i];
+    return r;
+}
+
+/* Display follows the scalar disp's "01-Jan-2014 00:00:00" form,
+ * compressing to one row per element with leading 3-space pad —
+ * matches MATLAB's column-of-datetimes default rendering. The vec
+ * size header is suppressed when n == 1 (degenerate scalar case). */
+extern "C" void matlab_datetime_vec_disp(matlab_datetime_vec *v) {
+    pthread_mutex_lock(&matlab_io_mutex);
+    if (!v || v->n == 0) {
+        printf("  0x0 datetime\n");
+        pthread_mutex_unlock(&matlab_io_mutex);
+        return;
+    }
+    static const char *months[] = {"Jan","Feb","Mar","Apr","May","Jun",
+                                    "Jul","Aug","Sep","Oct","Nov","Dec"};
+    for (int64_t i = 0; i < v->n; ++i) {
+        int y, m, dd, hh, mm; double ss;
+        epoch_to_civil(v->secs[i], &y, &m, &dd, &hh, &mm, &ss);
+        int mi = (m - 1) % 12; if (mi < 0) mi += 12;
+        int isec = (int)floor(ss + 0.5);
+        printf("   %02d-%s-%04d %02d:%02d:%02d\n",
+               dd, months[mi], y, hh, mm, isec);
+    }
+    pthread_mutex_unlock(&matlab_io_mutex);
+}
+
+/* duration vec display picks one sensible unit for the whole column
+ * and shows N rows of `xx unit` — matches MATLAB's smart-unit choice
+ * on the scalar disp. We pick from the largest-abs element so a
+ * `days(0:251)` column reads as "days" rather than seconds. */
+extern "C" void matlab_duration_vec_disp(matlab_duration_vec *v) {
+    pthread_mutex_lock(&matlab_io_mutex);
+    if (!v || v->n == 0) {
+        printf("  0x0 duration\n");
+        pthread_mutex_unlock(&matlab_io_mutex);
+        return;
+    }
+    double absmax = 0.0;
+    for (int64_t i = 0; i < v->n; ++i) {
+        double a = fabs(v->secs[i]);
+        if (a > absmax) absmax = a;
+    }
+    double f; const char *u;
+    if      (absmax >= 86400.0) { f = 86400.0; u = "days"; }
+    else if (absmax >= 3600.0)  { f = 3600.0;  u = "hr";   }
+    else if (absmax >= 60.0)    { f = 60.0;    u = "min";  }
+    else                        { f = 1.0;     u = "sec";  }
+    for (int64_t i = 0; i < v->n; ++i)
+        printf("   %.4f %s\n", v->secs[i] / f, u);
+    pthread_mutex_unlock(&matlab_io_mutex);
+}
+
+/* Arithmetic. Vec + scalar broadcasts the scalar across the vec;
+ * vec + vec is elementwise and pads to the longer operand by
+ * truncating to the shorter (mirrors MATLAB's broadcasting error
+ * — we silently truncate rather than raise, consistent with the
+ * runtime's existing dimension-mismatch behavior). */
+extern "C" matlab_datetime_vec *matlab_datetime_add_duration_vec(
+        matlab_datetime *a, matlab_duration_vec *d) {
+    int64_t n = d ? d->n : 0;
+    matlab_datetime_vec *r = dt_vec_alloc(n);
+    double base = a ? a->seconds : 0.0;
+    for (int64_t i = 0; i < n; ++i) r->secs[i] = base + d->secs[i];
+    return r;
+}
+extern "C" matlab_datetime_vec *matlab_datetime_vec_add_duration(
+        matlab_datetime_vec *a, matlab_duration *d) {
+    int64_t n = a ? a->n : 0;
+    matlab_datetime_vec *r = dt_vec_alloc(n);
+    double delta = d ? d->seconds : 0.0;
+    for (int64_t i = 0; i < n; ++i) r->secs[i] = a->secs[i] + delta;
+    return r;
+}
+extern "C" matlab_datetime_vec *matlab_datetime_vec_sub_duration(
+        matlab_datetime_vec *a, matlab_duration *d) {
+    int64_t n = a ? a->n : 0;
+    matlab_datetime_vec *r = dt_vec_alloc(n);
+    double delta = d ? d->seconds : 0.0;
+    for (int64_t i = 0; i < n; ++i) r->secs[i] = a->secs[i] - delta;
+    return r;
+}
+extern "C" matlab_datetime_vec *matlab_datetime_vec_add_duration_vec(
+        matlab_datetime_vec *a, matlab_duration_vec *d) {
+    int64_t na = a ? a->n : 0, nd = d ? d->n : 0;
+    int64_t n = na < nd ? na : nd;
+    matlab_datetime_vec *r = dt_vec_alloc(n);
+    for (int64_t i = 0; i < n; ++i) r->secs[i] = a->secs[i] + d->secs[i];
+    return r;
+}
+extern "C" matlab_duration_vec *matlab_datetime_vec_sub_datetime_vec(
+        matlab_datetime_vec *a, matlab_datetime_vec *b) {
+    int64_t na = a ? a->n : 0, nb = b ? b->n : 0;
+    int64_t n = na < nb ? na : nb;
+    matlab_duration_vec *r = dur_vec_alloc(n);
+    for (int64_t i = 0; i < n; ++i) r->secs[i] = a->secs[i] - b->secs[i];
+    return r;
+}
+extern "C" matlab_duration_vec *matlab_datetime_vec_sub_datetime(
+        matlab_datetime_vec *a, matlab_datetime *b) {
+    int64_t n = a ? a->n : 0;
+    matlab_duration_vec *r = dur_vec_alloc(n);
+    double base = b ? b->seconds : 0.0;
+    for (int64_t i = 0; i < n; ++i) r->secs[i] = a->secs[i] - base;
+    return r;
+}
+
+/* ====================================================================== */
+/* Phase 5.4 (cont.) — timetable.
+ *
+ * Composition over matlab_table: the timetable carries its own
+ * parallel-array column store plus the datetime_vec RowTimes and
+ * the Properties.Description string. We do NOT embed matlab_table
+ * because timetable will diverge — retime/synchronize need a
+ * RowTimes-aware fast path that the bare table lookup can't
+ * shortcut, and dropping a column needs to leave RowTimes intact.
+ * The column kinds reuse the MATLAB_TABLE_KIND_* enum so add_column
+ * dispatch lines up byte-for-byte with the table-runtime conventions.
+ * ====================================================================== */
+
+struct matlab_timetable_s {
+    int32_t  nvars;
+    int32_t  cap;
+    int32_t  nrows;
+    char   **names;
+    void   **data;
+    int8_t  *kinds;
+    matlab_datetime_vec *row_times;
+    char    *description;
+};
+typedef struct matlab_timetable_s matlab_timetable;
+
+static void tt_grow(matlab_timetable *tt, int32_t need) {
+    if (tt->cap >= need) return;
+    int32_t nc = tt->cap ? tt->cap * 2 : 4;
+    while (nc < need) nc *= 2;
+    tt->names = (char **)realloc(tt->names, (size_t)nc * sizeof(char *));
+    tt->data  = (void **)realloc(tt->data,  (size_t)nc * sizeof(void *));
+    tt->kinds = (int8_t *)realloc(tt->kinds, (size_t)nc * sizeof(int8_t));
+    for (int32_t i = tt->cap; i < nc; ++i) {
+        tt->names[i] = NULL;
+        tt->data[i]  = NULL;
+        tt->kinds[i] = MATLAB_TABLE_KIND_NUMERIC;
+    }
+    tt->cap = nc;
+}
+static int32_t tt_find(matlab_timetable *tt, const char *name, int64_t len) {
+    if (!tt) return -1;
+    for (int32_t i = 0; i < tt->nvars; ++i) {
+        if (!tt->names[i]) continue;
+        if ((int64_t)strlen(tt->names[i]) == len &&
+            memcmp(tt->names[i], name, (size_t)len) == 0) return i;
+    }
+    return -1;
+}
+
+extern "C" matlab_timetable *matlab_timetable_new(void) {
+    return (matlab_timetable *)calloc(1, sizeof(matlab_timetable));
+}
+
+extern "C" void matlab_timetable_set_row_times(matlab_timetable *tt,
+                                                matlab_datetime_vec *rt) {
+    if (!tt) return;
+    tt->row_times = rt;
+    if (rt && tt->nrows == 0) tt->nrows = (int32_t)rt->n;
+}
+
+extern "C" matlab_datetime_vec *matlab_timetable_get_row_times(matlab_timetable *tt) {
+    return tt ? tt->row_times : NULL;
+}
+
+extern "C" void matlab_timetable_set_description(matlab_timetable *tt,
+                                                  const char *desc,
+                                                  int64_t len) {
+    if (!tt) return;
+    free(tt->description);
+    tt->description = NULL;
+    if (desc && len > 0) {
+        tt->description = (char *)malloc((size_t)len + 1);
+        memcpy(tt->description, desc, (size_t)len);
+        tt->description[len] = '\0';
+    }
+}
+
+extern "C" void matlab_timetable_add_column(matlab_timetable *tt,
+                                             const char *name, int64_t namelen,
+                                             matlab_mat *col) {
+    if (!tt) return;
+    int32_t i = tt_find(tt, name, namelen);
+    if (i < 0) {
+        if (tt->nvars == tt->cap) tt_grow(tt, tt->nvars + 1);
+        i = tt->nvars++;
+        tt->names[i] = (char *)malloc((size_t)namelen + 1);
+        memcpy(tt->names[i], name, (size_t)namelen);
+        tt->names[i][namelen] = '\0';
+        if (col && tt->nrows == 0) {
+            int64_t r = col->rows * col->cols;
+            tt->nrows = (int32_t)r;
+        }
+    }
+    tt->data[i]  = col;
+    tt->kinds[i] = MATLAB_TABLE_KIND_NUMERIC;
+}
+
+extern "C" void matlab_timetable_add_column_kind(matlab_timetable *tt,
+                                                  const char *name,
+                                                  int64_t namelen,
+                                                  void *col, int32_t kind,
+                                                  int64_t nrows_hint) {
+    if (!tt) return;
+    int32_t i = tt_find(tt, name, namelen);
+    if (i < 0) {
+        if (tt->nvars == tt->cap) tt_grow(tt, tt->nvars + 1);
+        i = tt->nvars++;
+        tt->names[i] = (char *)malloc((size_t)namelen + 1);
+        memcpy(tt->names[i], name, (size_t)namelen);
+        tt->names[i][namelen] = '\0';
+        if (tt->nrows == 0 && nrows_hint > 0)
+            tt->nrows = (int32_t)nrows_hint;
+    }
+    tt->data[i]  = col;
+    tt->kinds[i] = (int8_t)kind;
+}
+
+extern "C" matlab_mat *matlab_timetable_get_column(matlab_timetable *tt,
+                                                    const char *name,
+                                                    int64_t namelen) {
+    int32_t i = tt_find(tt, name, namelen);
+    if (i < 0 || !tt->data[i]) return mat_alloc(0, 0);
+    if (tt->kinds && tt->kinds[i] != MATLAB_TABLE_KIND_NUMERIC)
+        return mat_alloc(0, 0);
+    return (matlab_mat *)tt->data[i];
+}
+
+extern "C" double matlab_timetable_get_kind(matlab_timetable *tt,
+                                             const char *name,
+                                             int64_t namelen) {
+    int32_t i = tt_find(tt, name, namelen);
+    if (i < 0) return -1.0;
+    return tt->kinds ? (double)tt->kinds[i] : 0.0;
+}
+
+extern "C" double matlab_timetable_height(matlab_timetable *tt) {
+    return tt ? (double)tt->nrows : 0.0;
+}
+extern "C" double matlab_timetable_width(matlab_timetable *tt) {
+    return tt ? (double)tt->nvars : 0.0;
+}
+extern "C" double matlab_timetable_numel(matlab_timetable *tt) {
+    return tt ? (double)(tt->nrows * tt->nvars) : 0.0;
+}
+extern "C" double matlab_timetable_size_dim(matlab_timetable *tt, double dim) {
+    if (!tt) return 0.0;
+    int d = (int)dim;
+    if (d == 1) return (double)tt->nrows;
+    if (d == 2) return (double)tt->nvars;
+    return 1.0;
+}
+
+/* Selection helpers — these return a fresh matlab_timetable that
+ * shares column-data pointers with the source (we are a static-
+ * compile lane; no refcounted ownership semantics, and the source
+ * outlives the slice by construction in the headline workflow).
+ * For row selection we copy the numeric column data, since the
+ * new column is a different length than the source. */
+extern "C" matlab_timetable *matlab_timetable_select_var(matlab_timetable *tt,
+                                                          const char *name,
+                                                          int64_t namelen) {
+    matlab_timetable *out = matlab_timetable_new();
+    if (!tt) return out;
+    int32_t i = tt_find(tt, name, namelen);
+    out->row_times = tt->row_times;
+    out->nrows = tt->nrows;
+    if (i < 0) return out;
+    /* Share the column pointer — the caller treats the slice as
+     * read-only for the duration of any downstream call chain. */
+    matlab_timetable_add_column_kind(out, name, namelen,
+                                      tt->data[i],
+                                      tt->kinds ? tt->kinds[i] : 0,
+                                      tt->nrows);
+    return out;
+}
+
+/* Row-selection: idx is a matlab_mat of 1-based positions. The
+ * out timetable carries copies of each column reduced to those
+ * rows, and a fresh datetime_vec with the matching RowTimes. We
+ * detect logical-index style (all values in {0,1} with length ==
+ * nrows) and route to the boolean-mask path. */
+extern "C" matlab_timetable *matlab_timetable_select_rows_mat(
+        matlab_timetable *tt, matlab_mat *idx) {
+    matlab_timetable *out = matlab_timetable_new();
+    if (!tt || !idx) return out;
+    int64_t in_n = (int64_t)(idx->rows * idx->cols);
+    int64_t src_n = tt->nrows;
+    bool is_logical = (in_n == src_n);
+    if (is_logical) {
+        for (int64_t i = 0; i < in_n; ++i) {
+            double v = idx->data[i];
+            if (v != 0.0 && v != 1.0) { is_logical = false; break; }
+        }
+    }
+    /* Build the row map (1-based source row per output row). */
+    int64_t out_n = 0;
+    int64_t *map = (int64_t *)calloc((size_t)(in_n > 0 ? in_n : 1),
+                                     sizeof(int64_t));
+    if (is_logical) {
+        for (int64_t i = 0; i < in_n; ++i)
+            if (idx->data[i] != 0.0) map[out_n++] = i;
+    } else {
+        for (int64_t i = 0; i < in_n; ++i) {
+            int64_t r = (int64_t)idx->data[i] - 1;
+            if (r >= 0 && r < src_n) map[out_n++] = r;
+        }
+    }
+    /* RowTimes slice. */
+    matlab_datetime_vec *rt = dt_vec_alloc(out_n);
+    if (tt->row_times && tt->row_times->secs)
+        for (int64_t i = 0; i < out_n; ++i)
+            rt->secs[i] = tt->row_times->secs[map[i]];
+    out->row_times = rt;
+    out->nrows = (int32_t)out_n;
+    /* Per-column copy (numeric only — string / datetime columns
+     * fall back to a no-op copy of the pointer array; they're rare
+     * in the timetable headline. */
+    for (int32_t c = 0; c < tt->nvars; ++c) {
+        int kind = tt->kinds ? tt->kinds[c] : 0;
+        const char *cname = tt->names[c];
+        int64_t cnl = (int64_t)strlen(cname);
+        if (kind == MATLAB_TABLE_KIND_NUMERIC) {
+            matlab_mat *src = (matlab_mat *)tt->data[c];
+            matlab_mat *dst = mat_alloc(out_n, 1);
+            if (src && src->data)
+                for (int64_t i = 0; i < out_n; ++i)
+                    dst->data[i] = src->data[map[i]];
+            matlab_timetable_add_column(out, cname, cnl, dst);
+        } else {
+            /* For string / datetime columns we'd allocate a fresh
+             * pointer-array of the right length and copy the
+             * selected pointers. Defer until a test exercises it. */
+            matlab_timetable_add_column_kind(out, cname, cnl,
+                                              tt->data[c], (int32_t)kind,
+                                              out_n);
+        }
+    }
+    free(map);
+    if (out->description && !out->description[0]) out->description = NULL;
+    return out;
+}
+
+extern "C" const char *matlab_timetable_get_description(matlab_timetable *tt) {
+    if (!tt || !tt->description) return "";
+    return tt->description;
+}
+
+/* Timerange — a closed / half-open / open interval used as a row
+ * index on a timetable. Mode encodes which endpoints are included
+ * (see header). The select arm walks RowTimes and copies rows whose
+ * timestamp falls in the interval. */
+struct matlab_timerange_s {
+    double t_start;
+    double t_end;
+    int32_t mode;
+};
+typedef struct matlab_timerange_s matlab_timerange;
+
+extern "C" matlab_timerange *matlab_timerange_new(matlab_datetime *t1,
+                                                   matlab_datetime *t2,
+                                                   int32_t mode) {
+    matlab_timerange *tr = (matlab_timerange *)calloc(1, sizeof(*tr));
+    tr->t_start = t1 ? t1->seconds : 0.0;
+    tr->t_end   = t2 ? t2->seconds : 0.0;
+    tr->mode    = mode;
+    return tr;
+}
+
+static inline bool tr_contains(double t, double s, double e, int mode) {
+    switch (mode) {
+        case 0: /* closed     */ return t >= s && t <= e;
+        case 1: /* openright  */ return t >= s && t <  e;
+        case 2: /* openleft   */ return t >  s && t <= e;
+        case 3: /* open       */ return t >  s && t <  e;
+    }
+    return t >= s && t <  e;
+}
+
+/* Cadence / aggregator codes — mirror the matlab_runtime.h enums.
+ * Keep these as plain ints (not enum class) so the LowerTensorOps
+ * pass can pass i32 constants directly. */
+enum { RETIME_DAILY = 0, RETIME_WEEKLY = 1,
+       RETIME_MONTHLY = 2, RETIME_YEARLY = 3 };
+enum { AGG_FIRSTVALUE = 0, AGG_LASTVALUE = 1,
+       AGG_MAX = 2, AGG_MIN = 3, AGG_SUM = 4, AGG_MEAN = 5 };
+
+/* Bucket key + bucket-start helpers. For daily / weekly we treat the
+ * input as a UTC time-of-day; the bucket key is the integer count
+ * of days/weeks since the Unix epoch. For monthly / yearly we
+ * decompose to civil (y,m) and key on year*12+month or year. */
+static int64_t bucket_key_for(double secs, int cadence,
+                               int *out_y, int *out_m, int *out_d) {
+    double days = floor(secs / 86400.0);
+    int64_t day = (int64_t)days;
+    switch (cadence) {
+        case RETIME_DAILY: {
+            return day;
+        }
+        case RETIME_WEEKLY: {
+            /* Unix epoch (1970-01-01) was a Thursday. Mondays satisfy
+             * (days + 3) % 7 == 0 in the same indexing. So
+             *   week_start_day = floor((day + 3) / 7) * 7 - 3
+             * and the key is that integer. */
+            int64_t wk = (day + 3) >= 0
+                ? (day + 3) / 7
+                : -((-(day + 3) + 6) / 7);
+            return wk;
+        }
+        case RETIME_MONTHLY:
+        case RETIME_YEARLY: {
+            int y, m, d, hh, mm; double ss;
+            epoch_to_civil(secs, &y, &m, &d, &hh, &mm, &ss);
+            if (out_y) *out_y = y;
+            if (out_m) *out_m = m;
+            if (out_d) *out_d = d;
+            if (cadence == RETIME_YEARLY) return y;
+            return (int64_t)y * 12 + m;
+        }
+    }
+    return day;
+}
+
+static double bucket_start_secs(int cadence, int64_t key) {
+    switch (cadence) {
+        case RETIME_DAILY:   return (double)key * 86400.0;
+        case RETIME_WEEKLY:  return ((double)key * 7.0 - 3.0) * 86400.0;
+        case RETIME_MONTHLY: {
+            int y = (int)(key / 12);
+            int m = (int)(key % 12);
+            if (m == 0) { y -= 1; m = 12; }
+            return civil_to_epoch(y, m, 1, 0, 0, 0.0);
+        }
+        case RETIME_YEARLY:
+            return civil_to_epoch((int)key, 1, 1, 0, 0, 0.0);
+    }
+    return (double)key * 86400.0;
+}
+
+extern "C" matlab_timetable *matlab_timetable_retime(matlab_timetable *tt,
+                                                      int32_t cadence,
+                                                      int32_t agg) {
+    matlab_timetable *out = matlab_timetable_new();
+    if (!tt || !tt->row_times || tt->row_times->n == 0) return out;
+    int64_t src_n = tt->row_times->n;
+
+    /* Per-row bucket key. */
+    int64_t *keys = (int64_t *)calloc((size_t)src_n, sizeof(int64_t));
+    for (int64_t i = 0; i < src_n; ++i)
+        keys[i] = bucket_key_for(tt->row_times->secs[i], cadence,
+                                  NULL, NULL, NULL);
+
+    /* Unique-key list, in source order. We assume RowTimes are
+     * sorted (MATLAB requires it for a sorted timetable). */
+    int64_t *uniq = (int64_t *)calloc((size_t)src_n, sizeof(int64_t));
+    int64_t *start_row = (int64_t *)calloc((size_t)src_n, sizeof(int64_t));
+    int64_t *end_row   = (int64_t *)calloc((size_t)src_n, sizeof(int64_t));
+    int64_t out_n = 0;
+    for (int64_t i = 0; i < src_n; ++i) {
+        if (out_n == 0 || keys[i] != uniq[out_n - 1]) {
+            uniq[out_n] = keys[i];
+            start_row[out_n] = i;
+            end_row[out_n]   = i;
+            out_n++;
+        } else {
+            end_row[out_n - 1] = i;
+        }
+    }
+
+    /* New RowTimes — bucket-start per unique key. */
+    matlab_datetime_vec *rt = dt_vec_alloc(out_n);
+    for (int64_t i = 0; i < out_n; ++i)
+        rt->secs[i] = bucket_start_secs(cadence, uniq[i]);
+    out->row_times = rt;
+    out->nrows = (int32_t)out_n;
+
+    /* Per numeric column, aggregate over each bucket. String and
+     * datetime columns aren't meaningful under aggregators like
+     * max/sum/mean, but firstvalue/lastvalue would be — keep
+     * those as a follow-on. */
+    for (int32_t c = 0; c < tt->nvars; ++c) {
+        int kind = tt->kinds ? tt->kinds[c] : 0;
+        const char *cname = tt->names[c];
+        int64_t cnl = (int64_t)strlen(cname);
+        if (kind != MATLAB_TABLE_KIND_NUMERIC) {
+            matlab_timetable_add_column_kind(out, cname, cnl,
+                                              tt->data[c], (int32_t)kind,
+                                              out_n);
+            continue;
+        }
+        matlab_mat *src = (matlab_mat *)tt->data[c];
+        matlab_mat *dst = mat_alloc(out_n, 1);
+        if (!src || !src->data) {
+            matlab_timetable_add_column(out, cname, cnl, dst);
+            continue;
+        }
+        for (int64_t b = 0; b < out_n; ++b) {
+            int64_t s = start_row[b], e = end_row[b];
+            double acc = 0.0;
+            double v;
+            switch (agg) {
+                case AGG_FIRSTVALUE:
+                    dst->data[b] = src->data[s]; break;
+                case AGG_LASTVALUE:
+                    dst->data[b] = src->data[e]; break;
+                case AGG_MAX:
+                    acc = src->data[s];
+                    for (int64_t k = s + 1; k <= e; ++k) {
+                        v = src->data[k];
+                        if (v > acc) acc = v;
+                    }
+                    dst->data[b] = acc; break;
+                case AGG_MIN:
+                    acc = src->data[s];
+                    for (int64_t k = s + 1; k <= e; ++k) {
+                        v = src->data[k];
+                        if (v < acc) acc = v;
+                    }
+                    dst->data[b] = acc; break;
+                case AGG_SUM:
+                    for (int64_t k = s; k <= e; ++k) acc += src->data[k];
+                    dst->data[b] = acc; break;
+                case AGG_MEAN:
+                    for (int64_t k = s; k <= e; ++k) acc += src->data[k];
+                    dst->data[b] = acc / (double)(e - s + 1); break;
+                default:
+                    dst->data[b] = src->data[s]; break;
+            }
+        }
+        matlab_timetable_add_column(out, cname, cnl, dst);
+    }
+    free(keys); free(uniq); free(start_row); free(end_row);
+    return out;
+}
+
+/* Method codes mirror the MATLAB_FILL_* enum in matlab_runtime.h. */
+enum { FILL_LINEAR = 0, FILL_PREVIOUS = 1, FILL_NEXT = 2 };
+
+/* Forward-declare matlab_timetable_disp so head() can reuse it; the
+ * canonical definition is further up in this TU. */
+extern "C" void matlab_timetable_disp(matlab_timetable *tt);
+
+/* fillmissing per numeric column. Three method codes mirror the
+ * enum in matlab_runtime.h. Linear interpolation walks rows once,
+ * tracking the last non-NaN; on hitting a non-NaN it back-fills the
+ * gap by linear interpolation; leading-NaN runs are carried from
+ * the first non-NaN, trailing-NaN runs from the last. previous /
+ * next are one-pass carries. */
+static bool is_nan_d(double x) { return x != x; }
+extern "C" matlab_timetable *matlab_timetable_fillmissing(
+        matlab_timetable *tt, int32_t method) {
+    matlab_timetable *out = matlab_timetable_new();
+    if (!tt) return out;
+    /* RowTimes pass through. */
+    if (tt->row_times) {
+        matlab_datetime_vec *rt = dt_vec_alloc(tt->row_times->n);
+        for (int64_t i = 0; i < tt->row_times->n; ++i)
+            rt->secs[i] = tt->row_times->secs[i];
+        out->row_times = rt;
+    }
+    out->nrows = tt->nrows;
+    if (tt->description)
+        matlab_timetable_set_description(out, tt->description,
+                                          (int64_t)strlen(tt->description));
+    int64_t n = tt->nrows;
+    for (int32_t c = 0; c < tt->nvars; ++c) {
+        int kind = tt->kinds ? tt->kinds[c] : 0;
+        const char *cn = tt->names[c];
+        int64_t cnl = (int64_t)strlen(cn);
+        if (kind != MATLAB_TABLE_KIND_NUMERIC) {
+            matlab_timetable_add_column_kind(out, cn, cnl,
+                                              tt->data[c], (int32_t)kind, n);
+            continue;
+        }
+        matlab_mat *src = (matlab_mat *)tt->data[c];
+        matlab_mat *dst = mat_alloc(n, 1);
+        if (!src || !src->data) {
+            matlab_timetable_add_column(out, cn, cnl, dst);
+            continue;
+        }
+        for (int64_t i = 0; i < n; ++i) dst->data[i] = src->data[i];
+        if (method == FILL_PREVIOUS) {
+            double last = NAN;
+            for (int64_t i = 0; i < n; ++i) {
+                if (!is_nan_d(dst->data[i])) last = dst->data[i];
+                else if (!is_nan_d(last)) dst->data[i] = last;
+            }
+        } else if (method == FILL_NEXT) {
+            double next = NAN;
+            for (int64_t i = n - 1; i >= 0; --i) {
+                if (!is_nan_d(dst->data[i])) next = dst->data[i];
+                else if (!is_nan_d(next)) dst->data[i] = next;
+            }
+        } else { /* MATLAB_FILL_LINEAR (default) */
+            int64_t prev_i = -1;
+            double prev_v = 0.0;
+            for (int64_t i = 0; i < n; ++i) {
+                if (is_nan_d(dst->data[i])) continue;
+                if (prev_i < 0) {
+                    /* Carry the first non-NaN backwards over leading NaNs. */
+                    for (int64_t k = 0; k < i; ++k) dst->data[k] = dst->data[i];
+                } else if (i > prev_i + 1) {
+                    /* Linear interpolate the gap (prev_i, i). */
+                    double step = (dst->data[i] - prev_v) /
+                                  (double)(i - prev_i);
+                    for (int64_t k = prev_i + 1; k < i; ++k)
+                        dst->data[k] = prev_v + step * (double)(k - prev_i);
+                }
+                prev_i = i;
+                prev_v = dst->data[i];
+            }
+            /* Carry the last non-NaN forwards over trailing NaNs. */
+            if (prev_i >= 0)
+                for (int64_t k = prev_i + 1; k < n; ++k) dst->data[k] = prev_v;
+        }
+        matlab_timetable_add_column(out, cn, cnl, dst);
+    }
+    return out;
+}
+
+extern "C" void matlab_timetable_summary(matlab_timetable *tt) {
+    if (!tt) return;
+    pthread_mutex_lock(&matlab_io_mutex);
+    /* Time-axis line. */
+    if (tt->row_times && tt->row_times->n > 0) {
+        int y1, m1, d1, hh1, mm1, y2, m2, d2, hh2, mm2;
+        double ss;
+        static const char *months[] = {"Jan","Feb","Mar","Apr","May","Jun",
+                                        "Jul","Aug","Sep","Oct","Nov","Dec"};
+        epoch_to_civil(tt->row_times->secs[0],
+                        &y1, &m1, &d1, &hh1, &mm1, &ss);
+        epoch_to_civil(tt->row_times->secs[tt->row_times->n - 1],
+                        &y2, &m2, &d2, &hh2, &mm2, &ss);
+        int mi1 = (m1 - 1) % 12; if (mi1 < 0) mi1 += 12;
+        int mi2 = (m2 - 1) % 12; if (mi2 < 0) mi2 += 12;
+        printf("Time: %lld rows  [%02d-%s-%04d ... %02d-%s-%04d]\n",
+                (long long)tt->row_times->n,
+                d1, months[mi1], y1, d2, months[mi2], y2);
+    }
+    /* Per-numeric-column line: min/max/mean/NumMissing. */
+    for (int32_t c = 0; c < tt->nvars; ++c) {
+        int kind = tt->kinds ? tt->kinds[c] : 0;
+        const char *cn = tt->names[c];
+        if (kind != MATLAB_TABLE_KIND_NUMERIC) {
+            printf("%s: (non-numeric)\n", cn ? cn : "(unnamed)");
+            continue;
+        }
+        matlab_mat *col = (matlab_mat *)tt->data[c];
+        int64_t n = tt->nrows;
+        if (!col || !col->data || n == 0) {
+            printf("%s: (empty)\n", cn ? cn : "(unnamed)");
+            continue;
+        }
+        double mn = INFINITY, mx = -INFINITY, sum = 0.0;
+        int64_t nan_n = 0, valid_n = 0;
+        for (int64_t i = 0; i < n; ++i) {
+            double v = col->data[i];
+            if (is_nan_d(v)) { nan_n++; continue; }
+            if (v < mn) mn = v;
+            if (v > mx) mx = v;
+            sum += v;
+            valid_n++;
+        }
+        double mean = valid_n > 0 ? sum / (double)valid_n : NAN;
+        printf("%s: NumMissing=%lld  Min=%.4g  Max=%.4g  Mean=%.4g\n",
+                cn ? cn : "(unnamed)", (long long)nan_n, mn, mx, mean);
+    }
+    pthread_mutex_unlock(&matlab_io_mutex);
+}
+
+/* head — display the first n rows. n<=0 means "8 by default". */
+extern "C" void matlab_timetable_head(matlab_timetable *tt, double n) {
+    if (!tt) return;
+    int64_t k = (int64_t)n;
+    if (k <= 0) k = 8;
+    if (k > tt->nrows) k = tt->nrows;
+    /* Reuse disp's renderer by transiently trimming nrows. The
+     * field set is restored before return so the caller's view is
+     * unchanged. */
+    int32_t saved = tt->nrows;
+    tt->nrows = (int32_t)k;
+    matlab_timetable_disp(tt);
+    tt->nrows = saved;
+}
+
+/* movavg over the first numeric column. Simple MA uses a running-
+ * window mean (over the available rows for the first N-1 elements);
+ * EMA uses MATLAB's a = 2/(N+1) smoothing factor with y[0] = x[0]. */
+enum { MA_SIMPLE = 0, MA_EXPONENTIAL = 1 };
+
+static matlab_mat *first_numeric_column(matlab_timetable *tt) {
+    if (!tt) return NULL;
+    for (int32_t c = 0; c < tt->nvars; ++c) {
+        int kind = tt->kinds ? tt->kinds[c] : 0;
+        if (kind == MATLAB_TABLE_KIND_NUMERIC) return (matlab_mat *)tt->data[c];
+    }
+    return NULL;
+}
+
+extern "C" matlab_timetable *matlab_timetable_movavg(matlab_timetable *tt,
+                                                      int32_t type,
+                                                      int32_t period) {
+    matlab_timetable *out = matlab_timetable_new();
+    if (!tt) return out;
+    matlab_mat *src = first_numeric_column(tt);
+    int64_t n = tt->nrows;
+    if (tt->row_times) {
+        matlab_datetime_vec *rt = dt_vec_alloc(n);
+        for (int64_t i = 0; i < n; ++i) rt->secs[i] = tt->row_times->secs[i];
+        out->row_times = rt;
+    }
+    out->nrows = (int32_t)n;
+    matlab_mat *dst = mat_alloc(n, 1);
+    if (src && src->data && n > 0) {
+        int64_t N = period > 0 ? period : 1;
+        if (type == MA_SIMPLE) {
+            double acc = 0.0;
+            for (int64_t i = 0; i < n; ++i) {
+                acc += src->data[i];
+                if (i >= N) acc -= src->data[i - N];
+                int64_t window = i < N ? (i + 1) : N;
+                dst->data[i] = acc / (double)window;
+            }
+        } else { /* exponential */
+            double a = 2.0 / (double)(N + 1);
+            dst->data[0] = src->data[0];
+            for (int64_t i = 1; i < n; ++i)
+                dst->data[i] = a * src->data[i] + (1.0 - a) * dst->data[i - 1];
+        }
+    }
+    /* Match MATLAB's movavg-on-timetable behaviour: the output
+     * column is named like the input column (so 'Close' stays
+     * 'Close' in the EMA timetable). */
+    const char *cn = "Var1";
+    if (tt->nvars > 0 && tt->names && tt->names[0]) cn = tt->names[0];
+    matlab_timetable_add_column(out, cn, (int64_t)strlen(cn), dst);
+    return out;
+}
+
+/* macd: fast=12 EMA, slow=26 EMA, signal=9 EMA of (fast - slow). */
+static void ema_inplace(const double *x, double *y, int64_t n, int64_t N) {
+    if (n == 0) return;
+    double a = 2.0 / (double)(N + 1);
+    y[0] = x[0];
+    for (int64_t i = 1; i < n; ++i)
+        y[i] = a * x[i] + (1.0 - a) * y[i - 1];
+}
+extern "C" matlab_timetable *matlab_timetable_macd(matlab_timetable *tt) {
+    matlab_timetable *out = matlab_timetable_new();
+    if (!tt) return out;
+    matlab_mat *src = first_numeric_column(tt);
+    int64_t n = tt->nrows;
+    if (tt->row_times) {
+        matlab_datetime_vec *rt = dt_vec_alloc(n);
+        for (int64_t i = 0; i < n; ++i) rt->secs[i] = tt->row_times->secs[i];
+        out->row_times = rt;
+    }
+    out->nrows = (int32_t)n;
+    matlab_mat *macd = mat_alloc(n, 1);
+    matlab_mat *signal = mat_alloc(n, 1);
+    matlab_mat *hist   = mat_alloc(n, 1);
+    if (src && src->data && n > 0) {
+        std::vector<double> fast(n), slow(n);
+        ema_inplace(src->data, fast.data(), n, 12);
+        ema_inplace(src->data, slow.data(), n, 26);
+        for (int64_t i = 0; i < n; ++i) macd->data[i] = fast[i] - slow[i];
+        ema_inplace(macd->data, signal->data, n, 9);
+        for (int64_t i = 0; i < n; ++i)
+            hist->data[i] = macd->data[i] - signal->data[i];
+    }
+    matlab_timetable_add_column(out, "MACD",      4, macd);
+    matlab_timetable_add_column(out, "Signal",    6, signal);
+    matlab_timetable_add_column(out, "Histogram", 9, hist);
+    return out;
+}
+
+/* Horizontal concat: produce a fresh timetable whose RowTimes are
+ * taken from `a` and whose columns are the union of `a`'s and `b`'s.
+ * Mismatched RowTimes are silently truncated (we copy min(a->nrows,
+ * b->nrows) rows from each — the doc-page workflow already aligned
+ * both inputs via retime onto the same grid before concatenating). */
+extern "C" matlab_timetable *matlab_timetable_horzcat(matlab_timetable *a,
+                                                       matlab_timetable *b) {
+    matlab_timetable *out = matlab_timetable_new();
+    if (!a && !b) return out;
+    if (!a) { a = b; b = NULL; }
+    /* RowTimes from `a` (we trust the caller to have aligned). */
+    int64_t nrows = a->nrows;
+    if (b && b->nrows < nrows) nrows = b->nrows;
+    if (a->row_times) {
+        matlab_datetime_vec *rt = dt_vec_alloc(nrows);
+        for (int64_t i = 0; i < nrows; ++i)
+            rt->secs[i] = a->row_times->secs[i];
+        out->row_times = rt;
+    }
+    out->nrows = (int32_t)nrows;
+    /* Copy a's columns. */
+    for (int32_t c = 0; c < a->nvars; ++c) {
+        int kind = a->kinds ? a->kinds[c] : 0;
+        const char *cn = a->names[c];
+        int64_t cnl = (int64_t)strlen(cn);
+        if (kind == MATLAB_TABLE_KIND_NUMERIC) {
+            matlab_mat *src = (matlab_mat *)a->data[c];
+            matlab_mat *dst = mat_alloc(nrows, 1);
+            if (src && src->data)
+                for (int64_t i = 0; i < nrows; ++i)
+                    dst->data[i] = src->data[i];
+            matlab_timetable_add_column(out, cn, cnl, dst);
+        } else {
+            matlab_timetable_add_column_kind(out, cn, cnl,
+                                              a->data[c], (int32_t)kind,
+                                              nrows);
+        }
+    }
+    /* Then b's columns. */
+    if (b) {
+        for (int32_t c = 0; c < b->nvars; ++c) {
+            int kind = b->kinds ? b->kinds[c] : 0;
+            const char *cn = b->names[c];
+            int64_t cnl = (int64_t)strlen(cn);
+            if (kind == MATLAB_TABLE_KIND_NUMERIC) {
+                matlab_mat *src = (matlab_mat *)b->data[c];
+                matlab_mat *dst = mat_alloc(nrows, 1);
+                if (src && src->data)
+                    for (int64_t i = 0; i < nrows; ++i)
+                        dst->data[i] = src->data[i];
+                matlab_timetable_add_column(out, cn, cnl, dst);
+            } else {
+                matlab_timetable_add_column_kind(out, cn, cnl,
+                                                  b->data[c], (int32_t)kind,
+                                                  nrows);
+            }
+        }
+    }
+    return out;
+}
+
+/* synchronize: retime both inputs onto the same cadence + aggregator,
+ * then horz-cat. The result has one row per cadence bucket and
+ * carries all columns from both inputs. */
+extern "C" matlab_timetable *matlab_timetable_synchronize(
+        matlab_timetable *a, matlab_timetable *b,
+        int32_t cadence, int32_t aggregator) {
+    matlab_timetable *ra = matlab_timetable_retime(a, cadence, aggregator);
+    matlab_timetable *rb = matlab_timetable_retime(b, cadence, aggregator);
+    return matlab_timetable_horzcat(ra, rb);
+}
+
+extern "C" matlab_timetable *matlab_timetable_select_rows_timerange(
+        matlab_timetable *tt, matlab_timerange *tr) {
+    matlab_timetable *out = matlab_timetable_new();
+    if (!tt || !tr || !tt->row_times) return out;
+    int64_t src_n = tt->row_times->n;
+    int64_t out_n = 0;
+    int64_t *map = (int64_t *)calloc((size_t)(src_n > 0 ? src_n : 1),
+                                      sizeof(int64_t));
+    for (int64_t i = 0; i < src_n; ++i) {
+        if (tr_contains(tt->row_times->secs[i],
+                         tr->t_start, tr->t_end, tr->mode))
+            map[out_n++] = i;
+    }
+    matlab_datetime_vec *rt = dt_vec_alloc(out_n);
+    for (int64_t i = 0; i < out_n; ++i)
+        rt->secs[i] = tt->row_times->secs[map[i]];
+    out->row_times = rt;
+    out->nrows = (int32_t)out_n;
+    for (int32_t c = 0; c < tt->nvars; ++c) {
+        int kind = tt->kinds ? tt->kinds[c] : 0;
+        const char *cname = tt->names[c];
+        int64_t cnl = (int64_t)strlen(cname);
+        if (kind == MATLAB_TABLE_KIND_NUMERIC) {
+            matlab_mat *src = (matlab_mat *)tt->data[c];
+            matlab_mat *dst = mat_alloc(out_n, 1);
+            if (src && src->data)
+                for (int64_t i = 0; i < out_n; ++i)
+                    dst->data[i] = src->data[map[i]];
+            matlab_timetable_add_column(out, cname, cnl, dst);
+        } else {
+            matlab_timetable_add_column_kind(out, cname, cnl,
+                                              tt->data[c], (int32_t)kind,
+                                              out_n);
+        }
+    }
+    free(map);
+    return out;
+}
+
+/* table2timetable: take ownership of the table's columns and attach
+ * a RowTimes axis. We move (not copy) so the source table becomes
+ * stale; the test harness keeps no further reference. */
+extern "C" matlab_timetable *matlab_table2timetable(matlab_table *t,
+                                                     matlab_datetime_vec *rt) {
+    matlab_timetable *tt = matlab_timetable_new();
+    if (!t) return tt;
+    tt->nvars = t->nvars;
+    tt->cap   = t->cap;
+    tt->nrows = t->nrows;
+    tt->names = t->names;
+    tt->data  = t->data;
+    tt->kinds = t->kinds;
+    /* Null-out the source so the caller's free-on-drop doesn't double-free. */
+    t->nvars = 0; t->cap = 0;
+    t->names = NULL; t->data = NULL; t->kinds = NULL;
+    tt->row_times = rt;
+    if (rt && tt->nrows == 0) tt->nrows = (int32_t)rt->n;
+    return tt;
+}
+
+/* Display. MATLAB renders timetables as:
+ *      Time             Var1   Var2  ...
+ *      ____________     ____   ____
+ *      01-Jan-2014       100     50
+ *      02-Jan-2014       110     55
+ *      ...
+ * The time column comes first; we reuse the datetime/string/numeric
+ * cell renderers from matlab_table_disp byte-for-byte. */
+extern "C" void matlab_timetable_disp(matlab_timetable *tt) {
+    if (!tt) { matlab_disp_str("(empty timetable)", 17); return; }
+    pthread_mutex_lock(&matlab_io_mutex);
+    const int WTIME = 20;
+    const int W     = 12;
+    /* Description (Properties.Description) prints above the header
+     * when set, matching MATLAB's table render. */
+    if (tt->description && tt->description[0]) {
+        printf("    %s\n", tt->description);
+    }
+    /* Header: Time + variable names. */
+    printf("    %*s", WTIME, "Time");
+    for (int32_t i = 0; i < tt->nvars; ++i)
+        printf("    %*s", W, tt->names[i] ? tt->names[i] : "");
+    putchar('\n');
+    /* Underline. */
+    printf("    ");
+    for (int j = 0; j < WTIME; ++j) putchar('_');
+    for (int32_t i = 0; i < tt->nvars; ++i) {
+        printf("    ");
+        for (int j = 0; j < W; ++j) putchar('_');
+    }
+    putchar('\n');
+    /* Rows. */
+    static const char *months[] = {"Jan","Feb","Mar","Apr","May","Jun",
+                                    "Jul","Aug","Sep","Oct","Nov","Dec"};
+    for (int32_t r = 0; r < tt->nrows; ++r) {
+        /* Time column. */
+        if (tt->row_times && r < tt->row_times->n) {
+            int y, m, dd, hh, mm; double ss;
+            epoch_to_civil(tt->row_times->secs[r], &y, &m, &dd, &hh, &mm, &ss);
+            int mi = (m - 1) % 12; if (mi < 0) mi += 12;
+            int isec = (int)floor(ss + 0.5);
+            char buf[40];
+            int n = snprintf(buf, sizeof buf,
+                              "%02d-%s-%04d %02d:%02d:%02d",
+                              dd, months[mi], y, hh, mm, isec);
+            printf("    %*.*s", WTIME, n, buf);
+        } else {
+            printf("    %*s", WTIME, "");
+        }
+        /* Data columns — same dispatch as matlab_table_disp. */
+        for (int32_t c = 0; c < tt->nvars; ++c) {
+            int kind = tt->kinds ? (int)tt->kinds[c] : 0;
+            if (kind == MATLAB_TABLE_KIND_STRING) {
+                matlab_string_s_fwd_ **arr =
+                    (matlab_string_s_fwd_ **)tt->data[c];
+                matlab_string_s_fwd_ *s = arr ? arr[r] : NULL;
+                if (s && s->data) {
+                    int len = (int)s->len;
+                    if (len > W) len = W;
+                    int pad = W - len;
+                    printf("    ");
+                    for (int p = 0; p < pad; ++p) putchar(' ');
+                    fwrite(s->data, 1, (size_t)len, stdout);
+                } else {
+                    printf("    %*s", W, "");
+                }
+            } else if (kind == MATLAB_TABLE_KIND_DATETIME) {
+                matlab_datetime **arr = (matlab_datetime **)tt->data[c];
+                matlab_datetime *d = arr ? arr[r] : NULL;
+                if (d) {
+                    int y, m, dd, hh, mm; double ss;
+                    epoch_to_civil(d->seconds, &y, &m, &dd, &hh, &mm, &ss);
+                    int mi = (m - 1) % 12; if (mi < 0) mi += 12;
+                    char buf[32];
+                    int n = snprintf(buf, sizeof buf,
+                                      "%02d-%s-%04d", dd, months[mi], y);
+                    printf("    %*.*s", W, n, buf);
+                } else {
+                    printf("    %*s", W, "");
+                }
+            } else {
+                matlab_mat *col = (matlab_mat *)tt->data[c];
+                if (col && r < col->rows * col->cols) {
+                    double v = col->data[r];
+                    if (v == (double)(int64_t)v && fabs(v) < 1e15)
+                        printf("    %*lld", W, (long long)v);
+                    else
+                        printf("    %*.*g", W, 6, v);
+                } else {
+                    printf("    %*s", W, "");
+                }
+            }
+        }
+        putchar('\n');
+    }
+    pthread_mutex_unlock(&matlab_io_mutex);
+}
+
+/* ====================================================================== */
 /* Phase 4 — containers.Map / dictionary.
  *
  * A simple key/value map. Keys are either f64 scalars or strings
