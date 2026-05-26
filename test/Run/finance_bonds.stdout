@@ -1,0 +1,9 @@
+par bond price = 100.0000
+premium bond  = 116.3514
+discount bond = 85.1225
+bndyield(premium) = 0.0400
+Macaulay = 8.3392, Modified = 8.1757
+convexity = 78.90
+accrfrac(30, 180) = 0.1667
+prdisc(5%, 91d) = 98.7361
+ytbill(98.74, 91) = 0.0512

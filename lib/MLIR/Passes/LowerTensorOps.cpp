@@ -6945,6 +6945,85 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"writeVerilogAAmplifier",  "matlab_rf_write_verilog_a_amplifier",  0, "fffp"},
       {"writeVerilogAAM",         "matlab_rf_write_verilog_a_am",         0, "ffp"},
       {"writeVerilogAIQMod",      "matlab_rf_write_verilog_a_iqmod",      0, "ffp"},
+      /* ====================================================================
+       * Financial Toolbox Tier-1: date arithmetic
+       * ==================================================================*/
+      {"yearfrac",   "matlab_yearfrac",   0, "ppf"},
+      {"daysdif",    "matlab_daysdif",    0, "ppf"},
+      {"daysadd",    "matlab_daysadd",    1, "pff"},
+      {"daysact",    "matlab_daysact",    0, "pp"},
+      {"days360",    "matlab_days360",    0, "pp"},
+      {"days365",    "matlab_days365",    0, "pp"},
+      {"busdate",    "matlab_busdate",    1, "pf"},
+      {"isbusday",   "matlab_isbusday",   0, "p"},
+      {"eomdate",    "matlab_eomdate",    1, "ff"},
+      {"lweekdate",  "matlab_lweekdate",  1, "fff"},
+      {"fweekdate",  "matlab_fweekdate",  1, "fff"},
+      {"m2xdate",    "matlab_m2xdate",    0, "f"},
+      {"x2mdate",    "matlab_x2mdate",    0, "f"},
+      /* ====================================================================
+       * Financial Toolbox Tier-1: cash flows + depreciation
+       * ==================================================================*/
+      {"pvfix",      "matlab_pvfix",      0, "fff"},
+      {"fvfix",      "matlab_fvfix",      0, "fff"},
+      {"pvvar",      "matlab_pvvar",      0, "pf"},
+      {"fvvar",      "matlab_fvvar",      0, "pf"},
+      {"irr",        "matlab_irr",        0, "p"},
+      {"payper",     "matlab_payper",     0, "fff"},
+      {"amortize",   "matlab_amortize",   1, "fff"},
+      {"nomrr",      "matlab_nomrr",      0, "ff"},
+      {"effrr",      "matlab_effrr",      0, "ff"},
+      {"depstln",    "matlab_depstln",    1, "fff"},
+      {"depsoyd",    "matlab_depsoyd",    1, "fff"},
+      {"depfixdb",   "matlab_depfixdb",   1, "fff"},
+      /* Financial Toolbox Tier-1: bond pricing + T-bills. */
+      {"bndprice",   "matlab_bndprice",   0, "ffff"},
+      {"bndyield",   "matlab_bndyield",   0, "ffff"},
+      {"bnddurp",    "matlab_bnddurp",    1, "ffff"},
+      {"bnddury",    "matlab_bnddury",    1, "ffff"},
+      {"bndconvp",   "matlab_bndconvp",   0, "ffff"},
+      {"accrfrac",   "matlab_accrfrac",   0, "ff"},
+      {"prdisc",     "matlab_prdisc",     0, "ff"},
+      {"prtbill",    "matlab_prtbill",    0, "ff"},
+      {"ytbill",     "matlab_ytbill",     0, "ff"},
+      {"beytbill",   "matlab_beytbill",   0, "ff"},
+      /* Financial Toolbox Tier-1: returns + indicator function-form. */
+      {"tick2ret",   "matlab_tick2ret",   1, "p"},
+      {"ret2tick",   "matlab_ret2tick",   1, "p"},
+      {"sma",        "matlab_sma",        1, "pf"},
+      {"bolling",    "matlab_bolling",    1, "pff"},
+      {"rsindex",    "matlab_rsindex",    1, "pf"},
+      /* Financial Toolbox Tier-2: performance metrics. */
+      {"sharpe",     "matlab_sharpe",     0, "pf"},
+      {"sortino",    "matlab_sortino",    0, "pf"},
+      {"inforatio",  "matlab_inforatio",  0, "pp"},
+      {"tracking",   "matlab_tracking",   0, "pp"},
+      {"maxdrawdown","matlab_maxdrawdown",0, "p"},
+      {"lpm",        "matlab_lpm",        0, "pff"},
+      {"portalpha",  "matlab_portalpha",  0, "ppf"},
+      /* Financial Toolbox Tier-2: Black-Scholes Greeks + implied vol. */
+      {"blsprice",   "matlab_blsprice",   0, "fffff"},
+      {"blsdelta",   "matlab_blsdelta",   0, "fffff"},
+      {"blsgamma",   "matlab_blsgamma",   0, "fffff"},
+      {"blsvega",    "matlab_blsvega",    0, "fffff"},
+      {"blsrho",     "matlab_blsrho",     0, "fffff"},
+      {"blstheta",   "matlab_blstheta",   0, "fffff"},
+      {"blslambda",  "matlab_blslambda",  0, "fffff"},
+      {"blsimpv",    "matlab_blsimpv",    0, "fffff"},
+      /* Financial Toolbox Tier-3: Portfolio classdef methods. The
+       * first ptr arg is the Portfolio object (a class-pinned
+       * matlab_obj*). Setters return the same obj for chaining. */
+      {"setAssetMoments",         "matlab_portfolio_set_asset_moments",        1, "ppp"},
+      {"setBounds",               "matlab_portfolio_set_bounds",               1, "ppp"},
+      {"setBudget",               "matlab_portfolio_set_budget",               1, "pff"},
+      {"setDefaultConstraints",   "matlab_portfolio_set_default_constraints",  1, "p"},
+      {"estimateFrontier",        "matlab_portfolio_estimate_frontier",        1, "pf"},
+      {"estimateFrontierByReturn","matlab_portfolio_estimate_frontier_by_return",1, "pf"},
+      {"estimateMaxSharpeRatio",  "matlab_portfolio_estimate_max_sharpe",      1, "p"},
+      {"estimatePortMoments",     "matlab_portfolio_estimate_port_moments",    1, "pp"},
+      {"estimatePortReturn",      "matlab_portfolio_estimate_port_return",     0, "pp"},
+      {"estimatePortRisk",        "matlab_portfolio_estimate_port_risk",       0, "pp"},
+      {"estimateAssetMoments",    "matlab_portfolio_estimate_asset_moments",   1, "pp"},
     };
 
     // Pick the first entry with name + arity + TYPE match so overloaded

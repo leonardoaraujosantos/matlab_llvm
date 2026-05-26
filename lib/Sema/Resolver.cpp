@@ -72,6 +72,34 @@ void Resolver::registerBuiltins() {
     "fillmissing", "summary", "head", "tail", "rowfun",
     /* Phase 5.4 Financial indicators on timetables. */
     "movavg", "macd", "sma", "ema", "highlow", "candle",
+    /* Financial Toolbox Tier-1: date arithmetic. */
+    "yearfrac", "daysdif", "daysadd", "daysact", "days360", "days365",
+    "busdate", "isbusday", "eomdate", "lweekdate", "fweekdate",
+    "m2xdate", "x2mdate",
+    /* Tier-1: cash flows + depreciation. */
+    "pvfix", "fvfix", "pvvar", "fvvar", "irr", "payper", "amortize",
+    "nomrr", "effrr", "depstln", "depsoyd", "depfixdb",
+    /* Tier-1: bond pricing. */
+    "bndprice", "bndyield", "bnddurp", "bnddury", "bndconvp",
+    "bndconvy", "accrfrac", "cfdates", "cfamounts",
+    "prdisc", "prtbill", "ytbill", "beytbill",
+    /* Tier-1: returns + indicator function-form. */
+    "tick2ret", "ret2tick", "rsindex", "bolling",
+    /* Tier-2: performance metrics + Black-Scholes. */
+    "sharpe", "sortino", "inforatio", "tracking", "maxdrawdown",
+    "lpm", "elpm", "portalpha",
+    "blsprice", "blsdelta", "blsgamma", "blsvega", "blsrho", "blstheta",
+    "blslambda", "blsimpv",
+    /* Tier-3: Portfolio classdef methods. The class itself
+     * (`Portfolio`) is provided by finance_classdefs.m via the
+     * auto-prepend mechanism; the methods listed here become first-
+     * arg-class-pinned dispatches through the LowerTensorOps Spec
+     * table when called as `setAssetMoments(p, m, C)`. */
+    "setAssetMoments", "setBounds", "setBudget",
+    "setEquality", "setInequality", "setDefaultConstraints",
+    "estimateFrontier", "estimateFrontierByReturn", "estimateFrontierByRisk",
+    "estimatePortMoments", "estimatePortReturn", "estimatePortRisk",
+    "estimateMaxSharpeRatio", "estimateAssetMoments", "plotFrontier",
     /* Phase 6 — Symbolic Math Toolbox via SymPP. The link target
      * (matlab_sym_* runtime) is only present when the build was
      * configured -DMATLAB_LLVM_WITH_SYM=ON; without that the JIT/-emit-c
