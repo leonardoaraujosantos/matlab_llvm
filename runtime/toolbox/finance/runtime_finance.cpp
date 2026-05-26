@@ -822,6 +822,145 @@ extern "C" matlab_mat *matlab_portfolio_estimate_asset_moments(
     return out;
 }
 
+/* ----- Tier-7 §1: close the half-wired Portfolio methods ----- */
+
+/* Read the universe (mean, cov, bounds, budget) into caller buffers.
+ * Returns N, or 0 on failure. */
+static int64_t portfolio_read(struct matlab_obj_s *p,
+                               const double **mean, const double **cov,
+                               std::vector<double> &lb, std::vector<double> &ub,
+                               double *budget) {
+    matlab_mat *m_mean = matlab_obj_get_mat(p, "AssetMean",  9);
+    matlab_mat *m_cov  = matlab_obj_get_mat(p, "AssetCovar", 10);
+    matlab_mat *m_lb   = matlab_obj_get_mat(p, "LowerBound", 10);
+    matlab_mat *m_ub   = matlab_obj_get_mat(p, "UpperBound", 10);
+    *budget = matlab_obj_get_f64(p, "LowerBudget", 11);
+    if (*budget <= 0.0) *budget = 1.0;
+    if (!m_mean || !m_mean->data || !m_cov || !m_cov->data) return 0;
+    int64_t N = m_mean->rows * m_mean->cols;
+    *mean = m_mean->data;
+    *cov  = m_cov->data;
+    lb.assign(static_cast<size_t>(N), 0.0);
+    ub.assign(static_cast<size_t>(N), 1.0);
+    if (m_lb && m_lb->data && (m_lb->rows*m_lb->cols) == N)
+        for (int64_t i = 0; i < N; ++i) lb[static_cast<size_t>(i)] = m_lb->data[i];
+    if (m_ub && m_ub->data && (m_ub->rows*m_ub->cols) == N)
+        for (int64_t i = 0; i < N; ++i) ub[static_cast<size_t>(i)] = m_ub->data[i];
+    return N;
+}
+
+static double port_risk(const double *cov, const double *w, int64_t N) {
+    std::vector<double> Cw(static_cast<size_t>(N));
+    matvec(cov, w, Cw.data(), N);
+    return sqrt(dot(w, Cw.data(), N));
+}
+
+/* estimateBounds(P) -> 1x2 [minReturn, maxReturn] attainable on the
+ * frontier. minReturn = return of the min-variance portfolio;
+ * maxReturn = max asset mean (the all-in-best-asset corner). */
+extern "C" matlab_mat *matlab_portfolio_estimate_bounds(
+        struct matlab_obj_s *p) {
+    matlab_mat *out = mat_alloc(1, 2);
+    if (!p) return out;
+    const double *mean = nullptr, *cov = nullptr; double budget = 1.0;
+    std::vector<double> lb, ub;
+    int64_t N = portfolio_read(p, &mean, &cov, lb, ub, &budget);
+    if (N == 0) return out;
+    double r_min_asset = mean[0], r_max_asset = mean[0];
+    for (int64_t i = 1; i < N; ++i) {
+        if (mean[i] < r_min_asset) r_min_asset = mean[i];
+        if (mean[i] > r_max_asset) r_max_asset = mean[i];
+    }
+    /* min-variance portfolio return: weights for the lowest target. */
+    std::vector<double> w(static_cast<size_t>(N));
+    portfolio_weights_for_return(mean, cov, lb.data(), ub.data(),
+                                  budget, r_min_asset, N, w.data());
+    out->data[0] = dot(mean, w.data(), N);   /* min-var portfolio return */
+    out->data[1] = r_max_asset * budget;     /* max attainable */
+    return out;
+}
+
+/* estimateFrontierByRisk(P, targetSigma) -> Nx1 weights whose risk is
+ * closest to targetSigma. Bisects on the return target (risk is
+ * monotone in return along the efficient frontier above min-var). */
+extern "C" matlab_mat *matlab_portfolio_estimate_frontier_by_risk(
+        struct matlab_obj_s *p, double target_sigma) {
+    if (!p) return mat_alloc(0, 0);
+    const double *mean = nullptr, *cov = nullptr; double budget = 1.0;
+    std::vector<double> lb, ub;
+    int64_t N = portfolio_read(p, &mean, &cov, lb, ub, &budget);
+    matlab_mat *w = mat_alloc(N, 1);
+    if (N == 0) return w;
+    double r_lo = mean[0], r_hi = mean[0];
+    for (int64_t i = 1; i < N; ++i) {
+        if (mean[i] < r_lo) r_lo = mean[i];
+        if (mean[i] > r_hi) r_hi = mean[i];
+    }
+    std::vector<double> wt(static_cast<size_t>(N));
+    for (int it = 0; it < 60; ++it) {
+        double r = 0.5 * (r_lo + r_hi);
+        portfolio_weights_for_return(mean, cov, lb.data(), ub.data(),
+                                      budget, r, N, wt.data());
+        double risk = port_risk(cov, wt.data(), N);
+        if (risk < target_sigma) r_lo = r; else r_hi = r;
+    }
+    portfolio_weights_for_return(mean, cov, lb.data(), ub.data(),
+                                  budget, 0.5*(r_lo+r_hi), N, w->data);
+    return w;
+}
+
+/* estimatePortFrontier(P, K) -> Kx2 [risk, return] frontier points. */
+extern "C" matlab_mat *matlab_portfolio_estimate_frontier_points(
+        struct matlab_obj_s *p, double n_pts) {
+    if (!p) return mat_alloc(0, 0);
+    const double *mean = nullptr, *cov = nullptr; double budget = 1.0;
+    std::vector<double> lb, ub;
+    int64_t N = portfolio_read(p, &mean, &cov, lb, ub, &budget);
+    int64_t K = static_cast<int64_t>(n_pts);
+    if (K < 2) K = 20;
+    matlab_mat *pts = mat_alloc(K, 2);
+    if (N == 0) return pts;
+    double r_min = mean[0], r_max = mean[0];
+    for (int64_t i = 1; i < N; ++i) {
+        if (mean[i] < r_min) r_min = mean[i];
+        if (mean[i] > r_max) r_max = mean[i];
+    }
+    std::vector<double> w(static_cast<size_t>(N));
+    for (int64_t k = 0; k < K; ++k) {
+        double t = K == 1 ? 0.0 : static_cast<double>(k)/static_cast<double>(K-1);
+        double r = r_min + t * (r_max - r_min);
+        portfolio_weights_for_return(mean, cov, lb.data(), ub.data(),
+                                      budget, r, N, w.data());
+        pts->data[k*2 + 0] = port_risk(cov, w.data(), N);
+        pts->data[k*2 + 1] = dot(mean, w.data(), N);
+    }
+    return pts;
+}
+
+/* plotFrontier(P[, K]) — render the risk/return frontier curve via the
+ * Cairo backend. Returns the Kx2 points so the value is still usable.
+ * The render is WITH_PLOT-guarded; without plot it's a no-op compute. */
+#ifdef MATLAB_LLVM_WITH_PLOT
+extern "C" void matlab_plot2(matlab_mat *x, matlab_mat *y);
+#endif
+extern "C" matlab_mat *matlab_portfolio_plot_frontier(
+        struct matlab_obj_s *p, double n_pts) {
+    matlab_mat *pts = matlab_portfolio_estimate_frontier_points(p, n_pts);
+#ifdef MATLAB_LLVM_WITH_PLOT
+    if (pts && pts->data && pts->rows >= 2) {
+        int64_t K = pts->rows;
+        matlab_mat *xr = mat_alloc(K, 1);
+        matlab_mat *yr = mat_alloc(K, 1);
+        for (int64_t k = 0; k < K; ++k) {
+            xr->data[k] = pts->data[k*2 + 0];
+            yr->data[k] = pts->data[k*2 + 1];
+        }
+        matlab_plot2(xr, yr);
+    }
+#endif
+    return pts;
+}
+
 /* ============================================================================
  * §T2.1 — Investment performance metrics
  *

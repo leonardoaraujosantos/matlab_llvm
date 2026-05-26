@@ -6635,6 +6635,10 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"estimatePortReturn",      "matlab_portfolio_estimate_port_return",     0, "pp"},
       {"estimatePortRisk",        "matlab_portfolio_estimate_port_risk",       0, "pp"},
       {"estimateAssetMoments",    "matlab_portfolio_estimate_asset_moments",   1, "pp"},
+      {"estimateBounds",          "matlab_portfolio_estimate_bounds",          1, "p"},
+      {"estimateFrontierByRisk",  "matlab_portfolio_estimate_frontier_by_risk",1, "pf"},
+      {"estimatePortFrontier",    "matlab_portfolio_estimate_frontier_points", 1, "pf"},
+      {"plotFrontier",            "matlab_portfolio_plot_frontier",            1, "pf"},
       /* Financial Toolbox Tier-4: regression with missing data. */
       {"ecmnmle",    "matlab_ecmnmle",    1, "p"},
       {"ecmncov",    "matlab_ecmncov",    1, "p"},
