@@ -2437,6 +2437,13 @@ void Lowerer::lowerStmt(const Stmt &St) {
       auto *Cx = static_cast<const CallOrIndex *>(A.RHS);
       if (auto *NE = dynamic_cast<const NameExpr *>(Cx->Callee)) {
         if (NE->Name == "datetime") RhsIsDatetime = true;
+        /* Financial Toolbox Tier-1: date-arithmetic helpers that
+         * return matlab_datetime *. Tag the LHS so disp routes
+         * to matlab_datetime_disp. */
+        else if (NE->Name == "daysadd"  || NE->Name == "busdate"   ||
+                 NE->Name == "eomdate"  || NE->Name == "lweekdate" ||
+                 NE->Name == "fweekdate")
+          RhsIsDatetime = true;
         else if (NE->Name == "seconds" || NE->Name == "minutes" ||
                  NE->Name == "hours"   || NE->Name == "days"    ||
                  NE->Name == "years"   || NE->Name == "duration")

@@ -64,6 +64,24 @@ void Resolver::registerBuiltins() {
     "categorical", "iscategorical", "categories", "iscategory",
     /* Phase 5.3 — table. */
     "table", "istable", "height", "width", "rows2vars", "varfun",
+    /* Financial Toolbox Tier-1: date arithmetic. */
+    "yearfrac", "daysdif", "daysadd", "daysact", "days360", "days365",
+    "busdate", "isbusday", "eomdate", "lweekdate", "fweekdate",
+    "m2xdate", "x2mdate",
+    /* Tier-1: cash flows + depreciation. */
+    "pvfix", "fvfix", "pvvar", "fvvar", "irr", "payper", "amortize",
+    "nomrr", "effrr", "depstln", "depsoyd", "depfixdb",
+    /* Tier-1: bond pricing. */
+    "bndprice", "bndyield", "bnddurp", "bnddury", "bndconvp",
+    "bndconvy", "accrfrac", "cfdates", "cfamounts",
+    "prdisc", "prtbill", "ytbill", "beytbill",
+    /* Tier-1: returns + indicator function-form. */
+    "tick2ret", "ret2tick", "rsindex", "bolling", "movavg", "sma",
+    /* Tier-2: performance metrics + Black-Scholes. */
+    "sharpe", "sortino", "inforatio", "tracking", "maxdrawdown",
+    "lpm", "elpm", "portalpha",
+    "blsprice", "blsdelta", "blsgamma", "blsvega", "blsrho", "blstheta",
+    "blslambda", "blsimpv",
     /* Phase 6 — Symbolic Math Toolbox via SymPP. The link target
      * (matlab_sym_* runtime) is only present when the build was
      * configured -DMATLAB_LLVM_WITH_SYM=ON; without that the JIT/-emit-c

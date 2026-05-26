@@ -1,0 +1,15 @@
+yearfrac act/act = 0.9993
+yearfrac 30/360  = 0.5000
+yearfrac act/360 = 1.0139
+yearfrac act/365 = 1.0000
+daysdif act    = 365
+daysdif 30/360 = 360
+days360        = 360
+days365        = 365
+31-Jan-2014 00:00:00
+isbusday Wed = 1
+isbusday Sat = 0
+06-Jan-2014 00:00:00
+28-Feb-2014 00:00:00
+xdate = 41640
+round-trip = 735600

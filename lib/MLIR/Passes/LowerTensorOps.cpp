@@ -6556,6 +6556,37 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"writeVerilogAAmplifier",  "matlab_rf_write_verilog_a_amplifier",  0, "fffp"},
       {"writeVerilogAAM",         "matlab_rf_write_verilog_a_am",         0, "ffp"},
       {"writeVerilogAIQMod",      "matlab_rf_write_verilog_a_iqmod",      0, "ffp"},
+      /* ====================================================================
+       * Financial Toolbox Tier-1: date arithmetic
+       * ==================================================================*/
+      {"yearfrac",   "matlab_yearfrac",   0, "ppf"},
+      {"daysdif",    "matlab_daysdif",    0, "ppf"},
+      {"daysadd",    "matlab_daysadd",    1, "pff"},
+      {"daysact",    "matlab_daysact",    0, "pp"},
+      {"days360",    "matlab_days360",    0, "pp"},
+      {"days365",    "matlab_days365",    0, "pp"},
+      {"busdate",    "matlab_busdate",    1, "pf"},
+      {"isbusday",   "matlab_isbusday",   0, "p"},
+      {"eomdate",    "matlab_eomdate",    1, "ff"},
+      {"lweekdate",  "matlab_lweekdate",  1, "fff"},
+      {"fweekdate",  "matlab_fweekdate",  1, "fff"},
+      {"m2xdate",    "matlab_m2xdate",    0, "f"},
+      {"x2mdate",    "matlab_x2mdate",    0, "f"},
+      /* ====================================================================
+       * Financial Toolbox Tier-1: cash flows + depreciation
+       * ==================================================================*/
+      {"pvfix",      "matlab_pvfix",      0, "fff"},
+      {"fvfix",      "matlab_fvfix",      0, "fff"},
+      {"pvvar",      "matlab_pvvar",      0, "pf"},
+      {"fvvar",      "matlab_fvvar",      0, "pf"},
+      {"irr",        "matlab_irr",        0, "p"},
+      {"payper",     "matlab_payper",     0, "fff"},
+      {"amortize",   "matlab_amortize",   1, "fff"},
+      {"nomrr",      "matlab_nomrr",      0, "ff"},
+      {"effrr",      "matlab_effrr",      0, "ff"},
+      {"depstln",    "matlab_depstln",    1, "fff"},
+      {"depsoyd",    "matlab_depsoyd",    1, "fff"},
+      {"depfixdb",   "matlab_depfixdb",   1, "fff"},
     };
 
     // Pick the first entry with name + arity + TYPE match so overloaded
