@@ -93,6 +93,7 @@ void Resolver::registerBuiltins() {
     "estimatePortMoments", "estimatePortReturn", "estimatePortRisk",
     "estimateMaxSharpeRatio", "estimateAssetMoments", "plotFrontier",
     "estimateBounds", "estimatePortFrontier", "blacklitterman",
+    "riskparity", "riskbudget", "riskcontribution",
     /* Tier-4: regression with missing data + credit risk. */
     "ecmnmle", "ecmncov", "mvnrmle", "capm",
     "transprob", "cdsbootstrap", "cdsspread", "cdsprice",

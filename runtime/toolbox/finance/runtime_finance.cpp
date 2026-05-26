@@ -2460,3 +2460,74 @@ extern "C" matlab_mat *matlab_blacklitterman(matlab_mat *Sigma, matlab_mat *wmkt
     }
     return out;
 }
+
+/* ============================================================================
+ * §T7.3 — Risk parity / risk budgeting
+ *
+ * riskparity(Sigma) -> equal-risk-contribution weights (each asset
+ * contributes the same share of portfolio variance). riskbudget(Sigma,
+ * b) targets an arbitrary risk-contribution budget b. Both use the
+ * standard fixed-point iteration w_i <- b_i / (Sigma w)_i, renormalised
+ * to sum 1, which converges to the (unique, long-only) RC solution.
+ * ==========================================================================*/
+
+static matlab_mat *risk_budget_core(const double *Sg, int64_t N,
+                                     const double *b) {
+    matlab_mat *w = mat_alloc(N, 1);
+    std::vector<double> x(static_cast<size_t>(N), 1.0 / static_cast<double>(N));
+    std::vector<double> Sx(static_cast<size_t>(N));
+    for (int it = 0; it < 500; ++it) {
+        matvec(Sg, x.data(), Sx.data(), N);
+        double sum = 0.0;
+        std::vector<double> nx(static_cast<size_t>(N));
+        for (int64_t i = 0; i < N; ++i) {
+            double denom = Sx[static_cast<size_t>(i)];
+            if (denom < 1e-12) denom = 1e-12;
+            nx[static_cast<size_t>(i)] = b[i] / denom;
+            sum += nx[static_cast<size_t>(i)];
+        }
+        double delta = 0.0;
+        for (int64_t i = 0; i < N; ++i) {
+            nx[static_cast<size_t>(i)] /= sum;
+            delta += fabs(nx[static_cast<size_t>(i)] - x[static_cast<size_t>(i)]);
+        }
+        x = nx;
+        if (delta < 1e-12) break;
+    }
+    for (int64_t i = 0; i < N; ++i) w->data[i] = x[static_cast<size_t>(i)];
+    return w;
+}
+
+extern "C" matlab_mat *matlab_riskparity(matlab_mat *Sigma) {
+    if (!Sigma || !Sigma->data) return mat_alloc(0, 0);
+    int64_t N = Sigma->rows;
+    std::vector<double> b(static_cast<size_t>(N), 1.0 / static_cast<double>(N));
+    return risk_budget_core(Sigma->data, N, b.data());
+}
+
+extern "C" matlab_mat *matlab_riskbudget(matlab_mat *Sigma, matlab_mat *budget) {
+    if (!Sigma || !Sigma->data || !budget || !budget->data) return mat_alloc(0, 0);
+    int64_t N = Sigma->rows;
+    /* Normalise the budget to sum 1. */
+    std::vector<double> b(static_cast<size_t>(N));
+    double s = 0.0;
+    for (int64_t i = 0; i < N; ++i) { b[static_cast<size_t>(i)] = budget->data[i]; s += budget->data[i]; }
+    if (s > 0.0) for (int64_t i = 0; i < N; ++i) b[static_cast<size_t>(i)] /= s;
+    return risk_budget_core(Sigma->data, N, b.data());
+}
+
+/* riskcontribution(Sigma, w) -> N×1 per-asset risk-contribution shares
+ * (RC_i = w_i (Sigma w)_i / (w' Sigma w), summing to 1). Lets a caller
+ * verify a riskparity result has equal contributions. */
+extern "C" matlab_mat *matlab_riskcontribution(matlab_mat *Sigma, matlab_mat *w) {
+    if (!Sigma || !Sigma->data || !w || !w->data) return mat_alloc(0, 0);
+    int64_t N = Sigma->rows;
+    matlab_mat *rc = mat_alloc(N, 1);
+    std::vector<double> Sw(static_cast<size_t>(N));
+    matvec(Sigma->data, w->data, Sw.data(), N);
+    double var = dot(w->data, Sw.data(), N);
+    if (var < 1e-20) var = 1e-20;
+    for (int64_t i = 0; i < N; ++i)
+        rc->data[i] = w->data[i] * Sw[static_cast<size_t>(i)] / var;
+    return rc;
+}
