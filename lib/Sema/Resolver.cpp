@@ -64,6 +64,11 @@ void Resolver::registerBuiltins() {
     "categorical", "iscategorical", "categories", "iscategory",
     /* Phase 5.3 — table. */
     "table", "istable", "height", "width", "rows2vars", "varfun",
+    /* Phase 5.4 — timetable. Constructor + table promotion; the
+     * subscripting / retime / synchronize entries live in the same
+     * timetable namespace and ride the same builtin registration. */
+    "timetable", "istimetable", "table2timetable", "timetable2table",
+    "timerange", "retime", "synchronize", "withtol",
     /* Phase 6 — Symbolic Math Toolbox via SymPP. The link target
      * (matlab_sym_* runtime) is only present when the build was
      * configured -DMATLAB_LLVM_WITH_SYM=ON; without that the JIT/-emit-c

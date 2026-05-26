@@ -2329,6 +2329,101 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase(); Changed = true; continue;
     }
+    /* Phase 5.4 (cont.) — timetable.
+     *   matlab_timetable_new        ()       -> ptr
+     *   matlab_timetable_disp       (ptr)    -> void
+     *   matlab_timetable_height/_width/_numel(ptr) -> f64
+     *   matlab_timetable_size_dim   (ptr,f64)-> f64
+     *   matlab_timetable_set_row_times(ptr, ptr) -> void
+     *   matlab_timetable_add_column (ptr, ptr, ptr) -> void
+     *   matlab_table2timetable      (ptr, ptr) -> ptr
+     */
+    if (Name == "matlab_timetable_new" &&
+        Call->getNumResults() == 1 && Call->getNumOperands() == 0) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, PtrTy, {});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{});
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase(); Changed = true; continue;
+    }
+    if (Name == "matlab_timetable_disp" &&
+        Call->getNumOperands() == 1 &&
+        Call->getOperand(0).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, VoidTy, {PtrTy});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                            ValueRange{Call->getOperand(0)});
+      Call->erase(); Changed = true; continue;
+    }
+    if ((Name == "matlab_timetable_height" ||
+         Name == "matlab_timetable_width"  ||
+         Name == "matlab_timetable_numel") &&
+        Call->getNumResults() == 1 && Call->getNumOperands() == 1 &&
+        Call->getOperand(0).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, F64, {PtrTy});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Call->getOperand(0)});
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase(); Changed = true; continue;
+    }
+    if (Name == "matlab_timetable_size_dim" &&
+        Call->getNumResults() == 1 && Call->getNumOperands() == 2 &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == F64) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, F64, {PtrTy, F64});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Call->getOperand(0),
+                                                 Call->getOperand(1)});
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase(); Changed = true; continue;
+    }
+    if (Name == "matlab_timetable_set_row_times" &&
+        Call->getNumOperands() == 2 &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, VoidTy, {PtrTy, PtrTy});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                            ValueRange{Call->getOperand(0),
+                                       Call->getOperand(1)});
+      Call->erase(); Changed = true; continue;
+    }
+    if (Name == "matlab_timetable_add_column" &&
+        Call->getNumOperands() == 3 &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(2).getType() == PtrTy) {
+      Value Base = Call->getOperand(0);
+      Value NameV = Call->getOperand(1);
+      Value Col = Call->getOperand(2);
+      int64_t Len = 0;
+      Value Ptr = fieldNameAddr(NameV, Len);
+      if (!Ptr) continue;
+      B.setInsertionPoint(Call);
+      Value LenV = LLVM::ConstantOp::create(
+          B, Call->getLoc(), I64, B.getI64IntegerAttr(Len));
+      auto Fn = rt(Name, VoidTy, {PtrTy, PtrTy, I64, PtrTy});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                            ValueRange{Base, Ptr, LenV, Col});
+      Call->erase(); Changed = true; continue;
+    }
+    if (Name == "matlab_table2timetable" &&
+        Call->getNumResults() == 1 && Call->getNumOperands() == 2 &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, PtrTy, {PtrTy, PtrTy});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Call->getOperand(0),
+                                                 Call->getOperand(1)});
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase(); Changed = true; continue;
+    }
     if ((Name == "matlab_duration_to_seconds" ||
          Name == "matlab_duration_to_minutes" ||
          Name == "matlab_duration_to_hours" ||

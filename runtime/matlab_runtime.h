@@ -1472,6 +1472,52 @@ matlab_datetime     *matlab_datetime_vec_get(matlab_datetime_vec *v, double idx)
 const double        *matlab_datetime_vec_secs(matlab_datetime_vec *v,
                                                int64_t *out_n);
 
+/* Phase 5.4 (cont.) — timetable. A column-store table indexed by a
+ * datetime_vec RowTimes axis. Builds on matlab_table's parallel-array
+ * column store (names + data + kinds) and adds the RowTimes column
+ * and the Properties.Description string. The data layout is
+ * intentionally separate from matlab_table so a `timetable` arg can
+ * carry its own kind tag without inheriting `table`'s lookup paths
+ * verbatim (retime / synchronize / time-row indexing need their own
+ * fast paths). The constructor surface matches MATLAB:
+ *   TT = timetable(c1, c2, ..., 'VariableNames', {n1,n2,...},
+ *                                'RowTimes', dt)
+ *   TT = table2timetable(T, 'RowTimes', dt)
+ * with a column-kind variant for string / datetime columns.        */
+typedef struct matlab_timetable_s matlab_timetable;
+struct matlab_table_s;     /* forward — declared further up */
+matlab_timetable *matlab_timetable_new(void);
+void              matlab_timetable_set_row_times(matlab_timetable *tt,
+                                                  matlab_datetime_vec *rt);
+matlab_datetime_vec *matlab_timetable_get_row_times(matlab_timetable *tt);
+void              matlab_timetable_set_description(matlab_timetable *tt,
+                                                    const char *desc,
+                                                    int64_t len);
+void              matlab_timetable_add_column(matlab_timetable *tt,
+                                               const char *name, int64_t namelen,
+                                               matlab_mat *col);
+void              matlab_timetable_add_column_kind(matlab_timetable *tt,
+                                                    const char *name,
+                                                    int64_t namelen,
+                                                    void *col, int32_t kind,
+                                                    int64_t nrows_hint);
+matlab_mat       *matlab_timetable_get_column(matlab_timetable *tt,
+                                               const char *name,
+                                               int64_t namelen);
+double            matlab_timetable_get_kind(matlab_timetable *tt,
+                                             const char *name,
+                                             int64_t namelen);
+double            matlab_timetable_height(matlab_timetable *tt);
+double            matlab_timetable_width (matlab_timetable *tt);
+double            matlab_timetable_numel (matlab_timetable *tt);
+double            matlab_timetable_size_dim(matlab_timetable *tt, double dim);
+void              matlab_timetable_disp  (matlab_timetable *tt);
+/* Promote a plain table to a timetable by attaching the RowTimes
+ * axis. The table is consumed (ownership transfers to the new
+ * timetable; the caller must not free it). */
+matlab_timetable *matlab_table2timetable(struct matlab_table_s *t,
+                                          matlab_datetime_vec *rt);
+
 /* Phase 4 — containers.Map / dictionary. A flat key/value table with
  * mixed key types (f64 or matlab_string *) and value types (f64 or
  * matlab_mat *). v1 backs both `containers.Map` and `dictionary` with
