@@ -1302,3 +1302,224 @@ extern "C" matlab_mat *matlab_depfixdb(double cost, double salvage,
     }
     return m;
 }
+
+/* ============================================================================
+ * §T4.1 — Multivariate normal regression + ECM (missing data)
+ *
+ * ecmnmle / ecmncov estimate the mean + covariance of an N×d data matrix
+ * that may contain NaN entries, via the Expectation-Conditional-
+ * Maximisation (ECM) algorithm:
+ *   E-step: for each row, fill missing components with their conditional
+ *           expectation given the observed components (current θ).
+ *   M-step: re-estimate mean (column mean of filled data) and covariance
+ *           (sample cov of filled data + the summed conditional-covariance
+ *           correction for the imputed blocks).
+ * The correction term is what makes this a proper MLE rather than naive
+ * mean-imputation — without it the covariance is biased toward zero.
+ * ==========================================================================*/
+
+/* Solve the small SPD system A x = b for the observed-block sub-matrix.
+ * A is `k×k` row-major. Uses the chol_factor/chol_solve helpers above. */
+static bool spd_solve(const double *A, const double *b, double *x,
+                       int64_t k) {
+    std::vector<double> L(static_cast<size_t>(k*k));
+    for (int64_t i = 0; i < k*k; ++i) L[static_cast<size_t>(i)] = A[i];
+    if (!chol_factor(L.data(), k)) {
+        for (int64_t i = 0; i < k*k; ++i) L[static_cast<size_t>(i)] = A[i];
+        for (int64_t i = 0; i < k; ++i) L[static_cast<size_t>(i*k + i)] += 1e-10;
+        if (!chol_factor(L.data(), k)) return false;
+    }
+    chol_solve(L.data(), b, x, k);
+    return true;
+}
+
+/* Core ECM. data is N×d row-major (NaN = missing). Writes the estimated
+ * mean (length d) into `mean_out` and the d×d covariance (row-major) into
+ * `cov_out`. */
+static void ecm_core(const double *data, int64_t N, int64_t d,
+                      double *mean_out, double *cov_out) {
+    /* Initialise mean = column nanmean; cov = diagonal nanvar. */
+    std::vector<double> mean(static_cast<size_t>(d), 0.0);
+    std::vector<double> cov(static_cast<size_t>(d*d), 0.0);
+    for (int64_t j = 0; j < d; ++j) {
+        double s = 0.0; int64_t c = 0;
+        for (int64_t i = 0; i < N; ++i) {
+            double v = data[i*d + j];
+            if (v == v) { s += v; c++; }
+        }
+        mean[static_cast<size_t>(j)] = c > 0 ? s / static_cast<double>(c) : 0.0;
+    }
+    for (int64_t j = 0; j < d; ++j) {
+        double s2 = 0.0; int64_t c = 0;
+        for (int64_t i = 0; i < N; ++i) {
+            double v = data[i*d + j];
+            if (v == v) { double dd = v - mean[static_cast<size_t>(j)]; s2 += dd*dd; c++; }
+        }
+        cov[static_cast<size_t>(j*d + j)] = c > 1 ? s2 / static_cast<double>(c - 1) : 1.0;
+    }
+
+    std::vector<double> filled(static_cast<size_t>(N*d));
+    for (int it = 0; it < 100; ++it) {
+        /* Accumulators for the M-step. */
+        std::vector<double> new_mean(static_cast<size_t>(d), 0.0);
+        std::vector<double> corr(static_cast<size_t>(d*d), 0.0);
+        for (int64_t i = 0; i < N; ++i) {
+            /* Partition this row into observed (O) and missing (M). */
+            std::vector<int64_t> O, Mi;
+            for (int64_t j = 0; j < d; ++j) {
+                if (data[i*d + j] == data[i*d + j]) O.push_back(j);
+                else Mi.push_back(j);
+            }
+            /* Copy observed values. */
+            for (int64_t j : O) filled[static_cast<size_t>(i*d + j)] = data[i*d + j];
+            if (!Mi.empty() && !O.empty()) {
+                int64_t k = static_cast<int64_t>(O.size());
+                int64_t mlen = static_cast<int64_t>(Mi.size());
+                /* Sigma_OO (k×k), Sigma_MO (mlen×k). */
+                std::vector<double> Soo(static_cast<size_t>(k*k));
+                std::vector<double> dev(static_cast<size_t>(k));
+                for (int64_t a = 0; a < k; ++a) {
+                    dev[static_cast<size_t>(a)] = data[i*d + O[static_cast<size_t>(a)]]
+                                  - mean[static_cast<size_t>(O[static_cast<size_t>(a)])];
+                    for (int64_t b = 0; b < k; ++b)
+                        Soo[static_cast<size_t>(a*k + b)] =
+                            cov[static_cast<size_t>(O[static_cast<size_t>(a)]*d + O[static_cast<size_t>(b)])];
+                }
+                /* w = Sigma_OO^-1 dev. */
+                std::vector<double> w(static_cast<size_t>(k), 0.0);
+                spd_solve(Soo.data(), dev.data(), w.data(), k);
+                /* For each missing index: cond mean = mu_M + Sigma_MO w. */
+                for (int64_t r = 0; r < mlen; ++r) {
+                    int64_t mr = Mi[static_cast<size_t>(r)];
+                    double cm = mean[static_cast<size_t>(mr)];
+                    for (int64_t a = 0; a < k; ++a)
+                        cm += cov[static_cast<size_t>(mr*d + O[static_cast<size_t>(a)])] * w[static_cast<size_t>(a)];
+                    filled[static_cast<size_t>(i*d + mr)] = cm;
+                }
+                /* Conditional covariance correction: Sigma_MM -
+                 * Sigma_MO Sigma_OO^-1 Sigma_OM, added to corr block. */
+                for (int64_t r = 0; r < mlen; ++r) {
+                    int64_t mr = Mi[static_cast<size_t>(r)];
+                    for (int64_t s = 0; s < mlen; ++s) {
+                        int64_t ms = Mi[static_cast<size_t>(s)];
+                        /* z = Sigma_OO^-1 Sigma_O,ms */
+                        std::vector<double> rhs(static_cast<size_t>(k)), z(static_cast<size_t>(k), 0.0);
+                        for (int64_t a = 0; a < k; ++a)
+                            rhs[static_cast<size_t>(a)] = cov[static_cast<size_t>(O[static_cast<size_t>(a)]*d + ms)];
+                        spd_solve(Soo.data(), rhs.data(), z.data(), k);
+                        double red = 0.0;
+                        for (int64_t a = 0; a < k; ++a)
+                            red += cov[static_cast<size_t>(mr*d + O[static_cast<size_t>(a)])] * z[static_cast<size_t>(a)];
+                        corr[static_cast<size_t>(mr*d + ms)] +=
+                            cov[static_cast<size_t>(mr*d + ms)] - red;
+                    }
+                }
+            } else if (!Mi.empty()) {
+                /* No observed components — fill with the marginal mean. */
+                for (int64_t j : Mi) filled[static_cast<size_t>(i*d + j)] = mean[static_cast<size_t>(j)];
+            }
+        }
+        /* M-step: new mean. */
+        for (int64_t j = 0; j < d; ++j) {
+            double s = 0.0;
+            for (int64_t i = 0; i < N; ++i) s += filled[static_cast<size_t>(i*d + j)];
+            new_mean[static_cast<size_t>(j)] = s / static_cast<double>(N);
+        }
+        /* M-step: new cov = sample cov of filled + corr / N. */
+        std::vector<double> new_cov(static_cast<size_t>(d*d), 0.0);
+        for (int64_t a = 0; a < d; ++a) {
+            for (int64_t b = 0; b < d; ++b) {
+                double s = 0.0;
+                for (int64_t i = 0; i < N; ++i) {
+                    double da = filled[static_cast<size_t>(i*d + a)] - new_mean[static_cast<size_t>(a)];
+                    double db = filled[static_cast<size_t>(i*d + b)] - new_mean[static_cast<size_t>(b)];
+                    s += da * db;
+                }
+                new_cov[static_cast<size_t>(a*d + b)] =
+                    (s + corr[static_cast<size_t>(a*d + b)]) / static_cast<double>(N);
+            }
+        }
+        /* Convergence check on the mean. */
+        double delta = 0.0;
+        for (int64_t j = 0; j < d; ++j)
+            delta += fabs(new_mean[static_cast<size_t>(j)] - mean[static_cast<size_t>(j)]);
+        mean = new_mean;
+        cov  = new_cov;
+        if (delta < 1e-10) break;
+    }
+    for (int64_t j = 0; j < d; ++j) mean_out[j] = mean[static_cast<size_t>(j)];
+    for (int64_t i = 0; i < d*d; ++i) cov_out[i] = cov[static_cast<size_t>(i)];
+}
+
+/* ecmnmle(Data) -> d×1 ECM mean estimate (NaN-aware). */
+extern "C" matlab_mat *matlab_ecmnmle(matlab_mat *X) {
+    if (!X || !X->data) return mat_alloc(0, 0);
+    int64_t N = X->rows, d = X->cols;
+    matlab_mat *out = mat_alloc(d, 1);
+    std::vector<double> cov(static_cast<size_t>(d*d));
+    ecm_core(X->data, N, d, out->data, cov.data());
+    return out;
+}
+/* ecmncov(Data) -> d×d ECM covariance estimate (NaN-aware). */
+extern "C" matlab_mat *matlab_ecmncov(matlab_mat *X) {
+    if (!X || !X->data) return mat_alloc(0, 0);
+    int64_t N = X->rows, d = X->cols;
+    matlab_mat *out = mat_alloc(d, d);
+    std::vector<double> mean(static_cast<size_t>(d));
+    ecm_core(X->data, N, d, mean.data(), out->data);
+    return out;
+}
+
+/* mvnrmle(Y, X) -> regression coefficients via OLS/MLE (no missing).
+ * Y is N×1, X is N×p; returns p×1 beta = (X'X)^-1 X'Y.                  */
+extern "C" matlab_mat *matlab_mvnrmle(matlab_mat *Y, matlab_mat *X) {
+    if (!Y || !Y->data || !X || !X->data) return mat_alloc(0, 0);
+    int64_t N = X->rows, p = X->cols;
+    matlab_mat *beta = mat_alloc(p, 1);
+    /* Normal equations: (X'X) beta = X'Y. */
+    std::vector<double> XtX(static_cast<size_t>(p*p), 0.0);
+    std::vector<double> XtY(static_cast<size_t>(p), 0.0);
+    for (int64_t a = 0; a < p; ++a) {
+        for (int64_t b = 0; b < p; ++b) {
+            double s = 0.0;
+            for (int64_t i = 0; i < N; ++i) s += X->data[i*p + a] * X->data[i*p + b];
+            XtX[static_cast<size_t>(a*p + b)] = s;
+        }
+        double sy = 0.0;
+        for (int64_t i = 0; i < N; ++i) sy += X->data[i*p + a] * Y->data[i];
+        XtY[static_cast<size_t>(a)] = sy;
+    }
+    spd_solve(XtX.data(), XtY.data(), beta->data, p);
+    return beta;
+}
+
+/* capm(assetReturns, marketReturns, rf) -> 2×1 [alpha; beta] for a
+ * single asset.  Regress excess asset return on excess market return. */
+extern "C" matlab_mat *matlab_capm(matlab_mat *asset, matlab_mat *market,
+                                    double rf) {
+    matlab_mat *out = mat_alloc(2, 1);
+    if (!asset || !asset->data || !market || !market->data) return out;
+    int64_t n = asset->rows * asset->cols;
+    int64_t m = market->rows * market->cols;
+    int64_t k = n < m ? n : m;
+    if (k < 2) return out;
+    double sx = 0.0, sy = 0.0;
+    for (int64_t i = 0; i < k; ++i) {
+        sx += market->data[i] - rf;
+        sy += asset->data[i]  - rf;
+    }
+    double mx = sx / static_cast<double>(k);
+    double my = sy / static_cast<double>(k);
+    double cov = 0.0, varx = 0.0;
+    for (int64_t i = 0; i < k; ++i) {
+        double dx = (market->data[i] - rf) - mx;
+        double dy = (asset->data[i]  - rf) - my;
+        cov  += dx * dy;
+        varx += dx * dx;
+    }
+    double beta = varx > 0.0 ? cov / varx : 0.0;
+    double alpha = my - beta * mx;
+    out->data[0] = alpha;
+    out->data[1] = beta;
+    return out;
+}

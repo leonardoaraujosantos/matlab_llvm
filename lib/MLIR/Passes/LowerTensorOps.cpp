@@ -6635,6 +6635,11 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"estimatePortReturn",      "matlab_portfolio_estimate_port_return",     0, "pp"},
       {"estimatePortRisk",        "matlab_portfolio_estimate_port_risk",       0, "pp"},
       {"estimateAssetMoments",    "matlab_portfolio_estimate_asset_moments",   1, "pp"},
+      /* Financial Toolbox Tier-4: regression with missing data. */
+      {"ecmnmle",    "matlab_ecmnmle",    1, "p"},
+      {"ecmncov",    "matlab_ecmncov",    1, "p"},
+      {"mvnrmle",    "matlab_mvnrmle",    1, "pp"},
+      {"capm",       "matlab_capm",       1, "ppf"},
     };
 
     // Pick the first entry with name + arity + TYPE match so overloaded
