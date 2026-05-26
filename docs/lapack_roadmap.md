@@ -286,10 +286,50 @@ Heavier kernels; needs careful 2-/3-return splitter wiring at the
 **Acceptance**: `pca` on 1000×50 matches `np.linalg.eigh` to ±1e-10;
 `n4sid` on `ident/data_driven_mpc.m` runs ≥3× faster.
 
-### 5.4 Phase 4 — GPU library replacement — see `gpu_coder_roadmap.md`
+### 5.4 Phase 4 — GPU library replacement (🟢 Metal MVP shipped 2026-05-25)
 
-Sized at ~2 weeks per platform in that doc. Builds on Phases 1-3
-(host fallback when GPU library is below threshold or not built in).
+**Metal MPS gemm landed.** `gpucoder.gemm(A, B)` routes through
+`matlab_gpu_gemm` which dispatches to `MPSMatrixMultiplication`
+when `MATLAB_GPU_TARGET=metal` and the operand shape is at or above
+the `N ≥ 128` threshold (matches MathWorks cusolver). Below that
+it falls back to the host CPU lane (Phase 1's `cblas_dgemm`).
+
+Shipped components:
+* `runtime/gpu/metal/runtime_gpu_metal.mm:matlab_gpu_metal_gemm_double` —
+  fp64 → fp32 host-side downcast, MTLBuffer round-trip,
+  `MPSMatrixMultiplication`, fp32 → fp64 upcast. Apple GPUs have no
+  fp64 hardware so this is the only viable path; gating test
+  (`test/Run/gpu_metal_mps_gemm.m`) accepts ~1e-3 absolute error
+  for the fp32 round-off accumulated over the inner-product reduction.
+* `runtime/gpu/runtime_gpu.cpp:matlab_gpu_gemm` — dispatcher with
+  weak-symbol Metal hook (graceful fallback when the Metal TU isn't
+  in the link line) and `MATLAB_GPU_GEMM_MIN` env-var threshold.
+* `lib/Parse/Parser.cpp` + `lib/Sema/Resolver.cpp` +
+  `lib/MLIR/Passes/LowerTensorOps.cpp` — frontend fold for
+  `gpucoder.gemm(A, B) → gpucoder_gemm → matlab_gpu_gemm`.
+
+**Bench result** (M2 Max, single-thread BLAS pinned, N=1000):
+| lane | time | vs Accelerate |
+|---|---|---|
+| matlab_llvm (Accelerate) | 8.07 ms | — |
+| **matlab_llvm (Metal MPS)** | **2.73 ms** | **2.96×** |
+| NumPy (Accelerate) | 8.90 ms | 0.91× |
+
+**Carve-outs / follow-ons** (sized in `gpu_coder_roadmap.md`):
+* CUDA / cuBLAS sgemm path (NVIDIA Linux).
+* AMD ROCm / clBLAS path.
+* Phase 4 for non-gemm: `MPSMatrixDecompositionLU` (`A \ B`),
+  `MPSMatrixDecompositionCholesky` (`chol`),
+  `MPSMatrixDecompositionSymmetric` (sym `eig`),
+  `MPSGraph` FFT.
+* gpuArray operator overload (`gA * gB → gpucoder.gemm` automatically
+  via classdef operator dispatch) — needs classdef operator support
+  in Lowering.
+* fp32 / fp16 storage lane in `matlab_mat` (avoid fp64 → fp32 cast
+  cost; would also unlock cuBLAS sgemm faster path).
+
+Sized at ~2 weeks per platform in `gpu_coder_roadmap.md`. The Metal
+MVP delivered in ~half that for the gemm-only carve-down.
 
 ---
 

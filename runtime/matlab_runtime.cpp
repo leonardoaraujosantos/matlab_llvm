@@ -31,6 +31,89 @@
 
 #include "runtime_internal.h"
 
+/* LAPACK / BLAS acceleration epic (#45 / docs/lapack_roadmap.md).
+ *
+ * Opt-in at build time via -DMATLAB_LLVM_WITH_BLAS=ON. When OFF (the
+ * default for cross-compile / embedded targets) the preprocessor
+ * strips every cblas_* / LAPACKE_* reference so the resulting object
+ * has zero external linalg dependency — verified by the bench
+ * driver's cross-emit invariant check.
+ *
+ * Apple Accelerate provides BLAS + LAPACK via the unified
+ * <Accelerate/Accelerate.h> umbrella; CMake links -framework Accelerate.
+ * Linux / Windows builds use the system OpenBLAS / MKL / generic LAPACK
+ * via CMake's FindBLAS / FindLAPACK (cblas.h + lapacke.h includes). */
+#ifdef MATLAB_LLVM_WITH_BLAS
+#  ifdef __APPLE__
+     /* Apple Accelerate exposes the classic Fortran LAPACK ABI via
+      * <vecLib/clapack.h>. As of macOS 13.3 the classic symbols are
+      * deprecated in favour of the New LAPACK interface; they still
+      * work and the runtime is OS-portable, so we keep the classic
+      * names and quiet the deprecation noise. */
+#    pragma clang diagnostic push
+#    pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#    include <Accelerate/Accelerate.h>
+#    pragma clang diagnostic pop
+     /* Bridge type names so the kernel bodies stay readable on both
+      * Darwin (where the typedef is `__CLPK_integer` = `long long`)
+      * and Linux (where reference LAPACK uses plain `int`). */
+     typedef __CLPK_integer lapack_int_t;
+#  else
+#    include <cblas.h>
+     /* No <lapack.h> on Linux — Apple's vecLib ships one, but
+      * libopenblas-dev / liblapack-dev on Ubuntu provide only the
+      * .so/.a, not a C header.  Every LAPACK entry point we call is
+      * forward-declared in the extern "C" block below. */
+     typedef int lapack_int_t;
+     /* Reference / OpenBLAS / MKL all expose the classic ABI with a
+      * trailing underscore on Linux ELF. */
+     extern "C" {
+       void dgesv_(int*, int*, double*, int*, int*, double*, int*, int*);
+       void dgetrf_(int*, int*, double*, int*, int*, int*);
+       void dpotrf_(char*, int*, double*, int*, int*);
+       void dgeqrf_(int*, int*, double*, int*, double*, double*, int*, int*);
+       void dorgqr_(int*, int*, int*, double*, int*, double*, double*, int*, int*);
+       void dgesvd_(char*, char*, int*, int*, double*, int*, double*,
+                    double*, int*, double*, int*, double*, int*, int*);
+       void dsyevd_(char*, char*, int*, double*, int*, double*,
+                    double*, int*, int*, int*, int*);
+       void dgeev_(char*, char*, int*, double*, int*, double*, double*,
+                   double*, int*, double*, int*, double*, int*, int*);
+     }
+#  endif
+
+/* Row-major → column-major transpose into scratch. Both matrices are
+ * n*n. The transpose is O(N^2) and dominated by the subsequent
+ * O(N^3) LAPACK call, so it's perf-irrelevant for the sizes we
+ * accelerate (N >= 64). */
+static inline void rm_to_cm(const double *src, double *dst,
+                            int64_t rows, int64_t cols) {
+    for (int64_t i = 0; i < rows; ++i)
+        for (int64_t j = 0; j < cols; ++j)
+            dst[j * rows + i] = src[i * cols + j];
+}
+static inline void cm_to_rm(const double *src, double *dst,
+                            int64_t rows, int64_t cols) {
+    for (int64_t i = 0; i < rows; ++i)
+        for (int64_t j = 0; j < cols; ++j)
+            dst[i * cols + j] = src[j * rows + i];
+}
+
+/* LAPACK threshold. Below this, the hand-rolled O(N^3) inner loops
+ * are competitive (the row-major↔col-major copy + LAPACK call
+ * overhead amortises poorly). The LAPACK threshold can be lower
+ * than the BLAS gemm threshold because the per-call setup is
+ * smaller. Tunable via MATLAB_LAPACK_MIN env var for sweeps. */
+static inline int64_t lapack_threshold(void) {
+    static int64_t cached = -1;
+    if (cached < 0) {
+        const char *env = std::getenv("MATLAB_LAPACK_MIN");
+        cached = (env && *env) ? (int64_t)std::atoll(env) : 64;
+    }
+    return cached;
+}
+#endif
+
 extern "C" {
 
 /* A single global mutex serializes all stdout I/O so parfor bodies that call
@@ -380,12 +463,47 @@ matlab_mat *matlab_matmul_mm(matlab_mat *A, matlab_mat *B) {
     if (A->cols != B->rows) return mat_alloc(0, 0);
     int64_t m = A->rows, k = A->cols, n = B->cols;
     matlab_mat *C = mat_alloc(m, n);
+#ifdef MATLAB_LLVM_WITH_BLAS
+    /* Phase 1 of #45 — dispatch to cblas_dgemm when the operand shape
+     * is "big enough" that the BLAS call overhead is amortised.
+     * Below the threshold the naive triple loop is faster (BLAS
+     * function-call + parameter marshalling dominates the actual
+     * arithmetic). The threshold mirrors NumPy / SciPy heuristics
+     * (m·n·k ≥ 64³ ≈ 262144). Tunable via MATLAB_BLAS_GEMM_MIN env
+     * var for benchmark sweeps. matlab_mat is row-major and BLAS
+     * accepts CblasRowMajor directly, so no transpose at boundary. */
+    {
+        static int threshold = -1;
+        if (threshold < 0) {
+            const char *env = std::getenv("MATLAB_BLAS_GEMM_MIN");
+            threshold = (env && *env) ? std::atoi(env) : 262144;  /* 64^3 */
+        }
+        if ((int64_t)m * n * k >= threshold) {
+            cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                        (int)m, (int)n, (int)k,
+                        1.0,
+                        A->data, (int)k,
+                        B->data, (int)n,
+                        0.0,
+                        C->data, (int)n);
+            return C;
+        }
+    }
+#endif
+    /* Tier 4 (acceleration_roadmap §5) — hoist the operand data
+     * pointers into __restrict__ locals so the back-end knows
+     * A/B/C are disjoint (C is freshly allocated above) and can
+     * vectorise the inner reduction.  Without this, the opaque-
+     * pointer-via-struct view blocks NEON / AVX autovec. */
+    const double * __restrict__ Adata = A->data;
+    const double * __restrict__ Bdata = B->data;
+    double       * __restrict__ Cdata = C->data;
     for (int64_t i = 0; i < m; ++i) {
         for (int64_t j = 0; j < n; ++j) {
             double s = 0.0;
             for (int64_t t = 0; t < k; ++t)
-                s += A->data[i * k + t] * B->data[t * n + j];
-            C->data[i * n + j] = s;
+                s += Adata[i * k + t] * Bdata[t * n + j];
+            Cdata[i * n + j] = s;
         }
     }
     return C;
@@ -468,6 +586,26 @@ static void lu_solve_column(const double *LU, int64_t n, const int64_t *piv,
 matlab_mat *matlab_inv(matlab_mat *A) {
     if (!A || A->rows != A->cols) return mat_alloc(0, 0);
     int64_t n = A->rows;
+#ifdef MATLAB_LLVM_WITH_BLAS
+    if (n >= lapack_threshold()) {
+        /* dgesv_ solves A * X = B in-place. Use B = I to recover X = A^-1.
+         * Row-major A → col-major scratch; B starts as identity (which
+         * is its own transpose, so no swap needed). dgesv overwrites
+         * B with X in col-major. Transpose back to row-major. */
+        std::vector<double> A_cm(n * n);
+        std::vector<double> B_cm(n * n, 0.0);
+        rm_to_cm(A->data, A_cm.data(), n, n);
+        for (int64_t i = 0; i < n; ++i) B_cm[i * n + i] = 1.0;
+        lapack_int_t nn = (lapack_int_t)n, info = 0;
+        std::vector<lapack_int_t> ipiv(n);
+        dgesv_(&nn, &nn, A_cm.data(), &nn, ipiv.data(),
+               B_cm.data(), &nn, &info);
+        if (info != 0) return mat_alloc(0, 0);
+        matlab::runtime::MatPtr work = matlab::runtime::make_mat(n, n);
+        cm_to_rm(B_cm.data(), work->data, n, n);
+        return work.release();
+    }
+#endif
     std::vector<double> LU(A->data, A->data + n * n);
     std::vector<int64_t> piv(n);
     int sign;
@@ -490,6 +628,26 @@ matlab_mat *matlab_mldivide_mm(matlab_mat *A, matlab_mat *B) {
         return mat_alloc(0, 0);
     int64_t n = A->rows;
     int64_t k = B->cols;
+#ifdef MATLAB_LLVM_WITH_BLAS
+    if (n >= lapack_threshold()) {
+        /* dgesv_(N, NRHS, A, LDA, IPIV, B, LDB, INFO) — solves A*X=B
+         * in place. Convert A, B row-major → col-major, call, convert
+         * X (in B's slot) back. */
+        std::vector<double> A_cm(n * n);
+        std::vector<double> B_cm(n * k);
+        rm_to_cm(A->data, A_cm.data(), n, n);
+        rm_to_cm(B->data, B_cm.data(), n, k);
+        lapack_int_t nn = (lapack_int_t)n,
+                     kk = (lapack_int_t)k, info = 0;
+        std::vector<lapack_int_t> ipiv(n);
+        dgesv_(&nn, &kk, A_cm.data(), &nn, ipiv.data(),
+               B_cm.data(), &nn, &info);
+        if (info != 0) return mat_alloc(0, 0);
+        matlab::runtime::MatPtr work = matlab::runtime::make_mat(n, k);
+        cm_to_rm(B_cm.data(), work->data, n, k);
+        return work.release();
+    }
+#endif
     std::vector<double> LU(A->data, A->data + n * n);
     std::vector<int64_t> piv(n);
     int sign;
@@ -542,6 +700,36 @@ matlab_mat *matlab_mrdivide_mm(matlab_mat *A, matlab_mat *B) {
  */
 matlab_mat *matlab_svd(matlab_mat *A_in) {
     int64_t m_orig = A_in->rows, n_orig = A_in->cols;
+#ifdef MATLAB_LLVM_WITH_BLAS
+    if (std::min(m_orig, n_orig) >= lapack_threshold()) {
+        /* Phase 3 of #45 — dgesvd_ with jobu='N', jobvt='N' computes
+         * only the singular values (no U / V matrices). MATLAB's
+         * scalar-return form `s = svd(A)` returns a column vector of
+         * length min(m,n) in descending order — which is what dgesvd
+         * gives us natively. Row-major in / col-major LAPACK / row-
+         * major out; the singular values themselves are layout-
+         * agnostic so no post-transpose needed for the result. */
+        int64_t k = std::min(m_orig, n_orig);
+        std::vector<double> A_cm(m_orig * n_orig);
+        rm_to_cm(A_in->data, A_cm.data(), m_orig, n_orig);
+        std::vector<double> s(k);
+        lapack_int_t mm = (lapack_int_t)m_orig,
+                     nn = (lapack_int_t)n_orig,
+                     info = 0, lwork = -1;
+        char jobu = 'N', jobvt = 'N';
+        double wopt = 0.0;
+        /* Workspace query. */
+        dgesvd_(&jobu, &jobvt, &mm, &nn, A_cm.data(), &mm, s.data(),
+                nullptr, &mm, nullptr, &nn, &wopt, &lwork, &info);
+        lwork = (lapack_int_t)wopt;
+        std::vector<double> work(lwork > 0 ? (size_t)lwork : 1);
+        dgesvd_(&jobu, &jobvt, &mm, &nn, A_cm.data(), &mm, s.data(),
+                nullptr, &mm, nullptr, &nn, work.data(), &lwork, &info);
+        matlab::runtime::MatPtr S = matlab::runtime::make_mat(k, 1);
+        for (int64_t i = 0; i < k; ++i) S->data[i] = s[i];
+        return S.release();
+    }
+#endif
     int64_t m = m_orig, n = n_orig;
     matlab_mat *A = A_in;
     matlab_mat *T = NULL;
@@ -865,6 +1053,73 @@ static int extract_eigenvalues_(const double *H, int64_t n,
 matlab_mat *matlab_eig(matlab_mat *A_in) {
     if (!A_in || A_in->rows != A_in->cols) return mat_alloc(0, 0);
     int64_t n = A_in->rows;
+#ifdef MATLAB_LLVM_WITH_BLAS
+    if (n >= lapack_threshold()) {
+        /* Phase 3 of #45 — dispatch based on symmetry detection.
+         * Symmetric: dsyevd_ (divide & conquer, ascending eigenvalues).
+         * Non-symmetric: dgeev_ (real Schur form → ere, eim arrays).
+         * The non-symmetric path mirrors the hand-rolled output
+         * contract: real column when all eigenvalues are real, complex
+         * (matlab_mat_c*) otherwise. */
+        if (n > 0 && matrix_is_symmetric_(A_in->data, n)) {
+            std::vector<double> A_cm(n * n);
+            rm_to_cm(A_in->data, A_cm.data(), n, n);
+            std::vector<double> w(n);
+            char jobz = 'N', uplo = 'U';
+            lapack_int_t nn = (lapack_int_t)n, info = 0,
+                         lwork = -1, liwork = -1;
+            double wopt = 0;
+            lapack_int_t iwopt = 0;
+            dsyevd_(&jobz, &uplo, &nn, A_cm.data(), &nn, w.data(),
+                    &wopt, &lwork, &iwopt, &liwork, &info);
+            lwork = (lapack_int_t)wopt;
+            liwork = iwopt;
+            std::vector<double> work(lwork > 0 ? (size_t)lwork : 1);
+            std::vector<lapack_int_t> iwork(liwork > 0 ? (size_t)liwork : 1);
+            dsyevd_(&jobz, &uplo, &nn, A_cm.data(), &nn, w.data(),
+                    work.data(), &lwork, iwork.data(), &liwork, &info);
+            matlab::runtime::MatPtr E = matlab::runtime::make_mat(n, 1);
+            for (int64_t i = 0; i < n; ++i) E->data[i] = w[i];
+            return E.release();
+        }
+        /* Non-symmetric — dgeev_ with jobvl='N', jobvr='N'. */
+        std::vector<double> A_cm(n * n);
+        rm_to_cm(A_in->data, A_cm.data(), n, n);
+        std::vector<double> wr(n), wi(n);
+        char jobvl = 'N', jobvr = 'N';
+        lapack_int_t nn = (lapack_int_t)n, info = 0, lwork = -1;
+        double wopt = 0.0;
+        dgeev_(&jobvl, &jobvr, &nn, A_cm.data(), &nn, wr.data(), wi.data(),
+               nullptr, &nn, nullptr, &nn, &wopt, &lwork, &info);
+        lwork = (lapack_int_t)wopt;
+        std::vector<double> work(lwork > 0 ? (size_t)lwork : 1);
+        dgeev_(&jobvl, &jobvr, &nn, A_cm.data(), &nn, wr.data(), wi.data(),
+               nullptr, &nn, nullptr, &nn, work.data(), &lwork, &info);
+        /* Sort ascending by real part, tie-break by imag (match the
+         * hand-rolled path's sort contract). */
+        for (int64_t i = 0; i < n; ++i) {
+            for (int64_t j = i + 1; j < n; ++j) {
+                bool swap = (wr[j] < wr[i]) ||
+                            (wr[j] == wr[i] && wi[j] < wi[i]);
+                if (swap) {
+                    double t;
+                    t = wr[i]; wr[i] = wr[j]; wr[j] = t;
+                    t = wi[i]; wi[i] = wi[j]; wi[j] = t;
+                }
+            }
+        }
+        bool all_real = true;
+        for (int64_t i = 0; i < n; ++i) if (wi[i] != 0.0) { all_real = false; break; }
+        if (all_real) {
+            matlab::runtime::MatPtr E = matlab::runtime::make_mat(n, 1);
+            for (int64_t i = 0; i < n; ++i) E->data[i] = wr[i];
+            return E.release();
+        }
+        matlab_mat_c *Ec = mat_c_alloc(n, 1);
+        for (int64_t i = 0; i < n; ++i) { Ec->re[i] = wr[i]; Ec->im[i] = wi[i]; }
+        return (matlab_mat *)Ec;
+    }
+#endif
 
     /* Non-symmetric path — Francis double-shift QR on Hessenberg form.
      * Returns matlab_mat* (real) when all eigenvalues are real, or
@@ -6194,6 +6449,12 @@ static matlab_mat_c *to_mat_c(void *p) {
  *
  * `epow` is only defined for real inputs at runtime; it keeps the
  * old macro. */
+/* Tier 4: hoist the freshly-allocated output buffer into a __restrict__
+ * local pointer so clang's autovec sees that writes through Cd don't
+ * alias reads through A/B (the macro `op` reads via A->data / B->data).
+ * Inputs intentionally aren't __restrict__ — `A .+ A` (Ap == Bp) is
+ * legal MATLAB and read-only aliasing between the input operands is
+ * fine. */
 #define BINARY_MM(name, op) \
     matlab_mat *matlab_##name##_mm(void *Ap, void *Bp) { \
         if (mat_is_complex(Ap) || mat_is_complex(Bp)) \
@@ -6204,14 +6465,16 @@ static matlab_mat_c *to_mat_c(void *p) {
             matlab_mat3 *C3 = mat3_alloc(A3->rows, A3->cols, A3->depth); \
             matlab_mat Ah = {A3->data, tot, 1}, Bh = {B3->data, tot, 1}, Ch = {C3->data, tot, 1}; \
             matlab_mat *A = &Ah, *B = &Bh, *C = &Ch; \
-            for (int64_t k = 0; k < tot; ++k) C->data[k] = (op); \
+            double * __restrict__ Cd = C->data; \
+            for (int64_t k = 0; k < tot; ++k) Cd[k] = (op); \
             return (matlab_mat *)C3; \
         } \
         matlab_mat *A = (matlab_mat *)Ap; \
         matlab_mat *B = (matlab_mat *)Bp; \
         int64_t m = A->rows, n = A->cols; \
         matlab_mat *C = mat_alloc(m, n); \
-        for (int64_t k = 0; k < m * n; ++k) C->data[k] = (op); \
+        double * __restrict__ Cd = C->data; \
+        for (int64_t k = 0; k < m * n; ++k) Cd[k] = (op); \
         return C; \
     }
 
@@ -6230,13 +6493,15 @@ static matlab_mat_c *to_mat_c(void *p) {
             matlab_mat3 *C3 = mat3_alloc(A3->rows, A3->cols, A3->depth); \
             matlab_mat Ah = {A3->data, tot, 1}, Ch = {C3->data, tot, 1}; \
             matlab_mat *A = &Ah, *C = &Ch; \
-            for (int64_t k = 0; k < tot; ++k) C->data[k] = (op); \
+            double * __restrict__ Cd = C->data; \
+            for (int64_t k = 0; k < tot; ++k) Cd[k] = (op); \
             return (matlab_mat *)C3; \
         } \
         matlab_mat *A = (matlab_mat *)Ap; \
         int64_t m = A->rows, n = A->cols; \
         matlab_mat *C = mat_alloc(m, n); \
-        for (int64_t k = 0; k < m * n; ++k) C->data[k] = (op); \
+        double * __restrict__ Cd = C->data; \
+        for (int64_t k = 0; k < m * n; ++k) Cd[k] = (op); \
         return C; \
     }
 
@@ -6251,13 +6516,15 @@ static matlab_mat_c *to_mat_c(void *p) {
             matlab_mat3 *C3 = mat3_alloc(A3->rows, A3->cols, A3->depth); \
             matlab_mat Ah = {A3->data, tot, 1}, Ch = {C3->data, tot, 1}; \
             matlab_mat *A = &Ah, *C = &Ch; \
-            for (int64_t k = 0; k < tot; ++k) C->data[k] = (op); \
+            double * __restrict__ Cd = C->data; \
+            for (int64_t k = 0; k < tot; ++k) Cd[k] = (op); \
             return (matlab_mat *)C3; \
         } \
         matlab_mat *A = (matlab_mat *)Ap; \
         int64_t m = A->rows, n = A->cols; \
         matlab_mat *C = mat_alloc(m, n); \
-        for (int64_t k = 0; k < m * n; ++k) C->data[k] = (op); \
+        double * __restrict__ Cd = C->data; \
+        for (int64_t k = 0; k < m * n; ++k) Cd[k] = (op); \
         return C; \
     }
 
@@ -6271,8 +6538,9 @@ BINARY_MM(ediv, A->data[k] / B->data[k])
 matlab_mat *matlab_epow_mm(matlab_mat *A, matlab_mat *B) {
     int64_t m = A->rows, n = A->cols;
     matlab_mat *C = mat_alloc(m, n);
+    double * __restrict__ Cd = C->data;
     for (int64_t k = 0; k < m * n; ++k)
-        C->data[k] = pow(A->data[k], B->data[k]);
+        Cd[k] = pow(A->data[k], B->data[k]);
     return C;
 }
 
@@ -13020,6 +13288,39 @@ matlab_mat *matlab_grpdelay(matlab_mat *b, matlab_mat *a, double N_d) {
 matlab_mat *matlab_chol(matlab_mat *A) {
     if (!A || A->rows != A->cols) return mat_alloc(0, 0);
     int64_t n = A->rows;
+#ifdef MATLAB_LLVM_WITH_BLAS
+    if (n >= lapack_threshold()) {
+        /* Phase 2 of #45 — dispatch to dpotrf_ for SPD Cholesky. The
+         * row-major upper triangular factor R satisfies R' * R = A,
+         * which is the column-major *lower* triangular factor (since
+         * (R')_col == R_row data layout). So:
+         *   - copy A row-major → scratch col-major.
+         *   - dpotrf_('L', n, scratch, n, &info) to factor as L * L'.
+         *   - copy scratch col-major → result row-major, zeroing the
+         *     strictly-lower part (since R is upper-tri row-major).
+         * The L-on-col-major == R-on-row-major equivalence saves a
+         * second transpose. */
+        std::vector<double> cm(n * n);
+        rm_to_cm(A->data, cm.data(), n, n);
+        char uplo = 'L';
+        lapack_int_t nn = (lapack_int_t)n, info = 0;
+        dpotrf_(&uplo, &nn, cm.data(), &nn, &info);
+        if (info != 0) {
+            /* Non-SPD (info > 0) or bad input (info < 0). Preserve the
+             * pre-LAPACK error contract. */
+            return matlab::runtime::fail_with_msg(
+                "chol: matrix is not positive definite", 38);
+        }
+        matlab::runtime::MatPtr R = matlab::runtime::make_mat(n, n);
+        cm_to_rm(cm.data(), R->data, n, n);
+        /* Zero the strictly-lower triangle so callers reading R as
+         * upper triangular don't see leftover L entries. */
+        for (int64_t i = 1; i < n; ++i)
+            for (int64_t j = 0; j < i; ++j)
+                R->data[i * n + j] = 0.0;
+        return R.release();
+    }
+#endif
     /* Phase-4 RAII: MatPtr ensures the descriptor is freed if any
      * intermediate path throws (none today, but defensive). */
     matlab::runtime::MatPtr R = matlab::runtime::make_mat(n, n);
@@ -13123,6 +13424,42 @@ static void lu_factor(matlab_mat *A, matlab_mat *L, matlab_mat *U,
     }
 }
 
+#ifdef MATLAB_LLVM_WITH_BLAS
+/* Shared LAPACK-backed LU helper for matlab_lu_L / matlab_lu_U.
+ * dgetrf_ returns the packed L (unit-diag, strictly below the
+ * diagonal) and U (on and above the diagonal) in one matrix. Split
+ * them into the row-major L / U the matlab.lu_L / _U callers expect.
+ * The MATLAB convention for `[L,U] = lu(A)` returns the permuted-row
+ * factors (P*A = L*U) without an explicit P output — same shape the
+ * pre-LAPACK lu_factor returned. */
+static void lapack_lu_factor(matlab_mat *A, matlab_mat *L, matlab_mat *U) {
+    int64_t n = A->rows;
+    std::vector<double> LU_cm(n * n);
+    rm_to_cm(A->data, LU_cm.data(), n, n);
+    lapack_int_t nn = (lapack_int_t)n, info = 0;
+    std::vector<lapack_int_t> ipiv(n);
+    dgetrf_(&nn, &nn, LU_cm.data(), &nn, ipiv.data(), &info);
+    /* Even on info != 0 (singular U), the factors are filled — return
+     * what LAPACK produced; matches the naive lu_factor's leniency. */
+    /* Initialise L = I and U = 0 (row-major). */
+    for (int64_t i = 0; i < n; ++i) {
+        for (int64_t j = 0; j < n; ++j) {
+            L->data[i * n + j] = (i == j) ? 1.0 : 0.0;
+            U->data[i * n + j] = 0.0;
+        }
+    }
+    /* Split: U is the upper-triangular part of LU_cm in row-major;
+     * L's strictly-lower part is from LU_cm's strictly-lower (col-major
+     * read → row-major write). */
+    for (int64_t i = 0; i < n; ++i) {
+        for (int64_t j = i; j < n; ++j)
+            U->data[i * n + j] = LU_cm[j * n + i];     /* col-major read */
+        for (int64_t j = 0; j < i; ++j)
+            L->data[i * n + j] = LU_cm[j * n + i];     /* below-diag */
+    }
+}
+#endif
+
 matlab_mat *matlab_lu_L(matlab_mat *A) {
     if (!A || A->rows != A->cols) return mat_alloc(0, 0);
     int64_t n = A->rows;
@@ -13130,6 +13467,12 @@ matlab_mat *matlab_lu_L(matlab_mat *A) {
      * code freed U with two manual free()s and a malloc'd piv array. */
     matlab::runtime::MatPtr L = matlab::runtime::make_mat(n, n);
     matlab::runtime::MatPtr U = matlab::runtime::make_mat(n, n);
+#ifdef MATLAB_LLVM_WITH_BLAS
+    if (n >= lapack_threshold()) {
+        lapack_lu_factor(A, L.get(), U.get());
+        return L.release();
+    }
+#endif
     std::vector<int64_t> piv(n);
     lu_factor(A, L.get(), U.get(), piv.data());
     return L.release();
@@ -13141,6 +13484,12 @@ matlab_mat *matlab_lu_U(matlab_mat *A) {
     int64_t n = A->rows;
     matlab::runtime::MatPtr L = matlab::runtime::make_mat(n, n);
     matlab::runtime::MatPtr U = matlab::runtime::make_mat(n, n);
+#ifdef MATLAB_LLVM_WITH_BLAS
+    if (n >= lapack_threshold()) {
+        lapack_lu_factor(A, L.get(), U.get());
+        return U.release();
+    }
+#endif
     std::vector<int64_t> piv(n);
     lu_factor(A, L.get(), U.get(), piv.data());
     return U.release();
@@ -13177,6 +13526,47 @@ static void qr_factor(matlab_mat *A, matlab_mat *Q, matlab_mat *R) {
     }
 }
 
+#ifdef MATLAB_LLVM_WITH_BLAS
+/* Shared LAPACK-backed QR helper. dgeqrf_ returns R packed in the
+ * upper triangle of the input and the Householder reflectors below;
+ * dorgqr_ then expands the reflectors into Q.
+ * MATLAB's `[Q,R] = qr(A)` for m>=n returns Q (m×n, "economy") and
+ * R (n×n) — same shapes the pre-LAPACK qr_factor used. */
+static void lapack_qr_factor(matlab_mat *A, matlab_mat *Q, matlab_mat *R) {
+    int64_t m = A->rows, n = A->cols;
+    std::vector<double> A_cm(m * n);
+    rm_to_cm(A->data, A_cm.data(), m, n);
+    std::vector<double> tau(std::min(m, n));
+    lapack_int_t mm = (lapack_int_t)m,
+                 nn = (lapack_int_t)n,
+                 info = 0, lwork = -1;
+    double wopt = 0.0;
+    /* Workspace query. */
+    dgeqrf_(&mm, &nn, A_cm.data(), &mm, tau.data(),
+            &wopt, &lwork, &info);
+    lwork = (lapack_int_t)wopt;
+    std::vector<double> work(lwork > 0 ? (size_t)lwork : 1);
+    dgeqrf_(&mm, &nn, A_cm.data(), &mm, tau.data(),
+            work.data(), &lwork, &info);
+    /* Extract R from the upper triangle (col-major → row-major). */
+    for (int64_t i = 0; i < n; ++i) {
+        for (int64_t j = 0; j < n; ++j) {
+            R->data[i * n + j] = (i <= j) ? A_cm[j * m + i] : 0.0;
+        }
+    }
+    /* Expand Q via dorgqr_. */
+    lwork = -1;
+    dorgqr_(&mm, &nn, &nn, A_cm.data(), &mm, tau.data(),
+            &wopt, &lwork, &info);
+    lwork = (lapack_int_t)wopt;
+    work.resize(lwork > 0 ? (size_t)lwork : 1);
+    dorgqr_(&mm, &nn, &nn, A_cm.data(), &mm, tau.data(),
+            work.data(), &lwork, &info);
+    /* Q is m×n in col-major; convert to row-major. */
+    cm_to_rm(A_cm.data(), Q->data, m, n);
+}
+#endif
+
 matlab_mat *matlab_qr_Q(matlab_mat *A) {
     if (!A) return mat_alloc(0, 0);
     int64_t m = A->rows, n = A->cols;
@@ -13184,6 +13574,12 @@ matlab_mat *matlab_qr_Q(matlab_mat *A) {
     /* Phase-4 RAII — R is scratch, Q is the result. */
     matlab::runtime::MatPtr Q = matlab::runtime::make_mat(m, n);
     matlab::runtime::MatPtr R = matlab::runtime::make_mat(n, n);
+#ifdef MATLAB_LLVM_WITH_BLAS
+    if (std::min(m, n) >= lapack_threshold()) {
+        lapack_qr_factor(A, Q.get(), R.get());
+        return Q.release();
+    }
+#endif
     qr_factor(A, Q.get(), R.get());
     return Q.release();
 }
@@ -13194,6 +13590,12 @@ matlab_mat *matlab_qr_R(matlab_mat *A) {
     if (m < n) return mat_alloc(0, 0);
     matlab::runtime::MatPtr Q = matlab::runtime::make_mat(m, n);
     matlab::runtime::MatPtr R = matlab::runtime::make_mat(n, n);
+#ifdef MATLAB_LLVM_WITH_BLAS
+    if (std::min(m, n) >= lapack_threshold()) {
+        lapack_qr_factor(A, Q.get(), R.get());
+        return R.release();
+    }
+#endif
     qr_factor(A, Q.get(), R.get());
     return R.release();
 }

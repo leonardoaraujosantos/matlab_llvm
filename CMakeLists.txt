@@ -63,6 +63,26 @@ if(MATLAB_LLVM_WITH_PLOT)
     runtime/plot/contour.cpp)
 endif()
 
+# --- BLAS / LAPACK acceleration --------------------------------------------
+# Default ON on Apple (Accelerate is preinstalled and free), OFF
+# everywhere else so the runtime stays library-agnostic for cross-
+# compile / embedded targets. Per docs/lapack_roadmap.md §0, the
+# emitted C / C++ source NEVER depends on BLAS — only this build of
+# the runtime does, and only when this flag is on. Verified by
+# `nm runtime/matlab_runtime.cpp.o | grep cblas_` returning empty
+# when WITH_BLAS=OFF.
+if(NOT DEFINED MATLAB_LLVM_WITH_BLAS)
+  if(APPLE)
+    set(MATLAB_LLVM_WITH_BLAS ON CACHE BOOL
+        "Link runtime against BLAS / LAPACK (host-CPU dense linalg
+         acceleration; preserves the cross-emit invariant)" FORCE)
+  else()
+    set(MATLAB_LLVM_WITH_BLAS OFF CACHE BOOL
+        "Link runtime against BLAS / LAPACK (host-CPU dense linalg
+         acceleration; preserves the cross-emit invariant)" FORCE)
+  endif()
+endif()
+
 # --- Verilog-A lint ---------------------------------------------------------
 # Off by default; turn on with -DMATLAB_LLVM_WITH_VA_LINT=ON to register a
 # CTest target that runs scripts/va_lint.sh (OpenVAF / ADMS) over every
@@ -312,6 +332,44 @@ if(MATLAB_LLVM_WITH_MLIR)
     target_sources(matlabc PRIVATE runtime/toolbox/sym/runtime_sym.cpp)
     target_link_libraries(matlabc PRIVATE SymPP::sympp)
     target_compile_definitions(matlabc PRIVATE MATLAB_LLVM_WITH_SYM=1)
+  endif()
+  # LAPACK acceleration epic (#45). When ON, the runtime's hand-rolled
+  # dense linalg kernels dispatch to a host BLAS / LAPACK library for
+  # matrices above an amortisation threshold. The naive fallback stays
+  # the only path when this flag is OFF — preserving the cross-emit
+  # invariant (no cblas_* symbol references in the runtime object).
+  # See docs/lapack_roadmap.md §0 for the architectural argument.
+  if(MATLAB_LLVM_WITH_BLAS)
+    target_compile_definitions(matlabc PRIVATE MATLAB_LLVM_WITH_BLAS=1)
+    if(APPLE)
+      # Apple Accelerate ships LAPACK + BLAS + vDSP + vImage; preinstalled
+      # on every Mac. Hand-tuned for the AMX matrix coprocessor on
+      # Apple Silicon.
+      target_link_libraries(matlabc PRIVATE "-framework Accelerate")
+      message(STATUS "BLAS: linking Apple Accelerate (-framework Accelerate)")
+    else()
+      # Linux / other — let CMake's FindBLAS / FindLAPACK pick the
+      # preferred lib (OpenBLAS / MKL / generic). Default backend
+      # picked by the BLA_VENDOR variable; defaults to system search.
+      find_package(BLAS)
+      find_package(LAPACK)
+      if(BLAS_FOUND AND LAPACK_FOUND)
+        target_link_libraries(matlabc PRIVATE
+            ${BLAS_LIBRARIES} ${LAPACK_LIBRARIES})
+        message(STATUS "BLAS: ${BLAS_LIBRARIES}")
+        message(STATUS "LAPACK: ${LAPACK_LIBRARIES}")
+      else()
+        message(WARNING
+            "MATLAB_LLVM_WITH_BLAS=ON but no BLAS / LAPACK found via CMake's"
+            " FindBLAS / FindLAPACK; disabling. Pass -DBLA_VENDOR=<vendor>"
+            " (e.g. OpenBLAS / Intel10_64lp / Generic) to pick one.")
+        # Strip the define so the runtime falls back to the naive path
+        # rather than failing to link.
+        get_target_property(_defs matlabc COMPILE_DEFINITIONS)
+        list(REMOVE_ITEM _defs MATLAB_LLVM_WITH_BLAS=1)
+        set_target_properties(matlabc PROPERTIES COMPILE_DEFINITIONS "${_defs}")
+      endif()
+    endif()
   endif()
   if(MATLAB_LLVM_WITH_PLOT)
     target_sources(matlabc PRIVATE ${MATLAB_PLOT_SOURCES})

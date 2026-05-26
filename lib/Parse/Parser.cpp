@@ -981,6 +981,8 @@ static bool isGpucoderLeaf(std::string_view Leaf) {
   static const std::string_view Names[] = {
     "reduce", "matrixMatrixKernel", "sort", "batchedMatMul",
     "stencilKernel",  /* deprecated MathWorks alias for stencilfun */
+    "gemm",  /* Phase 4 of lapack_roadmap §4 — GPU library replacement
+              * for GEMM.  Routes through matlab_gpu_gemm dispatcher. */
   };
   for (auto N : Names) if (N == Leaf) return true;
   return false;

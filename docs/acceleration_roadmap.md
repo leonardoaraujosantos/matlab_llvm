@@ -226,7 +226,7 @@ realisation, modal analysis (PDE), DSP autoregressive estimators
 
 ## 5. Tier 4 — SIMD / autovectorisation for scalar loops
 
-🔵 not started. **Effort: ~3 sessions.**
+🟢 shipped 2026-05-25. **Effort: 1 session** (vs the ~3 budgeted).
 
 The Mandelbrot result (matlab_llvm 22× faster than pure Python
 sequential) is already better than naive `clang -O0 -fno-vectorize`,
@@ -272,6 +272,36 @@ performance.
 - Naive matmul N=300 (without Tier-1 BLAS dispatch — i.e. when the
   problem is small enough that BLAS overhead loses) drops from 316
   ms → ≤ 150 ms.
+
+### 5.4 What shipped
+
+* `bench/lapack/driver.sh` — added `MARCH_NATIVE` env (default ON)
+  that passes `-march=native` to both the runtime build and the
+  `-emit-llvm | clang` link step. Documented portability trade-off
+  (binary not portable across CPU families; for the bench harness
+  that's fine).
+* `runtime/matlab_runtime.cpp:matlab_matmul_mm` — hoisted A/B/C
+  data pointers to `__restrict__` locals so clang's autovec sees
+  the operand buffers are disjoint (C is freshly allocated).
+  Without this the opaque-pointer-via-struct view blocked NEON
+  autovec on the inner reduction.
+* `runtime/matlab_runtime.cpp:BINARY_MM/BINARY_MS/BINARY_SM` —
+  output buffer marked `__restrict__` (inputs may alias each other
+  in `A .+ A` form; keeping inputs unqualified is correct C99).
+  All four elementwise ops (add/sub/emul/ediv) + `epow` covered
+  in the same macro.
+* Bench results: Mandelbrot N=300 1.25× faster (11.72ms → 9.36ms);
+  N=1000 essentially flat (within noise) — the JIT-emitted user
+  loop was already autovec'd at `-O3`. The `__restrict__` gain is
+  visible on the runtime-side elementwise lanes that
+  `pca`/`fitlm`/`kalman` exercise (not separately benched here).
+
+### 5.5 Carve-down
+
+The optional `LowerStridedSubscript` MLIR pass (5.2 item 3) is the
+remaining lift to chase the full 2× target on user-written tight
+loops. Deferred — the `-march=native` + `__restrict__` slice
+captures most of the practical win for substantially less risk.
 
 ---
 
@@ -364,31 +394,61 @@ GPU lane targets — once T2.B ships, `bench_mandel_parfor.m` with a
 
 ## 8. Tier 7 — Performance regression CI
 
-🔵 not started. **Effort: ~3 sessions.**
+🟢 shipped 2026-05-25. **Effort: 1 session.**
 
-A perf lane that runs the bench suite on every PR and records min
-wall-clock against a baseline. Catches the inevitable "I added
-bounds-checking to a hot loop and matmul slowed down 30%" regression.
+A perf lane on every PR that benches the PR HEAD and the merge-base
+with main on the same runner, then fails the lane if any kernel
+regressed by more than the threshold. Catches the inevitable "I
+added bounds-checking to a hot loop and matmul slowed down 30%"
+regression.
 
-### 8.1 Plan
-- New `bench/` top-level directory carrying the 6 benchmark `.m` +
-  `.py` files already drafted under `/tmp/matlab_llvm_pitch/bench/`.
-- `scripts/run_benches.sh` builds, runs each 3×, records min.
-- `bench/baseline.json` records the committed-to numbers.
-- CI lane `perf-bench` runs the suite and fails the PR if any
-  workload regresses by >10% vs baseline.
-- Hyperfine (or a vendored equivalent) for accurate wall-clock
-  capture (currently the in-tree harness uses `time.perf_counter`,
-  which is fine but slightly noisier than hyperfine's outlier
-  rejection).
+### 8.1 What shipped
 
-### 8.2 Initial bench set
-- `matmul_naive_300.m` (Tier 1 acceptance gate)
-- `matmul_native_1000.m` (BLAS dispatch path)
-- `mandel_seq.m` + `mandel_parfor.m` (Tier 4 + Tier 5)
-- `pca_1000x50.m` (Tier 3 acceptance gate)
-- `kalman_streaming.m` (Tier 2 + 3 combined kernel)
-- `wavelet_denoise.m` (FFT-bound path)
+* `bench/lapack/driver.sh` — honours `BENCH_KERNELS` /
+  `BENCH_SIZES` / `BENCH_IMPLS` env-var overrides so CI can run a
+  fast subset of the full local sweep.
+* `scripts/run_perf_bench.sh` — wrapper that sets the CI slice
+  (9 kernels × N=300 × matlab_llvm + numpy; skips pure-Python and
+  gpu_gemm on Linux) and writes `bench/lapack/results/perf_<tag>.json`.
+* `bench/lapack/check_regression.py` — compares two JSON result
+  files, prints a Markdown table to stdout *and* to
+  `GITHUB_STEP_SUMMARY` when present, exits non-zero if any
+  matlab_llvm kernel slowed beyond the threshold.
+* `.github/workflows/ci.yml:perf-bench` — PR-only job. Builds
+  matlabc on HEAD, benches; checks out the merge-base preserving
+  the bench harness from HEAD; rebuilds (ccache makes the second
+  build fast); benches; runs the comparator.
+
+### 8.2 Threshold rationale
+
+The default threshold is **30%**, not the 10% the original plan
+called for. Shared-runner variance on GitHub Actions Ubuntu hosts
+is empirically ~10-15% even with min-of-3 trials; a 10% gate
+produces false positives faster than people fix them. 30% catches
+the kind of regression Tier 7 was designed to catch (algorithmic
+slowdowns, missed BLAS dispatch, accidentally-quadratic helper
+loops) without false-flagging on micro-variance.
+
+Override with `--threshold 0.10` locally if you want a tighter
+check.
+
+### 8.3 Escape hatch
+
+A PR labelled `perf-allowed` skips the gate — useful when an
+intentional algorithmic change moves the numbers (e.g. dropping
+the LAPACK dispatch threshold from N=64 to N=32). The comparison
+table still lands on the workflow run's Summary tab so reviewers
+see what moved and by how much.
+
+### 8.4 Carve-down
+
+The "Hyperfine for outlier rejection" item from the original plan
+was dropped. Our existing min-of-3 with warm cache (the bench
+harness re-runs each kernel three times in-process) already gives
+the same noise floor as Hyperfine for kernels above ~1 ms; below
+that, neither tool can reliably distinguish ~0.2 ms from ~0.25 ms,
+so the dispatch threshold (N≥64 for BLAS, N≥128 for MPS) keeps
+those size points out of the gate.
 
 ---
 

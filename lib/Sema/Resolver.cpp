@@ -836,6 +836,12 @@ void Resolver::registerBuiltins() {
      * `gpucoder.batchedMatMul` / `gpucoder.stencilKernel` (deprecated). */
     "gpucoder_reduce", "gpucoder_matrixMatrixKernel",
     "gpucoder_sort", "gpucoder_batchedMatMul", "gpucoder_stencilKernel",
+    /* Phase 4 of lapack_roadmap §4 — GPU library replacement for GEMM.
+     * `gpucoder.gemm(A,B)` folds to `gpucoder_gemm`; the runtime
+     * dispatcher (matlab_gpu_gemm) routes to MPSMatrixMultiplication
+     * on Metal / cuBLAS sgemm on CUDA (future) / falls back to the CPU
+     * BLAS path otherwise. */
+    "gpucoder_gemm",
     /* `coder.gpuConfig('mex' | 'lib' | 'exe' | 'dll')` returns a
      * config record consumed by the -emit-{cuda,metal,opencl} lanes. */
     "coder_gpuConfig",

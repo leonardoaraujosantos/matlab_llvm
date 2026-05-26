@@ -136,6 +136,15 @@ matlab_gpu_launch_metal(double, double, double, void *, void *, int) {
       "built in.  Reconfigure with -DMATLAB_LLVM_GPU_METAL=ON.\n");
   std::abort();
 }
+
+/* Phase 4 of LAPACK roadmap (#45 §4) — Metal MPS gemm hook.  Defined
+ * strongly by runtime_gpu_metal.mm when the Metal TU is in the link
+ * line; the weak stub returns nullptr so the dispatcher below falls
+ * back to the CPU lane on hosts without Metal linked in. */
+extern "C" __attribute__((weak)) matlab_mat *
+matlab_gpu_metal_gemm_double(matlab_mat *, matlab_mat *) {
+  return nullptr;  /* "Metal backend not linked — fall back" */
+}
 extern "C" __attribute__((weak)) int
 matlab_gpu_launch_cuda(double, double, double, void *, void *, int) {
   std::fprintf(stderr,
@@ -294,6 +303,44 @@ double matlab_gpu_exists_on_gpu(void *obj) {
   /* True when the carrier exists.  Refined when DevicePtr tracking
    * becomes meaningful in T2+. */
   return obj ? 1.0 : 0.0;
+}
+
+/* ====================================================================
+ * matlab_gpu_gemm — Phase 4 (LAPACK roadmap §4) entry point.
+ *
+ * The user-facing surface lets the MATLAB level invoke the active
+ * backend's GEMM library replacement (MPSMatrixMultiplication on
+ * Metal; cuBLAS sgemm on CUDA — future).  Mirrors the CPU-side
+ * matlab_matmul_mm signature so caller and call site shape are
+ * symmetric.
+ *
+ * Falls back to the host CPU lane (matlab_matmul_mm) when the active
+ * target is CPU, when the matrix shape is below the GPU-launch
+ * threshold, or when the backend hook returns nullptr (e.g. Metal
+ * device unavailable).
+ *
+ * Threshold: matches MathWorks' cusolver dispatch (N >= 128) — below
+ * that the upload + downcast + launch overhead dwarfs the kernel
+ * itself even on M-series UMA.  Tunable via MATLAB_GPU_GEMM_MIN env
+ * var for benchmark sweeps. */
+extern "C" matlab_mat *matlab_matmul_mm(matlab_mat *A, matlab_mat *B);
+
+matlab_mat *matlab_gpu_gemm(matlab_mat *A, matlab_mat *B) {
+  if (!A || !B) return nullptr;
+  static int threshold = -1;
+  if (threshold < 0) {
+    const char *env = std::getenv("MATLAB_GPU_GEMM_MIN");
+    threshold = (env && *env) ? std::atoi(env) : 128;
+  }
+  int64_t M = A->rows, K = A->cols, N = B->cols;
+  bool big_enough = (M >= threshold && N >= threshold && K >= threshold);
+  GpuTarget T = activeTarget();
+  if (T == GpuTarget::Metal && big_enough) {
+    matlab_mat *C = matlab_gpu_metal_gemm_double(A, B);
+    if (C) return C;
+    /* Backend hook unavailable / failed — fall through to CPU. */
+  }
+  return matlab_matmul_mm(A, B);
 }
 
 }  /* extern "C" */
