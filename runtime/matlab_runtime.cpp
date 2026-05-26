@@ -10429,6 +10429,156 @@ extern "C" matlab_timetable *matlab_timetable_retime(matlab_timetable *tt,
     return out;
 }
 
+/* Method codes mirror the MATLAB_FILL_* enum in matlab_runtime.h. */
+enum { FILL_LINEAR = 0, FILL_PREVIOUS = 1, FILL_NEXT = 2 };
+
+/* Forward-declare matlab_timetable_disp so head() can reuse it; the
+ * canonical definition is further up in this TU. */
+extern "C" void matlab_timetable_disp(matlab_timetable *tt);
+
+/* fillmissing per numeric column. Three method codes mirror the
+ * enum in matlab_runtime.h. Linear interpolation walks rows once,
+ * tracking the last non-NaN; on hitting a non-NaN it back-fills the
+ * gap by linear interpolation; leading-NaN runs are carried from
+ * the first non-NaN, trailing-NaN runs from the last. previous /
+ * next are one-pass carries. */
+static bool is_nan_d(double x) { return x != x; }
+extern "C" matlab_timetable *matlab_timetable_fillmissing(
+        matlab_timetable *tt, int32_t method) {
+    matlab_timetable *out = matlab_timetable_new();
+    if (!tt) return out;
+    /* RowTimes pass through. */
+    if (tt->row_times) {
+        matlab_datetime_vec *rt = dt_vec_alloc(tt->row_times->n);
+        for (int64_t i = 0; i < tt->row_times->n; ++i)
+            rt->secs[i] = tt->row_times->secs[i];
+        out->row_times = rt;
+    }
+    out->nrows = tt->nrows;
+    if (tt->description)
+        matlab_timetable_set_description(out, tt->description,
+                                          (int64_t)strlen(tt->description));
+    int64_t n = tt->nrows;
+    for (int32_t c = 0; c < tt->nvars; ++c) {
+        int kind = tt->kinds ? tt->kinds[c] : 0;
+        const char *cn = tt->names[c];
+        int64_t cnl = (int64_t)strlen(cn);
+        if (kind != MATLAB_TABLE_KIND_NUMERIC) {
+            matlab_timetable_add_column_kind(out, cn, cnl,
+                                              tt->data[c], (int32_t)kind, n);
+            continue;
+        }
+        matlab_mat *src = (matlab_mat *)tt->data[c];
+        matlab_mat *dst = mat_alloc(n, 1);
+        if (!src || !src->data) {
+            matlab_timetable_add_column(out, cn, cnl, dst);
+            continue;
+        }
+        for (int64_t i = 0; i < n; ++i) dst->data[i] = src->data[i];
+        if (method == FILL_PREVIOUS) {
+            double last = NAN;
+            for (int64_t i = 0; i < n; ++i) {
+                if (!is_nan_d(dst->data[i])) last = dst->data[i];
+                else if (!is_nan_d(last)) dst->data[i] = last;
+            }
+        } else if (method == FILL_NEXT) {
+            double next = NAN;
+            for (int64_t i = n - 1; i >= 0; --i) {
+                if (!is_nan_d(dst->data[i])) next = dst->data[i];
+                else if (!is_nan_d(next)) dst->data[i] = next;
+            }
+        } else { /* MATLAB_FILL_LINEAR (default) */
+            int64_t prev_i = -1;
+            double prev_v = 0.0;
+            for (int64_t i = 0; i < n; ++i) {
+                if (is_nan_d(dst->data[i])) continue;
+                if (prev_i < 0) {
+                    /* Carry the first non-NaN backwards over leading NaNs. */
+                    for (int64_t k = 0; k < i; ++k) dst->data[k] = dst->data[i];
+                } else if (i > prev_i + 1) {
+                    /* Linear interpolate the gap (prev_i, i). */
+                    double step = (dst->data[i] - prev_v) /
+                                  (double)(i - prev_i);
+                    for (int64_t k = prev_i + 1; k < i; ++k)
+                        dst->data[k] = prev_v + step * (double)(k - prev_i);
+                }
+                prev_i = i;
+                prev_v = dst->data[i];
+            }
+            /* Carry the last non-NaN forwards over trailing NaNs. */
+            if (prev_i >= 0)
+                for (int64_t k = prev_i + 1; k < n; ++k) dst->data[k] = prev_v;
+        }
+        matlab_timetable_add_column(out, cn, cnl, dst);
+    }
+    return out;
+}
+
+extern "C" void matlab_timetable_summary(matlab_timetable *tt) {
+    if (!tt) return;
+    pthread_mutex_lock(&matlab_io_mutex);
+    /* Time-axis line. */
+    if (tt->row_times && tt->row_times->n > 0) {
+        int y1, m1, d1, hh1, mm1, y2, m2, d2, hh2, mm2;
+        double ss;
+        static const char *months[] = {"Jan","Feb","Mar","Apr","May","Jun",
+                                        "Jul","Aug","Sep","Oct","Nov","Dec"};
+        epoch_to_civil(tt->row_times->secs[0],
+                        &y1, &m1, &d1, &hh1, &mm1, &ss);
+        epoch_to_civil(tt->row_times->secs[tt->row_times->n - 1],
+                        &y2, &m2, &d2, &hh2, &mm2, &ss);
+        int mi1 = (m1 - 1) % 12; if (mi1 < 0) mi1 += 12;
+        int mi2 = (m2 - 1) % 12; if (mi2 < 0) mi2 += 12;
+        printf("Time: %lld rows  [%02d-%s-%04d ... %02d-%s-%04d]\n",
+                (long long)tt->row_times->n,
+                d1, months[mi1], y1, d2, months[mi2], y2);
+    }
+    /* Per-numeric-column line: min/max/mean/NumMissing. */
+    for (int32_t c = 0; c < tt->nvars; ++c) {
+        int kind = tt->kinds ? tt->kinds[c] : 0;
+        const char *cn = tt->names[c];
+        if (kind != MATLAB_TABLE_KIND_NUMERIC) {
+            printf("%s: (non-numeric)\n", cn ? cn : "(unnamed)");
+            continue;
+        }
+        matlab_mat *col = (matlab_mat *)tt->data[c];
+        int64_t n = tt->nrows;
+        if (!col || !col->data || n == 0) {
+            printf("%s: (empty)\n", cn ? cn : "(unnamed)");
+            continue;
+        }
+        double mn = INFINITY, mx = -INFINITY, sum = 0.0;
+        int64_t nan_n = 0, valid_n = 0;
+        for (int64_t i = 0; i < n; ++i) {
+            double v = col->data[i];
+            if (is_nan_d(v)) { nan_n++; continue; }
+            if (v < mn) mn = v;
+            if (v > mx) mx = v;
+            sum += v;
+            valid_n++;
+        }
+        double mean = valid_n > 0 ? sum / (double)valid_n : NAN;
+        printf("%s: NumMissing=%lld  Min=%.4g  Max=%.4g  Mean=%.4g\n",
+                cn ? cn : "(unnamed)", (long long)nan_n, mn, mx, mean);
+    }
+    pthread_mutex_unlock(&matlab_io_mutex);
+}
+
+/* head — display the first n rows. n<=0 means "8 by default". */
+extern "C" void matlab_timetable_head(matlab_timetable *tt, double n) {
+    if (!tt) return;
+    int64_t k = (int64_t)n;
+    if (k <= 0) k = 8;
+    if (k > tt->nrows) k = tt->nrows;
+    /* Reuse disp's renderer by transiently trimming nrows. The
+     * field set is restored before return so the caller's view is
+     * unchanged. */
+    int32_t saved = tt->nrows;
+    tt->nrows = (int32_t)k;
+    matlab_timetable_disp(tt);
+    tt->nrows = saved;
+}
+
 /* Horizontal concat: produce a fresh timetable whose RowTimes are
  * taken from `a` and whose columns are the union of `a`'s and `b`'s.
  * Mismatched RowTimes are silently truncated (we copy min(a->nrows,

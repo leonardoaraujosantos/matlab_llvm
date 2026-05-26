@@ -1587,6 +1587,23 @@ matlab_timetable *matlab_timetable_synchronize(matlab_timetable *a,
                                                 matlab_timetable *b,
                                                 int32_t cadence,
                                                 int32_t aggregator);
+/* Utilities. fillmissing operates per-column with one of:
+ *   0 = linear interpolation between neighbour non-NaNs (boundary
+ *       NaNs are carried from the closest non-NaN)
+ *   1 = previous (carry-forward; leading NaNs stay NaN)
+ *   2 = next     (carry-back;   trailing NaNs stay NaN)
+ * Methods 3 (constant) etc. land later when a test needs them.
+ * Returns a fresh timetable. summary / head are display-only and
+ * return void; n=0 in head means "default 8 rows".              */
+enum {
+    MATLAB_FILL_LINEAR   = 0,
+    MATLAB_FILL_PREVIOUS = 1,
+    MATLAB_FILL_NEXT     = 2,
+};
+matlab_timetable *matlab_timetable_fillmissing(matlab_timetable *tt,
+                                                int32_t method);
+void              matlab_timetable_summary(matlab_timetable *tt);
+void              matlab_timetable_head   (matlab_timetable *tt, double n);
 
 /* Phase 4 — containers.Map / dictionary. A flat key/value table with
  * mixed key types (f64 or matlab_string *) and value types (f64 or
