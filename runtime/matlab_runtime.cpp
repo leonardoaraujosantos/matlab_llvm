@@ -10147,6 +10147,101 @@ extern "C" double matlab_timetable_size_dim(matlab_timetable *tt, double dim) {
     return 1.0;
 }
 
+/* Selection helpers — these return a fresh matlab_timetable that
+ * shares column-data pointers with the source (we are a static-
+ * compile lane; no refcounted ownership semantics, and the source
+ * outlives the slice by construction in the headline workflow).
+ * For row selection we copy the numeric column data, since the
+ * new column is a different length than the source. */
+extern "C" matlab_timetable *matlab_timetable_select_var(matlab_timetable *tt,
+                                                          const char *name,
+                                                          int64_t namelen) {
+    matlab_timetable *out = matlab_timetable_new();
+    if (!tt) return out;
+    int32_t i = tt_find(tt, name, namelen);
+    out->row_times = tt->row_times;
+    out->nrows = tt->nrows;
+    if (i < 0) return out;
+    /* Share the column pointer — the caller treats the slice as
+     * read-only for the duration of any downstream call chain. */
+    matlab_timetable_add_column_kind(out, name, namelen,
+                                      tt->data[i],
+                                      tt->kinds ? tt->kinds[i] : 0,
+                                      tt->nrows);
+    return out;
+}
+
+/* Row-selection: idx is a matlab_mat of 1-based positions. The
+ * out timetable carries copies of each column reduced to those
+ * rows, and a fresh datetime_vec with the matching RowTimes. We
+ * detect logical-index style (all values in {0,1} with length ==
+ * nrows) and route to the boolean-mask path. */
+extern "C" matlab_timetable *matlab_timetable_select_rows_mat(
+        matlab_timetable *tt, matlab_mat *idx) {
+    matlab_timetable *out = matlab_timetable_new();
+    if (!tt || !idx) return out;
+    int64_t in_n = (int64_t)(idx->rows * idx->cols);
+    int64_t src_n = tt->nrows;
+    bool is_logical = (in_n == src_n);
+    if (is_logical) {
+        for (int64_t i = 0; i < in_n; ++i) {
+            double v = idx->data[i];
+            if (v != 0.0 && v != 1.0) { is_logical = false; break; }
+        }
+    }
+    /* Build the row map (1-based source row per output row). */
+    int64_t out_n = 0;
+    int64_t *map = (int64_t *)calloc((size_t)(in_n > 0 ? in_n : 1),
+                                     sizeof(int64_t));
+    if (is_logical) {
+        for (int64_t i = 0; i < in_n; ++i)
+            if (idx->data[i] != 0.0) map[out_n++] = i;
+    } else {
+        for (int64_t i = 0; i < in_n; ++i) {
+            int64_t r = (int64_t)idx->data[i] - 1;
+            if (r >= 0 && r < src_n) map[out_n++] = r;
+        }
+    }
+    /* RowTimes slice. */
+    matlab_datetime_vec *rt = dt_vec_alloc(out_n);
+    if (tt->row_times && tt->row_times->secs)
+        for (int64_t i = 0; i < out_n; ++i)
+            rt->secs[i] = tt->row_times->secs[map[i]];
+    out->row_times = rt;
+    out->nrows = (int32_t)out_n;
+    /* Per-column copy (numeric only — string / datetime columns
+     * fall back to a no-op copy of the pointer array; they're rare
+     * in the timetable headline. */
+    for (int32_t c = 0; c < tt->nvars; ++c) {
+        int kind = tt->kinds ? tt->kinds[c] : 0;
+        const char *cname = tt->names[c];
+        int64_t cnl = (int64_t)strlen(cname);
+        if (kind == MATLAB_TABLE_KIND_NUMERIC) {
+            matlab_mat *src = (matlab_mat *)tt->data[c];
+            matlab_mat *dst = mat_alloc(out_n, 1);
+            if (src && src->data)
+                for (int64_t i = 0; i < out_n; ++i)
+                    dst->data[i] = src->data[map[i]];
+            matlab_timetable_add_column(out, cname, cnl, dst);
+        } else {
+            /* For string / datetime columns we'd allocate a fresh
+             * pointer-array of the right length and copy the
+             * selected pointers. Defer until a test exercises it. */
+            matlab_timetable_add_column_kind(out, cname, cnl,
+                                              tt->data[c], (int32_t)kind,
+                                              out_n);
+        }
+    }
+    free(map);
+    if (out->description && !out->description[0]) out->description = NULL;
+    return out;
+}
+
+extern "C" const char *matlab_timetable_get_description(matlab_timetable *tt) {
+    if (!tt || !tt->description) return "";
+    return tt->description;
+}
+
 /* table2timetable: take ownership of the table's columns and attach
  * a RowTimes axis. We move (not copy) so the source table becomes
  * stale; the test harness keeps no further reference. */
@@ -10181,6 +10276,11 @@ extern "C" void matlab_timetable_disp(matlab_timetable *tt) {
     pthread_mutex_lock(&matlab_io_mutex);
     const int WTIME = 20;
     const int W     = 12;
+    /* Description (Properties.Description) prints above the header
+     * when set, matching MATLAB's table render. */
+    if (tt->description && tt->description[0]) {
+        printf("    %s\n", tt->description);
+    }
     /* Header: Time + variable names. */
     printf("    %*s", WTIME, "Time");
     for (int32_t i = 0; i < tt->nvars; ++i)

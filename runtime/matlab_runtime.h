@@ -1517,6 +1517,18 @@ void              matlab_timetable_disp  (matlab_timetable *tt);
  * timetable; the caller must not free it). */
 matlab_timetable *matlab_table2timetable(struct matlab_table_s *t,
                                           matlab_datetime_vec *rt);
+/* Subscripting helpers.
+ *   _select_var       : TT(:,'colName') -> new TT with just that
+ *                        column (RowTimes preserved)
+ *   _select_rows_mat  : TT(idx,:) where idx is a matlab_mat of
+ *                        1-based numeric indices (or 0/1 logical)
+ *   _description      : property read (returns char* or "")        */
+matlab_timetable *matlab_timetable_select_var(matlab_timetable *tt,
+                                                const char *name,
+                                                int64_t namelen);
+matlab_timetable *matlab_timetable_select_rows_mat(matlab_timetable *tt,
+                                                     matlab_mat *idx);
+const char       *matlab_timetable_get_description(matlab_timetable *tt);
 
 /* Phase 4 — containers.Map / dictionary. A flat key/value table with
  * mixed key types (f64 or matlab_string *) and value types (f64 or

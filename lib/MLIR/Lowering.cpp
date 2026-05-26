@@ -2459,6 +2459,10 @@ void Lowerer::lowerStmt(const Stmt &St) {
          * height / etc. route to matlab_timetable_*. */
         if (NE->Name == "timetable" || NE->Name == "table2timetable")
           RhsIsTimetable = true;
+        /* TT(rowIdx, :) and TT(:, 'colName') both return a new
+         * timetable, so the LHS slot inherits the tag. */
+        if (NE->Ref && TimetableBindings.count(NE->Ref))
+          RhsIsTimetable = true;
         /* Known struct-returning builtins. struct() is the textbook
          * literal; linkBudget is the PROP-Tier-2b struct return; stepinfo
          * returns the CST step-response-metrics struct. Adding more is a
@@ -2478,6 +2482,14 @@ void Lowerer::lowerStmt(const Stmt &St) {
       if (NE->Ref &&
           (StructInitialised.count(NE->Ref) || NE->Ref->IsStruct))
         RhsIsStruct = true;
+    } else if (A.RHS && A.RHS->Kind == NodeKind::FieldAccess) {
+      /* Phase 5.4: TT.Time produces a matlab_datetime_vec *. TT.<col>
+       * is a plain matlab_mat — the default lane handles it. */
+      auto *FA = static_cast<const FieldAccess *>(A.RHS);
+      if (auto *BN = dynamic_cast<const NameExpr *>(FA->Base))
+        if (BN->Ref && TimetableBindings.count(BN->Ref) &&
+            FA->Field == "Time")
+          RhsIsDatetimeVec = true;
     }
     if (A.RHS && A.RHS->Kind == NodeKind::CallOrIndex) {
       auto *Cx = static_cast<const CallOrIndex *>(A.RHS);
@@ -4281,6 +4293,40 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
                     {mlir::NoneType::get(&MCtx)}, loc(F.Range), {Cal});
         return;
       }
+    /* Phase 5.4 (cont.): TT.<colName> = Rhs on a timetable binding.
+     * Same shape as table column write — _add_column auto-replaces. */
+    if (auto *BN = dynamic_cast<const NameExpr *>(F.Base))
+      if (BN->Ref && TimetableBindings.count(BN->Ref)) {
+        mlir::Value Tv = lowerExpr(*F.Base);
+        mlir::Value NameV = emitFieldNameChar(F.Field, loc(F.Range));
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_timetable_add_column"));
+        emitUnregOp("matlab.call_builtin", {Tv, NameV, Rhs},
+                    {mlir::NoneType::get(&MCtx)}, loc(F.Range), {Cal});
+        return;
+      }
+    /* TT.Properties.Description = 'literal' — nested FieldAccess.
+     * Match exactly that two-level shape; defer other Properties
+     * write targets (VariableNames rename, etc.) to later tasks. */
+    if (auto *Inner = dynamic_cast<const FieldAccess *>(F.Base))
+      if (auto *BN = dynamic_cast<const NameExpr *>(Inner->Base))
+        if (BN->Ref && TimetableBindings.count(BN->Ref) &&
+            Inner->Field == "Properties" && F.Field == "Description") {
+          mlir::Value Tv = lowerExpr(*Inner->Base);
+          mlir::NamedAttribute VA(
+              mlir::StringAttr::get(&MCtx, "value"),
+              mlir::StringAttr::get(&MCtx, ""));
+          /* Rhs may be a char literal (matlab.const_char) or a
+           * string descriptor. We accept the const_char form
+           * directly — the runtime entry takes (ptr, char*, i64). */
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_timetable_set_description"));
+          emitUnregOp("matlab.call_builtin", {Tv, Rhs},
+                      {mlir::NoneType::get(&MCtx)}, loc(F.Range), {Cal});
+          return;
+        }
     if (auto *CI = dynamic_cast<const CallOrIndex *>(F.Base)) {
       auto *NE = dynamic_cast<const NameExpr *>(CI->Callee);
       if (NE && NE->Ref &&
@@ -5096,6 +5142,48 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
               mlir::StringAttr::get(&MCtx, "callee"),
               mlir::StringAttr::get(&MCtx, "matlab_dict_new"));
           return emitUnreg("matlab.call_builtin", {}, PtrTy, L, {Cal});
+        }
+    /* Phase 5.4 (cont.): TMW(rowIdx, colSel) read on a timetable
+     * binding. Shape menu:
+     *   TMW(:, 'colName') | TMW(:, "colName")   -> matlab_timetable
+     *                                              with just that column
+     *   TMW(idx, :)                              -> matlab_timetable
+     *                                              with rows selected
+     * timerange() row-subscripting lives in Task 5; this arm rejects
+     * args it can't recognise and falls through to the polymorphic
+     * indexing path (which would error). */
+    if (C.Args.size() == 2 && C.Args[0] && C.Args[1])
+      if (auto *N = dynamic_cast<const NameExpr *>(C.Callee))
+        if (N->Ref && TimetableBindings.count(N->Ref)) {
+          auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+          /* Column-by-name form: TMW(:, 'colName'). */
+          if (dynamic_cast<const ColonExpr *>(C.Args[0])) {
+            std::string ColName;
+            if (auto *CL = dynamic_cast<const CharLiteral *>(C.Args[1]))
+              ColName = std::string(CL->Value);
+            else if (auto *SL = dynamic_cast<const StringLiteral *>(C.Args[1]))
+              ColName = std::string(SL->Value);
+            if (!ColName.empty()) {
+              mlir::Value Tv = lowerExpr(*C.Callee);
+              mlir::Value NameV = emitFieldNameChar(ColName, L);
+              mlir::NamedAttribute Cal(
+                  mlir::StringAttr::get(&MCtx, "callee"),
+                  mlir::StringAttr::get(&MCtx, "matlab_timetable_select_var"));
+              return emitUnreg("matlab.call_builtin", {Tv, NameV},
+                               PtrTy, L, {Cal});
+            }
+          }
+          /* Row-by-mask form: TMW(idx, :) where idx lowers as a
+           * matlab_mat * (numeric 1-based indices OR logical). */
+          if (dynamic_cast<const ColonExpr *>(C.Args[1])) {
+            mlir::Value Tv  = lowerExpr(*C.Callee);
+            mlir::Value Idx = lowerExpr(*C.Args[0]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_timetable_select_rows_mat"));
+            return emitUnreg("matlab.call_builtin", {Tv, Idx},
+                             PtrTy, L, {Cal});
+          }
         }
     /* Phase 4: m(k) read on a dict binding. Detect via DictBindings,
      * dispatch to matlab_dict_get_<str|num>_<f64|mat>. The expected
@@ -10526,6 +10614,29 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         mlir::NamedAttribute Cal(
             mlir::StringAttr::get(&MCtx, "callee"),
             mlir::StringAttr::get(&MCtx, "matlab_table_get_column"));
+        return emitUnreg("matlab.call_builtin", {Tv, NameV},
+                         PtrTy, L, {Cal});
+      }
+    /* Phase 5.4 (cont.): TMW.<name> read on a timetable binding.
+     *   TMW.Time              -> matlab_datetime_vec * (RowTimes)
+     *   TMW.<colName>         -> matlab_mat * (numeric column)
+     * The implicit-display + arithmetic dispatch for the returned
+     * value follows the same datetime_vec / matrix flow as the
+     * standalone constructors. */
+    if (auto *BN = dynamic_cast<const NameExpr *>(F.Base))
+      if (BN->Ref && TimetableBindings.count(BN->Ref)) {
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        mlir::Value Tv = lowerExpr(*F.Base);
+        if (F.Field == "Time") {
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_timetable_get_row_times"));
+          return emitUnreg("matlab.call_builtin", {Tv}, PtrTy, L, {Cal});
+        }
+        mlir::Value NameV = emitFieldNameChar(F.Field, L);
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_timetable_get_column"));
         return emitUnreg("matlab.call_builtin", {Tv, NameV},
                          PtrTy, L, {Cal});
       }
