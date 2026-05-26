@@ -1998,3 +1998,81 @@ extern "C" struct matlab_obj_s *matlab_portfoliomad_set_scenarios(
         struct matlab_obj_s *p, matlab_mat *S) {
     return matlab_portfoliocvar_set_scenarios(p, S);
 }
+
+/* ============================================================================
+ * §T5.3 — Backtest engine (function-form)
+ *
+ * A leaner backtest than MATLAB's handle-driven backtestStrategy /
+ * backtestEngine: backtest a FIXED target weight vector over a T×N
+ * asset-return matrix, either rebalancing to target every period
+ * (rebalance != 0) or buying-and-holding with weight drift
+ * (rebalance == 0). Returns a (T+1)×1 equity curve starting at 1.0.
+ * The handle-based rebalance-callback surface is a documented follow-on.
+ * ==========================================================================*/
+
+extern "C" matlab_mat *matlab_backtest(matlab_mat *returns, matlab_mat *weights,
+                                        double rebalance) {
+    if (!returns || !returns->data || !weights || !weights->data)
+        return mat_alloc(0, 0);
+    int64_t T = returns->rows, N = returns->cols;
+    if ((weights->rows * weights->cols) != N) return mat_alloc(0, 0);
+    matlab_mat *equity = mat_alloc(T + 1, 1);
+    equity->data[0] = 1.0;
+    bool rb = rebalance != 0.0;
+    /* Per-asset holdings (dollar value); start at weights * 1.0. */
+    std::vector<double> hold(static_cast<size_t>(N));
+    for (int64_t j = 0; j < N; ++j) hold[static_cast<size_t>(j)] = weights->data[j];
+    for (int64_t t = 0; t < T; ++t) {
+        /* Apply this period's per-asset returns. */
+        double total = 0.0;
+        for (int64_t j = 0; j < N; ++j) {
+            hold[static_cast<size_t>(j)] *= (1.0 + returns->data[t*N + j]);
+            total += hold[static_cast<size_t>(j)];
+        }
+        equity->data[t + 1] = total;
+        if (rb) {
+            /* Rebalance back to target weights at the new total value. */
+            for (int64_t j = 0; j < N; ++j)
+                hold[static_cast<size_t>(j)] = total * weights->data[j];
+        }
+    }
+    return equity;
+}
+
+/* backtestSummary(equity) -> 1×3 [totalReturn, annSharpe, maxDrawdown].
+ * Derives per-period returns from the equity curve; annualises the
+ * Sharpe by sqrt(periodsPerYear=252) as a convention. */
+extern "C" matlab_mat *matlab_backtest_summary(matlab_mat *equity) {
+    matlab_mat *out = mat_alloc(1, 3);
+    if (!equity || !equity->data) return out;
+    int64_t n = equity->rows * equity->cols;
+    if (n < 2) return out;
+    double total = equity->data[n-1] / equity->data[0] - 1.0;
+    /* per-period returns */
+    std::vector<double> r(static_cast<size_t>(n - 1));
+    double s = 0.0;
+    for (int64_t i = 0; i < n - 1; ++i) {
+        r[static_cast<size_t>(i)] = equity->data[i+1] / equity->data[i] - 1.0;
+        s += r[static_cast<size_t>(i)];
+    }
+    double mean = s / static_cast<double>(n - 1);
+    double s2 = 0.0;
+    for (int64_t i = 0; i < n - 1; ++i) {
+        double d = r[static_cast<size_t>(i)] - mean;
+        s2 += d * d;
+    }
+    double sd = (n > 2) ? sqrt(s2 / static_cast<double>(n - 2)) : 0.0;
+    double sharpe = sd > 0.0 ? mean / sd * sqrt(252.0) : 0.0;
+    /* max drawdown of the equity curve */
+    double peak = equity->data[0], mdd = 0.0;
+    for (int64_t i = 0; i < n; ++i) {
+        double v = equity->data[i];
+        if (v > peak) peak = v;
+        double dd = peak > 0.0 ? (peak - v) / peak : 0.0;
+        if (dd > mdd) mdd = dd;
+    }
+    out->data[0] = total;
+    out->data[1] = sharpe;
+    out->data[2] = mdd;
+    return out;
+}

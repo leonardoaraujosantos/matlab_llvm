@@ -6654,6 +6654,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"setScenarios",        "matlab_portfoliocvar_set_scenarios",   1, "pp"},
       {"setProbabilityLevel", "matlab_portfoliocvar_set_prob_level",  1, "pf"},
       {"estimatePortVaR",     "matlab_portfoliocvar_estimate_port_var",0, "pp"},
+      {"backtest",            "matlab_backtest",          1, "ppf"},
+      {"backtestSummary",     "matlab_backtest_summary",  1, "p"},
     };
 
     // Pick the first entry with name + arity + TYPE match so overloaded
