@@ -92,7 +92,7 @@ void Resolver::registerBuiltins() {
     "estimateFrontier", "estimateFrontierByReturn", "estimateFrontierByRisk",
     "estimatePortMoments", "estimatePortReturn", "estimatePortRisk",
     "estimateMaxSharpeRatio", "estimateAssetMoments", "plotFrontier",
-    "estimateBounds", "estimatePortFrontier",
+    "estimateBounds", "estimatePortFrontier", "blacklitterman",
     /* Tier-4: regression with missing data + credit risk. */
     "ecmnmle", "ecmncov", "mvnrmle", "capm",
     "transprob", "cdsbootstrap", "cdsspread", "cdsprice",

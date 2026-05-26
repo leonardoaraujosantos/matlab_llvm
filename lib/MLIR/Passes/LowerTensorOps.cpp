@@ -6639,6 +6639,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"estimateFrontierByRisk",  "matlab_portfolio_estimate_frontier_by_risk",1, "pf"},
       {"estimatePortFrontier",    "matlab_portfolio_estimate_frontier_points", 1, "pf"},
       {"plotFrontier",            "matlab_portfolio_plot_frontier",            1, "pf"},
+      {"blacklitterman",          "matlab_blacklitterman",                     1, "ppppff"},
+      {"blacklitterman",          "matlab_blacklitterman_q1",                  1, "pppfff"},
       /* Financial Toolbox Tier-4: regression with missing data. */
       {"ecmnmle",    "matlab_ecmnmle",    1, "p"},
       {"ecmncov",    "matlab_ecmncov",    1, "p"},

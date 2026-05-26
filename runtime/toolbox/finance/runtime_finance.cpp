@@ -2362,3 +2362,101 @@ extern "C" double matlab_optpricemc(matlab_mat *ST, double K,
     }
     return exp(-r * T) * s / static_cast<double>(n);
 }
+
+/* ============================================================================
+ * §T7.2 — Black-Litterman posterior expected returns
+ *
+ * blacklitterman(Sigma, wmkt, P, Q, tau, delta) -> N×1 posterior mean.
+ *   Prior (equilibrium):  Pi = delta * Sigma * wmkt
+ *   Omega = diag(P (tau Sigma) P')              (He-Litterman choice)
+ *   Pi_BL = [ (tauSigma)^-1 + P' Omega^-1 P ]^-1
+ *           [ (tauSigma)^-1 Pi + P' Omega^-1 Q ]
+ * Matrix inverse via Cholesky-solve on identity columns.
+ * ==========================================================================*/
+
+static void spd_inv(const double *A, double *Ainv, int64_t n) {
+    std::vector<double> L(static_cast<size_t>(n*n));
+    for (int64_t i = 0; i < n*n; ++i) L[static_cast<size_t>(i)] = A[i];
+    if (!chol_factor(L.data(), n)) {
+        for (int64_t i = 0; i < n*n; ++i) L[static_cast<size_t>(i)] = A[i];
+        for (int64_t i = 0; i < n; ++i) L[static_cast<size_t>(i*n + i)] += 1e-10;
+        chol_factor(L.data(), n);
+    }
+    std::vector<double> e(static_cast<size_t>(n)), x(static_cast<size_t>(n));
+    for (int64_t c = 0; c < n; ++c) {
+        for (int64_t i = 0; i < n; ++i) e[static_cast<size_t>(i)] = (i == c) ? 1.0 : 0.0;
+        chol_solve(L.data(), e.data(), x.data(), n);
+        for (int64_t i = 0; i < n; ++i) Ainv[i*n + c] = x[static_cast<size_t>(i)];
+    }
+}
+
+extern "C" matlab_mat *matlab_blacklitterman(matlab_mat *Sigma, matlab_mat *wmkt,
+                                             matlab_mat *P, matlab_mat *Q,
+                                             double tau, double delta);
+/* Scalar-Q convenience: a single view's Q folds to an f64 literal at
+ * the call site. Box it into a 1×1 matrix and delegate. */
+extern "C" matlab_mat *matlab_blacklitterman_q1(matlab_mat *Sigma,
+                                                matlab_mat *wmkt, matlab_mat *P,
+                                                double q, double tau,
+                                                double delta) {
+    matlab_mat *Q = mat_alloc(1, 1);
+    Q->data[0] = q;
+    return matlab_blacklitterman(Sigma, wmkt, P, Q, tau, delta);
+}
+
+extern "C" matlab_mat *matlab_blacklitterman(matlab_mat *Sigma, matlab_mat *wmkt,
+                                             matlab_mat *P, matlab_mat *Q,
+                                             double tau, double delta) {
+    if (!Sigma || !Sigma->data || !wmkt || !wmkt->data) return mat_alloc(0, 0);
+    int64_t N = Sigma->rows;
+    int64_t K = (P && P->data) ? P->rows : 0;
+    const double *Sg = Sigma->data;
+    /* Equilibrium prior Pi = delta * Sigma * wmkt. */
+    std::vector<double> Pi(static_cast<size_t>(N), 0.0);
+    for (int64_t i = 0; i < N; ++i) {
+        double s = 0.0;
+        for (int64_t j = 0; j < N; ++j) s += Sg[i*N + j] * wmkt->data[j];
+        Pi[static_cast<size_t>(i)] = delta * s;
+    }
+    /* tauSigma + its inverse A. */
+    std::vector<double> tauS(static_cast<size_t>(N*N));
+    for (int64_t i = 0; i < N*N; ++i) tauS[static_cast<size_t>(i)] = tau * Sg[i];
+    std::vector<double> A(static_cast<size_t>(N*N));
+    spd_inv(tauS.data(), A.data(), N);
+    /* M = A + P' Omega^-1 P;  rhs = A Pi + P' Omega^-1 Q. */
+    std::vector<double> M(A);
+    std::vector<double> rhs(static_cast<size_t>(N), 0.0);
+    for (int64_t i = 0; i < N; ++i) {
+        double s = 0.0;
+        for (int64_t j = 0; j < N; ++j) s += A[i*N + j] * Pi[static_cast<size_t>(j)];
+        rhs[static_cast<size_t>(i)] = s;
+    }
+    for (int64_t k = 0; k < K; ++k) {
+        const double *Pk = &P->data[k*N];
+        /* omega_k = Pk (tauSigma) Pk'. */
+        double omega = 0.0;
+        for (int64_t a = 0; a < N; ++a) {
+            double tsp = 0.0;
+            for (int64_t b = 0; b < N; ++b) tsp += tauS[static_cast<size_t>(a*N + b)] * Pk[b];
+            omega += Pk[a] * tsp;
+        }
+        if (omega < 1e-12) omega = 1e-12;
+        double inv_omega = 1.0 / omega;
+        double Qk = Q && Q->data ? Q->data[k] : 0.0;
+        for (int64_t a = 0; a < N; ++a) {
+            rhs[static_cast<size_t>(a)] += inv_omega * Pk[a] * Qk;
+            for (int64_t b = 0; b < N; ++b)
+                M[static_cast<size_t>(a*N + b)] += inv_omega * Pk[a] * Pk[b];
+        }
+    }
+    /* Pi_BL = M^-1 rhs. */
+    matlab_mat *out = mat_alloc(N, 1);
+    std::vector<double> Minv(static_cast<size_t>(N*N));
+    spd_inv(M.data(), Minv.data(), N);
+    for (int64_t i = 0; i < N; ++i) {
+        double s = 0.0;
+        for (int64_t j = 0; j < N; ++j) s += Minv[static_cast<size_t>(i*N + j)] * rhs[static_cast<size_t>(j)];
+        out->data[i] = s;
+    }
+    return out;
+}
