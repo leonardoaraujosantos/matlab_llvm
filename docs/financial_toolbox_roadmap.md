@@ -1,5 +1,17 @@
 # Financial Toolbox — Compatibility Roadmap
 
+> **STATUS (2026-05-26): Tiers 1–7 SHIPPED.** This document is the
+> original *plan*; the as-built surface, headline demos, gating tests,
+> and the deliberate carve-outs are tracked in
+> [`financial_toolbox_status.md`](financial_toolbox_status.md). The
+> "🔵 not started" / "clean slate" language below reflects the state
+> *before* implementation — read it as the design rationale, not the
+> current status. Shipped across PRs #57 (timetables) / #58 (T1–T3) /
+> #59 (T4–T6) / #60 (T7). Runtime in
+> `runtime/toolbox/finance/runtime_finance.cpp` +
+> `finance_classdefs.m`; 20 gating tests in `test/Run/finance_*.m` +
+> `portfolio_*.m`.
+
 Scoped plan for what `matlab_llvm` (Sema + MLIR + Runtime + REPL/Debug
 + Plot) needs to ship in order to faithfully **compile and execute**,
 **debug/REPL**, and **demo** Financial-Toolbox programs.
