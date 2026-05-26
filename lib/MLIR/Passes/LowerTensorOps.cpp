@@ -6604,6 +6604,23 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"sma",        "matlab_sma",        1, "pf"},
       {"bolling",    "matlab_bolling",    1, "pff"},
       {"rsindex",    "matlab_rsindex",    1, "pf"},
+      /* Financial Toolbox Tier-2: performance metrics. */
+      {"sharpe",     "matlab_sharpe",     0, "pf"},
+      {"sortino",    "matlab_sortino",    0, "pf"},
+      {"inforatio",  "matlab_inforatio",  0, "pp"},
+      {"tracking",   "matlab_tracking",   0, "pp"},
+      {"maxdrawdown","matlab_maxdrawdown",0, "p"},
+      {"lpm",        "matlab_lpm",        0, "pff"},
+      {"portalpha",  "matlab_portalpha",  0, "ppf"},
+      /* Financial Toolbox Tier-2: Black-Scholes Greeks + implied vol. */
+      {"blsprice",   "matlab_blsprice",   0, "fffff"},
+      {"blsdelta",   "matlab_blsdelta",   0, "fffff"},
+      {"blsgamma",   "matlab_blsgamma",   0, "fffff"},
+      {"blsvega",    "matlab_blsvega",    0, "fffff"},
+      {"blsrho",     "matlab_blsrho",     0, "fffff"},
+      {"blstheta",   "matlab_blstheta",   0, "fffff"},
+      {"blslambda",  "matlab_blslambda",  0, "fffff"},
+      {"blsimpv",    "matlab_blsimpv",    0, "fffff"},
     };
 
     // Pick the first entry with name + arity + TYPE match so overloaded

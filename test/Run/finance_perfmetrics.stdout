@@ -1,0 +1,9 @@
+mean(r) = 0.0092
+std(r)  = 0.0146
+sharpe(r, 0)    = 0.6259
+sortino(r, 0)   = 0.6929
+inforatio(r,b)  = 0.1756
+tracking(r,b)   = 0.0047
+maxdrawdown(p)  = 0.1364
+lpm(r,0,2)      = 0.000044
+portalpha       = -0.0025

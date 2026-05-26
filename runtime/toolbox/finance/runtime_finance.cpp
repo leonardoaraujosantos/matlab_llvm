@@ -395,6 +395,252 @@ extern "C" matlab_mat *matlab_depsoyd(double cost, double salvage,
 }
 
 /* ============================================================================
+ * §T2.1 — Investment performance metrics
+ *
+ * All take an N-row return matlab_mat (any layout — flattened) and a few
+ * scalar parameters. Return a scalar f64.  Conventions:
+ *   - sharpe / sortino / inforatio are NOT annualised here; multiply by
+ *     sqrt(periodsPerYear) at the call site if you want annualised.
+ * ==========================================================================*/
+
+static void mat_stats(matlab_mat *m, double *out_mean, double *out_std,
+                       int64_t *out_n) {
+    double s = 0.0, s2 = 0.0;
+    int64_t n = m && m->data ? m->rows * m->cols : 0;
+    for (int64_t i = 0; i < n; ++i) s += m->data[i];
+    double mean = n > 0 ? s / static_cast<double>(n) : 0.0;
+    for (int64_t i = 0; i < n; ++i) {
+        double d = m->data[i] - mean;
+        s2 += d * d;
+    }
+    double sd = n > 1 ? sqrt(s2 / static_cast<double>(n - 1)) : 0.0;
+    if (out_mean) *out_mean = mean;
+    if (out_std)  *out_std  = sd;
+    if (out_n)    *out_n    = n;
+}
+
+extern "C" double matlab_sharpe(matlab_mat *r, double rf) {
+    double mean, sd; int64_t n;
+    mat_stats(r, &mean, &sd, &n);
+    if (sd == 0.0 || n == 0) return 0.0;
+    return (mean - rf) / sd;
+}
+
+/* sortino: same numerator as sharpe but uses downside deviation
+ * (std of negative excess returns only). */
+extern "C" double matlab_sortino(matlab_mat *r, double mar) {
+    if (!r || !r->data) return 0.0;
+    int64_t n = r->rows * r->cols;
+    if (n == 0) return 0.0;
+    double s = 0.0, dsd = 0.0;
+    int64_t nd = 0;
+    for (int64_t i = 0; i < n; ++i) s += r->data[i];
+    double mean = s / static_cast<double>(n);
+    for (int64_t i = 0; i < n; ++i) {
+        double e = r->data[i] - mar;
+        if (e < 0.0) { dsd += e * e; nd++; }
+    }
+    if (nd == 0) return 0.0;
+    double downside = sqrt(dsd / static_cast<double>(nd));
+    if (downside == 0.0) return 0.0;
+    return (mean - mar) / downside;
+}
+
+/* inforatio: mean(r - b) / std(r - b). */
+extern "C" double matlab_inforatio(matlab_mat *r, matlab_mat *b) {
+    if (!r || !r->data || !b || !b->data) return 0.0;
+    int64_t n = r->rows * r->cols;
+    int64_t m = b->rows * b->cols;
+    int64_t k = n < m ? n : m;
+    if (k == 0) return 0.0;
+    double s = 0.0;
+    for (int64_t i = 0; i < k; ++i) s += r->data[i] - b->data[i];
+    double mean = s / static_cast<double>(k);
+    double s2 = 0.0;
+    for (int64_t i = 0; i < k; ++i) {
+        double d = (r->data[i] - b->data[i]) - mean;
+        s2 += d * d;
+    }
+    if (k < 2) return 0.0;
+    double sd = sqrt(s2 / static_cast<double>(k - 1));
+    if (sd == 0.0) return 0.0;
+    return mean / sd;
+}
+
+/* tracking: std of active returns r - b.  Sample stddev. */
+extern "C" double matlab_tracking(matlab_mat *r, matlab_mat *b) {
+    if (!r || !r->data || !b || !b->data) return 0.0;
+    int64_t n = r->rows * r->cols;
+    int64_t m = b->rows * b->cols;
+    int64_t k = n < m ? n : m;
+    if (k < 2) return 0.0;
+    double s = 0.0;
+    for (int64_t i = 0; i < k; ++i) s += r->data[i] - b->data[i];
+    double mean = s / static_cast<double>(k);
+    double s2 = 0.0;
+    for (int64_t i = 0; i < k; ++i) {
+        double d = (r->data[i] - b->data[i]) - mean;
+        s2 += d * d;
+    }
+    return sqrt(s2 / static_cast<double>(k - 1));
+}
+
+/* maxdrawdown(p) — peak-to-trough max drawdown of a price/equity
+ * curve.  Returns a positive fraction (0.25 = 25% drawdown). */
+extern "C" double matlab_maxdrawdown(matlab_mat *p) {
+    if (!p || !p->data) return 0.0;
+    int64_t n = p->rows * p->cols;
+    if (n == 0) return 0.0;
+    double peak = p->data[0];
+    double mdd = 0.0;
+    for (int64_t i = 0; i < n; ++i) {
+        double v = p->data[i];
+        if (v > peak) peak = v;
+        double dd = peak > 0.0 ? (peak - v) / peak : 0.0;
+        if (dd > mdd) mdd = dd;
+    }
+    return mdd;
+}
+
+/* lpm(r, MAR, order) — lower partial moment.  Average of
+ * max(MAR - r, 0)^order. */
+extern "C" double matlab_lpm(matlab_mat *r, double mar, double order) {
+    if (!r || !r->data) return 0.0;
+    int64_t n = r->rows * r->cols;
+    if (n == 0) return 0.0;
+    double s = 0.0;
+    for (int64_t i = 0; i < n; ++i) {
+        double diff = mar - r->data[i];
+        if (diff > 0.0) s += pow(diff, order);
+    }
+    return s / static_cast<double>(n);
+}
+
+/* portalpha(r, rb, rf) — Jensen's alpha against a benchmark.
+ * Computes beta first via cov(r,b)/var(b), then alpha = mean(r) - rf -
+ * beta * (mean(b) - rf). */
+extern "C" double matlab_portalpha(matlab_mat *r, matlab_mat *b, double rf) {
+    if (!r || !r->data || !b || !b->data) return 0.0;
+    int64_t n = r->rows * r->cols;
+    int64_t m = b->rows * b->cols;
+    int64_t k = n < m ? n : m;
+    if (k < 2) return 0.0;
+    double sr = 0.0, sb = 0.0;
+    for (int64_t i = 0; i < k; ++i) { sr += r->data[i]; sb += b->data[i]; }
+    double mr = sr / static_cast<double>(k);
+    double mb = sb / static_cast<double>(k);
+    double cov = 0.0, varb = 0.0;
+    for (int64_t i = 0; i < k; ++i) {
+        double dr = r->data[i] - mr;
+        double db = b->data[i] - mb;
+        cov  += dr * db;
+        varb += db * db;
+    }
+    if (varb == 0.0) return 0.0;
+    double beta = cov / varb;
+    return mr - rf - beta * (mb - rf);
+}
+
+/* ============================================================================
+ * §T2.2 — Black-Scholes Greeks
+ *
+ * Closed-form European-option formulas. We pull normcdf via the math
+ * library (erfc-based — same convention as Stats).
+ * ==========================================================================*/
+
+static double bs_normcdf(double x) {
+    return 0.5 * erfc(-x / sqrt(2.0));
+}
+static double bs_normpdf(double x) {
+    return exp(-0.5 * x * x) / sqrt(2.0 * M_PI);
+}
+static void bs_d1d2(double S, double X, double r, double T,
+                     double sigma, double *out_d1, double *out_d2) {
+    double sT = sigma * sqrt(T);
+    double d1 = (log(S / X) + (r + 0.5 * sigma * sigma) * T) / sT;
+    double d2 = d1 - sT;
+    *out_d1 = d1;
+    *out_d2 = d2;
+}
+
+/* blsprice(S, X, r, T, sigma) — European call price. */
+extern "C" double matlab_blsprice(double S, double X, double r,
+                                   double T, double sigma) {
+    double d1, d2;
+    bs_d1d2(S, X, r, T, sigma, &d1, &d2);
+    return S * bs_normcdf(d1) - X * exp(-r * T) * bs_normcdf(d2);
+}
+
+/* blsdelta(S, X, r, T, sigma) — Δ of a European call (N(d1)). */
+extern "C" double matlab_blsdelta(double S, double X, double r,
+                                    double T, double sigma) {
+    double d1, d2;
+    bs_d1d2(S, X, r, T, sigma, &d1, &d2);
+    return bs_normcdf(d1);
+}
+
+/* blsgamma(S, X, r, T, sigma) — Γ. */
+extern "C" double matlab_blsgamma(double S, double X, double r,
+                                    double T, double sigma) {
+    double d1, d2;
+    bs_d1d2(S, X, r, T, sigma, &d1, &d2);
+    return bs_normpdf(d1) / (S * sigma * sqrt(T));
+}
+
+/* blsvega — sensitivity to volatility (per unit sigma). */
+extern "C" double matlab_blsvega(double S, double X, double r,
+                                   double T, double sigma) {
+    double d1, d2;
+    bs_d1d2(S, X, r, T, sigma, &d1, &d2);
+    return S * bs_normpdf(d1) * sqrt(T);
+}
+
+/* blsrho — sensitivity to interest rate (call). */
+extern "C" double matlab_blsrho(double S, double X, double r,
+                                  double T, double sigma) {
+    double d1, d2;
+    bs_d1d2(S, X, r, T, sigma, &d1, &d2);
+    return X * T * exp(-r * T) * bs_normcdf(d2);
+}
+
+/* blstheta — time decay (call), per year.  Negative number. */
+extern "C" double matlab_blstheta(double S, double X, double r,
+                                    double T, double sigma) {
+    double d1, d2;
+    bs_d1d2(S, X, r, T, sigma, &d1, &d2);
+    double t1 = -(S * bs_normpdf(d1) * sigma) / (2.0 * sqrt(T));
+    double t2 = -r * X * exp(-r * T) * bs_normcdf(d2);
+    return t1 + t2;
+}
+
+/* blslambda — elasticity = Δ * S / Price. */
+extern "C" double matlab_blslambda(double S, double X, double r,
+                                     double T, double sigma) {
+    double price = matlab_blsprice(S, X, r, T, sigma);
+    if (price == 0.0) return 0.0;
+    double delta = matlab_blsdelta(S, X, r, T, sigma);
+    return delta * S / price;
+}
+
+/* blsimpv(S, X, r, T, P) — implied vol via Newton-Raphson on
+ * (blsprice - P) at fixed sigma. */
+extern "C" double matlab_blsimpv(double S, double X, double r,
+                                   double T, double P) {
+    double sigma = 0.2;
+    for (int it = 0; it < 100; ++it) {
+        double p = matlab_blsprice(S, X, r, T, sigma);
+        double vega = matlab_blsvega(S, X, r, T, sigma);
+        if (vega < 1e-12) break;
+        double dsigma = (p - P) / vega;
+        sigma -= dsigma;
+        if (sigma < 1e-6) sigma = 1e-6;
+        if (sigma > 5.0)  sigma = 5.0;
+        if (fabs(dsigma) < 1e-8) return sigma;
+    }
+    return sigma;
+}
+
+/* ============================================================================
  * §T1.5 — Returns + technical indicators (function-form over matlab_mat)
  * ==========================================================================*/
 

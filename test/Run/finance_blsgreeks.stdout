@@ -1,0 +1,9 @@
+blsprice(100,100,5%,1y,20%) = 10.4506
+blsdelta = 0.6368
+blsgamma = 0.0188
+blsvega  = 37.5240
+blsrho   = 53.2325
+blstheta = -6.4140
+blslambda = 6.0937
+blsimpv(c) = 0.2000
+blsimpv(c=12.50) = 0.2543
