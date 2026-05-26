@@ -19,7 +19,7 @@ The build produces (in `build/`):
 | Artefact | Always | Notes |
 |---|---|---|
 | `matlabc` | ✅ | the compiler / REPL |
-| `libMatlabRuntime.a` | ✅ | every shipped runtime TU (core + 19 toolboxes + GPU dispatcher) consolidated into one static archive, compiled with `-ffunction-sections -fdata-sections` so external link can dead-strip per-symbol |
+| `libMatlabRuntime.a` | ✅ | every shipped runtime TU (core + 19 toolboxes + GPU dispatcher) consolidated into one static archive, compiled with `-ffunction-sections -fdata-sections` so external link can dead-strip per-symbol. The Cairo plot TUs (`c_api.cpp.o`, `figure.cpp.o`, `cairo_render.cpp.o`, `cairo_dl.cpp.o`, `colormap.cpp.o`, `contour.cpp.o`) are folded into the same archive **only when configured with `-DMATLAB_LLVM_WITH_PLOT=ON`** (#54); a runtime built without that flag can link non-plot programs only. Verify with `ar -t build/libMatlabRuntime.a \| grep cairo`. |
 | `libmatlab_sym.dylib` (or `.so`) | only if `MATLAB_LLVM_WITH_SYM=ON` | SymPP-backed shared library — `dlopen`'d on first sym call by the stub layer baked into `libMatlabRuntime.a` |
 
 ## Compile + run
@@ -49,11 +49,11 @@ That's all of it.
 ## Plot example
 
 ```bash
-build/matlabc -emit-llvm examples/plot/hello.m > /tmp/hello.ll
+build/matlabc -emit-llvm examples/plot/sine_wave.m > /tmp/sine_wave.ll
 clang++ -std=c++20 -O2 -Wno-override-module \
-    /tmp/hello.ll build/libMatlabRuntime.a \
-    -ldl -lpthread -Wl,-dead_strip -o /tmp/hello
-/tmp/hello                                  # writes hello.pdf
+    /tmp/sine_wave.ll build/libMatlabRuntime.a \
+    -ldl -lpthread -Wl,-dead_strip -o /tmp/sine_wave
+/tmp/sine_wave                              # writes /tmp/plot_sine.png
 ```
 
 The binary has **no `LC_LOAD_DYLIB` for libcairo** (`otool -L /tmp/hello | grep -i cairo` is empty). The first `plot` / `figure` / `savefig` call inside the binary `dlopen`s `libcairo.dylib` from Homebrew / system paths. A program that never plots launches even on hosts without Cairo installed.

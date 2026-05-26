@@ -359,6 +359,19 @@ target_link_libraries(MatlabRuntime PUBLIC m ${CMAKE_DL_LIBS})
 target_compile_options(MatlabRuntime PRIVATE
     -ffunction-sections -fdata-sections)
 
+# #54: when configured with -DMATLAB_LLVM_WITH_PLOT=ON, fold the Cairo
+# plot TUs into the same MatlabRuntime archive so external callers
+# (per docs/build_and_run.md) get matlab_plot / matlab_figure / etc.
+# from a single -lMatlabRuntime instead of having to recompile the
+# plot sources themselves.  Dead-strip still drops the plot symbols
+# from any program that doesn't call them (same per-symbol sections
+# as the rest of the archive).
+if(MATLAB_LLVM_WITH_PLOT)
+  target_sources(MatlabRuntime PRIVATE ${MATLAB_PLOT_SOURCES})
+  target_include_directories(MatlabRuntime PRIVATE ${MATLAB_PLOT_INCLUDE_DIRS})
+  target_compile_definitions(MatlabRuntime PRIVATE MATLAB_LLVM_WITH_PLOT=1)
+endif()
+
 # Helper — force-load every symbol from MatlabRuntime into a consumer.
 # matlabc's MLIR REPL JIT resolves runtime symbols via
 # LLJIT's DynamicLibrarySearchGenerator::GetForCurrentProcess, so every
@@ -451,9 +464,9 @@ if(MATLAB_LLVM_WITH_MLIR)
     endif()
   endif()
   if(MATLAB_LLVM_WITH_PLOT)
-    target_sources(matlabc PRIVATE ${MATLAB_PLOT_SOURCES})
-    target_include_directories(matlabc PRIVATE ${MATLAB_PLOT_INCLUDE_DIRS})
-    target_link_libraries(matlabc PRIVATE ${CMAKE_DL_LIBS})
+    # The plot TUs now ship inside MatlabRuntime (see add_library above);
+    # matlabc force-loads the archive, so we only need to flip the macro
+    # that gates the matlabc-side plot dispatch tables.
     target_compile_definitions(matlabc PRIVATE MATLAB_LLVM_WITH_PLOT=1)
   endif()
   # GPU Coder — Metal backend (T2).  Auto-on on macOS, off elsewhere.
@@ -586,11 +599,12 @@ set_source_files_properties(
 if(MATLAB_LLVM_WITH_PLOT)
   foreach(_plot_test IN ITEMS hello basic)
     set(_plot_target "runtime-plot-${_plot_test}")
+    # Plot TUs are inside MatlabRuntime now (see add_library above);
+    # force-load pulls every entry into the test binary so the symbol
+    # table mirrors matlabc's runtime ABI.
     add_executable(${_plot_target}
-      test/Runtime/test_plot_${_plot_test}.cpp
-      ${MATLAB_PLOT_SOURCES})
-    target_include_directories(${_plot_target} PRIVATE ${MATLAB_PLOT_INCLUDE_DIRS})
-    target_link_libraries(${_plot_target} PRIVATE MatlabRuntime ${CMAKE_DL_LIBS})
+      test/Runtime/test_plot_${_plot_test}.cpp)
+    target_link_libraries(${_plot_target} PRIVATE MatlabRuntime)
     matlab_runtime_force_load(${_plot_target})
     add_test(NAME runtime-plot-${_plot_test}
              COMMAND $<TARGET_FILE:${_plot_target}>)
