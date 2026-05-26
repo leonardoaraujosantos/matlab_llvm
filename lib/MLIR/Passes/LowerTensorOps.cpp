@@ -6587,6 +6587,17 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"depstln",    "matlab_depstln",    1, "fff"},
       {"depsoyd",    "matlab_depsoyd",    1, "fff"},
       {"depfixdb",   "matlab_depfixdb",   1, "fff"},
+      /* Financial Toolbox Tier-1: bond pricing + T-bills. */
+      {"bndprice",   "matlab_bndprice",   0, "ffff"},
+      {"bndyield",   "matlab_bndyield",   0, "ffff"},
+      {"bnddurp",    "matlab_bnddurp",    1, "ffff"},
+      {"bnddury",    "matlab_bnddury",    1, "ffff"},
+      {"bndconvp",   "matlab_bndconvp",   0, "ffff"},
+      {"accrfrac",   "matlab_accrfrac",   0, "ff"},
+      {"prdisc",     "matlab_prdisc",     0, "ff"},
+      {"prtbill",    "matlab_prtbill",    0, "ff"},
+      {"ytbill",     "matlab_ytbill",     0, "ff"},
+      {"beytbill",   "matlab_beytbill",   0, "ff"},
     };
 
     // Pick the first entry with name + arity + TYPE match so overloaded

@@ -394,6 +394,140 @@ extern "C" matlab_mat *matlab_depsoyd(double cost, double salvage,
     return m;
 }
 
+/* ============================================================================
+ * §T1.4 — Bond pricing
+ *
+ * Simplified API: take periods + freq directly rather than settle/maturity
+ * dates + day-count basis (the full date-based form lands as a follow-on
+ * once cfdates/cfamounts wire the schedule generator).  Conventions:
+ *   - face value = 100
+ *   - yield + coupon are annualised; per-period rates are /freq
+ *   - freq defaults to 2 (semi-annual)
+ * ==========================================================================*/
+
+extern "C" double matlab_bndprice(double yield_, double coupon,
+                                   double periods, double freq) {
+    double y = yield_ / freq;
+    double c = coupon * 100.0 / freq;
+    int64_t N = static_cast<int64_t>(periods);
+    if (N <= 0) return 100.0;
+    double pv = 0.0;
+    double disc = 1.0;
+    double oneplus = 1.0 + y;
+    for (int64_t t = 1; t <= N; ++t) {
+        disc *= oneplus;
+        pv += c / disc;
+    }
+    pv += 100.0 / disc;     /* terminal redemption */
+    return pv;
+}
+
+extern "C" double matlab_bndyield(double price, double coupon,
+                                   double periods, double freq) {
+    /* Newton-Raphson on bndprice(y) - price = 0. */
+    double y = coupon;   /* seed with coupon rate */
+    for (int it = 0; it < 100; ++it) {
+        double p = matlab_bndprice(y, coupon, periods, freq);
+        double pdy = matlab_bndprice(y + 1e-6, coupon, periods, freq);
+        double f = p - price;
+        double df = (pdy - p) / 1e-6;
+        if (fabs(df) < 1e-12) break;
+        double dy = f / df;
+        y -= dy;
+        if (fabs(dy) < 1e-10) break;
+        if (y < -0.5) y = -0.5;
+        if (y > 5.0)  y = 5.0;
+    }
+    return y;
+}
+
+/* bnddurp: returns a 1x2 mat [Macaulay, Modified] duration in years. */
+extern "C" matlab_mat *matlab_bnddurp(double yield_, double coupon,
+                                       double periods, double freq) {
+    matlab_mat *m = mat_alloc(1, 2);
+    if (!m || !m->data) return m;
+    double y = yield_ / freq;
+    double c = coupon * 100.0 / freq;
+    int64_t N = static_cast<int64_t>(periods);
+    double pv = 0.0, weighted = 0.0;
+    double disc = 1.0;
+    double oneplus = 1.0 + y;
+    for (int64_t t = 1; t <= N; ++t) {
+        disc *= oneplus;
+        double cft = (t == N ? c + 100.0 : c);
+        pv += cft / disc;
+        weighted += static_cast<double>(t) * cft / disc;
+    }
+    double macaulay_periods = weighted / pv;
+    double macaulay = macaulay_periods / freq;
+    double modified = macaulay / (1.0 + yield_ / freq);
+    m->data[0] = macaulay;
+    m->data[1] = modified;
+    return m;
+}
+
+/* bnddury: duration from yield (alias to bnddurp; MATLAB exposes both for
+ * symmetry with price-from-yield / yield-from-price). */
+extern "C" matlab_mat *matlab_bnddury(double yield_, double coupon,
+                                       double periods, double freq) {
+    return matlab_bnddurp(yield_, coupon, periods, freq);
+}
+
+/* bndconvp: convexity (years²).  C = Σ t(t+1) CF / (P (1+y)²) per period;
+ * convert to year² by dividing by freq². */
+extern "C" double matlab_bndconvp(double yield_, double coupon,
+                                   double periods, double freq) {
+    double y = yield_ / freq;
+    double c = coupon * 100.0 / freq;
+    int64_t N = static_cast<int64_t>(periods);
+    double pv = 0.0, weighted = 0.0;
+    double disc = 1.0;
+    double oneplus = 1.0 + y;
+    for (int64_t t = 1; t <= N; ++t) {
+        disc *= oneplus;
+        double cft = (t == N ? c + 100.0 : c);
+        pv += cft / disc;
+        double td = static_cast<double>(t);
+        weighted += td * (td + 1.0) * cft / disc;
+    }
+    double conv = weighted / (pv * (1.0 + y) * (1.0 + y));
+    return conv / (freq * freq);
+}
+
+/* accrfrac(daysSinceLastCoupon, daysInPeriod) — accrued-interest fraction
+ * for the bond's current coupon period.  Trivial ratio; the MATLAB form
+ * derives the day counts from settle / coupon dates + basis.            */
+extern "C" double matlab_accrfrac(double days_since, double days_in_period) {
+    if (days_in_period <= 0.0) return 0.0;
+    return days_since / days_in_period;
+}
+
+/* ============================================================================
+ * §T1.4 (cont.) — Treasury bills
+ *
+ * T-bills quote as a discount rate.  Price from discount:
+ *   P = 100 * (1 - d * t / 360)            where t = days to maturity
+ * Yield (CMT/coupon equivalent):
+ *   y = (100 - P) * 365 / (P * t)
+ * ==========================================================================*/
+
+extern "C" double matlab_prdisc(double discount, double days_to_maturity) {
+    return 100.0 * (1.0 - discount * days_to_maturity / 360.0);
+}
+
+extern "C" double matlab_prtbill(double discount, double days_to_maturity) {
+    return matlab_prdisc(discount, days_to_maturity);
+}
+
+extern "C" double matlab_ytbill(double price, double days_to_maturity) {
+    if (price <= 0.0 || days_to_maturity <= 0.0) return 0.0;
+    return (100.0 - price) * 365.0 / (price * days_to_maturity);
+}
+
+extern "C" double matlab_beytbill(double price, double days_to_maturity) {
+    return matlab_ytbill(price, days_to_maturity);
+}
+
 /* depfixdb(cost, salvage, life, period[, month]) — fixed declining-
  * balance.  Rate = 1 - (salvage/cost)^(1/life).                         */
 extern "C" matlab_mat *matlab_depfixdb(double cost, double salvage,
