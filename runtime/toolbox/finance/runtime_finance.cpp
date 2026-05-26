@@ -330,12 +330,12 @@ extern "C" double matlab_payper(double rate, double n, double pv) {
     return -pv * rate / (1.0 - pow(1.0 + rate, -n));
 }
 
-/* amortize(rate, n, pv) — returns a 4-column matlab_mat with per-period:
+/* amortize(rate, n, pv) — returns an n×4 matlab_mat with per-period:
  *   col 1: principal payment
  *   col 2: interest payment
  *   col 3: remaining balance after the payment
  *   col 4: cumulative interest paid
- * Layout: n rows, 4 cols.                                              */
+ * The runtime stores matlab_mat row-major (data[r*cols + c]).          */
 extern "C" matlab_mat *matlab_amortize(double rate, double n, double pv) {
     int64_t N = static_cast<int64_t>(n);
     matlab_mat *m = mat_alloc(N, 4);
@@ -348,10 +348,10 @@ extern "C" matlab_mat *matlab_amortize(double rate, double n, double pv) {
         double principal = pmt - interest;
         bal -= principal;
         cumi += interest;
-        m->data[i + 0*N] = principal;
-        m->data[i + 1*N] = interest;
-        m->data[i + 2*N] = bal;
-        m->data[i + 3*N] = cumi;
+        m->data[i*4 + 0] = principal;
+        m->data[i*4 + 1] = interest;
+        m->data[i*4 + 2] = bal;
+        m->data[i*4 + 3] = cumi;
     }
     return m;
 }
