@@ -1,0 +1,7 @@
+return bounds: [0.0843, 0.1200]
+frontier points: 5 x 2
+point1 risk=0.1485 ret=0.0843
+point5 risk=0.1807 ret=0.1142
+risk rises = 0.0322
+target risk 0.1600 -> realised 0.1600
+weights sum = 1.0000

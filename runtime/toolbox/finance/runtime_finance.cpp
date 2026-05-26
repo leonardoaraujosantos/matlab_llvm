@@ -822,6 +822,145 @@ extern "C" matlab_mat *matlab_portfolio_estimate_asset_moments(
     return out;
 }
 
+/* ----- Tier-7 §1: close the half-wired Portfolio methods ----- */
+
+/* Read the universe (mean, cov, bounds, budget) into caller buffers.
+ * Returns N, or 0 on failure. */
+static int64_t portfolio_read(struct matlab_obj_s *p,
+                               const double **mean, const double **cov,
+                               std::vector<double> &lb, std::vector<double> &ub,
+                               double *budget) {
+    matlab_mat *m_mean = matlab_obj_get_mat(p, "AssetMean",  9);
+    matlab_mat *m_cov  = matlab_obj_get_mat(p, "AssetCovar", 10);
+    matlab_mat *m_lb   = matlab_obj_get_mat(p, "LowerBound", 10);
+    matlab_mat *m_ub   = matlab_obj_get_mat(p, "UpperBound", 10);
+    *budget = matlab_obj_get_f64(p, "LowerBudget", 11);
+    if (*budget <= 0.0) *budget = 1.0;
+    if (!m_mean || !m_mean->data || !m_cov || !m_cov->data) return 0;
+    int64_t N = m_mean->rows * m_mean->cols;
+    *mean = m_mean->data;
+    *cov  = m_cov->data;
+    lb.assign(static_cast<size_t>(N), 0.0);
+    ub.assign(static_cast<size_t>(N), 1.0);
+    if (m_lb && m_lb->data && (m_lb->rows*m_lb->cols) == N)
+        for (int64_t i = 0; i < N; ++i) lb[static_cast<size_t>(i)] = m_lb->data[i];
+    if (m_ub && m_ub->data && (m_ub->rows*m_ub->cols) == N)
+        for (int64_t i = 0; i < N; ++i) ub[static_cast<size_t>(i)] = m_ub->data[i];
+    return N;
+}
+
+static double port_risk(const double *cov, const double *w, int64_t N) {
+    std::vector<double> Cw(static_cast<size_t>(N));
+    matvec(cov, w, Cw.data(), N);
+    return sqrt(dot(w, Cw.data(), N));
+}
+
+/* estimateBounds(P) -> 1x2 [minReturn, maxReturn] attainable on the
+ * frontier. minReturn = return of the min-variance portfolio;
+ * maxReturn = max asset mean (the all-in-best-asset corner). */
+extern "C" matlab_mat *matlab_portfolio_estimate_bounds(
+        struct matlab_obj_s *p) {
+    matlab_mat *out = mat_alloc(1, 2);
+    if (!p) return out;
+    const double *mean = nullptr, *cov = nullptr; double budget = 1.0;
+    std::vector<double> lb, ub;
+    int64_t N = portfolio_read(p, &mean, &cov, lb, ub, &budget);
+    if (N == 0) return out;
+    double r_min_asset = mean[0], r_max_asset = mean[0];
+    for (int64_t i = 1; i < N; ++i) {
+        if (mean[i] < r_min_asset) r_min_asset = mean[i];
+        if (mean[i] > r_max_asset) r_max_asset = mean[i];
+    }
+    /* min-variance portfolio return: weights for the lowest target. */
+    std::vector<double> w(static_cast<size_t>(N));
+    portfolio_weights_for_return(mean, cov, lb.data(), ub.data(),
+                                  budget, r_min_asset, N, w.data());
+    out->data[0] = dot(mean, w.data(), N);   /* min-var portfolio return */
+    out->data[1] = r_max_asset * budget;     /* max attainable */
+    return out;
+}
+
+/* estimateFrontierByRisk(P, targetSigma) -> Nx1 weights whose risk is
+ * closest to targetSigma. Bisects on the return target (risk is
+ * monotone in return along the efficient frontier above min-var). */
+extern "C" matlab_mat *matlab_portfolio_estimate_frontier_by_risk(
+        struct matlab_obj_s *p, double target_sigma) {
+    if (!p) return mat_alloc(0, 0);
+    const double *mean = nullptr, *cov = nullptr; double budget = 1.0;
+    std::vector<double> lb, ub;
+    int64_t N = portfolio_read(p, &mean, &cov, lb, ub, &budget);
+    matlab_mat *w = mat_alloc(N, 1);
+    if (N == 0) return w;
+    double r_lo = mean[0], r_hi = mean[0];
+    for (int64_t i = 1; i < N; ++i) {
+        if (mean[i] < r_lo) r_lo = mean[i];
+        if (mean[i] > r_hi) r_hi = mean[i];
+    }
+    std::vector<double> wt(static_cast<size_t>(N));
+    for (int it = 0; it < 60; ++it) {
+        double r = 0.5 * (r_lo + r_hi);
+        portfolio_weights_for_return(mean, cov, lb.data(), ub.data(),
+                                      budget, r, N, wt.data());
+        double risk = port_risk(cov, wt.data(), N);
+        if (risk < target_sigma) r_lo = r; else r_hi = r;
+    }
+    portfolio_weights_for_return(mean, cov, lb.data(), ub.data(),
+                                  budget, 0.5*(r_lo+r_hi), N, w->data);
+    return w;
+}
+
+/* estimatePortFrontier(P, K) -> Kx2 [risk, return] frontier points. */
+extern "C" matlab_mat *matlab_portfolio_estimate_frontier_points(
+        struct matlab_obj_s *p, double n_pts) {
+    if (!p) return mat_alloc(0, 0);
+    const double *mean = nullptr, *cov = nullptr; double budget = 1.0;
+    std::vector<double> lb, ub;
+    int64_t N = portfolio_read(p, &mean, &cov, lb, ub, &budget);
+    int64_t K = static_cast<int64_t>(n_pts);
+    if (K < 2) K = 20;
+    matlab_mat *pts = mat_alloc(K, 2);
+    if (N == 0) return pts;
+    double r_min = mean[0], r_max = mean[0];
+    for (int64_t i = 1; i < N; ++i) {
+        if (mean[i] < r_min) r_min = mean[i];
+        if (mean[i] > r_max) r_max = mean[i];
+    }
+    std::vector<double> w(static_cast<size_t>(N));
+    for (int64_t k = 0; k < K; ++k) {
+        double t = K == 1 ? 0.0 : static_cast<double>(k)/static_cast<double>(K-1);
+        double r = r_min + t * (r_max - r_min);
+        portfolio_weights_for_return(mean, cov, lb.data(), ub.data(),
+                                      budget, r, N, w.data());
+        pts->data[k*2 + 0] = port_risk(cov, w.data(), N);
+        pts->data[k*2 + 1] = dot(mean, w.data(), N);
+    }
+    return pts;
+}
+
+/* plotFrontier(P[, K]) — render the risk/return frontier curve via the
+ * Cairo backend. Returns the Kx2 points so the value is still usable.
+ * The render is WITH_PLOT-guarded; without plot it's a no-op compute. */
+#ifdef MATLAB_LLVM_WITH_PLOT
+extern "C" void matlab_plot2(matlab_mat *x, matlab_mat *y);
+#endif
+extern "C" matlab_mat *matlab_portfolio_plot_frontier(
+        struct matlab_obj_s *p, double n_pts) {
+    matlab_mat *pts = matlab_portfolio_estimate_frontier_points(p, n_pts);
+#ifdef MATLAB_LLVM_WITH_PLOT
+    if (pts && pts->data && pts->rows >= 2) {
+        int64_t K = pts->rows;
+        matlab_mat *xr = mat_alloc(K, 1);
+        matlab_mat *yr = mat_alloc(K, 1);
+        for (int64_t k = 0; k < K; ++k) {
+            xr->data[k] = pts->data[k*2 + 0];
+            yr->data[k] = pts->data[k*2 + 1];
+        }
+        matlab_plot2(xr, yr);
+    }
+#endif
+    return pts;
+}
+
 /* ============================================================================
  * §T2.1 — Investment performance metrics
  *
@@ -2222,4 +2361,173 @@ extern "C" double matlab_optpricemc(matlab_mat *ST, double K,
         if (payoff > 0.0) s += payoff;
     }
     return exp(-r * T) * s / static_cast<double>(n);
+}
+
+/* ============================================================================
+ * §T7.2 — Black-Litterman posterior expected returns
+ *
+ * blacklitterman(Sigma, wmkt, P, Q, tau, delta) -> N×1 posterior mean.
+ *   Prior (equilibrium):  Pi = delta * Sigma * wmkt
+ *   Omega = diag(P (tau Sigma) P')              (He-Litterman choice)
+ *   Pi_BL = [ (tauSigma)^-1 + P' Omega^-1 P ]^-1
+ *           [ (tauSigma)^-1 Pi + P' Omega^-1 Q ]
+ * Matrix inverse via Cholesky-solve on identity columns.
+ * ==========================================================================*/
+
+static void spd_inv(const double *A, double *Ainv, int64_t n) {
+    std::vector<double> L(static_cast<size_t>(n*n));
+    for (int64_t i = 0; i < n*n; ++i) L[static_cast<size_t>(i)] = A[i];
+    if (!chol_factor(L.data(), n)) {
+        for (int64_t i = 0; i < n*n; ++i) L[static_cast<size_t>(i)] = A[i];
+        for (int64_t i = 0; i < n; ++i) L[static_cast<size_t>(i*n + i)] += 1e-10;
+        chol_factor(L.data(), n);
+    }
+    std::vector<double> e(static_cast<size_t>(n)), x(static_cast<size_t>(n));
+    for (int64_t c = 0; c < n; ++c) {
+        for (int64_t i = 0; i < n; ++i) e[static_cast<size_t>(i)] = (i == c) ? 1.0 : 0.0;
+        chol_solve(L.data(), e.data(), x.data(), n);
+        for (int64_t i = 0; i < n; ++i) Ainv[i*n + c] = x[static_cast<size_t>(i)];
+    }
+}
+
+extern "C" matlab_mat *matlab_blacklitterman(matlab_mat *Sigma, matlab_mat *wmkt,
+                                             matlab_mat *P, matlab_mat *Q,
+                                             double tau, double delta);
+/* Scalar-Q convenience: a single view's Q folds to an f64 literal at
+ * the call site. Box it into a 1×1 matrix and delegate. */
+extern "C" matlab_mat *matlab_blacklitterman_q1(matlab_mat *Sigma,
+                                                matlab_mat *wmkt, matlab_mat *P,
+                                                double q, double tau,
+                                                double delta) {
+    matlab_mat *Q = mat_alloc(1, 1);
+    Q->data[0] = q;
+    return matlab_blacklitterman(Sigma, wmkt, P, Q, tau, delta);
+}
+
+extern "C" matlab_mat *matlab_blacklitterman(matlab_mat *Sigma, matlab_mat *wmkt,
+                                             matlab_mat *P, matlab_mat *Q,
+                                             double tau, double delta) {
+    if (!Sigma || !Sigma->data || !wmkt || !wmkt->data) return mat_alloc(0, 0);
+    int64_t N = Sigma->rows;
+    int64_t K = (P && P->data) ? P->rows : 0;
+    const double *Sg = Sigma->data;
+    /* Equilibrium prior Pi = delta * Sigma * wmkt. */
+    std::vector<double> Pi(static_cast<size_t>(N), 0.0);
+    for (int64_t i = 0; i < N; ++i) {
+        double s = 0.0;
+        for (int64_t j = 0; j < N; ++j) s += Sg[i*N + j] * wmkt->data[j];
+        Pi[static_cast<size_t>(i)] = delta * s;
+    }
+    /* tauSigma + its inverse A. */
+    std::vector<double> tauS(static_cast<size_t>(N*N));
+    for (int64_t i = 0; i < N*N; ++i) tauS[static_cast<size_t>(i)] = tau * Sg[i];
+    std::vector<double> A(static_cast<size_t>(N*N));
+    spd_inv(tauS.data(), A.data(), N);
+    /* M = A + P' Omega^-1 P;  rhs = A Pi + P' Omega^-1 Q. */
+    std::vector<double> M(A);
+    std::vector<double> rhs(static_cast<size_t>(N), 0.0);
+    for (int64_t i = 0; i < N; ++i) {
+        double s = 0.0;
+        for (int64_t j = 0; j < N; ++j) s += A[i*N + j] * Pi[static_cast<size_t>(j)];
+        rhs[static_cast<size_t>(i)] = s;
+    }
+    for (int64_t k = 0; k < K; ++k) {
+        const double *Pk = &P->data[k*N];
+        /* omega_k = Pk (tauSigma) Pk'. */
+        double omega = 0.0;
+        for (int64_t a = 0; a < N; ++a) {
+            double tsp = 0.0;
+            for (int64_t b = 0; b < N; ++b) tsp += tauS[static_cast<size_t>(a*N + b)] * Pk[b];
+            omega += Pk[a] * tsp;
+        }
+        if (omega < 1e-12) omega = 1e-12;
+        double inv_omega = 1.0 / omega;
+        double Qk = Q && Q->data ? Q->data[k] : 0.0;
+        for (int64_t a = 0; a < N; ++a) {
+            rhs[static_cast<size_t>(a)] += inv_omega * Pk[a] * Qk;
+            for (int64_t b = 0; b < N; ++b)
+                M[static_cast<size_t>(a*N + b)] += inv_omega * Pk[a] * Pk[b];
+        }
+    }
+    /* Pi_BL = M^-1 rhs. */
+    matlab_mat *out = mat_alloc(N, 1);
+    std::vector<double> Minv(static_cast<size_t>(N*N));
+    spd_inv(M.data(), Minv.data(), N);
+    for (int64_t i = 0; i < N; ++i) {
+        double s = 0.0;
+        for (int64_t j = 0; j < N; ++j) s += Minv[static_cast<size_t>(i*N + j)] * rhs[static_cast<size_t>(j)];
+        out->data[i] = s;
+    }
+    return out;
+}
+
+/* ============================================================================
+ * §T7.3 — Risk parity / risk budgeting
+ *
+ * riskparity(Sigma) -> equal-risk-contribution weights (each asset
+ * contributes the same share of portfolio variance). riskbudget(Sigma,
+ * b) targets an arbitrary risk-contribution budget b. Both use the
+ * standard fixed-point iteration w_i <- b_i / (Sigma w)_i, renormalised
+ * to sum 1, which converges to the (unique, long-only) RC solution.
+ * ==========================================================================*/
+
+static matlab_mat *risk_budget_core(const double *Sg, int64_t N,
+                                     const double *b) {
+    matlab_mat *w = mat_alloc(N, 1);
+    std::vector<double> x(static_cast<size_t>(N), 1.0 / static_cast<double>(N));
+    std::vector<double> Sx(static_cast<size_t>(N));
+    for (int it = 0; it < 500; ++it) {
+        matvec(Sg, x.data(), Sx.data(), N);
+        double sum = 0.0;
+        std::vector<double> nx(static_cast<size_t>(N));
+        for (int64_t i = 0; i < N; ++i) {
+            double denom = Sx[static_cast<size_t>(i)];
+            if (denom < 1e-12) denom = 1e-12;
+            nx[static_cast<size_t>(i)] = b[i] / denom;
+            sum += nx[static_cast<size_t>(i)];
+        }
+        double delta = 0.0;
+        for (int64_t i = 0; i < N; ++i) {
+            nx[static_cast<size_t>(i)] /= sum;
+            delta += fabs(nx[static_cast<size_t>(i)] - x[static_cast<size_t>(i)]);
+        }
+        x = nx;
+        if (delta < 1e-12) break;
+    }
+    for (int64_t i = 0; i < N; ++i) w->data[i] = x[static_cast<size_t>(i)];
+    return w;
+}
+
+extern "C" matlab_mat *matlab_riskparity(matlab_mat *Sigma) {
+    if (!Sigma || !Sigma->data) return mat_alloc(0, 0);
+    int64_t N = Sigma->rows;
+    std::vector<double> b(static_cast<size_t>(N), 1.0 / static_cast<double>(N));
+    return risk_budget_core(Sigma->data, N, b.data());
+}
+
+extern "C" matlab_mat *matlab_riskbudget(matlab_mat *Sigma, matlab_mat *budget) {
+    if (!Sigma || !Sigma->data || !budget || !budget->data) return mat_alloc(0, 0);
+    int64_t N = Sigma->rows;
+    /* Normalise the budget to sum 1. */
+    std::vector<double> b(static_cast<size_t>(N));
+    double s = 0.0;
+    for (int64_t i = 0; i < N; ++i) { b[static_cast<size_t>(i)] = budget->data[i]; s += budget->data[i]; }
+    if (s > 0.0) for (int64_t i = 0; i < N; ++i) b[static_cast<size_t>(i)] /= s;
+    return risk_budget_core(Sigma->data, N, b.data());
+}
+
+/* riskcontribution(Sigma, w) -> N×1 per-asset risk-contribution shares
+ * (RC_i = w_i (Sigma w)_i / (w' Sigma w), summing to 1). Lets a caller
+ * verify a riskparity result has equal contributions. */
+extern "C" matlab_mat *matlab_riskcontribution(matlab_mat *Sigma, matlab_mat *w) {
+    if (!Sigma || !Sigma->data || !w || !w->data) return mat_alloc(0, 0);
+    int64_t N = Sigma->rows;
+    matlab_mat *rc = mat_alloc(N, 1);
+    std::vector<double> Sw(static_cast<size_t>(N));
+    matvec(Sigma->data, w->data, Sw.data(), N);
+    double var = dot(w->data, Sw.data(), N);
+    if (var < 1e-20) var = 1e-20;
+    for (int64_t i = 0; i < N; ++i)
+        rc->data[i] = w->data[i] * Sw[static_cast<size_t>(i)] / var;
+    return rc;
 }
