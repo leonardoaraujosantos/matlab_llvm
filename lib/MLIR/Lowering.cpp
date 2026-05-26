@@ -9815,47 +9815,66 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             mlir::StringAttr::get(&MCtx, "matlab_table2timetable"));
         return emitUnreg("matlab.call_builtin", {TB, RT}, PtrTy, L, {Cal});
       }
+      /* Predicate: does this expression yield a matlab_timetable *?
+       * Covers NameExpr bindings, TT-subscript CallOrIndex (TMW(...) -> TT),
+       * and the TT-returning builtins (timetable, table2timetable,
+       * retime, synchronize, fillmissing, movavg, macd). Used by
+       * the head/summary/fillmissing/movavg/macd dispatches below so
+       * `head(TMW(idx, :), 4)` style nested-subscript args work. */
+      auto exprIsTimetable = [&](const Expr *E) -> bool {
+        if (!E) return false;
+        if (auto *NE = dynamic_cast<const NameExpr *>(E))
+          return NE->Ref && TimetableBindings.count(NE->Ref);
+        if (auto *CX = dynamic_cast<const CallOrIndex *>(E))
+          if (auto *NE = dynamic_cast<const NameExpr *>(CX->Callee)) {
+            if (NE->Ref && TimetableBindings.count(NE->Ref)) return true;
+            if (NE->Name == "timetable" || NE->Name == "table2timetable" ||
+                NE->Name == "retime" || NE->Name == "synchronize" ||
+                NE->Name == "fillmissing" || NE->Name == "movavg" ||
+                NE->Name == "macd")
+              return true;
+          }
+        return false;
+      };
       /* movavg(TT, 'simple'|'exponential', period) -> matlab_timetable.
        * Operates on the first numeric column of TT (the canonical
        * TMW(:, 'Close') input). */
       if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
           N->Name == "movavg" && C.Args.size() == 3 &&
           C.Args[0] && C.Args[1] && C.Args[2]) {
-        if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]))
-          if (ArgN->Ref && TimetableBindings.count(ArgN->Ref)) {
-            auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
-            auto I32 = mlir::IntegerType::get(&MCtx, 32);
-            std::string Type;
-            if (auto *CL = dynamic_cast<const CharLiteral *>(C.Args[1]))  Type = std::string(CL->Value);
-            else if (auto *SL = dynamic_cast<const StringLiteral *>(C.Args[1])) Type = std::string(SL->Value);
-            int32_t code = 0;
-            if      (Type == "simple")      code = 0;
-            else if (Type == "exponential") code = 1;
-            mlir::Value Tv = lowerExpr(*C.Args[0]);
-            mlir::Value Tc = mlir::arith::ConstantOp::create(
-                B, L, I32, mlir::IntegerAttr::get(I32, code));
-            mlir::Value Pv = lowerExpr(*C.Args[2]);
-            /* Period arrives as f64; convert to i32. */
-            mlir::Value Pi = mlir::arith::FPToSIOp::create(B, L, I32, Pv);
-            mlir::NamedAttribute Cal(
-                mlir::StringAttr::get(&MCtx, "callee"),
-                mlir::StringAttr::get(&MCtx, "matlab_timetable_movavg"));
-            return emitUnreg("matlab.call_builtin", {Tv, Tc, Pi},
-                             PtrTy, L, {Cal});
-          }
+        if (exprIsTimetable(C.Args[0])) {
+          auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+          auto I32 = mlir::IntegerType::get(&MCtx, 32);
+          std::string Type;
+          if (auto *CL = dynamic_cast<const CharLiteral *>(C.Args[1]))  Type = std::string(CL->Value);
+          else if (auto *SL = dynamic_cast<const StringLiteral *>(C.Args[1])) Type = std::string(SL->Value);
+          int32_t code = 0;
+          if      (Type == "simple")      code = 0;
+          else if (Type == "exponential") code = 1;
+          mlir::Value Tv = lowerExpr(*C.Args[0]);
+          mlir::Value Tc = mlir::arith::ConstantOp::create(
+              B, L, I32, mlir::IntegerAttr::get(I32, code));
+          mlir::Value Pv = lowerExpr(*C.Args[2]);
+          /* Period arrives as f64; convert to i32. */
+          mlir::Value Pi = mlir::arith::FPToSIOp::create(B, L, I32, Pv);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_timetable_movavg"));
+          return emitUnreg("matlab.call_builtin", {Tv, Tc, Pi},
+                           PtrTy, L, {Cal});
+        }
       }
       /* macd(TT) -> 3-column matlab_timetable {MACD, Signal, Histogram}. */
       if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
           N->Name == "macd" && C.Args.size() == 1 && C.Args[0]) {
-        if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]))
-          if (ArgN->Ref && TimetableBindings.count(ArgN->Ref)) {
-            auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
-            mlir::Value Tv = lowerExpr(*C.Args[0]);
-            mlir::NamedAttribute Cal(
-                mlir::StringAttr::get(&MCtx, "callee"),
-                mlir::StringAttr::get(&MCtx, "matlab_timetable_macd"));
-            return emitUnreg("matlab.call_builtin", {Tv}, PtrTy, L, {Cal});
-          }
+        if (exprIsTimetable(C.Args[0])) {
+          auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+          mlir::Value Tv = lowerExpr(*C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_timetable_macd"));
+          return emitUnreg("matlab.call_builtin", {Tv}, PtrTy, L, {Cal});
+        }
       }
       /* fillmissing(TT, 'linear'|'previous'|'next') -> matlab_timetable.
        * The constant-replacement form (fillmissing(TT, k) with k
@@ -9865,59 +9884,56 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           C.Args[0] && C.Args[1]) {
         auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
         auto I32 = mlir::IntegerType::get(&MCtx, 32);
-        if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]))
-          if (ArgN->Ref && TimetableBindings.count(ArgN->Ref)) {
-            std::string Method;
-            if (auto *CL = dynamic_cast<const CharLiteral *>(C.Args[1]))
-              Method = std::string(CL->Value);
-            else if (auto *SL = dynamic_cast<const StringLiteral *>(C.Args[1]))
-              Method = std::string(SL->Value);
-            int32_t code = 0;
-            if      (Method == "linear")   code = 0;
-            else if (Method == "previous") code = 1;
-            else if (Method == "next")     code = 2;
-            mlir::Value Tv = lowerExpr(*C.Args[0]);
-            mlir::Value Mv = mlir::arith::ConstantOp::create(
-                B, L, I32, mlir::IntegerAttr::get(I32, code));
-            mlir::NamedAttribute Cal(
-                mlir::StringAttr::get(&MCtx, "callee"),
-                mlir::StringAttr::get(&MCtx, "matlab_timetable_fillmissing"));
-            return emitUnreg("matlab.call_builtin", {Tv, Mv},
-                             PtrTy, L, {Cal});
-          }
+        if (exprIsTimetable(C.Args[0])) {
+          std::string Method;
+          if (auto *CL = dynamic_cast<const CharLiteral *>(C.Args[1]))
+            Method = std::string(CL->Value);
+          else if (auto *SL = dynamic_cast<const StringLiteral *>(C.Args[1]))
+            Method = std::string(SL->Value);
+          int32_t code = 0;
+          if      (Method == "linear")   code = 0;
+          else if (Method == "previous") code = 1;
+          else if (Method == "next")     code = 2;
+          mlir::Value Tv = lowerExpr(*C.Args[0]);
+          mlir::Value Mv = mlir::arith::ConstantOp::create(
+              B, L, I32, mlir::IntegerAttr::get(I32, code));
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_timetable_fillmissing"));
+          return emitUnreg("matlab.call_builtin", {Tv, Mv},
+                           PtrTy, L, {Cal});
+        }
       }
       /* summary(TT) / head(TT[, n]) — display-only on a timetable. */
       if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
           N->Name == "summary" && C.Args.size() == 1 && C.Args[0]) {
-        if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]))
-          if (ArgN->Ref && TimetableBindings.count(ArgN->Ref)) {
-            mlir::Value Tv = lowerExpr(*C.Args[0]);
-            mlir::NamedAttribute Cal(
-                mlir::StringAttr::get(&MCtx, "callee"),
-                mlir::StringAttr::get(&MCtx, "matlab_timetable_summary"));
-            return emitUnreg("matlab.call_builtin", {Tv},
-                             mlir::NoneType::get(&MCtx), L, {Cal});
-          }
+        if (exprIsTimetable(C.Args[0])) {
+          mlir::Value Tv = lowerExpr(*C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_timetable_summary"));
+          return emitUnreg("matlab.call_builtin", {Tv},
+                           mlir::NoneType::get(&MCtx), L, {Cal});
+        }
       }
       if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
           N->Name == "head" && C.Args.size() >= 1 && C.Args[0]) {
-        if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]))
-          if (ArgN->Ref && TimetableBindings.count(ArgN->Ref)) {
-            auto F64 = mlir::Float64Type::get(&MCtx);
-            mlir::Value Tv = lowerExpr(*C.Args[0]);
-            mlir::Value NV;
-            if (C.Args.size() == 2 && C.Args[1]) {
-              NV = lowerExpr(*C.Args[1]);
-            } else {
-              NV = mlir::arith::ConstantOp::create(
-                  B, L, F64, mlir::FloatAttr::get(F64, 0.0));
-            }
-            mlir::NamedAttribute Cal(
-                mlir::StringAttr::get(&MCtx, "callee"),
-                mlir::StringAttr::get(&MCtx, "matlab_timetable_head"));
-            return emitUnreg("matlab.call_builtin", {Tv, NV},
-                             mlir::NoneType::get(&MCtx), L, {Cal});
+        if (exprIsTimetable(C.Args[0])) {
+          auto F64 = mlir::Float64Type::get(&MCtx);
+          mlir::Value Tv = lowerExpr(*C.Args[0]);
+          mlir::Value NV;
+          if (C.Args.size() == 2 && C.Args[1]) {
+            NV = lowerExpr(*C.Args[1]);
+          } else {
+            NV = mlir::arith::ConstantOp::create(
+                B, L, F64, mlir::FloatAttr::get(F64, 0.0));
           }
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_timetable_head"));
+          return emitUnreg("matlab.call_builtin", {Tv, NV},
+                           mlir::NoneType::get(&MCtx), L, {Cal});
+        }
       }
       /* synchronize(TT1, TT2, cadence, method) -> matlab_timetable.
        * Aligns both inputs onto the same cadence with the given
