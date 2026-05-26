@@ -281,6 +281,75 @@ if(MATLAB_LLVM_WITH_MLIR)
   target_link_libraries(matlab-lsp PRIVATE LLVMSupport)
 endif()
 
+# --------------------------------------------------------------------------
+# MatlabRuntime — single static archive bundling every unconditional runtime
+# TU (core + every shipped toolbox + GPU dispatcher).  See docs/runtime.md
+# §3 and issue #50 for the architectural argument.
+#
+# Why one library:
+#   * Deduplicates the source list — pre-#50, the same 19 .cpp files were
+#     enumerated in target_sources(matlabc) + every runtime-test-* +
+#     runtime-plot-* foreach.  Now a single list in one place.
+#   * External callers (the IDE, the bench harness, downstream packagers)
+#     can link `libMatlabRuntime.a` instead of recompiling 19 TUs every
+#     time they build a `.m`.  Per-toolbox dead-stripping is the linker's
+#     job (-Wl,-dead_strip on macOS, -Wl,--gc-sections on Linux); a
+#     program that only calls `disp(1)` won't pay for plot/sym/PDE/etc.
+#
+# Conditional toolboxes (Cairo plot, SymPP sym, Metal GPU, BLAS) stay
+# attached to matlabc separately below — those carry external dependencies
+# we don't want to force-link into every consumer (Cairo / SymPP will
+# migrate to dlopen in #50 Phase 2-3).
+add_library(MatlabRuntime STATIC
+    runtime/matlab_runtime.cpp
+    runtime/runtime_debug.cpp
+    runtime/runtime_complex.cpp
+    runtime/runtime_sparse.cpp
+    runtime/toolbox/prop/runtime_prop.cpp
+    runtime/toolbox/comm/runtime_comm.cpp
+    runtime/toolbox/rf/runtime_rf.cpp
+    runtime/toolbox/pde/runtime_pde.cpp
+    runtime/toolbox/optim/runtime_optim.cpp
+    runtime/toolbox/mpc/runtime_mpc.cpp
+    runtime/toolbox/ident/runtime_ident.cpp
+    runtime/toolbox/gads/runtime_gads.cpp
+    runtime/toolbox/stats/runtime_stats.cpp
+    runtime/toolbox/images/runtime_images.cpp
+    runtime/toolbox/curvefit/runtime_curvefit.cpp
+    runtime/toolbox/wavelet/runtime_wavelet.cpp
+    runtime/toolbox/dsp/runtime_dsp.cpp
+    runtime/toolbox/stateflow/runtime_mstateflow.cpp
+    runtime/gpu/runtime_gpu.cpp
+    runtime/toolbox/gpu/runtime_gpu_helpers.cpp)
+target_include_directories(MatlabRuntime PUBLIC ${CMAKE_SOURCE_DIR}/runtime)
+target_link_libraries(MatlabRuntime PUBLIC m)
+# -ffunction-sections + -fdata-sections give the linker per-symbol
+# granularity so external callers' dead-strip pass can drop unused
+# toolboxes one function at a time.  Mac's ld64 is per-symbol by
+# default; Linux's bfd / lld want the section split.  Cheap on compile
+# time; saves bytes on the link.
+target_compile_options(MatlabRuntime PRIVATE
+    -ffunction-sections -fdata-sections)
+
+# Helper — force-load every symbol from MatlabRuntime into a consumer.
+# matlabc's MLIR REPL JIT resolves runtime symbols via
+# LLJIT's DynamicLibrarySearchGenerator::GetForCurrentProcess, so every
+# matlab_* entry has to be in the executable's symbol table even if the
+# linker can't statically prove a need for it.  External callers (the
+# script-replacement invocation, the IDE, packagers) link WITHOUT
+# force-load so dead-strip kicks in normally.
+function(matlab_runtime_force_load TGT)
+  if(APPLE)
+    target_link_options(${TGT} PRIVATE
+        "-Wl,-force_load,$<TARGET_FILE:MatlabRuntime>")
+  else()
+    target_link_options(${TGT} PRIVATE
+        "LINKER:--whole-archive"
+        "$<TARGET_FILE:MatlabRuntime>"
+        "LINKER:--no-whole-archive")
+  endif()
+endfunction()
+
 add_executable(matlabc
   tools/matlabc/main.cpp
   tools/matlabc/MflowLinkJit.cpp)
@@ -302,32 +371,11 @@ if(MATLAB_LLVM_WITH_MLIR)
   # The runtime now compiles as C++ (Phase 3 of docs/port_runtime_2_cpp.md);
   # its body stays C-shaped and is wrapped in extern "C" so the exported
   # symbols match the names JIT-emitted code looks up.
-  # Phase 2 split: REPL/DAP debug machinery lives in runtime_debug.cpp;
-  # Phase 2.5 split: complex matrix family + FFT live in
-  # runtime_complex.cpp. The numerical real-side core stays in
-  # matlab_runtime.cpp. All three share private layouts via
-  # runtime/runtime_internal.h.
-  target_sources(matlabc PRIVATE
-    runtime/matlab_runtime.cpp
-    runtime/runtime_debug.cpp
-    runtime/runtime_complex.cpp
-    runtime/runtime_sparse.cpp
-    runtime/toolbox/prop/runtime_prop.cpp
-    runtime/toolbox/comm/runtime_comm.cpp
-    runtime/toolbox/rf/runtime_rf.cpp
-    runtime/toolbox/pde/runtime_pde.cpp
-    runtime/toolbox/optim/runtime_optim.cpp
-    runtime/toolbox/mpc/runtime_mpc.cpp
-    runtime/toolbox/ident/runtime_ident.cpp
-    runtime/toolbox/gads/runtime_gads.cpp
-    runtime/toolbox/stats/runtime_stats.cpp
-    runtime/toolbox/images/runtime_images.cpp
-    runtime/toolbox/curvefit/runtime_curvefit.cpp
-    runtime/toolbox/wavelet/runtime_wavelet.cpp
-    runtime/toolbox/dsp/runtime_dsp.cpp
-    runtime/toolbox/stateflow/runtime_mstateflow.cpp
-    runtime/gpu/runtime_gpu.cpp
-    runtime/toolbox/gpu/runtime_gpu_helpers.cpp)
+  # The runtime is now consolidated in the MatlabRuntime static archive
+  # (see the add_library above).  matlabc force-links every symbol so
+  # the MLIR REPL JIT can resolve them via the process's symbol table.
+  target_link_libraries(matlabc PRIVATE MatlabRuntime)
+  matlab_runtime_force_load(matlabc)
   if(MATLAB_LLVM_WITH_SYM)
     target_sources(matlabc PRIVATE runtime/toolbox/sym/runtime_sym.cpp)
     target_link_libraries(matlabc PRIVATE SymPP::sympp)
@@ -409,6 +457,12 @@ endif()
 if(MATLAB_LLVM_COVERAGE)
   target_compile_options(matlabc PRIVATE ${MATLAB_LLVM_COVERAGE_FLAGS})
   target_link_options(matlabc PRIVATE ${MATLAB_LLVM_COVERAGE_FLAGS})
+  # MatlabRuntime is now its own static library — instrument it too so
+  # the runtime TUs show up in coverage reports.  Profile-instrumented
+  # objects link cleanly into both matlabc (force-load) and the
+  # runtime-test-* test executables (normal link); the runtime
+  # variable counters are merged at process exit.
+  target_compile_options(MatlabRuntime PRIVATE ${MATLAB_LLVM_COVERAGE_FLAGS})
 endif()
 
 enable_testing()
@@ -444,32 +498,15 @@ endif()
 # docs/port_runtime_2_cpp.md (Phase 1).
 foreach(_rt_test IN ITEMS linalg shape rng complex reduce signal stats image more fft struct_cell fi elementwise unary fi_arrays int_arrays strings ode pde pde_io comm optim prop rf mstateflow)
   set(_rt_target "runtime-test-${_rt_test}")
-  add_executable(${_rt_target}
-    test/Runtime/test_${_rt_test}.c
-    runtime/matlab_runtime.cpp
-    runtime/runtime_debug.cpp
-    runtime/runtime_complex.cpp
-    runtime/runtime_sparse.cpp
-    runtime/toolbox/prop/runtime_prop.cpp
-    runtime/toolbox/comm/runtime_comm.cpp
-    runtime/toolbox/rf/runtime_rf.cpp
-    runtime/toolbox/pde/runtime_pde.cpp
-    runtime/toolbox/optim/runtime_optim.cpp
-    runtime/toolbox/mpc/runtime_mpc.cpp
-    runtime/toolbox/ident/runtime_ident.cpp
-    runtime/toolbox/gads/runtime_gads.cpp
-    runtime/toolbox/stats/runtime_stats.cpp
-    runtime/toolbox/images/runtime_images.cpp
-    runtime/toolbox/curvefit/runtime_curvefit.cpp
-    runtime/toolbox/wavelet/runtime_wavelet.cpp
-    runtime/toolbox/dsp/runtime_dsp.cpp
-    runtime/toolbox/stateflow/runtime_mstateflow.cpp
-    runtime/gpu/runtime_gpu.cpp
-    runtime/toolbox/gpu/runtime_gpu_helpers.cpp)
+  add_executable(${_rt_target} test/Runtime/test_${_rt_test}.c)
   target_include_directories(${_rt_target} PRIVATE
-    ${CMAKE_SOURCE_DIR}/runtime
     ${CMAKE_SOURCE_DIR}/test/Runtime)
-  target_link_libraries(${_rt_target} PRIVATE m)
+  # Pull the whole runtime archive — these C tests each call into a
+  # handful of toolbox-specific entries; without force-load, the linker
+  # might drop adjacent TUs the C test references via fn-pointer
+  # tables.  Same force-load shape matlabc uses.
+  target_link_libraries(${_rt_target} PRIVATE MatlabRuntime)
+  matlab_runtime_force_load(${_rt_target})
   if(MATLAB_LLVM_COVERAGE)
     target_compile_options(${_rt_target} PRIVATE ${MATLAB_LLVM_COVERAGE_FLAGS})
     target_link_options(${_rt_target}    PRIVATE ${MATLAB_LLVM_COVERAGE_FLAGS})
@@ -489,10 +526,12 @@ foreach(_rt_test IN ITEMS linalg shape rng complex reduce signal stats image mor
 endforeach()
 
 # --- Enforce no new C-style casts in modernised runtime TUs -----------------
-# The five new-runtime modules went through a mechanical static_cast<>
+# The new-runtime modules went through a mechanical static_cast<>
 # conversion. Lock that in with -Wold-style-cast as an error on these
 # TUs only; the legacy matlab_runtime.cpp + sibling TUs predate the
 # convention and would generate thousands of warnings if flagged.
+# Applies file-by-file inside the MatlabRuntime library — the same
+# per-file granularity matches the original setting.
 set_source_files_properties(
   runtime/toolbox/comm/runtime_comm.cpp
   runtime/toolbox/optim/runtime_optim.cpp
@@ -509,6 +548,7 @@ set_source_files_properties(
   runtime/toolbox/stateflow/runtime_mstateflow.cpp
   runtime/gpu/runtime_gpu.cpp
   runtime/toolbox/gpu/runtime_gpu_helpers.cpp
+  TARGET_DIRECTORY MatlabRuntime
   PROPERTIES COMPILE_OPTIONS "-Wold-style-cast;-Werror=old-style-cast")
 
 if(MATLAB_LLVM_WITH_PLOT)
@@ -516,18 +556,9 @@ if(MATLAB_LLVM_WITH_PLOT)
     set(_plot_target "runtime-plot-${_plot_test}")
     add_executable(${_plot_target}
       test/Runtime/test_plot_${_plot_test}.cpp
-      runtime/matlab_runtime.cpp
-      runtime/runtime_debug.cpp
-      runtime/runtime_complex.cpp
-      runtime/runtime_sparse.cpp
-      runtime/toolbox/prop/runtime_prop.cpp
-      runtime/toolbox/comm/runtime_comm.cpp
-      runtime/toolbox/rf/runtime_rf.cpp
-      runtime/toolbox/pde/runtime_pde.cpp
       ${MATLAB_PLOT_SOURCES})
-    target_include_directories(${_plot_target} PRIVATE
-      ${CMAKE_SOURCE_DIR}/runtime)
-    target_link_libraries(${_plot_target} PRIVATE m PkgConfig::CAIRO)
+    target_link_libraries(${_plot_target} PRIVATE MatlabRuntime PkgConfig::CAIRO)
+    matlab_runtime_force_load(${_plot_target})
     add_test(NAME runtime-plot-${_plot_test}
              COMMAND $<TARGET_FILE:${_plot_target}>)
   endforeach()
