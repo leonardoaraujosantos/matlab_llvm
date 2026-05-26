@@ -1,0 +1,6 @@
+frontier: assets=5, points=20
+min-var portfolio: risk=0.1058, return=0.0777
+max-ret portfolio: risk=0.2004, return=0.1353
+max-Sharpe portfolio: risk=0.1083, return=0.0950, sharpe=0.8776
+target r=0.10: risk=0.1150, return=0.1000
+estimated mean: 0.105 0.109 0.053 0.071 0.136
