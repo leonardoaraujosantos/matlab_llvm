@@ -1,0 +1,5 @@
+CVaR(equal-weight) = 0.0350
+VaR(equal-weight)  = 0.0100
+frontier: assets=3, points=5
+frontier point-1 risk = 0.0448
+weights sum = 1.0000

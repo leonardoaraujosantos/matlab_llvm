@@ -7024,6 +7024,32 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"estimatePortReturn",      "matlab_portfolio_estimate_port_return",     0, "pp"},
       {"estimatePortRisk",        "matlab_portfolio_estimate_port_risk",       0, "pp"},
       {"estimateAssetMoments",    "matlab_portfolio_estimate_asset_moments",   1, "pp"},
+      /* Financial Toolbox Tier-4: regression with missing data. */
+      {"ecmnmle",    "matlab_ecmnmle",    1, "p"},
+      {"ecmncov",    "matlab_ecmncov",    1, "p"},
+      {"mvnrmle",    "matlab_mvnrmle",    1, "pp"},
+      {"capm",       "matlab_capm",       1, "ppf"},
+      {"transprob",  "matlab_transprob",  1, "p"},
+      {"cdsbootstrap","matlab_cdsbootstrap",1, "pppf"},
+      {"cdsspread",  "matlab_cdsspread",  0, "ff"},
+      {"cdsprice",   "matlab_cdsprice",   0, "fff"},
+      {"fitmodel",   "matlab_creditscorecard_fitmodel",   1, "p"},
+      {"probdefault","matlab_creditscorecard_probdefault",1, "pp"},
+      {"score",      "matlab_creditscorecard_score",      1, "pp"},
+      /* Financial Toolbox Tier-5: PortfolioCVaR / PortfolioMAD. The
+       * shared estimateFrontier / estimatePortRisk / setDefaultConstraints
+       * names route through the matlab_portfolio_* dispatchers (RiskKind
+       * discriminant); these are the class-specific setters + readers. */
+      {"setScenarios",        "matlab_portfoliocvar_set_scenarios",   1, "pp"},
+      {"setProbabilityLevel", "matlab_portfoliocvar_set_prob_level",  1, "pf"},
+      {"estimatePortVaR",     "matlab_portfoliocvar_estimate_port_var",0, "pp"},
+      {"backtest",            "matlab_backtest",          1, "ppf"},
+      {"backtestSummary",     "matlab_backtest_summary",  1, "p"},
+      /* Financial Toolbox Tier-6: SDE Monte Carlo. */
+      {"simByEuler",    "matlab_sde_sim_euler",    1, "pfff"},
+      {"simBySolution", "matlab_sde_sim_solution", 1, "pfff"},
+      {"haltonseq",     "matlab_haltonseq",        1, "ff"},
+      {"optpricemc",    "matlab_optpricemc",       0, "pfff"},
     };
 
     // Pick the first entry with name + arity + TYPE match so overloaded
