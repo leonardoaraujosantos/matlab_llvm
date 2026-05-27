@@ -867,6 +867,14 @@ static bool retypeAnonsForVectorObjective(ModuleOp M) {
                 Name == "matlab_ident_ukf_correct") && nops == 3) {
       /* EKF/UKF correct(obj, @MeasFcn, y) — MeasFcn(x) handle at op 1. */
       Changed |= retypeAnonArg(Call->getOperand(1), 0);
+    } else if ((Name == "matlab_fusion_trackingekf_predict" ||
+                Name == "matlab_fusion_trackingukf_predict") && nops == 2) {
+      /* Sensor Fusion trackingEKF/UKF predict(obj, @StateFcn). */
+      Changed |= retypeAnonArg(Call->getOperand(1), 0);
+    } else if ((Name == "matlab_fusion_trackingekf_correct" ||
+                Name == "matlab_fusion_trackingukf_correct") && nops == 3) {
+      /* Sensor Fusion trackingEKF/UKF correct(obj, @MeasFcn, y_vec). */
+      Changed |= retypeAnonArg(Call->getOperand(1), 0);
     }
   }
   return Changed;

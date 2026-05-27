@@ -102,7 +102,8 @@ through Cairo), [`feature_status.md`](feature_status.md).
   T3 (~5.5 wk) close the inertial-navigation half** — the highest-value
   cut given the flight-control alignment.
 - **Status legend**: ✅ shipped · 🟡 partial · 🔵 not started.
-  **Everything below is 🔵 not started** — but the estimation substrate is
+  **Tiers 1–3 are ✅ shipped** as of 2026-05-27 (inertial-navigation half);
+  Tiers 4–6 are 🔵 not started. The estimation substrate is
   unusually deep: the EKF/UKF cores, ODE solvers, dense linalg, PRNG, and
   the single-filter classdef pattern are all shipped. The genuinely new
   surface is the **quaternion type**, the **sensor noise models**, the
@@ -447,9 +448,9 @@ object-API surface a *script* uses (quaternions / filters / IMU-GPS fusion
 
 | Tier | Scope | Effort | Net-new code | Status |
 |---|---|---|---|---|
-| T1 | quaternion + orientation/rotation math | ~1.5 wk | `quaternion` value type + conversions + `ecompass` + core gaps | 🔵 |
-| T2 | estimation filters + motion/measurement models | ~1.5 wk | `trackingKF`/`EKF`/`UKF`/`IMM` re-skins over shipped EKF/UKF + motion models | 🔵 |
-| T3 | inertial sensors + orientation/pose fusion | ~2.5 wk | `imuSensor`/`gpsSensor` + `ahrsfilter`/`imufilter`/`insfilter*` + `allanvar`/`tune` | 🔵 |
+| T1 | quaternion + orientation/rotation math | ~1.5 wk | `quaternion` value type + conversions + `ecompass` + core gaps | ✅ |
+| T2 | estimation filters + motion/measurement models | ~1.5 wk | `trackingKF`/`EKF`/`UKF` re-skins over shipped EKF/UKF + `constvel`/`constacc`/`constturn` + `objectDetection` + `initcvekf`/`initctekf` (`IMM`/`GSF`/`PF` deferred) | ✅ |
+| T3 | inertial sensors + orientation/pose fusion | ~2.5 wk | `imuSensor`/`gpsSensor` + Mahony-style `ahrsfilter`/`imufilter`/`complementaryFilter` + simplified `insfilterMARG` headline + `allanvar` (`tune` carved as follow-on) | ✅ |
 | T4 | trajectory + scenario generation | ~1.5 wk | `waypointTrajectory`/`kinematicTrajectory` + `trackingScenario`/`platform` + `theaterPlot` | 🔵 |
 | T5 | multi-object trackers + assignment | ~3 wk | Munkres/auction/JV/SD + `trackerGNN`/`JPDA`/`TOMHT` + track logic | 🔵 |
 | T6 | track fusion + metrics + RFS + polish | ~2.5 wk | `trackFuser`/`staticDetectionFuser` + GOSPA/OSPA metrics + `trackerPHD` + OOSM | 🔵 |

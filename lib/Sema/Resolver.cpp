@@ -448,6 +448,61 @@ void Resolver::registerBuiltins() {
     "getcov", "getpvec", "setpvec",
     "matlab_ident_arx_reg", "matlab_ident_getcov",
     "matlab_ident_getpvec", "matlab_ident_setpvec",
+    /* ===== Sensor Fusion and Tracking Toolbox Tier-1 — quaternion + rotations ====
+     * Class names (quaternion / trackingKF / trackingEKF / trackingUKF /
+     * objectDetection / imuSensor / gpsSensor / ahrsfilter / imufilter /
+     * complementaryFilter / insfilterMARG) are NOT registered here — they're
+     * picked up from fusion_classdefs.m by the prelude loader and resolved
+     * as classes, so calls route to Lowering's constructor-intercept path. */
+    "ecompass", "slerp",
+    "rotatepoint", "rotateframe",
+    "quat2eul", "eul2quat", "quat2rotm", "rotm2quat",
+    "matlab_fusion_quat_init_wxyz", "matlab_fusion_quat_init_mat",
+    "matlab_fusion_quat_init_from_data",
+    "matlab_fusion_quat_mul_data", "matlab_fusion_quat_conj_data",
+    "matlab_fusion_quat_norm_data", "matlab_fusion_quat_normalize_data",
+    "matlab_fusion_quat_inverse_data",
+    "matlab_fusion_quat_to_rotm", "matlab_fusion_quat2rotm",
+    "matlab_fusion_rotm_to_quat",
+    "matlab_fusion_quat_to_eul", "matlab_fusion_eul_to_quat",
+    "matlab_fusion_quat_rotatepoint", "matlab_fusion_quat_rotateframe",
+    "matlab_fusion_quat_slerp", "matlab_fusion_quat_dist",
+    "matlab_fusion_ecompass",
+    "matlab_fusion_quat_disp", "matlab_fusion_quat_parts",
+    /* ===== Sensor Fusion Tier-1 small core gaps (also generic builtins) ===== */
+    "cross", "dot", "deg2rad", "rad2deg", "mvnrnd",
+    "matlab_cross", "matlab_dot", "matlab_deg2rad", "matlab_rad2deg",
+    "matlab_normalize_vec", "matlab_mvnrnd",
+    /* ===== Sensor Fusion Tier-2 — tracking filters + motion/measurement models ===== */
+    "constvel", "constacc", "constturn",
+    "constveljac", "constaccjac", "constturnjac",
+    "cvmeas", "cameas", "ctmeas",
+    "cvmeasjac", "cameasjac", "ctmeasjac",
+    "initcvekf", "initctekf", "initcakf",
+    "matlab_fusion_trackingkf_init", "matlab_fusion_trackingkf_predict",
+    "matlab_fusion_trackingkf_correct", "matlab_fusion_trackingkf_distance",
+    "matlab_fusion_trackingkf_likelihood",
+    "matlab_fusion_trackingekf_init", "matlab_fusion_trackingekf_predict",
+    "matlab_fusion_trackingekf_correct",
+    "matlab_fusion_trackingukf_init", "matlab_fusion_trackingukf_predict",
+    "matlab_fusion_trackingukf_correct",
+    "matlab_fusion_constvel", "matlab_fusion_constacc", "matlab_fusion_constturn",
+    "matlab_fusion_cvmeas", "matlab_fusion_cameas", "matlab_fusion_ctmeas",
+    "matlab_fusion_objdet_init",
+    "matlab_fusion_initcvekf", "matlab_fusion_initctekf",
+    /* ===== Sensor Fusion Tier-3 — inertial sensors + orientation fusion ===== */
+    "allanvar",
+    /* MARG fusion update entry names — `predict` already registered.  */
+    "fuseaccel", "fusegps", "fusemag",
+    "matlab_fusion_imu_init", "matlab_fusion_imu_step",
+    "matlab_fusion_gps_init", "matlab_fusion_gps_step",
+    "matlab_fusion_ahrs_init", "matlab_fusion_ahrs_step",
+    "matlab_fusion_imufilter_init", "matlab_fusion_imufilter_step",
+    "matlab_fusion_compfilter_init", "matlab_fusion_compfilter_step",
+    "matlab_fusion_insmarg_init", "matlab_fusion_insmarg_predict",
+    "matlab_fusion_insmarg_fuse_accel", "matlab_fusion_insmarg_fuse_mag",
+    "matlab_fusion_insmarg_fuse_gps",
+    "matlab_fusion_allanvar",
     /* Inverse Tustin: discrete-to-continuous. */
     "d2c_tustin",
     /* Tier 3.4 / 2.3 — gramians and state-space step response. */

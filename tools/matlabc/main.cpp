@@ -2148,7 +2148,7 @@ static std::string buildReplPrelude(const std::string &Src) {
   static const char *kToolboxDirs[] = {
     "comm", "rf", "optim", "mpc", "ident", "gads", "pde", "prop", "sym",
     "stateflow", "antenna", "control", "stats", "images", "curvefit",
-    "dsp", "gpu", "finance", "econ",
+    "dsp", "gpu", "finance", "econ", "fusion",
   };
   std::vector<std::string> Files;
   auto add = [&](const std::string &Leaf) {
@@ -2298,6 +2298,40 @@ static std::string buildReplPrelude(const std::string &Src) {
     {false, "predict",    "ident_classdefs.m"},
     {false, "resid",      "ident_classdefs.m"},
     {false, "goodnessOfFit", "ident_classdefs.m"},
+    /* Sensor Fusion and Tracking Toolbox — `fusion_classdefs.m` holds the
+     * `quaternion` value-type + tracking filters (trackingKF/EKF/UKF) +
+     * inertial sensor models (imuSensor/gpsSensor) + orientation/pose
+     * fusion filters (ahrsfilter/imufilter/complementaryFilter/insfilterMARG).
+     * Predict/correct method names are already pulled in by ident; the
+     * mentions below cover the strictly-fusion surface. */
+    {false, "quaternion",          "fusion_classdefs.m"},
+    {false, "trackingKF",          "fusion_classdefs.m"},
+    {false, "trackingEKF",         "fusion_classdefs.m"},
+    {false, "trackingUKF",         "fusion_classdefs.m"},
+    {false, "objectDetection",     "fusion_classdefs.m"},
+    {false, "imuSensor",           "fusion_classdefs.m"},
+    {false, "gpsSensor",           "fusion_classdefs.m"},
+    {false, "ahrsfilter",          "fusion_classdefs.m"},
+    {false, "imufilter",           "fusion_classdefs.m"},
+    {false, "complementaryFilter", "fusion_classdefs.m"},
+    {false, "insfilterMARG",       "fusion_classdefs.m"},
+    {false, "ecompass",            "fusion_classdefs.m"},
+    {false, "slerp",               "fusion_classdefs.m"},
+    {false, "rotatepoint",         "fusion_classdefs.m"},
+    {false, "rotateframe",         "fusion_classdefs.m"},
+    {false, "quat2eul",            "fusion_classdefs.m"},
+    {false, "eul2quat",            "fusion_classdefs.m"},
+    {false, "quat2rotm",           "fusion_classdefs.m"},
+    {false, "rotm2quat",           "fusion_classdefs.m"},
+    {false, "allanvar",            "fusion_classdefs.m"},
+    {false, "constvel",            "fusion_classdefs.m"},
+    {false, "constacc",            "fusion_classdefs.m"},
+    {false, "constturn",           "fusion_classdefs.m"},
+    {false, "cvmeas",              "fusion_classdefs.m"},
+    {false, "cameas",              "fusion_classdefs.m"},
+    {false, "ctmeas",              "fusion_classdefs.m"},
+    {false, "initcvekf",           "fusion_classdefs.m"},
+    {false, "initctekf",           "fusion_classdefs.m"},
     /* Global Optimization Toolbox Tier-2 — `gads_classdefs.m` holds the
      * MultiStart + GlobalSearch solver objects.  (`run` is too generic
      * to trigger on; the solver-object mentions pull the prelude.) */
@@ -11383,6 +11417,14 @@ int main(int Argc, char **Argv) {
       /* Econometrics Toolbox model objects (econ_classdefs.m). */
       "arima", "garch", "egarch", "gjr", "varm", "ssm", "dssm",
       "bayeslm", "dtmc",
+      /* Sensor Fusion and Tracking Toolbox — `fusion_classdefs.m` umbrella. */
+      "quaternion", "trackingKF", "trackingEKF", "trackingUKF",
+      "objectDetection", "imuSensor", "gpsSensor", "ahrsfilter",
+      "imufilter", "complementaryFilter", "insfilterMARG",
+      "ecompass", "slerp", "rotatepoint", "rotateframe",
+      "quat2eul", "eul2quat", "quat2rotm", "rotm2quat",
+      "allanvar", "constvel", "constacc", "constturn",
+      "cvmeas", "cameas", "ctmeas", "initcvekf", "initctekf",
       /* GPU Coder T5 design-pattern helpers — runtime entries, no
        * prelude file needed.  Listed here only for the AOT-prelude
        * scanner's awareness (no leaf to map). */
@@ -11582,6 +11624,24 @@ int main(int Argc, char **Argv) {
         ClsName == "ssm" || ClsName == "dssm" ||
         ClsName == "bayeslm" || ClsName == "dtmc")
       return "econ_classdefs.m";
+    /* Sensor Fusion and Tracking Toolbox — single umbrella file with the
+     * `quaternion` value type, tracking filters, sensor models, and fusion
+     * filters. */
+    if (ClsName == "quaternion" || ClsName == "trackingKF" ||
+        ClsName == "trackingEKF" || ClsName == "trackingUKF" ||
+        ClsName == "objectDetection" || ClsName == "imuSensor" ||
+        ClsName == "gpsSensor" || ClsName == "ahrsfilter" ||
+        ClsName == "imufilter" || ClsName == "complementaryFilter" ||
+        ClsName == "insfilterMARG" || ClsName == "ecompass" ||
+        ClsName == "slerp" || ClsName == "rotatepoint" ||
+        ClsName == "rotateframe" || ClsName == "quat2eul" ||
+        ClsName == "eul2quat" || ClsName == "quat2rotm" ||
+        ClsName == "rotm2quat" || ClsName == "allanvar" ||
+        ClsName == "constvel" || ClsName == "constacc" ||
+        ClsName == "constturn" || ClsName == "cvmeas" ||
+        ClsName == "cameas" || ClsName == "ctmeas" ||
+        ClsName == "initcvekf" || ClsName == "initctekf")
+      return "fusion_classdefs.m";
     /* GPU Coder T5 design-pattern helpers are C runtime entries; no
      * classdef file to pull in. */
     return std::string();
@@ -11637,7 +11697,7 @@ int main(int Argc, char **Argv) {
     static const char *kToolboxDirs[] = {
       "comm", "rf", "optim", "mpc", "ident", "gads", "pde", "prop", "sym",
       "stateflow", "antenna", "control", "stats", "images", "curvefit",
-      "dsp", "gpu", "finance", "econ",
+      "dsp", "gpu", "finance", "econ", "fusion",
     };
     std::vector<std::string> Cands;
     for (const char *Tb : kToolboxDirs) {

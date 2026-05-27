@@ -6083,6 +6083,156 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                       {mlir::NoneType::get(&MCtx)}, L, {Cal});
           return Obj;
         }
+        /* ===== Sensor Fusion Tier-1 — quaternion(...) constructors ============
+         * Three forms: quaternion(w,x,y,z) -> 1×4 row; quaternion(M) where M is
+         * an N×4/1×4/4×1 matrix; zero-arg (handled by the classdef ctor that
+         * sets Data = [1 0 0 0]). */
+        if (CD->Name == "quaternion" && C.Args.size() == 4) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "quaternion__quaternion"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value W = lowerExpr(*C.Args[0]);
+          mlir::Value X = lowerExpr(*C.Args[1]);
+          mlir::Value Y = lowerExpr(*C.Args[2]);
+          mlir::Value Z = lowerExpr(*C.Args[3]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_fusion_quat_init_wxyz"));
+          emitUnregOp("matlab.call_builtin", {Obj, W, X, Y, Z},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        if (CD->Name == "quaternion" && C.Args.size() == 1) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "quaternion__quaternion"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value M = lowerExpr(*C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_fusion_quat_init_mat"));
+          emitUnregOp("matlab.call_builtin", {Obj, M},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        /* ===== Sensor Fusion Tier-2 — trackingKF(...) constructor =============
+         * Signature: trackingKF(F, H, Q, R, x0) — five matrix args.  The
+         * runtime stores F/H/Q/R/x0 and initialises State + StateCovariance. */
+        if (CD->Name == "trackingKF" && C.Args.size() == 5) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "trackingKF__trackingKF"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Fm = lowerExpr(*C.Args[0]);
+          mlir::Value Hm = lowerExpr(*C.Args[1]);
+          mlir::Value Qm = lowerExpr(*C.Args[2]);
+          mlir::Value Rm = lowerExpr(*C.Args[3]);
+          mlir::Value X0 = lowerExpr(*C.Args[4]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_fusion_trackingkf_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, Fm, Hm, Qm, Rm, X0},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        /* trackingEKF(x0, P0, Q, R) / trackingUKF(x0, P0, Q, R) — re-skin of
+         * the Ident EKF/UKF but with VECTOR measurement noise (ny×ny). */
+        if ((CD->Name == "trackingEKF" || CD->Name == "trackingUKF") &&
+            C.Args.size() == 4) {
+          std::string Ctor = std::string(CD->Name) + "__" + std::string(CD->Name);
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, Ctor));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value X0 = lowerExpr(*C.Args[0]);
+          mlir::Value P0 = lowerExpr(*C.Args[1]);
+          mlir::Value Qm = lowerExpr(*C.Args[2]);
+          mlir::Value Rm = lowerExpr(*C.Args[3]);
+          const char *rt = (CD->Name == "trackingEKF")
+                               ? "matlab_fusion_trackingekf_init"
+                               : "matlab_fusion_trackingukf_init";
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, rt));
+          emitUnregOp("matlab.call_builtin", {Obj, X0, P0, Qm, Rm},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        /* ===== Sensor Fusion Tier-3 — sensor / filter constructors ============
+         * imuSensor(fs, hasMag) — both args optional (zero-arg ctor handles
+         * defaults; 1-2-arg form populates the SampleRate / HasMagnetometer
+         * flags). */
+        if (CD->Name == "imuSensor" && C.Args.size() >= 1 && C.Args.size() <= 2) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "imuSensor__imuSensor"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Fs = lowerExpr(*C.Args[0]);
+          mlir::Value HasMag = (C.Args.size() == 2)
+              ? lowerExpr(*C.Args[1])
+              : emitUnreg("matlab.const_float", {}, mlir::Float64Type::get(&MCtx), L,
+                  {mlir::NamedAttribute(mlir::StringAttr::get(&MCtx, "value"),
+                       mlir::FloatAttr::get(mlir::Float64Type::get(&MCtx), 0.0))});
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_fusion_imu_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, Fs, HasMag},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        if (CD->Name == "gpsSensor" && C.Args.size() == 1) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "gpsSensor__gpsSensor"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Fs = lowerExpr(*C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_fusion_gps_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, Fs},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        if ((CD->Name == "ahrsfilter" || CD->Name == "imufilter" ||
+             CD->Name == "complementaryFilter" || CD->Name == "insfilterMARG") &&
+            C.Args.size() == 1) {
+          std::string Ctor = std::string(CD->Name) + "__" + std::string(CD->Name);
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, Ctor));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Fs = lowerExpr(*C.Args[0]);
+          const char *rt;
+          if      (CD->Name == "ahrsfilter")          rt = "matlab_fusion_ahrs_init";
+          else if (CD->Name == "imufilter")           rt = "matlab_fusion_imufilter_init";
+          else if (CD->Name == "complementaryFilter") rt = "matlab_fusion_compfilter_init";
+          else                                        rt = "matlab_fusion_insmarg_init";
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, rt));
+          emitUnregOp("matlab.call_builtin", {Obj, Fs},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        /* objectDetection(time, z, R) — set Time / Measurement /
+         * MeasurementNoise.  2-arg form (without R) is a documented follow-on
+         * (runtime defaults R to eye(ny) when MeasurementNoise is empty). */
+        if (CD->Name == "objectDetection" && C.Args.size() == 3) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "objectDetection__objectDetection"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Tm = lowerExpr(*C.Args[0]);
+          mlir::Value Zm = lowerExpr(*C.Args[1]);
+          mlir::Value Rm = lowerExpr(*C.Args[2]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_fusion_objdet_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, Tm, Zm, Rm},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
         /* System Identification Tier-1.8 — ss(idpoly) / tf(idpoly)
          * conversion.  `ss`/`tf` resolve as classes (not builtins), so
          * this interception lives in the constructor-call path rather
@@ -8987,6 +9137,122 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
               mlir::StringAttr::get(&MCtx, "callee"),
               mlir::StringAttr::get(&MCtx, rt));
           return emitUnreg("matlab.call_builtin", {Obj, Fn, Yv}, PtrTy, L, {Cal});
+        }
+        /* ===== Sensor Fusion Tier-2 — tracking-filter methods =================
+         * predict(trackingKF) / correct(trackingKF, y) — no handles, linear KF. */
+        if (Nm == "predict" && Cls0 && Cn0 == "trackingKF" && C.Args.size() == 1) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_fusion_trackingkf_predict"));
+          return emitUnreg("matlab.call_builtin", {Obj}, PtrTy, L, {Cal});
+        }
+        if (Nm == "correct" && Cls0 && Cn0 == "trackingKF" && C.Args.size() == 2) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Yv  = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_fusion_trackingkf_correct"));
+          return emitUnreg("matlab.call_builtin", {Obj, Yv}, PtrTy, L, {Cal});
+        }
+        /* predict(trackingEKF/UKF, @f) / correct(trackingEKF/UKF, @h, y_vec). */
+        if (Nm == "predict" && Cls0 &&
+            (Cn0 == "trackingEKF" || Cn0 == "trackingUKF") &&
+            C.Args.size() == 2) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Fn  = lowerExpr(*C.Args[1]);
+          const char *rt = (Cn0 == "trackingEKF")
+                               ? "matlab_fusion_trackingekf_predict"
+                               : "matlab_fusion_trackingukf_predict";
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, rt));
+          return emitUnreg("matlab.call_builtin", {Obj, Fn}, PtrTy, L, {Cal});
+        }
+        if (Nm == "correct" && Cls0 &&
+            (Cn0 == "trackingEKF" || Cn0 == "trackingUKF") &&
+            C.Args.size() == 3) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Fn  = lowerExpr(*C.Args[1]);
+          mlir::Value Yv  = lowerExpr(*C.Args[2]);
+          const char *rt = (Cn0 == "trackingEKF")
+                               ? "matlab_fusion_trackingekf_correct"
+                               : "matlab_fusion_trackingukf_correct";
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, rt));
+          return emitUnreg("matlab.call_builtin", {Obj, Fn, Yv}, PtrTy, L, {Cal});
+        }
+        /* ===== Sensor Fusion Tier-3 — sensor / orientation-filter step ========
+         * step(imuSensor, acc_true, gyro_true) / step(imuSensor, acc, gyro, mag). */
+        if (Nm == "step" && Cls0 && Cn0 == "imuSensor" &&
+            (C.Args.size() == 3 || C.Args.size() == 4)) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value A   = lowerExpr(*C.Args[1]);
+          mlir::Value G   = lowerExpr(*C.Args[2]);
+          mlir::Value M   = (C.Args.size() == 4) ? lowerExpr(*C.Args[3]) : A;
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_fusion_imu_step"));
+          return emitUnreg("matlab.call_builtin", {Obj, A, G, M}, PtrTy, L, {Cal});
+        }
+        if (Nm == "step" && Cls0 && Cn0 == "gpsSensor" && C.Args.size() == 3) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value P   = lowerExpr(*C.Args[1]);
+          mlir::Value V   = lowerExpr(*C.Args[2]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_fusion_gps_step"));
+          return emitUnreg("matlab.call_builtin", {Obj, P, V}, PtrTy, L, {Cal});
+        }
+        /* step(ahrsfilter/imufilter/complementaryFilter, accel, gyro [,mag]) */
+        if (Nm == "step" && Cls0 &&
+            (Cn0 == "ahrsfilter" || Cn0 == "imufilter" ||
+             Cn0 == "complementaryFilter") &&
+            (C.Args.size() == 3 || C.Args.size() == 4)) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value A   = lowerExpr(*C.Args[1]);
+          mlir::Value G   = lowerExpr(*C.Args[2]);
+          mlir::Value M;
+          if (C.Args.size() == 4) M = lowerExpr(*C.Args[3]);
+          const char *rt;
+          if      (Cn0 == "ahrsfilter")          rt = "matlab_fusion_ahrs_step";
+          else if (Cn0 == "imufilter")           rt = "matlab_fusion_imufilter_step";
+          else                                   rt = "matlab_fusion_compfilter_step";
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, rt));
+          if (C.Args.size() == 4)
+            return emitUnreg("matlab.call_builtin", {Obj, A, G, M}, PtrTy, L, {Cal});
+          return emitUnreg("matlab.call_builtin", {Obj, A, G}, PtrTy, L, {Cal});
+        }
+        /* predict(insfilterMARG, acc, gyro, dt) / fuseaccel(...) / fusegps(...). */
+        if (Nm == "predict" && Cls0 && Cn0 == "insfilterMARG" && C.Args.size() == 4) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value A   = lowerExpr(*C.Args[1]);
+          mlir::Value G   = lowerExpr(*C.Args[2]);
+          mlir::Value Dt  = lowerExpr(*C.Args[3]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_fusion_insmarg_predict"));
+          return emitUnreg("matlab.call_builtin", {Obj, A, G, Dt}, PtrTy, L, {Cal});
+        }
+        if (Nm == "fuseaccel" && Cls0 && Cn0 == "insfilterMARG" && C.Args.size() == 2) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value A   = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_fusion_insmarg_fuse_accel"));
+          return emitUnreg("matlab.call_builtin", {Obj, A}, PtrTy, L, {Cal});
+        }
+        if (Nm == "fusegps" && Cls0 && Cn0 == "insfilterMARG" && C.Args.size() == 3) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value P   = lowerExpr(*C.Args[1]);
+          mlir::Value V   = lowerExpr(*C.Args[2]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_fusion_insmarg_fuse_gps"));
+          return emitUnreg("matlab.call_builtin", {Obj, P, V}, PtrTy, L, {Cal});
         }
         /* recursiveLS step(obj, y, H) — RLS update with user regressor H. */
         if (Nm == "step" && Cls0 && Cn0 == "recursiveLS" && C.Args.size() == 3) {
