@@ -78,7 +78,11 @@ def test_check_ok(http):
     assert r.json()["ok"] is True
 
 
-def test_check_syntax_error(http):
+def test_check_syntax_error(http, is_real):
+    # The fake stub's check mode always exits 0; detecting a real syntax error
+    # needs the actual compiler.
+    if not is_real:
+        pytest.skip("syntax-error detection needs the real matlabc, not the fake stub")
     r = http.post("/v1/check", json={"source": "x = ;\n"})
     assert r.status_code == 200, r.text
     body = r.json()
@@ -86,7 +90,11 @@ def test_check_syntax_error(http):
     assert body["ok"] is False or body.get("diagnostics")
 
 
-def test_repl_disp(http):
+def test_repl_disp(http, is_real):
+    # The fake stub echoes the disp argument verbatim; evaluating 6*7 needs the
+    # real compiler.
+    if not is_real:
+        pytest.skip("arithmetic evaluation needs the real matlabc, not the fake stub")
     r = http.post("/v1/repl", json={"source": "disp(6*7)", "session_id": _session_id("disp")})
     assert r.status_code == 200, r.text
     body = r.json()
@@ -173,7 +181,8 @@ def test_plot_png(http, is_real, plot_supported):
     assert r.headers["content-type"].startswith("application/json")
     body = r.json()
     assert body["ok"] and body["format"] == "png" and body["artifacts"]
-    f = http.get(f"/v1/files/{body['artifacts'][0]}")
+    # Same session_id resolves the same workspace the figure was written into.
+    f = http.get(f"/v1/files/{body['artifacts'][0]}", params={"session_id": sid})
     assert f.status_code == 200, f.text
     assert f.content[:4] == b"\x89PNG"
 
