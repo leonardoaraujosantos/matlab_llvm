@@ -60,21 +60,23 @@ and the shipped `extendedKalmanFilter` / `trackerGNN` precedent already
 proves that pattern. So Navigation, like Robotics, is **largely shippable
 without the System-Object lowering fix**.
 
-The headline tracer-bullet (the gating example for the whole roadmap) is
-[`examples/navigation/hybrid_astar_plan.m`](../examples/navigation/hybrid_astar_plan.m):
-*the canonical autonomous-navigation demo — load an `occupancyMap`, build a
-`stateSpaceSE2` + `validatorOccupancyMap`, plan a collision-free
-kinematically-feasible path between two poses with `plannerHybridAStar` (or
-`plannerRRTStar`), and report path length + clearance*. This exercises the
-state-space (T1) → occupancy-map (T1) → planner (T2) arc end-to-end;
-achieving it closes the **path-planning half** of the toolbox (the UG's
-flagship "Plan Path in Warehouse Scenario" workflow). The **SLAM tracer**
-(closing T3 + T4) is
-[`examples/navigation/lidar_slam_map.m`](../examples/navigation/lidar_slam_map.m):
-*a `lidarSLAM` over a sequence of `lidarScan`s — `matchScans` incremental
-odometry + loop-closure detection + `optimizePoseGraph` — producing a
-drift-corrected occupancy map (the UG "Build a Map from Lidar Data Using
-SLAM").* 
+The headline tracer-bullet **as shipped** is
+[`examples/navigation/nav_rrt_plan.m`](../examples/navigation/nav_rrt_plan.m):
+*the canonical autonomous-navigation demo — build an `occupancyMap`, `inflate`
+it for clearance, build a `stateSpaceSE2` + `validatorOccupancyMap`, plan a
+collision-free path between two poses with `plannerRRT`, and `shortenpath` it*.
+This exercises the state-space (T1) → occupancy-map (T1) → planner (T2) arc
+end-to-end and closes the **path-planning half** of the toolbox.
+(`plannerHybridAStar` — the kinematically-feasible variant from the UG's
+flagship "Plan Path in Warehouse Scenario" workflow — is a documented
+carve-down; `plannerRRT`/`plannerRRTStar` ship.)  The **localisation tracer**
+(T5) is [`examples/navigation/nav_mcl_localize.m`](../examples/navigation/nav_mcl_localize.m)
+(`monteCarloLocalization` particle filter on the map) and the **GNSS tracer**
+(T6) is [`examples/navigation/nav_gnss_position.m`](../examples/navigation/nav_gnss_position.m)
+(`gnssconstellation` → `pseudoranges` → `receiverposition` exact recovery).
+The shipped `lidarSLAM` does scan-to-scan `matchScans` odometry; loop-closure
+detection + `optimizePoseGraph`-corrected `buildMap` is a documented T3 carve-
+down (the SE2 pose-graph optimiser itself ships in T4).
 
 Companion docs:
 [`robotics_toolbox_roadmap.md`](robotics_toolbox_roadmap.md) (occupancy
@@ -236,11 +238,12 @@ validator.
 | 2.7 | path smoothing | `optimizePath` (optimisation-based smoothing under clearance + curvature) / `bsplinepolytraj` shortcutting. | `fmincon`, T1 |
 | 2.8 | `plannerControlRRT` | Kinematic-model RRT: propagate a `differentialDriveKinematics`/`bicycle` model under sampled controls (reverse-capable). | mobile kinematics + `ode45` |
 
-**Headline-within-tier**: **the roadmap headline** — `hybrid_astar_plan.m`:
-`occupancyMap` + `stateSpaceSE2` + `validatorOccupancyMap` +
-`plannerHybridAStar` planning a collision-free kinematically-feasible path
-between two poses (the UG "Plan Path in Warehouse Scenario" / "Generate Code
-for Path Planning Using Hybrid A Star").
+**Headline-within-tier (as shipped)**: `nav_rrt_plan.m` — `occupancyMap` +
+`inflate` + `stateSpaceSE2` + `validatorOccupancyMap` + `plannerRRT` + `plan`
++ `shortenpath` planning a collision-free path between two poses. The
+kinematically-feasible `plannerHybridAStar` variant (the UG "Plan Path in
+Warehouse Scenario" / "Generate Code for Path Planning Using Hybrid A Star")
+is a carve-down; `plannerRRT`/`plannerRRTStar`/`plannerAStarGrid` ship.
 
 **Compile/Execute wiring**: planners are built-once classdefs holding the
 state space + validator references (cloned in, per the shipped IK/RRT
@@ -264,11 +267,13 @@ Goal: the lidar half — register range scans + build a map incrementally.
 | 3.6 | `buildMap` | Fuse scans-at-poses into an `occupancyMap` (`insertRay` per beam). | T1.5 |
 | 3.7 | egocentric maps | `insertRay`/`raycast` egocentric occupancy update from range readings; `rangeSensor` simulated lidar over a map. | T1.5 |
 
-**Headline-within-tier**: **the SLAM tracer** — `lidar_slam_map.m`:
-`lidarSLAM` over a sequence of `lidarScan`s → incremental `matchScans`
-odometry + loop closure + `optimizePoseGraph` → `buildMap` drift-corrected
-occupancy map (the UG "Build a Map from Lidar Data Using SLAM" / "Implement
-SLAM with Lidar Scans").
+**As shipped**: `lidarScan` (Ranges/Angles ↔ Cartesian), `matchScans`
+(2-D closed-form ICP — `navigation_scanmatch.m`), and `lidarSLAM` doing
+scan-to-scan `matchScans` odometry accumulation (`addScan` → trajectory).
+The full SLAM tracer — loop-closure detection + `optimizePoseGraph`-corrected
+`buildMap` (the UG "Build a Map from Lidar Data Using SLAM" / "Implement SLAM
+with Lidar Scans") — is a carve-down; the SE2 `optimizePoseGraph` back-end
+itself ships in T4 (`navigation_posegraph.m`).
 
 **Compile/Execute wiring**: `lidarScan` is a value container; `matchScans`
 is a matrix-in/pose-out builtin (ICP loop over `svd`); `lidarSLAM` is a
@@ -416,16 +421,18 @@ tier ships across **all four** before it counts as done.
 
 ### 8.3 Examples (`examples/navigation/`)
 
+**As shipped** — eight examples mirroring MathWorks UG pages:
+
 | Example | Closes | Exercises |
 |---|---|---|
-| `occupancy_map_basics.m` | T1 | `occupancyMap` set/inflate/checkOccupancy + `stateSpaceSE2` + `validatorOccupancyMap` |
-| `hybrid_astar_plan.m` | **headline (T1+T2)** | `occupancyMap` → `stateSpaceSE2` → `plannerHybridAStar` → `navPath` + clearance |
-| `rrtstar_plan.m` | T2 | `plannerRRTStar` optimal path on a cluttered grid; `pathmetrics` |
-| `lidar_slam_map.m` | **tracer (T3+T4)** | `lidarSLAM` (`matchScans` + loop closure) → `optimizePoseGraph` → `buildMap` |
-| `pose_graph_opt.m` | T4 | `poseGraph` with odometry + loop closures → `optimizePoseGraph` RMSE drop |
-| `mcl_localize.m` | T5 | `monteCarloLocalization` + `odometryMotionModel` + `likelihoodFieldSensorModel` convergence |
-| `gnss_positioning.m` | T6 | `gnssconstellation` → `pseudoranges` → `receiverposition` LS fix + DOP |
-| `frenet_lane_change.m` | T6 | `referencePathFrenet` + `trajectoryGeneratorFrenet` highway lane change |
+| `nav_rotations.m` | T1 (reuse) | `quaternion`/`eul2quat`/`quat2rotm`/`slerp` orientation math (Sensor Fusion surface) |
+| `nav_imu_intro.m` | T1 (reuse) | `imuSensor` simulated accel/gyro under a known motion profile |
+| `nav_ground_vehicle.m` | T1 (reuse) | IMU + GPS dead-reckoning + correction → shipped `insfilterMARG` |
+| `nav_rrt_plan.m` | **headline (T1+T2)** | `occupancyMap` → `inflate` → `stateSpaceSE2` → `validatorOccupancyMap` → `plannerRRT` → `plan` → `shortenpath` |
+| `nav_vfh_avoid.m` | T5 | `controllerVFH` reactive steering — clear field vs obstacle-ahead vs goal-biased |
+| `nav_mcl_localize.m` | T5 | `monteCarloLocalization` particle filter tracking a driven path (final error 0.02 m) |
+| `nav_gnss_position.m` | **T6** | `gnssconstellation` → `pseudoranges` → `receiverposition` exact recovery + noisy `gnssSensor` fix |
+| `nav_frenet_planner.m` | T6 | `referencePathFrenet` + `trajectoryGeneratorFrenet` lane-change (reaches d = 3.5 m) |
 
 ### 8.4 Tests (`test/Run/`)
 
@@ -434,20 +441,27 @@ Gating tests follow the `navigation_*.m` convention with a `.stdout` golden
 skipped; Python/TS skipped where the classdef path is rough, matching the
 Robotics / Image precedent).
 
+**As shipped** — eleven gating tests (randomised planners/filters seed `rng`
+and assert deterministic/`round()`ed quantities; the `navigation_posegraph`
+golden prints abs-based closure error to stay sign-stable across
+libstdc++/libc++):
+
 | Test | Tier | Asserts |
 |---|---|---|
-| `navigation_occmap.m` | T1 | `occupancyMap` log-odds set/get/inflate; `validatorOccupancyMap` `isStateValid` on a known grid |
-| `navigation_statespace.m` | T1 | `stateSpaceSE2`/`Dubins` `distance`/`interpolate` against known values |
-| `navigation_planner.m` | **T2** | `plannerRRTStar`/`plannerHybridAStar` returns a collision-free path between two poses (headline) |
-| `navigation_astar.m` | T2 | `plannerAStarGrid` finds the optimal grid path around a wall |
-| `navigation_scanmatch.m` | T3 | `matchScans` recovers a known relative pose between two synthetic scans |
-| `navigation_posegraph.m` | **T4** | `optimizePoseGraph` reduces the trajectory error on a graph with a loop closure |
-| `navigation_mcl.m` | T5 | `monteCarloLocalization` particle estimate converges < tol on a known map |
-| `navigation_gnss.m` | T6 | `receiverposition` LS fix < tol vs the true receiver position |
+| `navigation_occmap.m` | T1 | `occupancyMap` grid-size/set/get/`checkOccupancy`/`inflate` on a known grid |
+| `navigation_statespace.m` | T1 | `stateSpaceSE2` `distance`/`interpolate` + `validatorOccupancyMap` `isStateValid`/`isMotionValid` |
+| `navigation_astar.m` | T2 | `plannerAStarGrid` finds a path around a wall (cell count + endpoints) |
+| `navigation_planner.m` | **T2** | `plannerRRT`/`plannerRRTStar` reach the goal on an open map (deterministic exit flag) |
+| `navigation_scanmatch.m` | T3 | `lidarScan` Cartesian + `matchScans` self-match + `lidarSLAM` `addScan` accumulation |
+| `navigation_posegraph.m` | **T4** | `optimizePoseGraph` recovers an exact unit-square loop (abs-based closure error) |
+| `navigation_vfh.m` | T5 | `controllerVFH` steers ≈0 in the clear, diverts under a dead-ahead obstacle |
+| `navigation_mcl.m` | T5 | `monteCarloLocalization` estimate tracks odometry dead-reckoning |
+| `navigation_pf.m` | T5 | `stateEstimatorPF` converges to the measured state over predict/correct |
+| `navigation_gnss.m` | **T6** | `receiverposition` recovers the true receiver lat/lon/alt from noiseless pseudoranges |
+| `navigation_frenet.m` | T6 | `referencePathFrenet` global↔Frenet round-trip + `trajectoryGeneratorFrenet` `connect` |
 
-Target: **~8 gating tests** (one+ per major surface), in line with Robotics
-(7) and Sensor Fusion (5). Full regression must stay green — the badge
-bumps to **24 toolboxes**.
+**11 gating tests** (above the Robotics (8) / Sensor Fusion (5) precedent);
+full regression **598/598 green**; badge bumped to **24 toolboxes**.
 
 ---
 
