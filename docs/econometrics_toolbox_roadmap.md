@@ -111,13 +111,21 @@ pattern), [`optim_toolbox_roadmap.md`](optim_toolbox_roadmap.md)
   close the 80 % everyday econometrics workflow (test stationarity, fit
   ARIMA, model volatility); T4 closes the macro/VAR workflow.
 - **Status legend**: ✅ shipped · 🟡 partial · 🔵 not started.
-  **Everything below is 🔵 not started** — there is no `arima` / `garch`
-  / `varm` / `vecm` / `ssm` / `adftest` / `autocorr` / `egcitest` /
-  `bayeslm` / `dtmc` in the runtime today. The deep shipped base
-  (Ident `armax`/`ssest`/Kalman, Stats test-CDFs/`mvnrnd`/HMM,
-  Financial `timetable`/ECM/classdef-carrier, Optim `fminunc`/
-  `lsqnonlin`, LAPACK) makes this **mostly composition, not net-new
-  numerics**.
+  **As of 2026-05-26 the core of every tier is ✅ shipped** in a single
+  `runtime/toolbox/econ/runtime_econ.cpp` (~2.3 kLOC) + `econ_classdefs.m`:
+  T1 ✅ (data prep + the full diagnostic/unit-root/cointegration test
+  surface), T2 ✅ (`arima`), T3 ✅ (`garch`/`egarch`/`gjr`), T4 🟡 (`varm`
+  + the cointegration *tests* — the `vecm` model object is deferred),
+  T5 🟡 (`ssm`/`dssm` — `regARIMA` deferred), T6 🟡 (`bayeslm` + `dtmc` —
+  `msVAR`/threshold-switching deferred). The per-tier sections below are
+  the *original plan*; see the SHIPPED banner at the top + §11 for what
+  actually landed vs. the documented carve-downs. The deep shipped base
+  (Ident `armax`/`ssest`/Kalman, Stats test-CDFs/`mvnrnd`/HMM, Financial
+  `timetable`/ECM/classdef-carrier, Optim `fminunc`/`lsqnonlin`, LAPACK)
+  made this **mostly composition, not net-new numerics** — though in the
+  event the Ident `compute_pe` turned out to be `static` (not linkable
+  cross-TU), so the estimators are self-contained (Hannan-Rissanen for
+  ARIMA, Nelder-Mead for the GARCH/state-space MLE), not literal reuse.
 
 ---
 
@@ -381,17 +389,21 @@ unlocks the iconic Box-Jenkins demo.
 
 ## 10. Layout in the repo
 
+**As shipped** (a single runtime TU rather than the per-tier split this
+section originally proposed — one TU keeps the shared helpers, χ²/normal
+CDFs, OLS, Jacobi-eig, and Nelder-Mead in one place):
+
 ```
 runtime/toolbox/econ/
-├── runtime_econ_tests.cpp        (T1 — unit-root + diagnostic tests, ACF/PACF, HP filter)
-├── runtime_econ_arima.cpp        (T2 — conditional-mean estimation/forecast)
-├── runtime_econ_garch.cpp        (T3 — conditional-variance estimation/forecast)
-├── runtime_econ_var.cpp          (T4 — VAR/VEC + cointegration)
-├── runtime_econ_ssm.cpp          (T5 — state-space Kalman + regARIMA)
-├── runtime_econ_bayes.cpp        (T6 — bayeslm)
-├── runtime_econ_switch.cpp       (T6 — dtmc + msVAR + threshold)
-└── econ_classdefs.m              (arima/garch/egarch/gjr/varm/vecm/
-                                    ssm/dssm/regARIMA/bayeslm/dtmc/msVAR)
+├── runtime_econ.cpp              (~2.3 kLOC — ALL tiers: §T1 tests/data-prep,
+│                                   §T2 arima, §T3 garch/egarch/gjr, §T4 varm +
+│                                   cointegration, §T5 ssm/dssm Kalman, §T6
+│                                   bayeslm + dtmc; shared OLS / chi2+normal CDF /
+│                                   matInv / matMul / jacobiEig / Nelder-Mead)
+└── econ_classdefs.m              (arima / garch / egarch / gjr / varm /
+                                    ssm / dssm / bayeslm / dtmc)
+
+test/Run/econ_{dataprep,tests,arima,garch,var,ssm,bayes}.m   (7 gating tests)
 
 examples/econ/
 ├── stationarity_workflow.m       (T1 headline)
@@ -402,34 +414,70 @@ examples/econ/
 └── bayeslm_regression.m          (T6 headline)
 ```
 
-Mirrors the `runtime/toolbox/{finance,ident,stats,…}/` layout.
+Mirrors the `runtime/toolbox/{finance,ident,stats,…}/` layout. Note the
+classdef umbrella ships `arima`/…/`dtmc` but **not** `vecm`/`regARIMA`/
+`msVAR` (deferred — see the banner + §11).
 
 ---
 
-## 11. Known gaps and risks
+## 11. Known gaps and risks (as shipped)
 
-- **ARIMA estimation reuses Ident `armax`, but the ABIs differ.** Ident
-  returns an `idpoly`; `arima` is its own classdef. The plan reuses the
-  *numeric core* (`compute_pe` + `lsqnonlin`), not the object — wire a
-  thin adapter that packs the estimated polynomials into an `arima`
-  carrier. Verify the differencing pre-step composes cleanly.
-- **`timetable` input.** `arima`/`varm`/`estimate` accept `timetable`
-  data in MATLAB; the shipped Financial timetable lane covers the
-  container, but the estimators must accept both a raw matrix and a
-  timetable (extract the variable columns). Reuse the
-  `matlab_timetable_get_column` path.
-- **Critical-value tables.** `adftest`/`kpsstest`/`jcitest` interpolate
-  p-values from response-surface tables (MacKinnon / Osterwald-Lenum).
-  Bake the standard tables in; document the interpolation as an
-  approximation versus the MathWorks simulated surfaces.
-- **GARCH MLE conditioning.** The variance recursion's likelihood is
-  flat near the stationarity boundary; `fminunc` needs a sensible
-  parameter transform (log/logit) + presample-variance back-cast — the
-  same care the Ident PEM seeds needed.
-- **Multi-return shapes.** `[h,p,stat,cvalue] = adftest(...)` and
-  `[Mdl,EstParamCov,logL,info] = estimate(...)` are multi-output. Reuse
-  the shipped multi-return splitter machinery (Stats `anova1`,
-  Ident `compare`).
+What actually landed vs. the plan above, plus the open gaps inside the
+shipped tiers. **Deferred full features:** `regARIMA` (T5 — its `estimate`
+needs the zero-arg fresh-object ctor path, which hits the matrix-param
+constructor frontend limit that `ssm` sidesteps via mutate-in-place),
+`vecm` model object (T4 — the cointegration *tests* ship, the VEC object
++ its estimate/forecast don't), Markov-switching `msVAR` + threshold-
+switching (T6 — needs the Stats HMM Baum-Welch EM wired to a per-regime
+VAR M-step), and the Time-Series-Regression I–X example series (T6).
+
+**The biggest cross-cutting gap is multi-return.** MATLAB econometrics is
+heavily multi-output (`[h,pValue,stat,cValue] = adftest(...)`,
+`[EstMdl,EstParamCov,logL,info] = estimate(...)`), but everything shipped
+is **single-return**: tests return the reject decision `h` at the 5 %
+level; `estimate` returns just the fitted model. No surfaced p-values,
+standard errors, parameter covariance, log-likelihood, or `summarize`
+tables. Wiring the shipped multi-return splitter (Stats `anova1`, Ident
+`compare`) is the highest-value follow-up — it raises fidelity across
+every tier at once.
+
+**Within-tier simplifications (🟡):**
+
+- **T1 tests** hardcode the `'AR'` model (no constant/trend variants);
+  `pptest` omits the nonparametric long-run-variance correction;
+  `lmctest` ≈ KPSS; `aicbic` returns AIC only (no BIC); `autocorr`/
+  `parcorr` have no confidence bounds. Critical values are baked-in 5 %
+  table points (not the full MacKinnon/Osterwald-Lenum response surfaces).
+- **T2 `arima`** uses **Hannan-Rissanen** (two-stage OLS), not exact
+  Gaussian MLE — and *not* the Ident `compute_pe`/`lsqnonlin` path the
+  plan assumed (that function is `static` in `runtime_ident.cpp`, not
+  linkable). No t-innovations, no ARIMAX `Beta`, no `filter`/`summarize`
+  methods; `forecast` returns points (no MSE bands). SARIMA is shallow.
+- **T3 GARCH** MLE is a self-contained **Nelder-Mead** over the variance
+  recursion (positivity/stationarity enforced by a barrier), not
+  `fminunc`. General `(P,Q)` for `garch`; `egarch`/`gjr` are `(1,1)`. No
+  t-innovations; egarch multi-step forecast is a persistence approximation.
+- **T4 `varm.irf`** returns the response to a shock in the *first* series
+  (numObs×k), not the full numObs×k×k array; no `fevd`, no VARX
+  regressors. `jcontest` is currently an alias of `jcitest` (not the real
+  restriction test on cointegrating vectors); tests use a fixed 1-lag VECM.
+- **T5 `ssm`** estimates only the free B/D noise loadings (A/C fixed) — no
+  parameter-mapping/NaN-parameter API; `dssm` uses a large-variance
+  diffuse approximation, not exact diffuse initialization; `smooth`
+  returns states only (no smoothed variances).
+- **T6 `bayeslm`** is diffuse-prior only (posterior mean = OLS) — no
+  conjugate/semiconjugate/lasso/SSVS priors, no Gibbs sampler, no credible
+  intervals. `dtmc` ships `asymptotics` + `simulate` only — missing
+  `classify`/`isergodic`/`hitprob`/`redistribute` + the graph plots.
+
+**Two general compiler fixes landed** (both regression-clean across the
+emit-c/cpp/python lanes): LowerTensorOps boxes a scalar assigned to a
+matrix-typed classdef property (`matlab_mat_from_scalar`); RefineSlotTypes
+refines a `none`-typed slot whose stores are a consistent ranked tensor.
+
+**`timetable` input** to `estimate` is still unwired — the estimators take
+raw matrices (the Financial `timetable` container exists; extracting its
+columns at the estimator boundary is a follow-on).
 
 ---
 

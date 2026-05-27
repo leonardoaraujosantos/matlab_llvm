@@ -789,7 +789,7 @@ folded into the Comm roadmap as priority §3.
 | 15 | **Predictive Maintenance** | S (2-3w) | Orchestrates Stats/ML + Signal + Ident — mostly shipped pieces. |
 | 16 | **Fuzzy Logic** | S (2w) | Mamdani/Sugeno inference. Niche. |
 | 17 | **Bioinformatics** | S (3-4w) | Smith-Waterman / Needleman-Wunsch, phylogenetic trees, BWT/FM-index. Self-contained numerics. |
-| 18 | **Econometrics** | S (3w) | ARIMA (have ARX in Ident), GARCH, VAR, cointegration. Stats + Ident overlap. |
+| ~~18~~ | **Econometrics** | ✅ **SHIPPED 2026-05-26** | All 6 tiers — `arima`/`garch`/`egarch`/`gjr`/`varm`/`ssm`/`dssm`/`bayeslm`/`dtmc` + full test surface (`adftest`/`autocorr`/`egcitest`/…). See [`feature_status.md`](feature_status.md) + [`econometrics_toolbox_roadmap.md`](econometrics_toolbox_roadmap.md). Carve-downs: `regARIMA`, `msVAR`, `vecm` model object. |
 | 19 | **Financial** + **Financial Instruments** | S+S (3w+3w) | Black-Scholes, MC pricing, yield curves, portfolio optim. |
 | 20 | **Risk Management** | XS (1w) | VaR/CVaR/scenarios. Trivial atop Stats. |
 | 21 | **Text Analytics** | S (2w) light / L heavy w/ embeddings | Tokenization/BoW/TF-IDF/LDA. Heavy if doing transformer embeddings. |
