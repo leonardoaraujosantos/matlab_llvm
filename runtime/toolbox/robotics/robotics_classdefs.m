@@ -200,7 +200,8 @@ end
 
 % Tier-5 ------------------------------------------------------------------
 
-% Differential-drive kinematics: simple unicycle wheels model.
+% Differential-drive kinematics: two independently-driven wheels.
+% State [x y theta]; command [v omega] (VehicleSpeedHeadingRate).
 classdef differentialDriveKinematics
     properties
         WheelRadius
@@ -210,6 +211,48 @@ classdef differentialDriveKinematics
         function obj = differentialDriveKinematics()
             obj.WheelRadius = 0.1;
             obj.TrackWidth  = 0.5;
+        end
+    end
+end
+
+% Unicycle: single rolling wheel.  State [x y theta]; command [v omega].
+classdef unicycleKinematics
+    properties
+        WheelRadius
+    end
+    methods
+        function obj = unicycleKinematics()
+            obj.WheelRadius = 0.1;
+        end
+    end
+end
+
+% Bicycle: car-like with front steering angle.  State [x y theta];
+% command [v psi] (psi = steering angle).  derivative uses WheelBase.
+classdef bicycleKinematics
+    properties
+        WheelBase
+        MaxSteeringAngle
+    end
+    methods
+        function obj = bicycleKinematics()
+            obj.WheelBase        = 1.0;
+            obj.MaxSteeringAngle = pi/4;
+        end
+    end
+end
+
+% Ackermann: car-like with Ackermann steering.  State [x y theta psi];
+% command [v psidot] (psi = steering angle, psidot its rate).
+classdef ackermannKinematics
+    properties
+        WheelBase
+        MaxSteeringAngle
+    end
+    methods
+        function obj = ackermannKinematics()
+            obj.WheelBase        = 1.0;
+            obj.MaxSteeringAngle = pi/4;
         end
     end
 end

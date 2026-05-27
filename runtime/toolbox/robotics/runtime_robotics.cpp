@@ -1743,6 +1743,61 @@ matlab_mat *matlab_robotics_diffdrive_derivative(void *obj_v, matlab_mat *state,
     return o;
 }
 
+// unicycleKinematics() — single wheel.  Same kinematics as diff-drive in the
+// VehicleSpeedHeadingRate convention: state [x y theta], command [v omega].
+matlab_mat *matlab_robotics_unicycle_init(void *obj_v, double wheel_r) {
+    robotics::obj_set_f64(obj_v, "WheelRadius", wheel_r > 0 ? wheel_r : 0.1);
+    return mat_alloc(0, 0);
+}
+matlab_mat *matlab_robotics_unicycle_derivative(void *obj_v, matlab_mat *state, matlab_mat *cmd) {
+    return matlab_robotics_diffdrive_derivative(obj_v, state, cmd);
+}
+
+// bicycleKinematics(wheelbase) — front-steered car.  State [x y theta],
+// command [v psi] (psi = steering angle).  thetadot = v·tan(psi)/WheelBase.
+matlab_mat *matlab_robotics_bicycle_init(void *obj_v, double wheelbase) {
+    robotics::obj_set_f64(obj_v, "WheelBase", wheelbase > 0 ? wheelbase : 1.0);
+    robotics::obj_set_f64(obj_v, "MaxSteeringAngle", M_PI / 4);
+    return mat_alloc(0, 0);
+}
+matlab_mat *matlab_robotics_bicycle_derivative(void *obj_v, matlab_mat *state, matlab_mat *cmd) {
+    matlab_mat *o = mat_alloc(3, 1);
+    if (!state || !cmd || state->rows * state->cols < 3 || cmd->rows * cmd->cols < 2) return o;
+    double L = robotics::obj_get_f64(obj_v, "WheelBase");
+    if (L <= 0) L = 1.0;
+    double th = state->data[2];
+    double v  = cmd->data[0];
+    double psi = cmd->data[1];
+    o->data[0] = v * std::cos(th);
+    o->data[1] = v * std::sin(th);
+    o->data[2] = v * std::tan(psi) / L;
+    return o;
+}
+
+// ackermannKinematics(wheelbase) — Ackermann car.  State [x y theta psi],
+// command [v psidot].  psi is now part of the state (steering angle), driven
+// by its rate psidot.
+matlab_mat *matlab_robotics_ackermann_init(void *obj_v, double wheelbase) {
+    robotics::obj_set_f64(obj_v, "WheelBase", wheelbase > 0 ? wheelbase : 1.0);
+    robotics::obj_set_f64(obj_v, "MaxSteeringAngle", M_PI / 4);
+    return mat_alloc(0, 0);
+}
+matlab_mat *matlab_robotics_ackermann_derivative(void *obj_v, matlab_mat *state, matlab_mat *cmd) {
+    matlab_mat *o = mat_alloc(4, 1);
+    if (!state || !cmd || state->rows * state->cols < 4 || cmd->rows * cmd->cols < 2) return o;
+    double L = robotics::obj_get_f64(obj_v, "WheelBase");
+    if (L <= 0) L = 1.0;
+    double th  = state->data[2];
+    double psi = state->data[3];
+    double v   = cmd->data[0];
+    double psidot = cmd->data[1];
+    o->data[0] = v * std::cos(th);
+    o->data[1] = v * std::sin(th);
+    o->data[2] = v * std::tan(psi) / L;
+    o->data[3] = psidot;
+    return o;
+}
+
 // binaryOccupancyMap(rows, cols, resolution) — alloc a zero map.
 matlab_mat *matlab_robotics_occmap_init(void *obj_v, double rows, double cols, double res) {
     int64_t R = static_cast<int64_t>(rows);

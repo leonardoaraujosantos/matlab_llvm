@@ -6373,6 +6373,39 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                       {mlir::NoneType::get(&MCtx)}, L, {Cal});
           return Obj;
         }
+        if (CD->Name == "unicycleKinematics" && C.Args.size() == 0) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "unicycleKinematics__unicycleKinematics"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_robotics_unicycle_init"));
+          mlir::Value WR = emitUnreg("matlab.const_float", {}, mlir::Float64Type::get(&MCtx), L,
+              {mlir::NamedAttribute(mlir::StringAttr::get(&MCtx, "value"),
+                   mlir::FloatAttr::get(mlir::Float64Type::get(&MCtx), 0.1))});
+          emitUnregOp("matlab.call_builtin", {Obj, WR}, {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        if ((CD->Name == "bicycleKinematics" || CD->Name == "ackermannKinematics") &&
+            (C.Args.size() == 0 || C.Args.size() == 1)) {
+          std::string Ctor = std::string(CD->Name) + "__" + std::string(CD->Name);
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, Ctor));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value WB = (C.Args.size() == 1) ? lowerExpr(*C.Args[0])
+              : emitUnreg("matlab.const_float", {}, mlir::Float64Type::get(&MCtx), L,
+                  {mlir::NamedAttribute(mlir::StringAttr::get(&MCtx, "value"),
+                       mlir::FloatAttr::get(mlir::Float64Type::get(&MCtx), 1.0))});
+          const char *rt = (CD->Name == "bicycleKinematics")
+              ? "matlab_robotics_bicycle_init" : "matlab_robotics_ackermann_init";
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, rt));
+          emitUnregOp("matlab.call_builtin", {Obj, WB}, {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
         if (CD->Name == "binaryOccupancyMap" && C.Args.size() == 3) {
           mlir::NamedAttribute CtorCal(
               mlir::StringAttr::get(&MCtx, "callee"),
@@ -9693,13 +9726,21 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           return emitUnreg("matlab.call_builtin", {Obj, Tg, Q0, Wp, Wo}, PtrTy, L, {Cal});
         }
         /* ===== Robotics Tier-5 — diffdrive derivative / occmap methods / PRM / pursuit == */
-        if (Nm == "derivative" && Cls0 && Cn0 == "differentialDriveKinematics" && C.Args.size() == 3) {
+        if (Nm == "derivative" && Cls0 &&
+            (Cn0 == "differentialDriveKinematics" || Cn0 == "unicycleKinematics" ||
+             Cn0 == "bicycleKinematics" || Cn0 == "ackermannKinematics") &&
+            C.Args.size() == 3) {
           mlir::Value Obj = loadObj(C.Args[0]);
           mlir::Value St  = lowerExpr(*C.Args[1]);
           mlir::Value Cm  = lowerExpr(*C.Args[2]);
+          const char *rt;
+          if      (Cn0 == "unicycleKinematics")  rt = "matlab_robotics_unicycle_derivative";
+          else if (Cn0 == "bicycleKinematics")   rt = "matlab_robotics_bicycle_derivative";
+          else if (Cn0 == "ackermannKinematics") rt = "matlab_robotics_ackermann_derivative";
+          else                                   rt = "matlab_robotics_diffdrive_derivative";
           mlir::NamedAttribute Cal(
               mlir::StringAttr::get(&MCtx, "callee"),
-              mlir::StringAttr::get(&MCtx, "matlab_robotics_diffdrive_derivative"));
+              mlir::StringAttr::get(&MCtx, rt));
           return emitUnreg("matlab.call_builtin", {Obj, St, Cm}, PtrTy, L, {Cal});
         }
         if (Nm == "setOccupancy" && Cls0 && Cn0 == "binaryOccupancyMap" && C.Args.size() == 3) {

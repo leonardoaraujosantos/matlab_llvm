@@ -2390,6 +2390,10 @@ static std::string buildReplPrelude(const std::string &Src) {
     {false, "collisionCylinder",         "robotics_classdefs.m"},
     {false, "collisionCapsule",          "robotics_classdefs.m"},
     {false, "differentialDriveKinematics","robotics_classdefs.m"},
+    {false, "unicycleKinematics",        "robotics_classdefs.m"},
+    {false, "bicycleKinematics",         "robotics_classdefs.m"},
+    {false, "ackermannKinematics",       "robotics_classdefs.m"},
+    {false, "derivative",                "robotics_classdefs.m"},
     {false, "binaryOccupancyMap",        "robotics_classdefs.m"},
     {false, "mobileRobotPRM",            "robotics_classdefs.m"},
     {false, "controllerPurePursuit",     "robotics_classdefs.m"},
@@ -11514,7 +11518,9 @@ int main(int Argc, char **Argv) {
       "importrobot", "generalizedInverseKinematics",
       "constraintPositionTarget", "constraintOrientationTarget",
       "constraintJointBounds", "collisionCylinder", "collisionCapsule",
-      "differentialDriveKinematics", "binaryOccupancyMap",
+      "differentialDriveKinematics", "unicycleKinematics",
+      "bicycleKinematics", "ackermannKinematics", "derivative",
+      "binaryOccupancyMap",
       "mobileRobotPRM", "controllerPurePursuit",
       "setOccupancy", "getOccupancy", "checkOccupancy", "findpath",
       "collisionBox", "collisionSphere", "checkCollision",
@@ -11770,6 +11776,8 @@ int main(int Argc, char **Argv) {
         ClsName == "constraintJointBounds" ||
         ClsName == "collisionCylinder" || ClsName == "collisionCapsule" ||
         ClsName == "differentialDriveKinematics" ||
+        ClsName == "unicycleKinematics" || ClsName == "bicycleKinematics" ||
+        ClsName == "ackermannKinematics" || ClsName == "derivative" ||
         ClsName == "binaryOccupancyMap" || ClsName == "mobileRobotPRM" ||
         ClsName == "controllerPurePursuit" ||
         ClsName == "setOccupancy" || ClsName == "getOccupancy" ||

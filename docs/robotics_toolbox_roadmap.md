@@ -112,8 +112,9 @@ plots route through Cairo 3-D), [`feature_status.md`](feature_status.md).
   `analyticalInverseKinematics` carved), T4 ✅ cubic/trap/transform trajs **+
   full CRBA/RNEA dynamics** (`inverseDynamics`/`massMatrix`/`forwardDynamics`/
   `gravityTorque`/`velocityProduct`/`centerOfMass`; bspline/minjerk/contopptraj
-  + `jointSpaceMotionModel` carved), T5 🟡 (diffdrive + occmap + PRM +
-  pure-pursuit; other kinematics + range sensor + VFH carved), T6 ✅
+  + `jointSpaceMotionModel` carved), T5 ✅ (all four mobile kinematic models
+  diff-drive/unicycle/bicycle/ackermann + `derivative` + occmap + PRM +
+  pure-pursuit; range sensor + VFH + stateSpaceSE3 carved), T6 ✅
   **orientation-aware GJK** `checkCollision` over box/sphere/cylinder/capsule
   + simplified `manipulatorRRT` (EPA penetration depth + `collisionMesh` +
   CHOMP + particle filter carved).
