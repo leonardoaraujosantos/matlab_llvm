@@ -6513,6 +6513,176 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                       {mlir::NoneType::get(&MCtx)}, L, {Cal});
           return Obj;
         }
+        /* ===== Navigation Toolbox Tier-1 — occupancyMap / state spaces /
+         * validator / navPath constructors ================================= */
+        if (CD->Name == "occupancyMap" &&
+            (C.Args.size() == 2 || C.Args.size() == 3)) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "occupancyMap__occupancyMap"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value W = lowerExpr(*C.Args[0]);
+          mlir::Value H = lowerExpr(*C.Args[1]);
+          mlir::Value Rs = (C.Args.size() == 3) ? lowerExpr(*C.Args[2])
+              : emitUnreg("matlab.const_float", {}, mlir::Float64Type::get(&MCtx), L,
+                  {mlir::NamedAttribute(mlir::StringAttr::get(&MCtx, "value"),
+                       mlir::FloatAttr::get(mlir::Float64Type::get(&MCtx), 1.0))});
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_occmap_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, W, H, Rs},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        if ((CD->Name == "stateSpaceSE2" || CD->Name == "stateSpaceDubins") &&
+            C.Args.size() == 1) {
+          std::string Ctor = std::string(CD->Name) + "__" + std::string(CD->Name);
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, Ctor));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value B = lowerExpr(*C.Args[0]);
+          const char *rt = (CD->Name == "stateSpaceSE2")
+              ? "matlab_nav_ss_se2_init" : "matlab_nav_ss_dubins_init";
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, rt));
+          emitUnregOp("matlab.call_builtin", {Obj, B},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        /* validatorOccupancyMap(ss, map) — 2-arg idiom (the `.Map=` property
+         * form is a documented carve-out; we clone the map at construction). */
+        if (CD->Name == "validatorOccupancyMap" && C.Args.size() == 2) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "validatorOccupancyMap__validatorOccupancyMap"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Ss = lowerExpr(*C.Args[0]);
+          mlir::Value Mp = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_validator_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, Ss, Mp},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        if (CD->Name == "navPath" && C.Args.size() == 1) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "navPath__navPath"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value St = lowerExpr(*C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_path_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, St},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        /* ===== Navigation Tier-2 — sampling planners ===================== */
+        if ((CD->Name == "plannerRRT" || CD->Name == "plannerRRTStar") &&
+            C.Args.size() == 2) {
+          std::string Ctor = std::string(CD->Name) + "__" + std::string(CD->Name);
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, Ctor));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Ss = lowerExpr(*C.Args[0]);
+          mlir::Value Sv = lowerExpr(*C.Args[1]);
+          double isStar = (CD->Name == "plannerRRTStar") ? 1.0 : 0.0;
+          mlir::Value Sf = emitUnreg("matlab.const_float", {}, mlir::Float64Type::get(&MCtx), L,
+              {mlir::NamedAttribute(mlir::StringAttr::get(&MCtx, "value"),
+                   mlir::FloatAttr::get(mlir::Float64Type::get(&MCtx), isStar))});
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_planner_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, Ss, Sv, Sf},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        if (CD->Name == "plannerAStarGrid" && C.Args.size() == 1) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "plannerAStarGrid__plannerAStarGrid"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Mp = lowerExpr(*C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_astar_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, Mp},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        /* ===== Navigation Tier-3 — lidarScan / lidarSLAM ================= */
+        if (CD->Name == "lidarScan" && C.Args.size() == 2) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "lidarScan__lidarScan"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Rg = lowerExpr(*C.Args[0]);
+          mlir::Value An = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_lidarscan_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, Rg, An},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        if (CD->Name == "lidarSLAM" && C.Args.size() == 2) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "lidarSLAM__lidarSLAM"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Rs = lowerExpr(*C.Args[0]);
+          mlir::Value Mr = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_slam_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, Rs, Mr},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        /* ===== Navigation Tier-5/6 — single-obj-arg ctor intercepts ======= */
+        if (CD->Name == "monteCarloLocalization" && C.Args.size() == 1) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "monteCarloLocalization__monteCarloLocalization"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Mp = lowerExpr(*C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_mcl_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, Mp},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        if (CD->Name == "referencePathFrenet" && C.Args.size() == 1) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "referencePathFrenet__referencePathFrenet"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Wp = lowerExpr(*C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_frenet_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, Wp},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        if (CD->Name == "trajectoryGeneratorFrenet" && C.Args.size() == 1) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "trajectoryGeneratorFrenet__trajectoryGeneratorFrenet"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Rp = lowerExpr(*C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_trajgen_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, Rp},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
         /* ===== Sensor Fusion Tier-5 — trackerGNN(maxTracks) ==================
          * One-arg ctor.  Empty tracker. */
         if (CD->Name == "trackerGNN" && C.Args.size() == 1) {
@@ -9805,6 +9975,239 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
               mlir::StringAttr::get(&MCtx, "callee"),
               mlir::StringAttr::get(&MCtx, "matlab_robotics_rrt_plan"));
           return emitUnreg("matlab.call_builtin", {Obj, Qs, Qg}, PtrTy, L, {Cal});
+        }
+        /* ===== Navigation Toolbox — method + free-function dispatch =======
+         * All keyed on arg-0's pinned class (the Robotics precedent). */
+        /* occupancyMap: setOccupancy / getOccupancy / checkOccupancy / inflate. */
+        if (Nm == "setOccupancy" && Cls0 && Cn0 == "occupancyMap" && C.Args.size() == 3) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value XY  = lowerExpr(*C.Args[1]);
+          mlir::Value V   = lowerExpr(*C.Args[2]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_occmap_set"));
+          return emitUnreg("matlab.call_builtin", {Obj, XY, V}, PtrTy, L, {Cal});
+        }
+        if (Nm == "getOccupancy" && Cls0 && Cn0 == "occupancyMap" && C.Args.size() == 2) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value XY  = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_occmap_get"));
+          return emitUnreg("matlab.call_builtin", {Obj, XY}, PtrTy, L, {Cal});
+        }
+        if (Nm == "checkOccupancy" && Cls0 && Cn0 == "occupancyMap" && C.Args.size() == 2) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value XY  = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_occmap_check"));
+          return emitUnreg("matlab.call_builtin", {Obj, XY}, PtrTy, L, {Cal});
+        }
+        if (Nm == "inflate" && Cls0 && Cn0 == "occupancyMap" && C.Args.size() == 2) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Rd  = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_occmap_inflate"));
+          return emitUnreg("matlab.call_builtin", {Obj, Rd}, PtrTy, L, {Cal});
+        }
+        /* state space: distance / interpolate / sampleUniform. */
+        if (Nm == "distance" && Cls0 &&
+            (Cn0 == "stateSpaceSE2" || Cn0 == "stateSpaceDubins") && C.Args.size() == 3) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value S1  = lowerExpr(*C.Args[1]);
+          mlir::Value S2  = lowerExpr(*C.Args[2]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_ss_distance"));
+          return emitUnreg("matlab.call_builtin", {Obj, S1, S2}, PtrTy, L, {Cal});
+        }
+        if (Nm == "interpolate" && Cls0 &&
+            (Cn0 == "stateSpaceSE2" || Cn0 == "stateSpaceDubins") && C.Args.size() == 4) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value S1  = lowerExpr(*C.Args[1]);
+          mlir::Value S2  = lowerExpr(*C.Args[2]);
+          mlir::Value Rt  = lowerExpr(*C.Args[3]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_ss_interpolate"));
+          return emitUnreg("matlab.call_builtin", {Obj, S1, S2, Rt}, PtrTy, L, {Cal});
+        }
+        if (Nm == "sampleUniform" && Cls0 &&
+            (Cn0 == "stateSpaceSE2" || Cn0 == "stateSpaceDubins") && C.Args.size() == 1) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_ss_sample"));
+          return emitUnreg("matlab.call_builtin", {Obj}, PtrTy, L, {Cal});
+        }
+        /* validator: isStateValid / isMotionValid. */
+        if (Nm == "isStateValid" && Cls0 && Cn0 == "validatorOccupancyMap" && C.Args.size() == 2) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value S   = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_validator_isstate"));
+          return emitUnreg("matlab.call_builtin", {Obj, S}, PtrTy, L, {Cal});
+        }
+        if (Nm == "isMotionValid" && Cls0 && Cn0 == "validatorOccupancyMap" && C.Args.size() == 3) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value S1  = lowerExpr(*C.Args[1]);
+          mlir::Value S2  = lowerExpr(*C.Args[2]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_validator_ismotion"));
+          return emitUnreg("matlab.call_builtin", {Obj, S1, S2}, PtrTy, L, {Cal});
+        }
+        /* navPath: pathLength + shortenpath(np, validator). */
+        if (Nm == "pathLength" && Cls0 && Cn0 == "navPath" && C.Args.size() == 1) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_path_length"));
+          return emitUnreg("matlab.call_builtin", {Obj}, PtrTy, L, {Cal});
+        }
+        if (Nm == "shortenpath" && Cls0 && Cn0 == "navPath" && C.Args.size() == 2) {
+          mlir::Value Np = loadObj(C.Args[0]);
+          mlir::Value Sv = loadObj(C.Args[1]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_shortenpath"));
+          return emitUnreg("matlab.call_builtin", {Np, Sv}, PtrTy, L, {Cal});
+        }
+        /* planners: plan(planner, start, goal). */
+        if (Nm == "plan" && Cls0 &&
+            (Cn0 == "plannerRRT" || Cn0 == "plannerRRTStar") && C.Args.size() == 3) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value St  = lowerExpr(*C.Args[1]);
+          mlir::Value Go  = lowerExpr(*C.Args[2]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_planner_plan"));
+          return emitUnreg("matlab.call_builtin", {Obj, St, Go}, PtrTy, L, {Cal});
+        }
+        if (Nm == "plan" && Cls0 && Cn0 == "plannerAStarGrid" && C.Args.size() == 3) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value St  = lowerExpr(*C.Args[1]);
+          mlir::Value Go  = lowerExpr(*C.Args[2]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_astar_plan"));
+          return emitUnreg("matlab.call_builtin", {Obj, St, Go}, PtrTy, L, {Cal});
+        }
+        /* lidar: matchScans(ref, cur) + addScan(slam, scan). */
+        if (Nm == "matchScans" && Cls0 && Cn0 == "lidarScan" && C.Args.size() == 2) {
+          mlir::Value Rf = loadObj(C.Args[0]);
+          mlir::Value Cu = loadObj(C.Args[1]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_matchscans"));
+          return emitUnreg("matlab.call_builtin", {Rf, Cu}, PtrTy, L, {Cal});
+        }
+        if (Nm == "addScan" && Cls0 && Cn0 == "lidarSLAM" && C.Args.size() == 2) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Sc  = loadObj(C.Args[1]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_slam_addscan"));
+          return emitUnreg("matlab.call_builtin", {Obj, Sc}, PtrTy, L, {Cal});
+        }
+        /* poseGraph: addRelativePose + optimizePoseGraph. */
+        if (Nm == "addRelativePose" && Cls0 && Cn0 == "poseGraph" &&
+            (C.Args.size() == 2 || C.Args.size() == 4)) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Rel = lowerExpr(*C.Args[1]);
+          mlir::Value Fr, To;
+          if (C.Args.size() == 4) { Fr = lowerExpr(*C.Args[2]); To = lowerExpr(*C.Args[3]); }
+          else {
+            Fr = emitUnreg("matlab.const_float", {}, mlir::Float64Type::get(&MCtx), L,
+                {mlir::NamedAttribute(mlir::StringAttr::get(&MCtx, "value"),
+                     mlir::FloatAttr::get(mlir::Float64Type::get(&MCtx), 0.0))});
+            To = Fr;
+          }
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_posegraph_addrel"));
+          return emitUnreg("matlab.call_builtin", {Obj, Rel, Fr, To}, PtrTy, L, {Cal});
+        }
+        if (Nm == "optimizePoseGraph" && Cls0 && Cn0 == "poseGraph" && C.Args.size() == 1) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_posegraph_optimize"));
+          return emitUnreg("matlab.call_builtin", {Obj}, PtrTy, L, {Cal});
+        }
+        /* ===== Navigation Tier-5/6 — method + free-fn dispatch =========== */
+        // controllerVFH: step(vfh, ranges, angles, targetDir) -> steering.
+        if (Nm == "step" && Cls0 && Cn0 == "controllerVFH" && C.Args.size() == 4) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Rg  = lowerExpr(*C.Args[1]);
+          mlir::Value An  = lowerExpr(*C.Args[2]);
+          mlir::Value Td  = lowerExpr(*C.Args[3]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_vfh_step"));
+          return emitUnreg("matlab.call_builtin", {Obj, Rg, An, Td}, PtrTy, L, {Cal});
+        }
+        // monteCarloLocalization: step(mcl, odom, ranges, angles) -> pose.
+        if (Nm == "step" && Cls0 && Cn0 == "monteCarloLocalization" && C.Args.size() == 4) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Od  = lowerExpr(*C.Args[1]);
+          mlir::Value Rg  = lowerExpr(*C.Args[2]);
+          mlir::Value An  = lowerExpr(*C.Args[3]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_mcl_step"));
+          return emitUnreg("matlab.call_builtin", {Obj, Od, Rg, An}, PtrTy, L, {Cal});
+        }
+        // stateEstimatorPF: initialize / predict / correct / getStateEstimate.
+        if (Nm == "initialize" && Cls0 && Cn0 == "stateEstimatorPF" && C.Args.size() == 4) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Nn  = lowerExpr(*C.Args[1]);
+          mlir::Value Mn  = lowerExpr(*C.Args[2]);
+          mlir::Value Cv  = lowerExpr(*C.Args[3]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_pf_initialize"));
+          return emitUnreg("matlab.call_builtin", {Obj, Nn, Mn, Cv}, PtrTy, L, {Cal});
+        }
+        if (Nm == "predict" && Cls0 && Cn0 == "stateEstimatorPF" && C.Args.size() == 3) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Av  = lowerExpr(*C.Args[1]);
+          mlir::Value Qv  = lowerExpr(*C.Args[2]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_pf_predict"));
+          return emitUnreg("matlab.call_builtin", {Obj, Av, Qv}, PtrTy, L, {Cal});
+        }
+        if (Nm == "correct" && Cls0 && Cn0 == "stateEstimatorPF" && C.Args.size() == 4) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Zv  = lowerExpr(*C.Args[1]);
+          mlir::Value Hv  = lowerExpr(*C.Args[2]);
+          mlir::Value Rv  = lowerExpr(*C.Args[3]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_pf_correct"));
+          return emitUnreg("matlab.call_builtin", {Obj, Zv, Hv, Rv}, PtrTy, L, {Cal});
+        }
+        if (Nm == "getStateEstimate" && Cls0 && Cn0 == "stateEstimatorPF" && C.Args.size() == 1) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_pf_estimate"));
+          return emitUnreg("matlab.call_builtin", {Obj}, PtrTy, L, {Cal});
+        }
+        // gnssSensor: step(gnss, lla, vel) -> noisy [lla vel].
+        if (Nm == "step" && Cls0 && Cn0 == "gnssSensor" && C.Args.size() == 3) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value La  = lowerExpr(*C.Args[1]);
+          mlir::Value Ve  = lowerExpr(*C.Args[2]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_gnss_step"));
+          return emitUnreg("matlab.call_builtin", {Obj, La, Ve}, PtrTy, L, {Cal});
+        }
+        // referencePathFrenet: global2frenet / frenet2global.
+        if (Nm == "global2frenet" && Cls0 && Cn0 == "referencePathFrenet" && C.Args.size() == 2) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Gv  = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_frenet_g2f"));
+          return emitUnreg("matlab.call_builtin", {Obj, Gv}, PtrTy, L, {Cal});
+        }
+        if (Nm == "frenet2global" && Cls0 && Cn0 == "referencePathFrenet" && C.Args.size() == 2) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Fv  = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_frenet_f2g"));
+          return emitUnreg("matlab.call_builtin", {Obj, Fv}, PtrTy, L, {Cal});
+        }
+        // trajectoryGeneratorFrenet: connect(trajgen, init, term, T) -> traj.
+        if (Nm == "connect" && Cls0 && Cn0 == "trajectoryGeneratorFrenet" && C.Args.size() == 4) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value In  = lowerExpr(*C.Args[1]);
+          mlir::Value Tm  = lowerExpr(*C.Args[2]);
+          mlir::Value Tt  = lowerExpr(*C.Args[3]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_trajgen_connect"));
+          return emitUnreg("matlab.call_builtin", {Obj, In, Tm, Tt}, PtrTy, L, {Cal});
         }
         /* recursiveLS step(obj, y, H) — RLS update with user regressor H. */
         if (Nm == "step" && Cls0 && Cn0 == "recursiveLS" && C.Args.size() == 3) {

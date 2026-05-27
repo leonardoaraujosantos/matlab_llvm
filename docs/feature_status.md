@@ -916,13 +916,16 @@ toolbox subsets.
   `fi` Q-format scalar + 1-D array arithmetic with 5 rounding modes;
   `numerictype` + `fimath` first-class objects.
 
-### Thirteen shipped toolbox surfaces
+### Twenty-four shipped toolbox surfaces
 
 Signal Processing · Control System · Communications · RF · Antenna ·
 Propagation Models · Optimization · Model Predictive Control · **System
-Identification** · Partial Differential Equation · Symbolic Math (opt-in
-via SymPP) · Fixed-Point Designer · Stateflow (mStateflow). Plus
-headless plotting (Cairo) and Verilog-A export.
+Identification** · Global Optimization · Statistics and Machine Learning ·
+Image Processing · Curve Fitting · DSP System · Wavelet · Partial
+Differential Equation · Symbolic Math (opt-in via SymPP) · Stateflow
+(mStateflow) · Financial · Econometrics · Fixed-Point Designer · **Sensor
+Fusion and Tracking** · **Robotics System** · **Navigation**. Plus headless
+plotting (Cairo) and Verilog-A export.
 See the per-toolbox roadmap docs in §9 for each toolbox's current
 tier closure + open follow-ons.
 

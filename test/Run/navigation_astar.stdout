@@ -1,0 +1,2 @@
+astar cells=13
+start=(10,1) goal=(1,10)
