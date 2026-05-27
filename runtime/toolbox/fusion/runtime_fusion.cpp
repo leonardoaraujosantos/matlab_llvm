@@ -1384,6 +1384,415 @@ matlab_mat *matlab_fusion_insmarg_fuse_gps(void *obj_v, matlab_mat *pos, matlab_
     return S;
 }
 
+// ---------------------------------------------------------------------------
+// Tier-4 — trajectory + scenario generation
+// ---------------------------------------------------------------------------
+
+// waypointTrajectory(waypoints, toa) populate: store an N×3 waypoint matrix
+// and the matching N×1 time-of-arrival vector on the obj.  lookupPose(t)
+// performs piecewise-linear position interpolation.  Velocity/orientation
+// outputs are documented Tier-4 follow-ons (the headline tracer only needs
+// position interpolation; the gnn_air_traffic example builds its own
+// ground truth from waypoint segments).
+matlab_mat *matlab_fusion_waypoint_init(void *obj_v, matlab_mat *wp, matlab_mat *toa) {
+    if (!wp || !toa) return mat_alloc(0, 0);
+    fusion::obj_set_mat(obj_v, "Waypoints", wp);
+    fusion::obj_set_mat(obj_v, "TimeOfArrival", toa);
+    // First waypoint as initial pose.
+    matlab_mat *p0 = mat_alloc(1, 3);
+    if (wp->cols == 3 && wp->rows >= 1) {
+        p0->data[0] = wp->data[0]; p0->data[1] = wp->data[1]; p0->data[2] = wp->data[2];
+    }
+    fusion::obj_set_mat(obj_v, "InitialPosition", p0);
+    return p0;
+}
+
+// lookupPose(traj, t) — linear interpolation between waypoints at time t.
+matlab_mat *matlab_fusion_waypoint_lookup(void *obj_v, double t) {
+    matlab_mat *wp  = fusion::obj_get_mat(obj_v, "Waypoints");
+    matlab_mat *toa = fusion::obj_get_mat(obj_v, "TimeOfArrival");
+    matlab_mat *o   = mat_alloc(1, 3);
+    if (!wp || !toa || wp->cols < 3) return o;
+    int64_t n = wp->rows;
+    if (n == 0) return o;
+    if (t <= toa->data[0]) {
+        for (int k = 0; k < 3; ++k) o->data[k] = wp->data[k];
+        return o;
+    }
+    if (t >= toa->data[n - 1]) {
+        for (int k = 0; k < 3; ++k) o->data[k] = wp->data[(n - 1) * 3 + k];
+        return o;
+    }
+    for (int64_t i = 0; i + 1 < n; ++i) {
+        if (t >= toa->data[i] && t <= toa->data[i + 1]) {
+            double dt = toa->data[i + 1] - toa->data[i];
+            double a  = dt < 1e-12 ? 0.0 : (t - toa->data[i]) / dt;
+            for (int k = 0; k < 3; ++k)
+                o->data[k] = (1 - a) * wp->data[i * 3 + k] + a * wp->data[(i + 1) * 3 + k];
+            return o;
+        }
+    }
+    return o;
+}
+
+// Coordinate conversions.  Geodetic ↔ local-NED on the WGS-84 ellipsoid.
+// lla2ned(lla, lla0) — converts lat/lon/alt (deg/deg/m) at point lla
+// relative to reference lla0 to local NED metres.
+matlab_mat *matlab_fusion_lla2ned(matlab_mat *lla, matlab_mat *lla0) {
+    matlab_mat *o = mat_alloc(1, 3);
+    if (!lla || !lla0 || lla->cols < 3 || lla0->cols < 3) return o;
+    // WGS-84.
+    constexpr double a = 6378137.0;
+    constexpr double f = 1.0 / 298.257223563;
+    constexpr double e2 = f * (2 - f);
+    double lat  = lla->data[0]  * M_PI / 180.0;
+    double lon  = lla->data[1]  * M_PI / 180.0;
+    double alt  = lla->data[2];
+    double lat0 = lla0->data[0] * M_PI / 180.0;
+    double lon0 = lla0->data[1] * M_PI / 180.0;
+    double alt0 = lla0->data[2];
+    auto ecef = [&](double lt, double ln, double h, double e[3]) {
+        double s = std::sin(lt), c = std::cos(lt);
+        double N = a / std::sqrt(1 - e2 * s * s);
+        e[0] = (N + h) * c * std::cos(ln);
+        e[1] = (N + h) * c * std::sin(ln);
+        e[2] = (N * (1 - e2) + h) * s;
+    };
+    double e[3], e0[3];
+    ecef(lat, lon, alt, e);
+    ecef(lat0, lon0, alt0, e0);
+    double dx = e[0] - e0[0], dy = e[1] - e0[1], dz = e[2] - e0[2];
+    double sL = std::sin(lat0), cL = std::cos(lat0);
+    double sl = std::sin(lon0), cl = std::cos(lon0);
+    o->data[0] = -sL * cl * dx - sL * sl * dy + cL * dz;  // north
+    o->data[1] = -sl * dx + cl * dy;                       // east
+    o->data[2] = -cL * cl * dx - cL * sl * dy - sL * dz;   // down
+    return o;
+}
+
+// ned2lla(ned, lla0) — inverse of lla2ned.
+matlab_mat *matlab_fusion_ned2lla(matlab_mat *ned, matlab_mat *lla0) {
+    matlab_mat *o = mat_alloc(1, 3);
+    if (!ned || !lla0 || ned->cols < 3 || lla0->cols < 3) return o;
+    constexpr double a = 6378137.0;
+    constexpr double f = 1.0 / 298.257223563;
+    constexpr double e2 = f * (2 - f);
+    double n_ = ned->data[0], e_ = ned->data[1], d_ = ned->data[2];
+    double lat0 = lla0->data[0] * M_PI / 180.0;
+    double lon0 = lla0->data[1] * M_PI / 180.0;
+    double alt0 = lla0->data[2];
+    auto ecef = [&](double lt, double ln, double h, double out[3]) {
+        double s = std::sin(lt), c = std::cos(lt);
+        double N = a / std::sqrt(1 - e2 * s * s);
+        out[0] = (N + h) * c * std::cos(ln);
+        out[1] = (N + h) * c * std::sin(ln);
+        out[2] = (N * (1 - e2) + h) * s;
+    };
+    double e0[3];
+    ecef(lat0, lon0, alt0, e0);
+    double sL = std::sin(lat0), cL = std::cos(lat0);
+    double sl = std::sin(lon0), cl = std::cos(lon0);
+    // Inverse rotation (rotation matrix is orthogonal).
+    double dx = -sL * cl * n_ - sl * e_ - cL * cl * d_;
+    double dy = -sL * sl * n_ + cl * e_ - cL * sl * d_;
+    double dz =  cL      * n_           - sL      * d_;
+    double X = e0[0] + dx, Y = e0[1] + dy, Z = e0[2] + dz;
+    // ECEF → LLA (Bowring's iterative).
+    double lon = std::atan2(Y, X);
+    double p = std::sqrt(X * X + Y * Y);
+    double lat = std::atan2(Z, p * (1 - e2));
+    for (int it = 0; it < 5; ++it) {
+        double s = std::sin(lat);
+        double N = a / std::sqrt(1 - e2 * s * s);
+        lat = std::atan2(Z + e2 * N * s, p);
+    }
+    double s = std::sin(lat);
+    double N = a / std::sqrt(1 - e2 * s * s);
+    double alt = p / std::cos(lat) - N;
+    o->data[0] = lat * 180.0 / M_PI;
+    o->data[1] = lon * 180.0 / M_PI;
+    o->data[2] = alt;
+    return o;
+}
+
+// ---------------------------------------------------------------------------
+// Tier-5 — multi-object trackers + assignment
+// ---------------------------------------------------------------------------
+
+// assignmunkres(C) — Munkres / Hungarian on an m×n cost matrix C.  Returns an
+// m×1 column vector of assigned column indices (1-based, -1 if unassigned).
+// Standard O(n³) implementation, padded to a square matrix internally.
+matlab_mat *matlab_fusion_assignmunkres(matlab_mat *C) {
+    if (!C) return mat_alloc(0, 0);
+    int64_t m = C->rows, n = C->cols;
+    int64_t sz = (m > n) ? m : n;
+    if (sz == 0) return mat_alloc(0, 0);
+    // Pad to square with a large finite cost.
+    constexpr double BIG = 1e15;
+    std::vector<double> A(sz * sz, BIG);
+    for (int64_t i = 0; i < m; ++i)
+        for (int64_t j = 0; j < n; ++j)
+            A[i * sz + j] = C->data[i * n + j];
+    // Hungarian via row + column reductions and augmenting paths.
+    // u, v are dual variables.
+    std::vector<double> u(sz + 1, 0.0), v(sz + 1, 0.0);
+    std::vector<int>    p(sz + 1, 0),   way(sz + 1, 0);
+    for (int64_t i = 1; i <= sz; ++i) {
+        p[0] = static_cast<int>(i);
+        int64_t j0 = 0;
+        std::vector<double> minv(sz + 1, BIG);
+        std::vector<int>    used(sz + 1, 0);
+        do {
+            used[j0] = 1;
+            int64_t i0 = p[j0], j1 = 0;
+            double delta = BIG;
+            for (int64_t j = 1; j <= sz; ++j) if (!used[j]) {
+                double cur = A[(i0 - 1) * sz + (j - 1)] - u[i0] - v[j];
+                if (cur < minv[j]) { minv[j] = cur; way[j] = static_cast<int>(j0); }
+                if (minv[j] < delta) { delta = minv[j]; j1 = j; }
+            }
+            for (int64_t j = 0; j <= sz; ++j) {
+                if (used[j]) { u[p[j]] += delta; v[j] -= delta; }
+                else         { minv[j] -= delta; }
+            }
+            j0 = j1;
+        } while (p[j0] != 0);
+        do {
+            int j1 = way[j0];
+            p[j0] = p[j1];
+            j0 = j1;
+        } while (j0);
+    }
+    // ans[col] = row assigned to that column; rebuild row→col.
+    std::vector<int> rowcol(sz + 1, 0);
+    for (int64_t j = 1; j <= sz; ++j) rowcol[p[j]] = static_cast<int>(j);
+    matlab_mat *o = mat_alloc(m, 1);
+    for (int64_t i = 0; i < m; ++i) {
+        int col = rowcol[i + 1];
+        // Filter padded assignments.
+        if (col == 0 || col > n) o->data[i] = -1.0;
+        else                     o->data[i] = static_cast<double>(col);
+    }
+    return o;
+}
+
+// trackerGNN — minimal in-runtime tracker.
+//
+// We carry a vector of trackingEKF-shaped objects via a packed matrix:
+//   States      :  Ntracks × 4   (constant-velocity 2-D state [x vx y vy])
+//   Covariances :  Ntracks × 16  (4×4 row-major flattened)
+//   Ages        :  Ntracks × 1   (integer hits-since-last-update)
+//   Confirmed   :  Ntracks × 1   (0/1)
+// This keeps the runtime model simple while still exercising the predict /
+// correct / gate / assign / confirm loop end-to-end.
+
+namespace fusion {
+constexpr int kGNNStateDim = 4;     // [x vx y vy]
+constexpr int kGNNCovStride = 16;   // 4×4 flattened
+constexpr int kGNNMeasDim  = 2;     // [x y]
+
+void gnn_predict_one(double *x, double *P, double dt) {
+    // F = [1 dt 0 0; 0 1 0 0; 0 0 1 dt; 0 0 0 1]
+    double new_x = x[0] + dt * x[1];
+    double new_y = x[2] + dt * x[3];
+    x[0] = new_x;
+    x[2] = new_y;
+    // P = F P F' + Q
+    double F[16] = {1, dt, 0, 0,
+                    0, 1,  0, 0,
+                    0, 0,  1, dt,
+                    0, 0,  0, 1};
+    double FP[16];
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j) {
+            double s = 0;
+            for (int k = 0; k < 4; ++k) s += F[i * 4 + k] * P[k * 4 + j];
+            FP[i * 4 + j] = s;
+        }
+    double Pn[16];
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j) {
+            double s = 0;
+            for (int k = 0; k < 4; ++k) s += FP[i * 4 + k] * F[j * 4 + k];
+            Pn[i * 4 + j] = s;
+        }
+    constexpr double q = 0.05;
+    Pn[0]  += q; Pn[5]  += q; Pn[10] += q; Pn[15] += q;
+    for (int i = 0; i < 16; ++i) P[i] = Pn[i];
+}
+
+double gnn_mahalanobis(const double *x, const double *P, const double *z, double R) {
+    // H = [1 0 0 0; 0 0 1 0];  innovation v = z - H x
+    double v0 = z[0] - x[0];
+    double v1 = z[1] - x[2];
+    // S = H P H' + R*I — extract Pxx, Pxy, Pyx, Pyy (with R on the diagonal).
+    double s00 = P[0]      + R;
+    double s01 = P[2];
+    double s10 = P[8];
+    double s11 = P[10]     + R;
+    double det = s00 * s11 - s01 * s10;
+    if (std::fabs(det) < 1e-18) return 1e18;
+    double inv00 =  s11 / det, inv01 = -s01 / det;
+    double inv10 = -s10 / det, inv11 =  s00 / det;
+    double d = v0 * (inv00 * v0 + inv01 * v1) + v1 * (inv10 * v0 + inv11 * v1);
+    return d;
+}
+
+void gnn_correct_one(double *x, double *P, const double *z, double R) {
+    double v0 = z[0] - x[0];
+    double v1 = z[1] - x[2];
+    double s00 = P[0]  + R;
+    double s01 = P[2];
+    double s10 = P[8];
+    double s11 = P[10] + R;
+    double det = s00 * s11 - s01 * s10;
+    if (std::fabs(det) < 1e-18) return;
+    double inv00 =  s11 / det, inv01 = -s01 / det;
+    double inv10 = -s10 / det, inv11 =  s00 / det;
+    // K = P H' S^-1.  P H' is column-0 / column-2 of P.
+    double K[8];
+    for (int i = 0; i < 4; ++i) {
+        double ph0 = P[i * 4 + 0];
+        double ph2 = P[i * 4 + 2];
+        K[i * 2 + 0] = ph0 * inv00 + ph2 * inv10;
+        K[i * 2 + 1] = ph0 * inv01 + ph2 * inv11;
+    }
+    // x = x + K v
+    for (int i = 0; i < 4; ++i) x[i] += K[i * 2 + 0] * v0 + K[i * 2 + 1] * v1;
+    // P = (I - K H) P
+    double Pn[16];
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            double s = P[i * 4 + j];
+            s -= K[i * 2 + 0] * P[0 * 4 + j];
+            s -= K[i * 2 + 1] * P[2 * 4 + j];
+            Pn[i * 4 + j] = s;
+        }
+    }
+    for (int i = 0; i < 16; ++i) P[i] = Pn[i];
+}
+}  // namespace fusion
+
+// trackerGNN init: empty tracker.
+matlab_mat *matlab_fusion_gnn_init(void *obj_v, double maxTracks) {
+    int64_t M = static_cast<int64_t>(maxTracks);
+    if (M < 1) M = 16;
+    fusion::obj_set_f64(obj_v, "MaxNumTracks", static_cast<double>(M));
+    fusion::obj_set_mat(obj_v, "States",      mat_alloc(0, fusion::kGNNStateDim));
+    fusion::obj_set_mat(obj_v, "Covariances", mat_alloc(0, fusion::kGNNCovStride));
+    fusion::obj_set_mat(obj_v, "Ages",        mat_alloc(0, 1));
+    fusion::obj_set_mat(obj_v, "Confirmed",   mat_alloc(0, 1));
+    return mat_alloc(0, 0);
+}
+
+// Single step: detections is N×2 (2-D positions); dt is the prediction step.
+// Returns the current confirmed-track state matrix (Ntrk×4).
+matlab_mat *matlab_fusion_gnn_step(void *obj_v, matlab_mat *detections, double dt) {
+    matlab_mat *St = fusion::obj_get_mat(obj_v, "States");
+    matlab_mat *Cv = fusion::obj_get_mat(obj_v, "Covariances");
+    matlab_mat *Ag = fusion::obj_get_mat(obj_v, "Ages");
+    matlab_mat *Cf = fusion::obj_get_mat(obj_v, "Confirmed");
+    if (!St) St = mat_alloc(0, fusion::kGNNStateDim);
+    if (!Cv) Cv = mat_alloc(0, fusion::kGNNCovStride);
+    if (!Ag) Ag = mat_alloc(0, 1);
+    if (!Cf) Cf = mat_alloc(0, 1);
+    int64_t T = St->rows;
+    int64_t N = detections ? detections->rows : 0;
+
+    // 1) Predict all existing tracks.
+    for (int64_t t = 0; t < T; ++t) {
+        fusion::gnn_predict_one(&St->data[t * 4], &Cv->data[t * 16], dt);
+    }
+    // 2) Build cost matrix C(T×N) of Mahalanobis distances; gate at chi2 ≈ 9.
+    constexpr double R    = 1.0;
+    constexpr double GATE = 9.0;
+    std::vector<double> Costs(static_cast<size_t>(T * N), 1e6);
+    for (int64_t t = 0; t < T; ++t) {
+        for (int64_t i = 0; i < N; ++i) {
+            const double *z = &detections->data[i * 2];
+            double d = fusion::gnn_mahalanobis(&St->data[t * 4], &Cv->data[t * 16], z, R);
+            if (d > GATE) d = 1e6;
+            Costs[t * N + i] = d;
+        }
+    }
+    // 3) Assignment via Munkres.
+    std::vector<int> det_to_track(static_cast<size_t>(N), -1);
+    if (T > 0 && N > 0) {
+        matlab_mat C; C.rows = T; C.cols = N;
+        std::vector<double> Cdup(Costs);
+        C.data = Cdup.data();
+        matlab_mat *Ar = matlab_fusion_assignmunkres(&C);
+        for (int64_t t = 0; t < T; ++t) {
+            int col = static_cast<int>(Ar->data[t]);
+            if (col > 0 && Costs[t * N + (col - 1)] < 1e5) {
+                det_to_track[col - 1] = static_cast<int>(t);
+            }
+        }
+    }
+    // 4) Update assigned tracks; assigned detections promote / set Confirmed.
+    std::vector<int> used_det(static_cast<size_t>(N), 0);
+    for (int64_t i = 0; i < N; ++i) {
+        int tidx = det_to_track[i];
+        if (tidx < 0) continue;
+        const double *z = &detections->data[i * 2];
+        fusion::gnn_correct_one(&St->data[tidx * 4], &Cv->data[tidx * 16], z, R);
+        Ag->data[tidx] += 1.0;
+        if (Ag->data[tidx] >= 2.0) Cf->data[tidx] = 1.0;
+        used_det[i] = 1;
+    }
+    // 5) Unmatched detections seed new tracks (capped at MaxNumTracks).
+    int64_t M = static_cast<int64_t>(fusion::obj_get_f64(obj_v, "MaxNumTracks"));
+    if (M < 1) M = 16;
+    int64_t new_T = T;
+    for (int64_t i = 0; i < N && new_T < M; ++i) {
+        if (used_det[i]) continue;
+        new_T += 1;
+    }
+    matlab_mat *St2 = mat_alloc(new_T, fusion::kGNNStateDim);
+    matlab_mat *Cv2 = mat_alloc(new_T, fusion::kGNNCovStride);
+    matlab_mat *Ag2 = mat_alloc(new_T, 1);
+    matlab_mat *Cf2 = mat_alloc(new_T, 1);
+    for (int64_t t = 0; t < T; ++t) {
+        for (int k = 0; k < 4; ++k)  St2->data[t * 4 + k]  = St->data[t * 4 + k];
+        for (int k = 0; k < 16; ++k) Cv2->data[t * 16 + k] = Cv->data[t * 16 + k];
+        Ag2->data[t] = Ag->data[t];
+        Cf2->data[t] = Cf->data[t];
+    }
+    int64_t cursor = T;
+    for (int64_t i = 0; i < N && cursor < new_T; ++i) {
+        if (used_det[i]) continue;
+        const double *z = &detections->data[i * 2];
+        St2->data[cursor * 4 + 0] = z[0];
+        St2->data[cursor * 4 + 1] = 0.0;
+        St2->data[cursor * 4 + 2] = z[1];
+        St2->data[cursor * 4 + 3] = 0.0;
+        for (int k = 0; k < 16; ++k) Cv2->data[cursor * 16 + k] = 0.0;
+        Cv2->data[cursor * 16 + 0]  = 100.0;  // px var
+        Cv2->data[cursor * 16 + 5]  = 100.0;  // vx var
+        Cv2->data[cursor * 16 + 10] = 100.0;  // py var
+        Cv2->data[cursor * 16 + 15] = 100.0;  // vy var
+        Ag2->data[cursor] = 1.0;
+        Cf2->data[cursor] = 0.0;
+        cursor += 1;
+    }
+    fusion::obj_set_mat(obj_v, "States", St2);
+    fusion::obj_set_mat(obj_v, "Covariances", Cv2);
+    fusion::obj_set_mat(obj_v, "Ages", Ag2);
+    fusion::obj_set_mat(obj_v, "Confirmed", Cf2);
+    return St2;
+}
+
+// trackerGNN.numConfirmed(obj) — count of Confirmed==1.
+matlab_mat *matlab_fusion_gnn_numconfirmed(void *obj_v) {
+    matlab_mat *Cf = fusion::obj_get_mat(obj_v, "Confirmed");
+    matlab_mat *o  = mat_alloc(1, 1);
+    if (!Cf) { o->data[0] = 0; return o; }
+    double s = 0;
+    for (int64_t i = 0; i < Cf->rows; ++i) s += Cf->data[i];
+    o->data[0] = s;
+    return o;
+}
+
 // ---------- Tier-3.7 allanvar ---------------------------------------------
 //
 // Compute the Allan variance of x[0..N-1] sampled at fs Hz, over a set of

@@ -494,6 +494,15 @@ void Resolver::registerBuiltins() {
     "allanvar",
     /* MARG fusion update entry names — `predict` already registered.  */
     "fuseaccel", "fusegps", "fusemag",
+    /* ===== Sensor Fusion Tier-4 — trajectory + scenario =================== */
+    "lookupPose", "lla2ned", "ned2lla",
+    "matlab_fusion_waypoint_init", "matlab_fusion_waypoint_lookup",
+    "matlab_fusion_lla2ned", "matlab_fusion_ned2lla",
+    /* ===== Sensor Fusion Tier-5 — multi-object trackers + assignment ====== */
+    "assignmunkres", "numConfirmed",
+    "matlab_fusion_assignmunkres",
+    "matlab_fusion_gnn_init", "matlab_fusion_gnn_step",
+    "matlab_fusion_gnn_numconfirmed",
     "matlab_fusion_imu_init", "matlab_fusion_imu_step",
     "matlab_fusion_gps_init", "matlab_fusion_gps_step",
     "matlab_fusion_ahrs_init", "matlab_fusion_ahrs_step",

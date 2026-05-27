@@ -102,8 +102,14 @@ through Cairo), [`feature_status.md`](feature_status.md).
   T3 (~5.5 wk) close the inertial-navigation half** — the highest-value
   cut given the flight-control alignment.
 - **Status legend**: ✅ shipped · 🟡 partial · 🔵 not started.
-  **Tiers 1–3 are ✅ shipped** as of 2026-05-27 (inertial-navigation half);
-  Tiers 4–6 are 🔵 not started. The estimation substrate is
+  **Tiers 1–3 ✅ shipped** 2026-05-27 (inertial-navigation half); **Tier-4
+  partial 🟡** (`waypointTrajectory` + `lla2ned`/`ned2lla` shipped;
+  `kinematicTrajectory` / `geoTrajectory` / `trackingScenario` / `theaterPlot`
+  carved down); **Tier-5 partial 🟡** (`assignmunkres` + `objectTrack` +
+  `trackerGNN` shipped — closes the `gnn_air_traffic.m` tracer; `assignjv` /
+  `assignauction` / `assignsd` / `trackerJPDA` / `trackerTOMHT` /
+  `fusionRadarSensor` carved down); **Tier-6 🔵** not started. The estimation
+  substrate is
   unusually deep: the EKF/UKF cores, ODE solvers, dense linalg, PRNG, and
   the single-filter classdef pattern are all shipped. The genuinely new
   surface is the **quaternion type**, the **sensor noise models**, the
@@ -451,8 +457,8 @@ object-API surface a *script* uses (quaternions / filters / IMU-GPS fusion
 | T1 | quaternion + orientation/rotation math | ~1.5 wk | `quaternion` value type + conversions + `ecompass` + core gaps | ✅ |
 | T2 | estimation filters + motion/measurement models | ~1.5 wk | `trackingKF`/`EKF`/`UKF` re-skins over shipped EKF/UKF + `constvel`/`constacc`/`constturn` + `objectDetection` + `initcvekf`/`initctekf` (`IMM`/`GSF`/`PF` deferred) | ✅ |
 | T3 | inertial sensors + orientation/pose fusion | ~2.5 wk | `imuSensor`/`gpsSensor` + Mahony-style `ahrsfilter`/`imufilter`/`complementaryFilter` + simplified `insfilterMARG` headline + `allanvar` (`tune` carved as follow-on) | ✅ |
-| T4 | trajectory + scenario generation | ~1.5 wk | `waypointTrajectory`/`kinematicTrajectory` + `trackingScenario`/`platform` + `theaterPlot` | 🔵 |
-| T5 | multi-object trackers + assignment | ~3 wk | Munkres/auction/JV/SD + `trackerGNN`/`JPDA`/`TOMHT` + track logic | 🔵 |
+| T4 | trajectory + scenario generation | ~1.5 wk | `waypointTrajectory` (position-only) + `lla2ned`/`ned2lla` WGS-84 (full kinematicTrajectory/geoTrajectory/trackingScenario/theaterPlot are documented follow-ons) | 🟡 |
+| T5 | multi-object trackers + assignment | ~3 wk | `assignmunkres` (O(n³) Hungarian) + `objectTrack` + `trackerGNN` over constvel trackingEKFs with Mahalanobis gating + age-based confirmation (assignjv/auction/sd + trackerJPDA/TOMHT + fusionRadarSensor carved as follow-ons) | 🟡 |
 | T6 | track fusion + metrics + RFS + polish | ~2.5 wk | `trackFuser`/`staticDetectionFuser` + GOSPA/OSPA metrics + `trackerPHD` + OOSM | 🔵 |
 | **Total** | | **~12.5 wk** | | |
 

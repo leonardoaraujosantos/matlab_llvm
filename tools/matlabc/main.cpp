@@ -2332,6 +2332,14 @@ static std::string buildReplPrelude(const std::string &Src) {
     {false, "ctmeas",              "fusion_classdefs.m"},
     {false, "initcvekf",           "fusion_classdefs.m"},
     {false, "initctekf",           "fusion_classdefs.m"},
+    {false, "waypointTrajectory",  "fusion_classdefs.m"},
+    {false, "lookupPose",          "fusion_classdefs.m"},
+    {false, "lla2ned",             "fusion_classdefs.m"},
+    {false, "ned2lla",             "fusion_classdefs.m"},
+    {false, "assignmunkres",       "fusion_classdefs.m"},
+    {false, "trackerGNN",          "fusion_classdefs.m"},
+    {false, "objectTrack",         "fusion_classdefs.m"},
+    {false, "numConfirmed",        "fusion_classdefs.m"},
     /* Global Optimization Toolbox Tier-2 — `gads_classdefs.m` holds the
      * MultiStart + GlobalSearch solver objects.  (`run` is too generic
      * to trigger on; the solver-object mentions pull the prelude.) */
@@ -11425,6 +11433,8 @@ int main(int Argc, char **Argv) {
       "quat2eul", "eul2quat", "quat2rotm", "rotm2quat",
       "allanvar", "constvel", "constacc", "constturn",
       "cvmeas", "cameas", "ctmeas", "initcvekf", "initctekf",
+      "waypointTrajectory", "lookupPose", "lla2ned", "ned2lla",
+      "assignmunkres", "trackerGNN", "objectTrack", "numConfirmed",
       /* GPU Coder T5 design-pattern helpers — runtime entries, no
        * prelude file needed.  Listed here only for the AOT-prelude
        * scanner's awareness (no leaf to map). */
@@ -11640,7 +11650,11 @@ int main(int Argc, char **Argv) {
         ClsName == "constvel" || ClsName == "constacc" ||
         ClsName == "constturn" || ClsName == "cvmeas" ||
         ClsName == "cameas" || ClsName == "ctmeas" ||
-        ClsName == "initcvekf" || ClsName == "initctekf")
+        ClsName == "initcvekf" || ClsName == "initctekf" ||
+        ClsName == "waypointTrajectory" || ClsName == "lookupPose" ||
+        ClsName == "lla2ned" || ClsName == "ned2lla" ||
+        ClsName == "assignmunkres" || ClsName == "trackerGNN" ||
+        ClsName == "objectTrack" || ClsName == "numConfirmed")
       return "fusion_classdefs.m";
     /* GPU Coder T5 design-pattern helpers are C runtime entries; no
      * classdef file to pull in. */

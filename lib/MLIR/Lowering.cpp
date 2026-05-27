@@ -6215,6 +6215,38 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                       {mlir::NoneType::get(&MCtx)}, L, {Cal});
           return Obj;
         }
+        /* ===== Sensor Fusion Tier-4 — waypointTrajectory(wp, toa) ============
+         * Two-arg ctor: N×3 waypoints + N×1 times.  Position-only interpolation
+         * (lookupPose). */
+        if (CD->Name == "waypointTrajectory" && C.Args.size() == 2) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "waypointTrajectory__waypointTrajectory"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Wp  = lowerExpr(*C.Args[0]);
+          mlir::Value To  = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_fusion_waypoint_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, Wp, To},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        /* ===== Sensor Fusion Tier-5 — trackerGNN(maxTracks) ==================
+         * One-arg ctor.  Empty tracker. */
+        if (CD->Name == "trackerGNN" && C.Args.size() == 1) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "trackerGNN__trackerGNN"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value M   = lowerExpr(*C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_fusion_gnn_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, M},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
         /* objectDetection(time, z, R) — set Time / Measurement /
          * MeasurementNoise.  2-arg form (without R) is a documented follow-on
          * (runtime defaults R to eye(ny) when MeasurementNoise is empty). */
@@ -9253,6 +9285,34 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
               mlir::StringAttr::get(&MCtx, "callee"),
               mlir::StringAttr::get(&MCtx, "matlab_fusion_insmarg_fuse_gps"));
           return emitUnreg("matlab.call_builtin", {Obj, P, V}, PtrTy, L, {Cal});
+        }
+        /* ===== Sensor Fusion Tier-4 / Tier-5 — trajectory + tracker methods ==
+         * lookupPose(waypointTrajectory, t) → 1×3 position. */
+        if (Nm == "lookupPose" && Cls0 && Cn0 == "waypointTrajectory" && C.Args.size() == 2) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Tv  = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_fusion_waypoint_lookup"));
+          return emitUnreg("matlab.call_builtin", {Obj, Tv}, PtrTy, L, {Cal});
+        }
+        /* step(trackerGNN, detections_Nx2, dt). */
+        if (Nm == "step" && Cls0 && Cn0 == "trackerGNN" && C.Args.size() == 3) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Dt  = lowerExpr(*C.Args[1]);
+          mlir::Value DtS = lowerExpr(*C.Args[2]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_fusion_gnn_step"));
+          return emitUnreg("matlab.call_builtin", {Obj, Dt, DtS}, PtrTy, L, {Cal});
+        }
+        /* numConfirmed(trackerGNN) — confirmed-track count. */
+        if (Nm == "numConfirmed" && Cls0 && Cn0 == "trackerGNN" && C.Args.size() == 1) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_fusion_gnn_numconfirmed"));
+          return emitUnreg("matlab.call_builtin", {Obj}, PtrTy, L, {Cal});
         }
         /* recursiveLS step(obj, y, H) — RLS update with user regressor H. */
         if (Nm == "step" && Cls0 && Cn0 == "recursiveLS" && C.Args.size() == 3) {

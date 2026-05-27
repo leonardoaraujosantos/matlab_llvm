@@ -258,6 +258,74 @@ classdef complementaryFilter
     end
 end
 
+% Tier-4 ------------------------------------------------------------------
+
+% waypointTrajectory — piecewise position interpolation over N waypoints +
+% matching time-of-arrival vector.  lookupPose(t) returns a 1×3 position.
+classdef waypointTrajectory
+    properties
+        Waypoints matrix         % N×3 [x y z] rows
+        TimeOfArrival matrix     % N×1 ascending times
+        InitialPosition matrix   % cached first waypoint (1×3)
+    end
+    methods
+        function obj = waypointTrajectory()
+            obj.Waypoints       = zeros(1, 3);
+            obj.TimeOfArrival   = zeros(1, 1);
+            obj.InitialPosition = zeros(1, 3);
+        end
+    end
+end
+
+% Tier-5 ------------------------------------------------------------------
+
+% objectTrack — track-state record matching MATLAB's objectTrack API.  We
+% expose a flat property layout; the trackerGNN runtime keeps its own
+% packed-matrix view of the active track set.
+classdef objectTrack
+    properties
+        TrackID
+        Age
+        IsConfirmed
+        State matrix
+        StateCovariance matrix
+    end
+    methods
+        function obj = objectTrack()
+            obj.TrackID         = 0;
+            obj.Age             = 0;
+            obj.IsConfirmed     = 0;
+            obj.State           = zeros(0, 0);
+            obj.StateCovariance = zeros(0, 0);
+        end
+    end
+end
+
+% trackerGNN — global-nearest-neighbour tracker over constvel trackingEKFs.
+% State is packed into matrix properties to dodge struct-array storage:
+%   States      : Ntrk × 4  ([x vx y vy] rows)
+%   Covariances : Ntrk × 16 (4×4 flattened row-major)
+%   Ages        : Ntrk × 1
+%   Confirmed   : Ntrk × 1
+classdef trackerGNN
+    properties
+        MaxNumTracks
+        States matrix
+        Covariances matrix
+        Ages matrix
+        Confirmed matrix
+    end
+    methods
+        function obj = trackerGNN()
+            obj.MaxNumTracks = 16;
+            obj.States       = zeros(0, 4);
+            obj.Covariances  = zeros(0, 16);
+            obj.Ages         = zeros(0, 1);
+            obj.Confirmed    = zeros(0, 1);
+        end
+    end
+end
+
 % insfilterMARG — EKF fusing IMU + GPS over a
 % [quaternion (4); position (3); velocity (3); gyro-bias (3); accel-bias (3)]
 % state vector (16 elements).

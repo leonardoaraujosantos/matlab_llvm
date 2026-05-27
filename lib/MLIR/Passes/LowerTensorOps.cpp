@@ -5827,6 +5827,19 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"matlab_fusion_insmarg_fuse_gps",    "matlab_fusion_insmarg_fuse_gps",    PtrTy, {PtrTy, PtrTy, PtrTy}},
         {"matlab_fusion_allanvar", "matlab_fusion_allanvar", PtrTy, {PtrTy, F64}},
         {"allanvar",                "matlab_fusion_allanvar", PtrTy, {PtrTy, F64}},
+        /* Sensor Fusion Tier-4 — waypointTrajectory + coordinate frames. */
+        {"matlab_fusion_waypoint_init",   "matlab_fusion_waypoint_init",   PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_fusion_waypoint_lookup", "matlab_fusion_waypoint_lookup", PtrTy, {PtrTy, F64}},
+        {"matlab_fusion_lla2ned",         "matlab_fusion_lla2ned",         PtrTy, {PtrTy, PtrTy}},
+        {"matlab_fusion_ned2lla",         "matlab_fusion_ned2lla",         PtrTy, {PtrTy, PtrTy}},
+        {"lla2ned",                       "matlab_fusion_lla2ned",         PtrTy, {PtrTy, PtrTy}},
+        {"ned2lla",                       "matlab_fusion_ned2lla",         PtrTy, {PtrTy, PtrTy}},
+        /* Sensor Fusion Tier-5 — assignmunkres + trackerGNN. */
+        {"matlab_fusion_assignmunkres",   "matlab_fusion_assignmunkres",   PtrTy, {PtrTy}},
+        {"assignmunkres",                 "matlab_fusion_assignmunkres",   PtrTy, {PtrTy}},
+        {"matlab_fusion_gnn_init",        "matlab_fusion_gnn_init",        PtrTy, {PtrTy, F64}},
+        {"matlab_fusion_gnn_step",        "matlab_fusion_gnn_step",        PtrTy, {PtrTy, PtrTy, F64}},
+        {"matlab_fusion_gnn_numconfirmed","matlab_fusion_gnn_numconfirmed",PtrTy, {PtrTy}},
       };
       bool matched = false;
       for (const auto &E : pde_table) {
