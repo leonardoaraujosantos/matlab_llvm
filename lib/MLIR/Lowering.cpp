@@ -8539,6 +8539,66 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         }
 
         /* ============================================================
+         * Econometrics Toolbox — class-pinned-first-arg dispatch.  The
+         * generic method names estimate/forecast/infer/simulate/filter
+         * are routed by the receiver's class name (arima/garch/...) to
+         * the matlab_econ_* kernels, so they coexist with the System-
+         * Identification idpoly routes below.
+         * ============================================================ */
+        {
+          /* Is the receiver one of the Econometrics model classes? */
+          bool econCls = Cls0 && (Cn0 == "arima");
+          if (econCls && Nm == "estimate" && C.Args.size() == 2) {
+            /* EstMdl = estimate(Mdl, y) — allocate a FRESH model via the
+             * zero-arg ctor (so the result value carries the arima class,
+             * exactly like armax returns a fresh idpoly), then populate it
+             * in place from the template orders + data. */
+            mlir::Value Tmpl = loadObj(C.Args[0]);
+            mlir::Value Y    = lowerExpr(*C.Args[1]);
+            mlir::NamedAttribute CtorCal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "arima__arima"));
+            mlir::Value Model =
+                emitUnreg("matlab.call", {}, PtrTy, L, {CtorCal});
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_econ_arima_estimate"));
+            emitUnregOp("matlab.call_builtin", {Model, Tmpl, Y},
+                        {mlir::NoneType::get(&MCtx)}, L, {Cal});
+            return Model;
+          }
+          if (econCls && Nm == "forecast" && C.Args.size() == 3) {
+            /* yF = forecast(Mdl, numPeriods, Y0) */
+            mlir::Value Mdl = loadObj(C.Args[0]);
+            mlir::Value H   = lowerExpr(*C.Args[1]);
+            mlir::Value Y0  = lowerExpr(*C.Args[2]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_econ_arima_forecast"));
+            return emitUnreg("matlab.call_builtin", {Mdl, H, Y0}, PtrTy, L,
+                             {Cal});
+          }
+          if (econCls && Nm == "infer" && C.Args.size() == 2) {
+            /* E = infer(Mdl, Y) — inferred innovations (residuals). */
+            mlir::Value Mdl = loadObj(C.Args[0]);
+            mlir::Value Y   = lowerExpr(*C.Args[1]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_econ_arima_infer"));
+            return emitUnreg("matlab.call_builtin", {Mdl, Y}, PtrTy, L, {Cal});
+          }
+          if (econCls && Nm == "simulate" && C.Args.size() == 2) {
+            /* Y = simulate(Mdl, numObs) */
+            mlir::Value Mdl = loadObj(C.Args[0]);
+            mlir::Value N   = lowerExpr(*C.Args[1]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_econ_arima_simulate"));
+            return emitUnreg("matlab.call_builtin", {Mdl, N}, PtrTy, L, {Cal});
+          }
+        }
+
+        /* ============================================================
          * System Identification Toolbox Tier-1 — class-pinned-first-arg
          * dispatch.  arx / ar return a fresh idpoly (allocated via the
          * zero-arg ctor, then populated by the runtime in place — same

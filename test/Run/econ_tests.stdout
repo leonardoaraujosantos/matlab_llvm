@@ -1,0 +1,10 @@
+adf_stationary=1
+adf_randomwalk=0
+kpss_randomwalk=1
+kpss_stationary=0
+lbq_white=0
+arch_white=0
+aic=106
+lr=1
+vr_randomwalk=0
+hac_dim=2x2

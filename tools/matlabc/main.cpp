@@ -2148,7 +2148,7 @@ static std::string buildReplPrelude(const std::string &Src) {
   static const char *kToolboxDirs[] = {
     "comm", "rf", "optim", "mpc", "ident", "gads", "pde", "prop", "sym",
     "stateflow", "antenna", "control", "stats", "images", "curvefit",
-    "dsp", "gpu", "finance",
+    "dsp", "gpu", "finance", "econ",
   };
   std::vector<std::string> Files;
   auto add = [&](const std::string &Leaf) {
@@ -2368,6 +2368,8 @@ static std::string buildReplPrelude(const std::string &Src) {
     {false, "estimateAssetMoments", "finance_classdefs.m"},
     {false, "estimateFrontierByReturn","finance_classdefs.m"},
     {false, "estimateFrontierByRisk", "finance_classdefs.m"},
+    /* Econometrics Toolbox model objects (econ_classdefs.m). */
+    {false, "arima",                  "econ_classdefs.m"},
     /* mStateflow Tier 4c — `mstateflow_helpers.m` exposes the small
      * MATLAB-level surface (emit / save-op / restore-op / active /
      * reset) that lets a REPL session drive a chart_tick function
@@ -11370,6 +11372,8 @@ int main(int Argc, char **Argv) {
       "setProbabilityLevel", "estimatePortVaR",
       /* Financial Toolbox Tier-6 — SDE Monte Carlo. */
       "gbm", "cir", "hwv", "simByEuler", "simBySolution",
+      /* Econometrics Toolbox model objects (econ_classdefs.m). */
+      "arima",
       /* GPU Coder T5 design-pattern helpers — runtime entries, no
        * prelude file needed.  Listed here only for the AOT-prelude
        * scanner's awareness (no leaf to map). */
@@ -11563,6 +11567,9 @@ int main(int Argc, char **Argv) {
         ClsName == "gbm" || ClsName == "cir" || ClsName == "hwv" ||
         ClsName == "simByEuler" || ClsName == "simBySolution")
       return "finance_classdefs.m";
+    /* Econometrics Toolbox model objects — econ_classdefs.m umbrella. */
+    if (ClsName == "arima")
+      return "econ_classdefs.m";
     /* GPU Coder T5 design-pattern helpers are C runtime entries; no
      * classdef file to pull in. */
     return std::string();
@@ -11618,7 +11625,7 @@ int main(int Argc, char **Argv) {
     static const char *kToolboxDirs[] = {
       "comm", "rf", "optim", "mpc", "ident", "gads", "pde", "prop", "sym",
       "stateflow", "antenna", "control", "stats", "images", "curvefit",
-      "dsp", "gpu", "finance",
+      "dsp", "gpu", "finance", "econ",
     };
     std::vector<std::string> Cands;
     for (const char *Tb : kToolboxDirs) {

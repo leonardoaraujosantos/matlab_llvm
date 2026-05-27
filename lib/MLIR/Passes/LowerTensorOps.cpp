@@ -5532,6 +5532,17 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"matlab_ident_getcov",   "matlab_ident_getcov",   PtrTy, {PtrTy}},
         {"matlab_ident_getpvec",  "matlab_ident_getpvec",  PtrTy, {PtrTy}},
         {"matlab_ident_setpvec",  "matlab_ident_setpvec",  PtrTy, {PtrTy, PtrTy}},
+        /* ===== Econometrics Toolbox — model-object methods =====
+         * arima estimate populates a fresh object in place (fresh,
+         * template, y); forecast/infer/simulate read the fitted model. */
+        {"matlab_econ_arima_estimate", "matlab_econ_arima_estimate", PtrTy,
+         {PtrTy, PtrTy, PtrTy}},
+        {"matlab_econ_arima_forecast", "matlab_econ_arima_forecast", PtrTy,
+         {PtrTy, F64, PtrTy}},
+        {"matlab_econ_arima_infer", "matlab_econ_arima_infer", PtrTy,
+         {PtrTy, PtrTy}},
+        {"matlab_econ_arima_simulate", "matlab_econ_arima_simulate", PtrTy,
+         {PtrTy, F64}},
         /* ===== DSP System Toolbox =====
          * System-Object step/lifecycle entries.  The classdef method body
          * forwards the receiver `obj` (PtrTy) + the input frame (PtrTy
@@ -7059,6 +7070,39 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"simBySolution", "matlab_sde_sim_solution", 1, "pfff"},
       {"haltonseq",     "matlab_haltonseq",        1, "ff"},
       {"optpricemc",    "matlab_optpricemc",       0, "pfff"},
+      /* ================== Econometrics Toolbox Tier-1 ================== */
+      /* Data prep. */
+      {"price2ret",  "matlab_econ_price2ret",  1, "p"},
+      {"ret2price",  "matlab_econ_ret2price",  1, "p"},
+      {"hpfilter",   "matlab_econ_hpfilter",   1, "p"},
+      {"hpfilter",   "matlab_econ_hpfilter_l", 1, "pf"},
+      /* ACF / PACF. */
+      {"autocorr",   "matlab_econ_autocorr",   1, "p"},
+      {"autocorr",   "matlab_econ_autocorr_n", 1, "pf"},
+      {"parcorr",    "matlab_econ_parcorr",    1, "p"},
+      {"parcorr",    "matlab_econ_parcorr_n",  1, "pf"},
+      {"crosscorr",  "matlab_econ_crosscorr",  1, "pp"},
+      /* Diagnostic + comparison tests (return reject decision h, 0/1, at
+       * the 5% level; the p-value/stat are available via the 2-output
+       * forms wired in Lowering). */
+      {"lbqtest",    "matlab_econ_lbqtest",    0, "p"},
+      {"lbqtest",    "matlab_econ_lbqtest_n",  0, "pf"},
+      {"archtest",   "matlab_econ_archtest",   0, "p"},
+      {"archtest",   "matlab_econ_archtest_n", 0, "pf"},
+      {"aicbic",     "matlab_econ_aic",        0, "ff"},
+      {"aicbic",     "matlab_econ_aic_n",      0, "fff"},
+      {"lratiotest", "matlab_econ_lratiotest", 0, "fff"},
+      {"waldtest",   "matlab_econ_waldtest",   0, "pp"},
+      {"lmtest",     "matlab_econ_lmtest",     0, "pp"},
+      {"hac",        "matlab_econ_hac",        1, "pp"},
+      {"fgls",       "matlab_econ_fgls",       1, "pp"},
+      /* Unit-root + stationarity tests. */
+      {"adftest",    "matlab_econ_adftest",    0, "p"},
+      {"adftest",    "matlab_econ_adftest_n",  0, "pf"},
+      {"pptest",     "matlab_econ_pptest",     0, "p"},
+      {"kpsstest",   "matlab_econ_kpsstest",   0, "p"},
+      {"lmctest",    "matlab_econ_lmctest",    0, "p"},
+      {"vratiotest", "matlab_econ_vratiotest", 0, "p"},
     };
 
     // Pick the first entry with name + arity + TYPE match so overloaded
