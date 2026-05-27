@@ -1205,20 +1205,60 @@ mlir::Value Lowerer::maybeCloneObjForAssign(mlir::Value Rhs,
    * additional clone is always safe (the callee already produced a
    * fresh obj). The same applies to BinaryOp / UnaryOp results. */
   if (!Rhs || !RhsExpr) return Rhs;
-  const ClassDef *Cls = nullptr;
-  if (auto *NE = dynamic_cast<const NameExpr *>(RhsExpr))
-    if (NE->Ref) Cls = NE->Ref->PinnedClass;
-  if (!Cls) return Rhs;
-  if (!isValueClass(Cls)) return Rhs;
-  /* Class-instance values may flow through `none`-typed slots in the
-   * existing lowering (the alloc carries `matlab.class_id` but the
-   * MLIR result type is none). Emit the clone call regardless and
-   * let LowerTensorOps retype operands through the runtime call. */
   auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
-  mlir::NamedAttribute Cal(
-      mlir::StringAttr::get(&MCtx, "callee"),
-      mlir::StringAttr::get(&MCtx, "matlab_obj_clone"));
-  return emitUnreg("matlab.call_builtin", {Rhs}, PtrTy, L, {Cal});
+  const NameExpr *NE = dynamic_cast<const NameExpr *>(RhsExpr);
+  const ClassDef *Cls = (NE && NE->Ref) ? NE->Ref->PinnedClass : nullptr;
+  if (Cls) {
+    if (!isValueClass(Cls)) return Rhs;
+    /* Class-instance values may flow through `none`-typed slots in the
+     * existing lowering (the alloc carries `matlab.class_id` but the
+     * MLIR result type is none). Emit the clone call regardless and
+     * let LowerTensorOps retype operands through the runtime call. */
+    mlir::NamedAttribute Cal(
+        mlir::StringAttr::get(&MCtx, "callee"),
+        mlir::StringAttr::get(&MCtx, "matlab_obj_clone"));
+    return emitUnreg("matlab.call_builtin", {Rhs}, PtrTy, L, {Cal});
+  }
+  /* Matrix copy-on-assign: a bare `B = A` shallow-copies the `matlab_mat*`
+   * pointer (the runtime has no refcount/COW), so a later `B(i) = v` would
+   * mutate A's shared buffer.  Clone when the RHS is a plain numeric-matrix
+   * variable (double / single / complex element) flowing as a heap pointer.
+   * Strings/structs/cells/objects (different Type::Kind or class-pinned) and
+   * integer-typed arrays (different runtime descriptor layout) are excluded,
+   * and a fresh RHS (call / operator / literal result) is not a NameExpr so
+   * never reaches here — only a bare variable reference can alias. */
+  if (NE && NE->Ref && !NE->Ref->PinnedClass) {
+    const Type *RT = RhsExpr->Ty ? RhsExpr->Ty : NE->Ref->InferredType;
+    bool isMat = false;
+    if (RT && RT->K == Type::Kind::Array) {
+      auto *AT = static_cast<const ArrayType *>(RT);
+      bool numeric = AT->Elt == Dtype::Double || AT->Elt == Dtype::Single ||
+                     AT->Elt == Dtype::Complex;
+      /* Only clone a *definitely multi-element* matrix.  Scalars flow as an
+       * f64 (no aliasing) and — crucially — a scalar wrongly wrapped here
+       * disrupts the lowering of values flowing into struct-field sets, N-D
+       * stores, and function returns (it leaves a `matlab.call_builtin` that
+       * downstream type-matched patterns no longer recognise).  Unknown-rank
+       * is excluded for the same safety reason. */
+      bool multiElem = AT->S.K == Shape::Rank::Vector ||
+                       AT->S.K == Shape::Rank::Matrix ||
+                       AT->S.K == Shape::Rank::NDArray;
+      isMat = numeric && multiElem;
+    }
+    if (isMat) {
+      /* A bare `B = A` shallow-copies the `matlab_mat*` pointer (the runtime
+       * has no refcount/COW), so a later `B(i) = v` would mutate A's shared
+       * buffer.  Clone the buffer (the LowerTensorOps arm passes a scalar f64
+       * through unchanged; the runtime helper deep-copies matlab_mat / mat3 /
+       * mat_c via the magic tag).  Gated on a *positive* numeric-matrix static
+       * type so non-matrix pointer values are never misread. */
+      mlir::NamedAttribute Cal(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, "matlab_mat_clone_cow"));
+      return emitUnreg("matlab.call_builtin", {Rhs}, PtrTy, L, {Cal});
+    }
+  }
+  return Rhs;
 }
 
 mlir::Value Lowerer::resolveStructBase(const Expr *E, mlir::Location L) {

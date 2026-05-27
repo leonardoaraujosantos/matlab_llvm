@@ -2310,6 +2310,38 @@ void matlab_slice_store2(matlab_mat *A, matlab_mat *rows, matlab_mat *cols,
     }
 }
 
+/* Copy-on-assign deep clone.  Emitted by the lowering for `B = A` when the
+ * RHS is a plain numeric-matrix variable, so a later `B(i) = v` cannot mutate
+ * A's shared buffer (MATLAB value semantics; the runtime has no refcount/COW).
+ * Handles the three double-backed descriptors via their magic tags; anything
+ * else is returned unchanged (the lowering already gates on a real-matrix
+ * static type, so non-matrix pointers should not reach here). */
+void *matlab_mat_clone_cow(void *p) {
+    if (!p) return p;
+    if (mat_is_3d(p)) {
+        matlab_mat3 *s = reinterpret_cast<matlab_mat3 *>(p);
+        matlab_mat3 *o = mat3_alloc(s->rows, s->cols, s->depth);
+        int64_t n = s->rows * s->cols * s->depth;
+        if (n > 0) std::memcpy(o->data, s->data, (size_t)n * sizeof(double));
+        return o;
+    }
+    if (mat_is_complex(p)) {
+        matlab_mat_c *s = reinterpret_cast<matlab_mat_c *>(p);
+        matlab_mat_c *o = mat_c_alloc(s->rows, s->cols);
+        int64_t n = s->rows * s->cols;
+        if (n > 0) {
+            std::memcpy(o->re, s->re, (size_t)n * sizeof(double));
+            std::memcpy(o->im, s->im, (size_t)n * sizeof(double));
+        }
+        return o;
+    }
+    matlab_mat *s = reinterpret_cast<matlab_mat *>(p);
+    matlab_mat *o = mat_alloc(s->rows, s->cols);
+    int64_t n = s->rows * s->cols;
+    if (n > 0) std::memcpy(o->data, s->data, (size_t)n * sizeof(double));
+    return o;
+}
+
 void matlab_slice_store2_scalar(matlab_mat *A, matlab_mat *rows,
                                 matlab_mat *cols, double v) {
     int64_t R = rows ? rows->rows * rows->cols : A->rows;
