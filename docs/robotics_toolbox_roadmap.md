@@ -102,14 +102,21 @@ plots route through Cairo 3-D), [`feature_status.md`](feature_status.md).
   the manipulator forward/inverse-kinematics core** — the highest-value
   cut and the foundation every robotics demo needs.
 - **Status legend**: ✅ shipped · 🟡 partial · 🔵 not started. **All 6 tiers
-  shipped 2026-05-27 in one PR** (partial per the documented carve-downs):
-  T1 ✅ full transform surface, T2 🟡 (DH-only `setFixedTransform`, baked
-  `loadrobot('planar2'/'planar3')`, URDF carved), T3 ✅ LM-damped IK with
-  multi-return + `constraintPoseTarget`, T4 🟡 (cubic/trap/transform trajs +
-  compact massMatrix/inverseDynamics; bspline/minjerk/contopptraj/`forwardDynamics`/`jointSpaceMotionModel`
-  carved), T5 🟡 (diffdrive + occmap + PRM + pure-pursuit; other kinematics
-  + range sensor + VFH carved), T6 🟡 (collision primitives + simplified
-  RRT; CHOMP / GJK-EPA / particle filter carved).
+  shipped 2026-05-27 in one PR + a follow-on slice** (partial per the
+  documented carve-downs):
+  T1 ✅ full transform surface, T2 ✅ (DH `loadrobot('planar2'/'planar3')`
+  **+ URDF `importrobot`** — fixed-transform tree from `<joint>`/`<link>`/
+  `<inertial>`; full per-body `rigidBody`/`rigidBodyJoint` classes carved),
+  T3 ✅ LM-damped IK + `constraintPoseTarget` **+ `generalizedInverseKinematics`**
+  (multi-constraint LM with `constraintPositionTarget`/`constraintOrientationTarget`;
+  `analyticalInverseKinematics` carved), T4 ✅ cubic/trap/transform trajs **+
+  full CRBA/RNEA dynamics** (`inverseDynamics`/`massMatrix`/`forwardDynamics`/
+  `gravityTorque`/`velocityProduct`/`centerOfMass`; bspline/minjerk/contopptraj
+  + `jointSpaceMotionModel` carved), T5 🟡 (diffdrive + occmap + PRM +
+  pure-pursuit; other kinematics + range sensor + VFH carved), T6 ✅
+  **orientation-aware GJK** `checkCollision` over box/sphere/cylinder/capsule
+  + simplified `manipulatorRRT` (EPA penetration depth + `collisionMesh` +
+  CHOMP + particle filter carved).
   **Everything below is 🔵 not started** — but the substrate is deep:
   `ode45`, `pinv`/`svd`/`qr`/`mldivide`, `fminunc`/`lsqnonlin`, `interp1`,
   the PRNG, the STL importer, classdef, and Cairo plotting are all

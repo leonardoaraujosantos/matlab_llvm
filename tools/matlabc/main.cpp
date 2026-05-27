@@ -2378,6 +2378,17 @@ static std::string buildReplPrelude(const std::string &Src) {
     {false, "transformtraj",             "robotics_classdefs.m"},
     {false, "massMatrix",                "robotics_classdefs.m"},
     {false, "inverseDynamics",           "robotics_classdefs.m"},
+    {false, "forwardDynamics",           "robotics_classdefs.m"},
+    {false, "gravityTorque",             "robotics_classdefs.m"},
+    {false, "velocityProduct",           "robotics_classdefs.m"},
+    {false, "centerOfMass",              "robotics_classdefs.m"},
+    {false, "importrobot",               "robotics_classdefs.m"},
+    {false, "generalizedInverseKinematics","robotics_classdefs.m"},
+    {false, "constraintPositionTarget",  "robotics_classdefs.m"},
+    {false, "constraintOrientationTarget","robotics_classdefs.m"},
+    {false, "constraintJointBounds",     "robotics_classdefs.m"},
+    {false, "collisionCylinder",         "robotics_classdefs.m"},
+    {false, "collisionCapsule",          "robotics_classdefs.m"},
     {false, "differentialDriveKinematics","robotics_classdefs.m"},
     {false, "binaryOccupancyMap",        "robotics_classdefs.m"},
     {false, "mobileRobotPRM",            "robotics_classdefs.m"},
@@ -11499,6 +11510,10 @@ int main(int Argc, char **Argv) {
       "homtrans", "wrapToPi", "wrapTo2Pi", "vecnorm",
       "cubicpolytraj", "trapveltraj", "transformtraj",
       "massMatrix", "inverseDynamics",
+      "forwardDynamics", "gravityTorque", "velocityProduct", "centerOfMass",
+      "importrobot", "generalizedInverseKinematics",
+      "constraintPositionTarget", "constraintOrientationTarget",
+      "constraintJointBounds", "collisionCylinder", "collisionCapsule",
       "differentialDriveKinematics", "binaryOccupancyMap",
       "mobileRobotPRM", "controllerPurePursuit",
       "setOccupancy", "getOccupancy", "checkOccupancy", "findpath",
@@ -11746,6 +11761,14 @@ int main(int Argc, char **Argv) {
         ClsName == "cubicpolytraj" || ClsName == "trapveltraj" ||
         ClsName == "transformtraj" ||
         ClsName == "massMatrix" || ClsName == "inverseDynamics" ||
+        ClsName == "forwardDynamics" || ClsName == "gravityTorque" ||
+        ClsName == "velocityProduct" || ClsName == "centerOfMass" ||
+        ClsName == "importrobot" ||
+        ClsName == "generalizedInverseKinematics" ||
+        ClsName == "constraintPositionTarget" ||
+        ClsName == "constraintOrientationTarget" ||
+        ClsName == "constraintJointBounds" ||
+        ClsName == "collisionCylinder" || ClsName == "collisionCapsule" ||
         ClsName == "differentialDriveKinematics" ||
         ClsName == "binaryOccupancyMap" || ClsName == "mobileRobotPRM" ||
         ClsName == "controllerPurePursuit" ||

@@ -1,3 +1,6 @@
 Two coincident spheres collide: 1
-Box at origin vs sphere at origin collide: 1
+Spheres 3m apart collide: 0
+GJK separation = 1.00 m
+box-cyl collide: 1
+box-cap collide: 1
 RRT plan rows=6 cols=2

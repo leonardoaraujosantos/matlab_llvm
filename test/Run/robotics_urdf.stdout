@@ -1,0 +1,5 @@
+Imported URDF: 2 bodies
+Home EE: [1.000, 0.000]
+Bent EE: [0.000, 1.000]
+M(1,1)=2.6600 symmetric_err=1.11e-16
+FD/ID roundtrip err = 1.21e-15

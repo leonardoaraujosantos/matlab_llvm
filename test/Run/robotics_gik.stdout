@@ -1,0 +1,4 @@
+gIK iters=6 flag=2 err=0.0196
+gIK q = [-0.337, 1.318]
+EE pos = [1.500, 0.500]  (target 1.5, 0.5)
+pos err = 0.0005

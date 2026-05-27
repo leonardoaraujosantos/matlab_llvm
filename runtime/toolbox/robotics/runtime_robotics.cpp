@@ -41,6 +41,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -145,6 +147,57 @@ inline void inv_tform(const double T[16], double Ti[16]) {
                     -Rt[3]*T[3] - Rt[4]*T[7] - Rt[5]*T[11],
                     -Rt[6]*T[3] - Rt[7]*T[7] - Rt[8]*T[11]};
     compose_tform(Rt, pi, Ti);
+}
+
+// Joint motion transform for the fixed-transform (URDF) representation:
+// rotation about `axis` by q (revolute, jt==1) or translation along `axis`
+// by q (prismatic, jt==2); identity for fixed.
+inline void joint_motion_tform(const double axis_in[3], int jt, double q, double M[16]) {
+    M[0]=1;M[1]=0;M[2]=0;M[3]=0; M[4]=0;M[5]=1;M[6]=0;M[7]=0;
+    M[8]=0;M[9]=0;M[10]=1;M[11]=0; M[12]=0;M[13]=0;M[14]=0;M[15]=1;
+    double ax[3] = { axis_in[0], axis_in[1], axis_in[2] };
+    if (jt == 1) {
+        double n = std::sqrt(ax[0]*ax[0]+ax[1]*ax[1]+ax[2]*ax[2]);
+        if (n > 1e-12) { ax[0]/=n; ax[1]/=n; ax[2]/=n; }
+        double c = std::cos(q), s = std::sin(q), C = 1 - c;
+        M[0]=c+ax[0]*ax[0]*C;        M[1]=ax[0]*ax[1]*C-ax[2]*s;  M[2]=ax[0]*ax[2]*C+ax[1]*s;
+        M[4]=ax[1]*ax[0]*C+ax[2]*s;  M[5]=c+ax[1]*ax[1]*C;        M[6]=ax[1]*ax[2]*C-ax[0]*s;
+        M[8]=ax[2]*ax[0]*C-ax[1]*s;  M[9]=ax[2]*ax[1]*C+ax[0]*s;  M[10]=c+ax[2]*ax[2]*C;
+    } else if (jt == 2) {
+        M[3]=ax[0]*q; M[7]=ax[1]*q; M[11]=ax[2]*q;
+    }
+}
+
+// Forward declaration (defined just below).
+inline void dh_tform(double a, double alpha, double d, double theta, double T[16]);
+inline void mul_tform(const double A[16], const double B[16], double C[16]);
+
+// Rep-aware forward kinematics: walk the chain, compose into T_out (4×4).
+// rep 0 = DH (DH N×4 + JT), rep 1 = fixed-transform (PT N×16 + AX N×3 + JT).
+inline void fk_chain(int rep, matlab_mat *DH, matlab_mat *JT,
+                     matlab_mat *PT, matlab_mat *AX,
+                     const double *q, int64_t N, double T_out[16]) {
+    double T[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    for (int64_t i = 0; i < N; ++i) {
+        double L[16];
+        int jt = static_cast<int>(JT->data[i]);
+        if (rep == 1) {
+            double pre[16]; for (int k=0;k<16;++k) pre[k]=PT->data[i*16+k];
+            double ax[3] = { AX->data[i*3+0], AX->data[i*3+1], AX->data[i*3+2] };
+            double mot[16];
+            joint_motion_tform(ax, jt, q[i], mot);
+            mul_tform(pre, mot, L);
+        } else {
+            double a = DH->data[i*4+0], alpha = DH->data[i*4+1];
+            double d = DH->data[i*4+2], th = DH->data[i*4+3];
+            if (jt == 1)      th += q[i];
+            else if (jt == 2) d  += q[i];
+            dh_tform(a, alpha, d, th, L);
+        }
+        double R[16]; mul_tform(T, L, R);
+        std::memcpy(T, R, sizeof(R));
+    }
+    std::memcpy(T_out, T, sizeof(T));
 }
 
 // DH transform: standard Denavit-Hartenberg (a, alpha, d, theta) — a 4×4
@@ -444,7 +497,43 @@ matlab_mat *matlab_robotics_tree_init(void *obj_v) {
     robotics::obj_set_mat(obj_v, "JointTypes",  mat_alloc(0, 1));
     robotics::obj_set_mat(obj_v, "JointLimits", mat_alloc(0, 2));
     robotics::obj_set_f64(obj_v, "NumBodies", 0.0);
+    robotics::obj_set_f64(obj_v, "Representation", 0.0);
+    robotics::obj_set_mat(obj_v, "PreTransforms", mat_alloc(0, 16));
+    robotics::obj_set_mat(obj_v, "JointAxes",     mat_alloc(0, 3));
+    robotics::obj_set_mat(obj_v, "Mass",          mat_alloc(0, 1));
+    robotics::obj_set_mat(obj_v, "COM",           mat_alloc(0, 3));
+    robotics::obj_set_mat(obj_v, "Inertia",       mat_alloc(0, 6));
+    matlab_mat *G = mat_alloc(1, 3);
+    G->data[0] = 0.0; G->data[1] = 0.0; G->data[2] = -9.81;
+    robotics::obj_set_mat(obj_v, "Gravity", G);
     return mat_alloc(0, 0);
+}
+
+// Bake uniform-rod link inertia for an N-link planar arm with per-link
+// length L[i]: mass 1 kg, COM at the link midpoint (−L/2 back along x from
+// the distal frame), thin-rod inertia about the COM (Izz = Iyy = m·L²/12).
+static void bake_rod_inertia(void *obj_v, const double *L, int64_t N) {
+    matlab_mat *M  = mat_alloc(N, 1);
+    matlab_mat *C  = mat_alloc(N, 3);
+    matlab_mat *In = mat_alloc(N, 6);
+    for (int64_t i = 0; i < N; ++i) {
+        double m = 1.0;
+        double Li = L[i];
+        M->data[i] = m;
+        C->data[i * 3 + 0] = -Li * 0.5;  // COM midway back along x
+        C->data[i * 3 + 1] = 0.0;
+        C->data[i * 3 + 2] = 0.0;
+        double rod = m * Li * Li / 12.0;
+        In->data[i * 6 + 0] = rod * 0.01;  // Ixx (thin)
+        In->data[i * 6 + 1] = rod;         // Iyy
+        In->data[i * 6 + 2] = rod;         // Izz
+        In->data[i * 6 + 3] = 0.0;         // Iyz
+        In->data[i * 6 + 4] = 0.0;         // Ixz
+        In->data[i * 6 + 5] = 0.0;         // Ixy
+    }
+    robotics::obj_set_mat(obj_v, "Mass",    M);
+    robotics::obj_set_mat(obj_v, "COM",     C);
+    robotics::obj_set_mat(obj_v, "Inertia", In);
 }
 
 // addBody(tree, dh, joint_type_code, low_lim, high_lim) — append one row to
@@ -501,6 +590,8 @@ static void build_planar2(void *obj_v) {
     robotics::obj_set_mat(obj_v, "JointTypes",  JT);
     robotics::obj_set_mat(obj_v, "JointLimits", JL);
     robotics::obj_set_f64(obj_v, "NumBodies", 2.0);
+    double L2[2] = { 1.0, 1.0 };
+    bake_rod_inertia(obj_v, L2, 2);
 }
 
 // Build a 3-link planar arm (RRR), each link 0.5 m.
@@ -523,6 +614,8 @@ static void build_planar3(void *obj_v) {
     robotics::obj_set_mat(obj_v, "JointTypes",  JT);
     robotics::obj_set_mat(obj_v, "JointLimits", JL);
     robotics::obj_set_f64(obj_v, "NumBodies", 3.0);
+    double L3[3] = { 0.5, 0.5, 0.5 };
+    bake_rod_inertia(obj_v, L3, 3);
 }
 
 matlab_mat *matlab_robotics_loadrobot(void *obj_v, void *name_s) {
@@ -540,27 +633,45 @@ matlab_mat *matlab_robotics_loadrobot(void *obj_v, void *name_s) {
 // revolute joint i, the joint variable q(i) adds to DH(i,4) (theta).  For
 // a prismatic joint, q(i) adds to DH(i,3) (d).
 matlab_mat *matlab_robotics_getTransform(void *obj_v, matlab_mat *q) {
-    matlab_mat *DH = robotics::obj_get_mat(obj_v, "DH");
     matlab_mat *JT = robotics::obj_get_mat(obj_v, "JointTypes");
     matlab_mat *O  = mat_alloc(4, 4);
     O->data[0] = 1.0; O->data[5] = 1.0; O->data[10] = 1.0; O->data[15] = 1.0;
-    if (!DH || !JT || !q) return O;
-    int64_t N = DH->rows;
+    if (!JT || !q) return O;
+    int rep = static_cast<int>(robotics::obj_get_f64(obj_v, "Representation"));
+    int64_t N = JT->rows;
     if (q->rows * q->cols < N) return O;
     double T[16];
     std::memcpy(T, O->data, sizeof(T));
-    for (int64_t i = 0; i < N; ++i) {
-        double a = DH->data[i * 4 + 0];
-        double alpha = DH->data[i * 4 + 1];
-        double d = DH->data[i * 4 + 2];
-        double th = DH->data[i * 4 + 3];
-        if (JT->data[i] == 1.0)      th += q->data[i];
-        else if (JT->data[i] == 2.0) d  += q->data[i];
-        double L[16];
-        robotics::dh_tform(a, alpha, d, th, L);
-        double R[16];
-        robotics::mul_tform(T, L, R);
-        std::memcpy(T, R, sizeof(T));
+    if (rep == 1) {
+        // Fixed-transform (URDF): T = prod(PreTransform_i · jointMotion(axis_i, q_i)).
+        matlab_mat *PT = robotics::obj_get_mat(obj_v, "PreTransforms");
+        matlab_mat *AX = robotics::obj_get_mat(obj_v, "JointAxes");
+        if (!PT || !AX) { for (int i=0;i<16;++i) O->data[i]=T[i]; return O; }
+        for (int64_t i = 0; i < N; ++i) {
+            double pre[16]; for (int k=0;k<16;++k) pre[k] = PT->data[i*16+k];
+            double ax[3] = { AX->data[i*3+0], AX->data[i*3+1], AX->data[i*3+2] };
+            double mot[16];
+            robotics::joint_motion_tform(ax, static_cast<int>(JT->data[i]), q->data[i], mot);
+            double L[16], R[16];
+            robotics::mul_tform(pre, mot, L);
+            robotics::mul_tform(T, L, R);
+            std::memcpy(T, R, sizeof(T));
+        }
+    } else {
+        matlab_mat *DH = robotics::obj_get_mat(obj_v, "DH");
+        if (!DH) { for (int i=0;i<16;++i) O->data[i]=T[i]; return O; }
+        for (int64_t i = 0; i < N; ++i) {
+            double a = DH->data[i * 4 + 0];
+            double alpha = DH->data[i * 4 + 1];
+            double d = DH->data[i * 4 + 2];
+            double th = DH->data[i * 4 + 3];
+            if (JT->data[i] == 1.0)      th += q->data[i];
+            else if (JT->data[i] == 2.0) d  += q->data[i];
+            double L[16], R[16];
+            robotics::dh_tform(a, alpha, d, th, L);
+            robotics::mul_tform(T, L, R);
+            std::memcpy(T, R, sizeof(T));
+        }
     }
     for (int i = 0; i < 16; ++i) O->data[i] = T[i];
     return O;
@@ -980,40 +1091,632 @@ matlab_mat *matlab_robotics_transformtraj(matlab_mat *T0, matlab_mat *T1, matlab
     return out;
 }
 
-// massMatrix(rb, q) — diagonal-dominant approximation using link-length
-// inertias proportional to a².  This is a compact stand-in for the full
-// composite-rigid-body algorithm (CRBA); sufficient for the trajectory
-// tracking demo + tests.  Real CRBA carved as a follow-on.
-matlab_mat *matlab_robotics_massMatrix(void *obj_v, matlab_mat *q) {
-    matlab_mat *DH = robotics::obj_get_mat(obj_v, "DH");
-    int64_t N = DH ? DH->rows : 0;
-    matlab_mat *M = mat_alloc(N, N);
-    (void)q;
+}  // extern "C" (close the T1-T4 block before the dynamics-helper namespace)
+
+// ---------- dynamics support helpers (file-local) --------------------------
+namespace robotics {
+
+inline void cross3(const double a[3], const double b[3], double o[3]) {
+    o[0] = a[1] * b[2] - a[2] * b[1];
+    o[1] = a[2] * b[0] - a[0] * b[2];
+    o[2] = a[0] * b[1] - a[1] * b[0];
+}
+// 3×3 (row-major) times 3-vec.
+inline void mv3(const double R[9], const double v[3], double o[3]) {
+    o[0] = R[0]*v[0] + R[1]*v[1] + R[2]*v[2];
+    o[1] = R[3]*v[0] + R[4]*v[1] + R[5]*v[2];
+    o[2] = R[6]*v[0] + R[7]*v[1] + R[8]*v[2];
+}
+// 3×3 transpose times 3-vec.
+inline void mtv3(const double R[9], const double v[3], double o[3]) {
+    o[0] = R[0]*v[0] + R[3]*v[1] + R[6]*v[2];
+    o[1] = R[1]*v[0] + R[4]*v[1] + R[7]*v[2];
+    o[2] = R[2]*v[0] + R[5]*v[1] + R[8]*v[2];
+}
+
+// Local frame transform A_i (frame i-1 → i) at config q_i, for either tree
+// representation; also returns the joint axis s (in the PARENT frame i-1).
+struct LinkFrame { double R[9]; double P[3]; double s[3]; int jt; };
+
+LinkFrame link_frame(void *obj_v, int rep, matlab_mat *DH, matlab_mat *JT,
+                     matlab_mat *PT, matlab_mat *AX, int64_t i, double qi) {
+    LinkFrame lf;
+    lf.jt = static_cast<int>(JT->data[i]);
+    double T[16];
+    if (rep == 0) {
+        // DH: A = dh_tform(a, alpha, d(+pris q), theta(+rev q)); axis = z of i-1.
+        double a = DH->data[i*4+0], alpha = DH->data[i*4+1];
+        double d = DH->data[i*4+2], th = DH->data[i*4+3];
+        if (lf.jt == 1)      th += qi;
+        else if (lf.jt == 2) d  += qi;
+        dh_tform(a, alpha, d, th, T);
+        lf.s[0] = 0; lf.s[1] = 0; lf.s[2] = 1;
+    } else {
+        // Fixed-transform: A = PreTransform · jointMotion(axis, type, q).
+        double pre[16];
+        for (int k = 0; k < 16; ++k) pre[k] = PT->data[i*16+k];
+        double ax[3] = { AX->data[i*3+0], AX->data[i*3+1], AX->data[i*3+2] };
+        double mot[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+        if (lf.jt == 1) {
+            // Rotation about ax by qi (Rodrigues).
+            double n = std::sqrt(ax[0]*ax[0]+ax[1]*ax[1]+ax[2]*ax[2]);
+            if (n > 1e-12) { ax[0]/=n; ax[1]/=n; ax[2]/=n; }
+            double c = std::cos(qi), si = std::sin(qi), C = 1 - c;
+            mot[0]=c+ax[0]*ax[0]*C;       mot[1]=ax[0]*ax[1]*C-ax[2]*si; mot[2]=ax[0]*ax[2]*C+ax[1]*si;
+            mot[4]=ax[1]*ax[0]*C+ax[2]*si; mot[5]=c+ax[1]*ax[1]*C;       mot[6]=ax[1]*ax[2]*C-ax[0]*si;
+            mot[8]=ax[2]*ax[0]*C-ax[1]*si; mot[9]=ax[2]*ax[1]*C+ax[0]*si; mot[10]=c+ax[2]*ax[2]*C;
+        } else if (lf.jt == 2) {
+            mot[3] = ax[0]*qi; mot[7] = ax[1]*qi; mot[11] = ax[2]*qi;
+        }
+        mul_tform(pre, mot, T);
+        lf.s[0] = AX->data[i*3+0]; lf.s[1] = AX->data[i*3+1]; lf.s[2] = AX->data[i*3+2];
+    }
+    lf.R[0]=T[0]; lf.R[1]=T[1]; lf.R[2]=T[2];
+    lf.R[3]=T[4]; lf.R[4]=T[5]; lf.R[5]=T[6];
+    lf.R[6]=T[8]; lf.R[7]=T[9]; lf.R[8]=T[10];
+    lf.P[0]=T[3]; lf.P[1]=T[7]; lf.P[2]=T[11];
+    (void)obj_v;
+    return lf;
+}
+
+// Recursive Newton-Euler inverse dynamics (Craig / Spong serial form).
+// Returns tau (N×1).  gravity is the 1×3 world gravity vector (folded into
+// the base frame's linear acceleration as -gravity).
+matlab_mat *rnea(void *obj_v, matlab_mat *q, matlab_mat *qd, matlab_mat *qdd,
+                 const double gravity[3]) {
+    int rep = static_cast<int>(obj_get_f64(obj_v, "Representation"));
+    matlab_mat *DH = obj_get_mat(obj_v, "DH");
+    matlab_mat *JT = obj_get_mat(obj_v, "JointTypes");
+    matlab_mat *PT = obj_get_mat(obj_v, "PreTransforms");
+    matlab_mat *AX = obj_get_mat(obj_v, "JointAxes");
+    matlab_mat *MS = obj_get_mat(obj_v, "Mass");
+    matlab_mat *CM = obj_get_mat(obj_v, "COM");
+    matlab_mat *IN = obj_get_mat(obj_v, "Inertia");
+    int64_t N = JT ? JT->rows : 0;
+    matlab_mat *tau = mat_alloc(N, 1);
+    if (N == 0 || !MS || !CM || !IN) return tau;
+
+    std::vector<LinkFrame> lf(N);
+    std::vector<double> w(N*3,0), wd(N*3,0), vd(N*3,0);
+    std::vector<double> F(N*3,0), Nt(N*3,0);
+    std::vector<double> axis(N*3,0);  // joint axis in frame i
+
+    double w_prev[3]={0,0,0}, wd_prev[3]={0,0,0};
+    double vd_prev[3]={-gravity[0],-gravity[1],-gravity[2]};
+
     for (int64_t i = 0; i < N; ++i) {
-        double a = DH->data[i * 4 + 0];
-        double inertia = std::max(0.05, a * a);
-        M->data[i * N + i] = (N - i) * inertia;  // outer joints drag more inertia
+        double qi = (q && q->rows*q->cols > i) ? q->data[i] : 0.0;
+        double qdi = (qd && qd->rows*qd->cols > i) ? qd->data[i] : 0.0;
+        double qddi = (qdd && qdd->rows*qdd->cols > i) ? qdd->data[i] : 0.0;
+        lf[i] = link_frame(obj_v, rep, DH, JT, PT, AX, i, qi);
+        double *R = lf[i].R, *P = lf[i].P;
+        double ax[3]; mtv3(R, lf[i].s, ax);   // joint axis in frame i
+        axis[i*3+0]=ax[0]; axis[i*3+1]=ax[1]; axis[i*3+2]=ax[2];
+        double Rt_w[3];  mtv3(R, w_prev, Rt_w);
+        double Rt_wd[3]; mtv3(R, wd_prev, Rt_wd);
+        double *wi = &w[i*3], *wdi = &wd[i*3], *vdi = &vd[i*3];
+        if (lf[i].jt == 1) {  // revolute
+            for (int k=0;k<3;++k) wi[k] = Rt_w[k] + qdi*ax[k];
+            double tmp[3]; cross3(Rt_w, ax, tmp);
+            for (int k=0;k<3;++k) wdi[k] = Rt_wd[k] + qddi*ax[k] + qdi*tmp[k];
+        } else {
+            for (int k=0;k<3;++k) { wi[k]=Rt_w[k]; wdi[k]=Rt_wd[k]; }
+        }
+        // vd_i = R^T( vd_{i-1} + wd_{i-1}×P + w_{i-1}×(w_{i-1}×P) )
+        double t1[3], t2[3], t3[3], inner[3];
+        cross3(wd_prev, P, t1);
+        cross3(w_prev, P, t2); cross3(w_prev, t2, t3);
+        for (int k=0;k<3;++k) inner[k] = vd_prev[k] + t1[k] + t3[k];
+        mtv3(R, inner, vdi);
+        if (lf[i].jt == 2) {  // prismatic adds translation terms
+            double cw[3]; cross3(wi, ax, cw);
+            for (int k=0;k<3;++k) vdi[k] += qddi*ax[k] + 2*qdi*cw[k];
+        }
+        // COM accel + body force/moment.
+        double Pc[3] = { CM->data[i*3+0], CM->data[i*3+1], CM->data[i*3+2] };
+        double a1[3], a2[3], a3[3], vcd[3];
+        cross3(wdi, Pc, a1);
+        cross3(wi, Pc, a2); cross3(wi, a2, a3);
+        for (int k=0;k<3;++k) vcd[k] = vdi[k] + a1[k] + a3[k];
+        double m = MS->data[i];
+        for (int k=0;k<3;++k) F[i*3+k] = m * vcd[k];
+        // Inertia tensor about COM (frame i): [Ixx Iyy Izz Iyz Ixz Ixy].
+        double Ic[9] = { IN->data[i*6+0], IN->data[i*6+5], IN->data[i*6+4],
+                         IN->data[i*6+5], IN->data[i*6+1], IN->data[i*6+3],
+                         IN->data[i*6+4], IN->data[i*6+3], IN->data[i*6+2] };
+        double Iw[3], Iwd[3], wIw[3];
+        mv3(Ic, wi, Iw);   cross3(wi, Iw, wIw);
+        mv3(Ic, wdi, Iwd);
+        for (int k=0;k<3;++k) Nt[i*3+k] = Iwd[k] + wIw[k];
+        for (int k=0;k<3;++k){ w_prev[k]=wi[k]; wd_prev[k]=wdi[k]; vd_prev[k]=vdi[k]; }
+    }
+
+    double f_next[3]={0,0,0}, n_next[3]={0,0,0};
+    for (int64_t i = N-1; i >= 0; --i) {
+        double Rn[9]; double Pn[3];
+        if (i+1 < N) {
+            for (int k=0;k<9;++k) Rn[k]=lf[i+1].R[k];
+            for (int k=0;k<3;++k) Pn[k]=lf[i+1].P[k];
+        } else {
+            Rn[0]=1;Rn[1]=0;Rn[2]=0; Rn[3]=0;Rn[4]=1;Rn[5]=0; Rn[6]=0;Rn[7]=0;Rn[8]=1;
+            Pn[0]=Pn[1]=Pn[2]=0;
+        }
+        double Rf[3]; mv3(Rn, f_next, Rf);
+        double fi[3];
+        for (int k=0;k<3;++k) fi[k] = Rf[k] + F[i*3+k];
+        double Pc[3] = { CM->data[i*3+0], CM->data[i*3+1], CM->data[i*3+2] };
+        double Rn_n[3]; mv3(Rn, n_next, Rn_n);
+        double c1[3]; cross3(Pc, &F[i*3], c1);
+        double c2[3]; cross3(Pn, Rf, c2);
+        double ni[3];
+        for (int k=0;k<3;++k) ni[k] = Nt[i*3+k] + Rn_n[k] + c1[k] + c2[k];
+        double *ax = &axis[i*3];
+        tau->data[i] = (lf[i].jt == 2) ? (fi[0]*ax[0]+fi[1]*ax[1]+fi[2]*ax[2])
+                                       : (ni[0]*ax[0]+ni[1]*ax[1]+ni[2]*ax[2]);
+        for (int k=0;k<3;++k){ f_next[k]=fi[k]; n_next[k]=ni[k]; }
+    }
+    return tau;
+}
+
+}  // namespace robotics
+
+extern "C" {
+
+// inverseDynamics(rb, q, qd, qdd) — full recursive Newton-Euler with gravity.
+matlab_mat *matlab_robotics_inverseDynamics(void *obj_v, matlab_mat *q,
+                                             matlab_mat *qd, matlab_mat *qdd) {
+    matlab_mat *G = robotics::obj_get_mat(obj_v, "Gravity");
+    double g[3] = {0,0,-9.81};
+    if (G && G->rows*G->cols >= 3) { g[0]=G->data[0]; g[1]=G->data[1]; g[2]=G->data[2]; }
+    return robotics::rnea(obj_v, q, qd, qdd, g);
+}
+
+// massMatrix(rb, q) — composite via the unit-acceleration method: column j is
+// inverseDynamics(q, qd=0, qdd=e_j) with gravity OFF.  Exactly the joint-space
+// inertia matrix M(q).
+matlab_mat *matlab_robotics_massMatrix(void *obj_v, matlab_mat *q) {
+    matlab_mat *JT = robotics::obj_get_mat(obj_v, "JointTypes");
+    int64_t N = JT ? JT->rows : 0;
+    matlab_mat *M = mat_alloc(N, N);
+    if (N == 0) return M;
+    double g0[3] = {0,0,0};
+    matlab_mat *qd = mat_alloc(N, 1);     // zeros
+    for (int64_t j = 0; j < N; ++j) {
+        matlab_mat *ej = mat_alloc(N, 1);
+        ej->data[j] = 1.0;
+        matlab_mat *col = robotics::rnea(obj_v, q, qd, ej, g0);
+        for (int64_t i = 0; i < N; ++i) M->data[i * N + j] = col->data[i];
     }
     return M;
 }
 
-// inverseDynamics(rb, q, qd, qdd) — gravity-only RNEA stand-in: torque(i) =
-// massMatrix·qdd + gravity term ≈ m·g·a·cos(θ).  Compact.
-matlab_mat *matlab_robotics_inverseDynamics(void *obj_v, matlab_mat *q, matlab_mat *qd, matlab_mat *qdd) {
+// gravityTorque(rb, q) — RNEA with qd=qdd=0 and gravity on.
+matlab_mat *matlab_robotics_gravityTorque(void *obj_v, matlab_mat *q) {
+    matlab_mat *JT = robotics::obj_get_mat(obj_v, "JointTypes");
+    int64_t N = JT ? JT->rows : 0;
+    matlab_mat *G = robotics::obj_get_mat(obj_v, "Gravity");
+    double g[3] = {0,0,-9.81};
+    if (G && G->rows*G->cols >= 3) { g[0]=G->data[0]; g[1]=G->data[1]; g[2]=G->data[2]; }
+    matlab_mat *z = mat_alloc(N, 1);
+    return robotics::rnea(obj_v, q, z, z, g);
+}
+
+// velocityProduct(rb, q, qd) — Coriolis/centrifugal: RNEA with qdd=0, gravity off.
+matlab_mat *matlab_robotics_velocityProduct(void *obj_v, matlab_mat *q, matlab_mat *qd) {
+    matlab_mat *JT = robotics::obj_get_mat(obj_v, "JointTypes");
+    int64_t N = JT ? JT->rows : 0;
+    double g0[3] = {0,0,0};
+    matlab_mat *z = mat_alloc(N, 1);
+    return robotics::rnea(obj_v, q, qd, z, g0);
+}
+
+// forwardDynamics(rb, q, qd, tau) — qdd = M^-1 (tau - bias), bias = RNEA(q,qd,0)
+// with gravity on (Coriolis + gravity).
+matlab_mat *matlab_robotics_forwardDynamics(void *obj_v, matlab_mat *q,
+                                            matlab_mat *qd, matlab_mat *tau) {
+    matlab_mat *JT = robotics::obj_get_mat(obj_v, "JointTypes");
+    int64_t N = JT ? JT->rows : 0;
+    matlab_mat *qdd = mat_alloc(N, 1);
+    if (N == 0) return qdd;
+    matlab_mat *G = robotics::obj_get_mat(obj_v, "Gravity");
+    double g[3] = {0,0,-9.81};
+    if (G && G->rows*G->cols >= 3) { g[0]=G->data[0]; g[1]=G->data[1]; g[2]=G->data[2]; }
+    matlab_mat *z = mat_alloc(N, 1);
+    matlab_mat *bias = robotics::rnea(obj_v, q, qd, z, g);
+    matlab_mat *M = matlab_robotics_massMatrix(obj_v, q);
+    std::vector<double> Mc(N*N), rhs(N);
+    for (int64_t i = 0; i < N*N; ++i) Mc[i] = M->data[i];
+    for (int64_t i = 0; i < N; ++i)
+        rhs[i] = (tau && tau->rows*tau->cols > i ? tau->data[i] : 0.0) - bias->data[i];
+    robotics::solve(Mc.data(), N, rhs.data(), 1);
+    for (int64_t i = 0; i < N; ++i) qdd->data[i] = rhs[i];
+    return qdd;
+}
+
+// centerOfMass(rb, q) — mass-weighted COM in the base frame (1×3).
+matlab_mat *matlab_robotics_centerOfMass(void *obj_v, matlab_mat *q) {
+    matlab_mat *JT = robotics::obj_get_mat(obj_v, "JointTypes");
+    matlab_mat *MS = robotics::obj_get_mat(obj_v, "Mass");
+    matlab_mat *CM = robotics::obj_get_mat(obj_v, "COM");
+    int rep = static_cast<int>(robotics::obj_get_f64(obj_v, "Representation"));
     matlab_mat *DH = robotics::obj_get_mat(obj_v, "DH");
-    int64_t N = DH ? DH->rows : 0;
-    (void)qd;
-    matlab_mat *Mm = matlab_robotics_massMatrix(obj_v, q);
-    matlab_mat *tau = mat_alloc(N, 1);
+    matlab_mat *PT = robotics::obj_get_mat(obj_v, "PreTransforms");
+    matlab_mat *AX = robotics::obj_get_mat(obj_v, "JointAxes");
+    int64_t N = JT ? JT->rows : 0;
+    matlab_mat *out = mat_alloc(1, 3);
+    if (N == 0 || !MS || !CM) return out;
+    double T[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    double total = 0, acc[3] = {0,0,0};
     for (int64_t i = 0; i < N; ++i) {
-        double s = 0;
-        if (qdd) for (int64_t j = 0; j < N; ++j) s += Mm->data[i * N + j] * qdd->data[j];
-        double a = DH->data[i * 4 + 0];
-        double th = (q ? q->data[i] : 0.0);
-        double g_term = 9.81 * a * std::cos(th);
-        tau->data[i] = s + g_term;
+        double qi = (q && q->rows*q->cols > i) ? q->data[i] : 0.0;
+        robotics::LinkFrame lf = robotics::link_frame(obj_v, rep, DH, JT, PT, AX, i, qi);
+        double A[16];
+        robotics::compose_tform(lf.R, lf.P, A);
+        double R[16];
+        robotics::mul_tform(T, A, R);
+        std::memcpy(T, R, sizeof(R));
+        double Pc[3] = { CM->data[i*3+0], CM->data[i*3+1], CM->data[i*3+2] };
+        double world[3];
+        world[0] = T[0]*Pc[0] + T[1]*Pc[1] + T[2]*Pc[2] + T[3];
+        world[1] = T[4]*Pc[0] + T[5]*Pc[1] + T[6]*Pc[2] + T[7];
+        world[2] = T[8]*Pc[0] + T[9]*Pc[1] + T[10]*Pc[2] + T[11];
+        double m = MS->data[i];
+        total += m;
+        for (int k=0;k<3;++k) acc[k] += m * world[k];
     }
-    return tau;
+    if (total > 1e-12) for (int k=0;k<3;++k) out->data[k] = acc[k] / total;
+    return out;
+}
+
+}  // extern "C" (dynamics block)
+
+// ---------------------------------------------------------------------------
+// URDF importrobot — minimal hand-rolled XML reader → fixed-transform tree.
+// ---------------------------------------------------------------------------
+namespace robotics {
+
+// Pull the value of attribute `attr` from a tag substring (attr="value").
+std::string xml_attr(const std::string &tag, const std::string &attr) {
+    size_t p = tag.find(attr + "=");
+    if (p == std::string::npos) return std::string();
+    p = tag.find('"', p);
+    if (p == std::string::npos) return std::string();
+    size_t e = tag.find('"', p + 1);
+    if (e == std::string::npos) return std::string();
+    return tag.substr(p + 1, e - p - 1);
+}
+
+// Parse a space-separated list of up to n doubles into out.
+void parse_doubles(const std::string &s, double *out, int n) {
+    for (int i = 0; i < n; ++i) out[i] = 0.0;
+    std::istringstream iss(s);
+    for (int i = 0; i < n; ++i) { if (!(iss >> out[i])) break; }
+}
+
+// rpy (fixed-axis XYZ: roll about x, pitch about y, yaw about z) → 3×3
+// rotation R = Rz(yaw)·Ry(pitch)·Rx(roll), row-major.
+void rpy_to_rotm(double r, double p, double y, double R[9]) {
+    double cr=std::cos(r), sr=std::sin(r);
+    double cp=std::cos(p), sp=std::sin(p);
+    double cy=std::cos(y), sy=std::sin(y);
+    R[0]=cy*cp; R[1]=cy*sp*sr-sy*cr; R[2]=cy*sp*cr+sy*sr;
+    R[3]=sy*cp; R[4]=sy*sp*sr+cy*cr; R[5]=sy*sp*cr-cy*sr;
+    R[6]=-sp;   R[7]=cp*sr;          R[8]=cp*cr;
+}
+
+// Find all <tagname ...>...</tagname> or self-closing blocks; returns the
+// substring spans (including the open tag through the matching close).
+struct Block { size_t open, close_end; std::string opentag; };
+std::vector<Block> find_blocks(const std::string &src, const std::string &tag) {
+    std::vector<Block> out;
+    std::string open = "<" + tag;
+    std::string close = "</" + tag + ">";
+    size_t pos = 0;
+    while ((pos = src.find(open, pos)) != std::string::npos) {
+        // Ensure it's a real tag boundary (next char is space, >, or /).
+        char nx = (pos + open.size() < src.size()) ? src[pos + open.size()] : '\0';
+        if (nx != ' ' && nx != '>' && nx != '/' && nx != '\t' && nx != '\n') { pos += open.size(); continue; }
+        size_t tag_end = src.find('>', pos);
+        if (tag_end == std::string::npos) break;
+        Block b;
+        b.open = pos;
+        b.opentag = src.substr(pos, tag_end - pos + 1);
+        if (tag_end > 0 && src[tag_end - 1] == '/') {
+            b.close_end = tag_end + 1;   // self-closing
+        } else {
+            size_t c = src.find(close, tag_end);
+            b.close_end = (c == std::string::npos) ? tag_end + 1 : c + close.size();
+        }
+        out.push_back(b);
+        pos = b.close_end;
+    }
+    return out;
+}
+
+}  // namespace robotics
+
+extern "C" {
+
+// importrobot(filename) — parse a URDF file into a fixed-transform tree.
+// Builds a serial chain by following parent→child links from the base.
+matlab_mat *matlab_robotics_importrobot(void *obj_v, void *fname_s) {
+    std::string path = read_string(fname_s);
+    std::ifstream in(path);
+    if (!in) { matlab_robotics_tree_init(obj_v); return mat_alloc(0, 0); }
+    std::ostringstream ss; ss << in.rdbuf();
+    std::string src = ss.str();
+
+    using robotics::xml_attr; using robotics::parse_doubles;
+    using robotics::rpy_to_rotm; using robotics::find_blocks;
+
+    // --- Parse links (name → inertial mass/COM/inertia). ---
+    struct LinkInfo { std::string name; double mass; double com[3]; double I[6]; };
+    std::vector<LinkInfo> links;
+    for (const auto &lb : find_blocks(src, "link")) {
+        LinkInfo li; li.name = xml_attr(lb.opentag, "name");
+        li.mass = 0.0; for (int k=0;k<3;++k) li.com[k]=0; for (int k=0;k<6;++k) li.I[k]=0;
+        std::string body = src.substr(lb.open, lb.close_end - lb.open);
+        auto ins = find_blocks(body, "inertial");
+        if (!ins.empty()) {
+            std::string inertial = body.substr(ins[0].open, ins[0].close_end - ins[0].open);
+            auto masses = find_blocks(inertial, "mass");
+            if (!masses.empty()) {
+                std::string v = xml_attr(masses[0].opentag, "value");
+                li.mass = v.empty() ? 0.0 : std::atof(v.c_str());
+            }
+            auto origins = find_blocks(inertial, "origin");
+            if (!origins.empty()) parse_doubles(xml_attr(origins[0].opentag, "xyz"), li.com, 3);
+            auto inertias = find_blocks(inertial, "inertia");
+            if (!inertias.empty()) {
+                const std::string &t = inertias[0].opentag;
+                auto a = [&](const char *k){ std::string s = xml_attr(t, k); return s.empty()?0.0:std::atof(s.c_str()); };
+                li.I[0]=a("ixx"); li.I[1]=a("iyy"); li.I[2]=a("izz");
+                li.I[3]=a("iyz"); li.I[4]=a("ixz"); li.I[5]=a("ixy");
+            }
+        }
+        links.push_back(li);
+    }
+    auto link_by_name = [&](const std::string &n) -> int {
+        for (size_t i = 0; i < links.size(); ++i) if (links[i].name == n) return static_cast<int>(i);
+        return -1;
+    };
+
+    // --- Parse joints. ---
+    struct JointInfo {
+        std::string name, parent, child, type;
+        double xyz[3], rpy[3], axis[3], lo, hi;
+    };
+    std::vector<JointInfo> joints;
+    for (const auto &jb : find_blocks(src, "joint")) {
+        JointInfo ji;
+        ji.name = xml_attr(jb.opentag, "name");
+        ji.type = xml_attr(jb.opentag, "type");
+        for (int k=0;k<3;++k){ ji.xyz[k]=0; ji.rpy[k]=0; ji.axis[k]=0; }
+        ji.axis[2] = 1.0; ji.lo = -M_PI; ji.hi = M_PI;
+        std::string body = src.substr(jb.open, jb.close_end - jb.open);
+        auto par = find_blocks(body, "parent");
+        if (!par.empty()) ji.parent = xml_attr(par[0].opentag, "link");
+        auto chi = find_blocks(body, "child");
+        if (!chi.empty()) ji.child = xml_attr(chi[0].opentag, "link");
+        auto org = find_blocks(body, "origin");
+        if (!org.empty()) {
+            parse_doubles(xml_attr(org[0].opentag, "xyz"), ji.xyz, 3);
+            parse_doubles(xml_attr(org[0].opentag, "rpy"), ji.rpy, 3);
+        }
+        auto ax = find_blocks(body, "axis");
+        if (!ax.empty()) parse_doubles(xml_attr(ax[0].opentag, "xyz"), ji.axis, 3);
+        auto lim = find_blocks(body, "limit");
+        if (!lim.empty()) {
+            std::string lo = xml_attr(lim[0].opentag, "lower");
+            std::string hi = xml_attr(lim[0].opentag, "upper");
+            if (!lo.empty()) ji.lo = std::atof(lo.c_str());
+            if (!hi.empty()) ji.hi = std::atof(hi.c_str());
+        }
+        joints.push_back(ji);
+    }
+
+    // --- Order joints into a serial chain (base → tip). ---
+    // Base link = a link that is no joint's child.
+    std::vector<int> ordered;
+    {
+        std::string base;
+        for (const auto &li : links) {
+            bool is_child = false;
+            for (const auto &j : joints) if (j.child == li.name) { is_child = true; break; }
+            if (!is_child) { base = li.name; break; }
+        }
+        std::string cur = base;
+        for (size_t guard = 0; guard < joints.size(); ++guard) {
+            int found = -1;
+            for (size_t j = 0; j < joints.size(); ++j)
+                if (joints[j].parent == cur) { found = static_cast<int>(j); break; }
+            if (found < 0) break;
+            ordered.push_back(found);
+            cur = joints[found].child;
+        }
+        // Fallback: if chain-walk found nothing, use document order.
+        if (ordered.empty())
+            for (size_t j = 0; j < joints.size(); ++j) ordered.push_back(static_cast<int>(j));
+    }
+
+    int64_t N = static_cast<int64_t>(ordered.size());
+    matlab_mat *PT = mat_alloc(N, 16);
+    matlab_mat *AX = mat_alloc(N, 3);
+    matlab_mat *JT = mat_alloc(N, 1);
+    matlab_mat *JL = mat_alloc(N, 2);
+    matlab_mat *MS = mat_alloc(N, 1);
+    matlab_mat *CM = mat_alloc(N, 3);
+    matlab_mat *IN = mat_alloc(N, 6);
+    for (int64_t k = 0; k < N; ++k) {
+        const JointInfo &ji = joints[ordered[k]];
+        double R[9]; rpy_to_rotm(ji.rpy[0], ji.rpy[1], ji.rpy[2], R);
+        double pre[16];
+        robotics::compose_tform(R, ji.xyz, pre);
+        for (int c = 0; c < 16; ++c) PT->data[k*16+c] = pre[c];
+        AX->data[k*3+0]=ji.axis[0]; AX->data[k*3+1]=ji.axis[1]; AX->data[k*3+2]=ji.axis[2];
+        int jt = 0;
+        if (ji.type == "revolute" || ji.type == "continuous") jt = 1;
+        else if (ji.type == "prismatic") jt = 2;
+        JT->data[k] = jt;
+        JL->data[k*2+0] = ji.lo; JL->data[k*2+1] = ji.hi;
+        // Child link inertial → this joint's link dynamics.
+        int ci = link_by_name(ji.child);
+        if (ci >= 0) {
+            MS->data[k] = links[ci].mass;
+            for (int c = 0; c < 3; ++c) CM->data[k*3+c] = links[ci].com[c];
+            for (int c = 0; c < 6; ++c) IN->data[k*6+c] = links[ci].I[c];
+        }
+    }
+    robotics::obj_set_f64(obj_v, "Representation", 1.0);
+    robotics::obj_set_mat(obj_v, "PreTransforms", PT);
+    robotics::obj_set_mat(obj_v, "JointAxes",     AX);
+    robotics::obj_set_mat(obj_v, "JointTypes",    JT);
+    robotics::obj_set_mat(obj_v, "JointLimits",   JL);
+    robotics::obj_set_mat(obj_v, "Mass",          MS);
+    robotics::obj_set_mat(obj_v, "COM",           CM);
+    robotics::obj_set_mat(obj_v, "Inertia",       IN);
+    robotics::obj_set_mat(obj_v, "DH",            mat_alloc(N, 4));
+    robotics::obj_set_f64(obj_v, "NumBodies", static_cast<double>(N));
+    matlab_mat *G = mat_alloc(1, 3);
+    G->data[2] = -9.81;
+    robotics::obj_set_mat(obj_v, "Gravity", G);
+    return mat_alloc(0, 0);
+}
+
+// ---------------------------------------------------------------------------
+// generalizedInverseKinematics — multi-constraint LM (numerical Jacobian)
+// ---------------------------------------------------------------------------
+
+// gik(rb) — clone the tree (FK fields) onto the solver.
+matlab_mat *matlab_robotics_gik_init(void *obj_v, void *tree_v) {
+    matlab_robotics_ik_init(obj_v, tree_v);  // clones DH/JT/JL/NumBodies + solver knobs
+    robotics::obj_set_f64(obj_v, "Representation", robotics::obj_get_f64(tree_v, "Representation"));
+    matlab_mat *PT = robotics::obj_get_mat(tree_v, "PreTransforms");
+    matlab_mat *AX = robotics::obj_get_mat(tree_v, "JointAxes");
+    if (PT) { matlab_mat *c = mat_alloc(PT->rows, 16); for (int64_t i=0;i<PT->rows*16;++i) c->data[i]=PT->data[i]; robotics::obj_set_mat(obj_v, "PreTransforms", c); }
+    if (AX) { matlab_mat *c = mat_alloc(AX->rows, 3);  for (int64_t i=0;i<AX->rows*3;++i)  c->data[i]=AX->data[i]; robotics::obj_set_mat(obj_v, "JointAxes", c); }
+    return mat_alloc(0, 0);
+}
+
+matlab_mat *matlab_robotics_constraint_position_init(void *obj_v, matlab_mat *tgt, matlab_mat *W) {
+    matlab_mat *T = mat_alloc(4, 4);
+    T->data[0]=1; T->data[5]=1; T->data[10]=1; T->data[15]=1;
+    if (tgt && tgt->rows*tgt->cols >= 3) { T->data[3]=tgt->data[0]; T->data[7]=tgt->data[1]; T->data[11]=tgt->data[2]; }
+    robotics::obj_set_mat(obj_v, "TargetTransform", T);
+    if (W && W->rows*W->cols >= 6) { matlab_mat *w=mat_alloc(1,6); for(int k=0;k<6;++k) w->data[k]=W->data[k]; robotics::obj_set_mat(obj_v, "Weights", w); }
+    return mat_alloc(0, 0);
+}
+
+matlab_mat *matlab_robotics_constraint_orientation_init(void *obj_v, matlab_mat *tgt, matlab_mat *W) {
+    matlab_mat *T = mat_alloc(4, 4);
+    T->data[15] = 1;
+    if (tgt && tgt->rows == 3 && tgt->cols == 3) {
+        T->data[0]=tgt->data[0]; T->data[1]=tgt->data[1]; T->data[2]=tgt->data[2];
+        T->data[4]=tgt->data[3]; T->data[5]=tgt->data[4]; T->data[6]=tgt->data[5];
+        T->data[8]=tgt->data[6]; T->data[9]=tgt->data[7]; T->data[10]=tgt->data[8];
+    } else if (tgt && tgt->rows == 4 && tgt->cols == 4) {
+        for (int k=0;k<16;++k) T->data[k]=tgt->data[k];
+    } else { T->data[0]=1; T->data[5]=1; T->data[10]=1; }
+    robotics::obj_set_mat(obj_v, "TargetTransform", T);
+    if (W && W->rows*W->cols >= 6) { matlab_mat *w=mat_alloc(1,6); for(int k=0;k<6;++k) w->data[k]=W->data[k]; robotics::obj_set_mat(obj_v, "Weights", w); }
+    return mat_alloc(0, 0);
+}
+
+// Per-constraint residual into r (returns the residual length used).
+// Kind 1 = pose (6), 2 = position (3), 3 = orientation (3).
+static int gik_residual(void *con, const double T[16], double *r) {
+    int kind = static_cast<int>(robotics::obj_get_f64(con, "Kind"));
+    matlab_mat *Tgt = robotics::obj_get_mat(con, "TargetTransform");
+    matlab_mat *W   = robotics::obj_get_mat(con, "Weights");
+    double wv[6] = {1,1,1,1,1,1};
+    if (W && W->rows*W->cols >= 6) for (int k=0;k<6;++k) wv[k]=W->data[k];
+    if (!Tgt) return 0;
+    // Position error.
+    double pe[3] = { Tgt->data[3]-T[3], Tgt->data[7]-T[7], Tgt->data[11]-T[11] };
+    // Orientation error (axis-angle of R_tgt·R_cur').
+    double Rc[9] = { T[0],T[1],T[2], T[4],T[5],T[6], T[8],T[9],T[10] };
+    double Rt[9] = { Tgt->data[0],Tgt->data[1],Tgt->data[2],
+                     Tgt->data[4],Tgt->data[5],Tgt->data[6],
+                     Tgt->data[8],Tgt->data[9],Tgt->data[10] };
+    double Rct[9] = { Rc[0],Rc[3],Rc[6], Rc[1],Rc[4],Rc[7], Rc[2],Rc[5],Rc[8] };
+    double Re[9];
+    for (int i=0;i<3;++i) for (int j=0;j<3;++j){ double s=0; for(int k=0;k<3;++k) s+=Rt[i*3+k]*Rct[k*3+j]; Re[i*3+j]=s; }
+    double tr = Re[0]+Re[4]+Re[8];
+    double c = (tr-1)*0.5; if(c>1)c=1; if(c<-1)c=-1;
+    double th = std::acos(c); double sn = std::sin(th);
+    double oe[3] = {0,0,0};
+    if (std::fabs(sn) > 1e-9) {
+        oe[0]=th*(Re[7]-Re[5])/(2*sn); oe[1]=th*(Re[2]-Re[6])/(2*sn); oe[2]=th*(Re[3]-Re[1])/(2*sn);
+    }
+    if (kind == 2) { for (int k=0;k<3;++k) r[k]=wv[3+k]*pe[k]; return 3; }
+    if (kind == 3) { for (int k=0;k<3;++k) r[k]=wv[k]*oe[k];   return 3; }
+    // pose
+    r[0]=wv[3]*pe[0]; r[1]=wv[4]*pe[1]; r[2]=wv[5]*pe[2];
+    r[3]=wv[0]*oe[0]; r[4]=wv[1]*oe[1]; r[5]=wv[2]*oe[2];
+    return 6;
+}
+
+// matlab_robotics_gik_solve(gik, q0, c1, c2) → packed (N+3)×1 [q; iters; flag; err].
+matlab_mat *matlab_robotics_gik_solve(void *gik_v, matlab_mat *q0, void *c1, void *c2) {
+    int rep = static_cast<int>(robotics::obj_get_f64(gik_v, "Representation"));
+    matlab_mat *DH = robotics::obj_get_mat(gik_v, "DH");
+    matlab_mat *JT = robotics::obj_get_mat(gik_v, "JointTypes");
+    matlab_mat *PT = robotics::obj_get_mat(gik_v, "PreTransforms");
+    matlab_mat *AX = robotics::obj_get_mat(gik_v, "JointAxes");
+    int64_t N = JT ? JT->rows : 0;
+    matlab_mat *out = mat_alloc(N + 3, 1);
+    if (N == 0) return out;
+    std::vector<double> q(N, 0.0);
+    if (q0 && q0->rows*q0->cols >= N) for (int64_t i=0;i<N;++i) q[i]=q0->data[i];
+    int max_iter = static_cast<int>(robotics::obj_get_f64(gik_v, "MaxIterations"));
+    double tol = robotics::obj_get_f64(gik_v, "SolutionTolerance");
+    if (max_iter <= 0) max_iter = 200;
+    if (tol <= 0) tol = 1e-6;
+    double lambda = 1e-2, last_err = 1e300;
+    int iters = 0, flag = 0;
+    auto build_resid = [&](const std::vector<double> &qq, std::vector<double> &r) {
+        double T[16];
+        robotics::fk_chain(rep, DH, JT, PT, AX, qq.data(), N, T);
+        double rb1[6], rb2[6];
+        int n1 = gik_residual(c1, T, rb1);
+        int n2 = c2 ? gik_residual(c2, T, rb2) : 0;
+        r.assign(n1 + n2, 0.0);
+        for (int k=0;k<n1;++k) r[k]=rb1[k];
+        for (int k=0;k<n2;++k) r[n1+k]=rb2[k];
+    };
+    for (iters = 0; iters < max_iter; ++iters) {
+        std::vector<double> r; build_resid(q, r);
+        int m = static_cast<int>(r.size());
+        double err = 0; for (double v : r) err += v*v; err = std::sqrt(err);
+        if (err < tol) { flag = 1; last_err = err; break; }
+        // Numerical Jacobian J (m×N).
+        std::vector<double> J(m * N, 0.0);
+        double dq = 1e-7;
+        for (int64_t j = 0; j < N; ++j) {
+            std::vector<double> qp = q; qp[j] += dq;
+            std::vector<double> rp; build_resid(qp, rp);
+            for (int i = 0; i < m; ++i) J[i*N+j] = (rp[i] - r[i]) / dq;
+        }
+        // dq = (J'J + lambda I)^-1 J' r  (note residual r already = target-current,
+        // so we step +).
+        std::vector<double> JtJ(N*N, 0.0), Jtr(N, 0.0);
+        for (int64_t a=0;a<N;++a){ for(int64_t b=0;b<N;++b){ double s=0; for(int i=0;i<m;++i) s+=J[i*N+a]*J[i*N+b]; JtJ[a*N+b]=s; } JtJ[a*N+a]+=lambda; }
+        for (int64_t a=0;a<N;++a){ double s=0; for(int i=0;i<m;++i) s+=J[i*N+a]*r[i]; Jtr[a]=s; }
+        robotics::solve(JtJ.data(), N, Jtr.data(), 1);
+        // J is the Jacobian of the residual r = (target - current), so the
+        // Gauss-Newton descent step is q -= (J'J)^-1 J' r.
+        double stepn = 0;
+        for (int64_t i=0;i<N;++i) { q[i] -= Jtr[i]; stepn += Jtr[i]*Jtr[i]; }
+        if (err < last_err) { lambda *= 0.7; if (lambda < 1e-9) lambda = 1e-9; }
+        else lambda *= 2.0;
+        last_err = err;
+        // Converged to a (possibly soft-constrained) local minimum.
+        if (std::sqrt(stepn) < tol) { flag = 2; ++iters; break; }
+    }
+    if (flag == 0 && last_err < tol*10) flag = 2;
+    for (int64_t i=0;i<N;++i) out->data[i]=q[i];
+    out->data[N]=iters; out->data[N+1]=flag; out->data[N+2]=last_err;
+    return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -1312,6 +2015,7 @@ matlab_mat *matlab_robotics_pursuit_step(void *obj_v, matlab_mat *pose) {
 
 matlab_mat *matlab_robotics_collbox_init(void *obj_v, double x, double y, double z) {
     if (x <= 0) x = 1.0; if (y <= 0) y = 1.0; if (z <= 0) z = 1.0;
+    robotics::obj_set_f64(obj_v, "ShapeKind", 1.0);
     robotics::obj_set_f64(obj_v, "X", x);
     robotics::obj_set_f64(obj_v, "Y", y);
     robotics::obj_set_f64(obj_v, "Z", z);
@@ -1319,67 +2023,190 @@ matlab_mat *matlab_robotics_collbox_init(void *obj_v, double x, double y, double
 }
 
 matlab_mat *matlab_robotics_collsphere_init(void *obj_v, double r) {
+    robotics::obj_set_f64(obj_v, "ShapeKind", 2.0);
     robotics::obj_set_f64(obj_v, "Radius", r > 0 ? r : 0.5);
     return mat_alloc(0, 0);
 }
 
-// checkCollision(A, B) — AABB-AABB or sphere-sphere or sphere-box (axis-
-// aligned simplification, no rotation considered).  Returns 1×1: 1 if
-// collision, 0 if free.
-//
-// The classdef carrier guarantees Pose is stored as a 4×4; we read only the
-// translation (Pose(1:3, 4)) for the simplified test.
-static void coll_get_translation(void *obj_v, double p[3]) {
-    matlab_mat *P = robotics::obj_get_mat(obj_v, "Pose");
-    if (P && P->rows == 4 && P->cols == 4) {
-        p[0] = P->data[3];
-        p[1] = P->data[7];
-        p[2] = P->data[11];
-    } else { p[0] = 0; p[1] = 0; p[2] = 0; }
+matlab_mat *matlab_robotics_collcyl_init(void *obj_v, double r, double len) {
+    robotics::obj_set_f64(obj_v, "ShapeKind", 3.0);
+    robotics::obj_set_f64(obj_v, "Radius", r > 0 ? r : 0.5);
+    robotics::obj_set_f64(obj_v, "Length", len > 0 ? len : 1.0);
+    return mat_alloc(0, 0);
 }
 
+matlab_mat *matlab_robotics_collcap_init(void *obj_v, double r, double len) {
+    robotics::obj_set_f64(obj_v, "ShapeKind", 4.0);
+    robotics::obj_set_f64(obj_v, "Radius", r > 0 ? r : 0.5);
+    robotics::obj_set_f64(obj_v, "Length", len > 0 ? len : 1.0);
+    return mat_alloc(0, 0);
+}
+
+}  // extern "C" (collision inits)
+
+// ---------- GJK support functions + intersection / distance ---------------
+namespace robotics {
+
+// World-frame support point of a convex shape in direction d:
+// the farthest point of the shape along d.  Pose (R,t) orients the shape.
+void shape_support(void *obj_v, const double d[3], double out[3]) {
+    matlab_mat *P = obj_get_mat(obj_v, "Pose");
+    double R[9] = {1,0,0,0,1,0,0,0,1}, t[3] = {0,0,0};
+    if (P && P->rows == 4 && P->cols == 4) {
+        R[0]=P->data[0]; R[1]=P->data[1]; R[2]=P->data[2];
+        R[3]=P->data[4]; R[4]=P->data[5]; R[5]=P->data[6];
+        R[6]=P->data[8]; R[7]=P->data[9]; R[8]=P->data[10];
+        t[0]=P->data[3]; t[1]=P->data[7]; t[2]=P->data[11];
+    }
+    int kind = static_cast<int>(obj_get_f64(obj_v, "ShapeKind"));
+    // Direction in local frame: dl = R^T d.
+    double dl[3]; mtv3(R, d, dl);
+    double sl[3] = {0,0,0};   // support in local frame
+    if (kind == 1) {                       // box: half-extents
+        double hx = obj_get_f64(obj_v, "X") * 0.5;
+        double hy = obj_get_f64(obj_v, "Y") * 0.5;
+        double hz = obj_get_f64(obj_v, "Z") * 0.5;
+        sl[0] = (dl[0] >= 0 ? hx : -hx);
+        sl[1] = (dl[1] >= 0 ? hy : -hy);
+        sl[2] = (dl[2] >= 0 ? hz : -hz);
+    } else if (kind == 2) {                // sphere
+        double r = obj_get_f64(obj_v, "Radius");
+        double n = std::sqrt(dl[0]*dl[0]+dl[1]*dl[1]+dl[2]*dl[2]);
+        if (n > 1e-12) { sl[0]=r*dl[0]/n; sl[1]=r*dl[1]/n; sl[2]=r*dl[2]/n; }
+    } else if (kind == 3 || kind == 4) {   // cylinder / capsule (axis = local z)
+        double r = obj_get_f64(obj_v, "Radius");
+        double h = obj_get_f64(obj_v, "Length") * 0.5;
+        // Radial part in xy-plane.
+        double rn = std::sqrt(dl[0]*dl[0]+dl[1]*dl[1]);
+        if (kind == 4) {
+            // Capsule: support of the segment endpoints + sphere of radius r.
+            double seg = (dl[2] >= 0 ? h : -h);
+            double n = std::sqrt(dl[0]*dl[0]+dl[1]*dl[1]+dl[2]*dl[2]);
+            sl[0] = (n>1e-12? r*dl[0]/n : 0);
+            sl[1] = (n>1e-12? r*dl[1]/n : 0);
+            sl[2] = seg + (n>1e-12? r*dl[2]/n : 0);
+        } else {
+            // Cylinder: flat caps.
+            if (rn > 1e-12) { sl[0]=r*dl[0]/rn; sl[1]=r*dl[1]/rn; }
+            sl[2] = (dl[2] >= 0 ? h : -h);
+        }
+    }
+    // Back to world: out = R·sl + t.
+    double sw[3]; mv3(R, sl, sw);
+    out[0]=sw[0]+t[0]; out[1]=sw[1]+t[1]; out[2]=sw[2]+t[2];
+}
+
+// Minkowski-difference support: support_A(d) - support_B(-d).
+void mink_support(void *a, void *b, const double d[3], double out[3]) {
+    double sa[3], sb[3], nd[3] = {-d[0],-d[1],-d[2]};
+    shape_support(a, d, sa);
+    shape_support(b, nd, sb);
+    out[0]=sa[0]-sb[0]; out[1]=sa[1]-sb[1]; out[2]=sa[2]-sb[2];
+}
+
+inline double dot3(const double a[3], const double b[3]) { return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; }
+
+// Boolean GJK: do the two convex shapes intersect?  Evolves a simplex on the
+// Minkowski difference toward the origin (standard line/triangle/tetra cases).
+bool gjk_intersect(void *a, void *b) {
+    double simplex[4][3];
+    int n = 0;
+    double d[3] = {1, 0, 0};
+    double p[3]; mink_support(a, b, d, p);
+    simplex[0][0]=p[0]; simplex[0][1]=p[1]; simplex[0][2]=p[2]; n = 1;
+    d[0]=-p[0]; d[1]=-p[1]; d[2]=-p[2];
+    for (int iter = 0; iter < 64; ++iter) {
+        double dn = std::sqrt(dot3(d,d));
+        if (dn < 1e-12) return true;  // origin on the simplex
+        mink_support(a, b, d, p);
+        if (dot3(p, d) < 0) return false;  // no intersection (past origin)
+        // Add p to the simplex.
+        simplex[n][0]=p[0]; simplex[n][1]=p[1]; simplex[n][2]=p[2]; ++n;
+        // do_simplex: reduce + new search direction.
+        auto sub = [](const double x[3], const double y[3], double o[3]){ o[0]=x[0]-y[0]; o[1]=x[1]-y[1]; o[2]=x[2]-y[2]; };
+        auto crs = [](const double x[3], const double y[3], double o[3]){ o[0]=x[1]*y[2]-x[2]*y[1]; o[1]=x[2]*y[0]-x[0]*y[2]; o[2]=x[0]*y[1]-x[1]*y[0]; };
+        if (n == 2) {
+            double *A = simplex[1], *B = simplex[0];
+            double AB[3], AO[3]; sub(B, A, AB); AO[0]=-A[0];AO[1]=-A[1];AO[2]=-A[2];
+            double t[3]; crs(AB, AO, t); crs(t, AB, d);   // perpendicular toward O
+            if (dot3(d,d) < 1e-18) { d[0]=-AB[1]; d[1]=AB[0]; d[2]=0; }
+        } else if (n == 3) {
+            double *A = simplex[2], *B = simplex[1], *Cc = simplex[0];
+            double AB[3], AC[3], AO[3]; sub(B,A,AB); sub(Cc,A,AC);
+            AO[0]=-A[0];AO[1]=-A[1];AO[2]=-A[2];
+            double ABC[3]; crs(AB, AC, ABC);
+            crs(ABC, AC, d);
+            if (dot3(d, AO) < 0) { crs(AB, ABC, d); }  // swap region
+            if (dot3(d,d) < 1e-18) { d[0]=ABC[0]; d[1]=ABC[1]; d[2]=ABC[2]; if (dot3(d,AO)<0){d[0]=-d[0];d[1]=-d[1];d[2]=-d[2];} }
+        } else if (n == 4) {
+            // Tetrahedron: check whether origin is inside; otherwise pick the
+            // face pointing toward O and reduce to it.
+            double *A = simplex[3], *B = simplex[2], *Cc = simplex[1], *D = simplex[0];
+            double AB[3], AC[3], AD[3], AO[3];
+            sub(B,A,AB); sub(Cc,A,AC); sub(D,A,AD); AO[0]=-A[0];AO[1]=-A[1];AO[2]=-A[2];
+            double ABC[3], ACD[3], ADB[3];
+            crs(AB,AC,ABC); crs(AC,AD,ACD); crs(AD,AB,ADB);
+            if (dot3(ABC, AO) > 0) {
+                // keep A,B,C
+                for (int k=0;k<3;++k){ simplex[0][k]=Cc[k]; simplex[1][k]=B[k]; simplex[2][k]=A[k]; }
+                n = 3; for (int k=0;k<3;++k) d[k]=ABC[k];
+            } else if (dot3(ACD, AO) > 0) {
+                for (int k=0;k<3;++k){ simplex[0][k]=D[k]; simplex[1][k]=Cc[k]; simplex[2][k]=A[k]; }
+                n = 3; for (int k=0;k<3;++k) d[k]=ACD[k];
+            } else if (dot3(ADB, AO) > 0) {
+                for (int k=0;k<3;++k){ simplex[0][k]=B[k]; simplex[1][k]=D[k]; simplex[2][k]=A[k]; }
+                n = 3; for (int k=0;k<3;++k) d[k]=ADB[k];
+            } else {
+                return true;  // origin inside the tetrahedron
+            }
+        }
+    }
+    return false;
+}
+
+}  // namespace robotics
+
+extern "C" {
+
+// checkCollision(A, B) — orientation-aware GJK intersection.  Returns 1×1.
 matlab_mat *matlab_robotics_checkCollision(void *a, void *b) {
     matlab_mat *o = mat_alloc(1, 1);
     if (!a || !b) return o;
-    // Heuristic detection of shape kind by looking for Radius vs X property.
-    double ra = robotics::obj_get_f64(a, "Radius");
-    double rb = robotics::obj_get_f64(b, "Radius");
-    double pa[3], pb[3];
-    coll_get_translation(a, pa);
-    coll_get_translation(b, pb);
-    if (ra > 0 && rb > 0) {
-        // Sphere-sphere.
-        double d = std::hypot(std::hypot(pa[0]-pb[0], pa[1]-pb[1]), pa[2]-pb[2]);
-        o->data[0] = (d <= ra + rb) ? 1.0 : 0.0;
-        return o;
+    o->data[0] = robotics::gjk_intersect(a, b) ? 1.0 : 0.0;
+    return o;
+}
+
+// gjk_collision(A, B) — returns [isColliding; separation_or_zero] (2×1).
+// Separation is an analytic centre-distance lower bound for separated convex
+// shapes (0 when colliding); exact EPA penetration depth is a follow-on.
+matlab_mat *matlab_robotics_gjk_collision(void *a, void *b) {
+    matlab_mat *o = mat_alloc(2, 1);
+    if (!a || !b) return o;
+    bool hit = robotics::gjk_intersect(a, b);
+    o->data[0] = hit ? 1.0 : 0.0;
+    if (!hit) {
+        // Coarse separation: distance between Pose origins minus a support
+        // margin along that axis (a conservative lower bound).
+        matlab_mat *Pa = robotics::obj_get_mat(a, "Pose");
+        matlab_mat *Pb = robotics::obj_get_mat(b, "Pose");
+        double ca[3]={0,0,0}, cb[3]={0,0,0};
+        if (Pa) { ca[0]=Pa->data[3]; ca[1]=Pa->data[7]; ca[2]=Pa->data[11]; }
+        if (Pb) { cb[0]=Pb->data[3]; cb[1]=Pb->data[7]; cb[2]=Pb->data[11]; }
+        double dir[3] = { cb[0]-ca[0], cb[1]-ca[1], cb[2]-ca[2] };
+        double dn = std::sqrt(dir[0]*dir[0]+dir[1]*dir[1]+dir[2]*dir[2]);
+        if (dn > 1e-9) {
+            double ndir[3] = { dir[0]/dn, dir[1]/dn, dir[2]/dn };
+            double nndir[3] = {-ndir[0],-ndir[1],-ndir[2]};
+            double sa[3], sb[3];
+            robotics::shape_support(a, ndir, sa);
+            robotics::shape_support(b, nndir, sb);
+            // Projected extents toward each other.
+            double ea = (sa[0]-ca[0])*ndir[0]+(sa[1]-ca[1])*ndir[1]+(sa[2]-ca[2])*ndir[2];
+            double eb = (cb[0]-sb[0])*ndir[0]+(cb[1]-sb[1])*ndir[1]+(cb[2]-sb[2])*ndir[2];
+            double sep = dn - ea - eb;
+            o->data[1] = sep > 0 ? sep : 0.0;
+        }
     }
-    if (ra <= 0 && rb <= 0) {
-        // Box-box (AABB, axis-aligned ignoring orientation).
-        double ax = robotics::obj_get_f64(a, "X") * 0.5;
-        double ay = robotics::obj_get_f64(a, "Y") * 0.5;
-        double az = robotics::obj_get_f64(a, "Z") * 0.5;
-        double bx = robotics::obj_get_f64(b, "X") * 0.5;
-        double by = robotics::obj_get_f64(b, "Y") * 0.5;
-        double bz = robotics::obj_get_f64(b, "Z") * 0.5;
-        bool ok = (std::fabs(pa[0]-pb[0]) <= ax + bx) &&
-                  (std::fabs(pa[1]-pb[1]) <= ay + by) &&
-                  (std::fabs(pa[2]-pb[2]) <= az + bz);
-        o->data[0] = ok ? 1.0 : 0.0;
-        return o;
-    }
-    // Sphere-box: collapse to AABB containment.
-    double r  = ra > 0 ? ra : rb;
-    double *ps = ra > 0 ? pa : pb;
-    void   *bo = ra > 0 ? b  : a;
-    double *pb_ = ra > 0 ? pb : pa;
-    double bx = robotics::obj_get_f64(bo, "X") * 0.5;
-    double by = robotics::obj_get_f64(bo, "Y") * 0.5;
-    double bz = robotics::obj_get_f64(bo, "Z") * 0.5;
-    double cx = std::max(pb_[0] - bx, std::min(ps[0], pb_[0] + bx));
-    double cy = std::max(pb_[1] - by, std::min(ps[1], pb_[1] + by));
-    double cz = std::max(pb_[2] - bz, std::min(ps[2], pb_[2] + bz));
-    double d  = std::hypot(std::hypot(ps[0]-cx, ps[1]-cy), ps[2]-cz);
-    o->data[0] = (d <= r) ? 1.0 : 0.0;
     return o;
 }
 
