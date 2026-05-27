@@ -195,3 +195,46 @@ classdef dssm
         end
     end
 end
+
+% ---------------------------------------------------------------------
+% bayeslm — Bayesian linear regression (Tier-6).  Under a diffuse prior the
+% posterior mean of Beta is the OLS estimate; Sigma2 is the residual scale.
+% estimate(Mdl, X, y) mutates the receiver; forecast(Mdl, XNew) returns the
+% posterior-mean prediction.
+% ---------------------------------------------------------------------
+classdef bayeslm
+    properties
+        NumPredictors
+        Beta matrix
+        Sigma2
+        ModelKind
+    end
+    methods
+        function obj = bayeslm(numPredictors)
+            if nargin < 1, numPredictors = 1; end
+            obj.NumPredictors = numPredictors;
+            obj.Beta = zeros(1, 1);
+            obj.Sigma2 = 1;
+            obj.ModelKind = 9;
+        end
+    end
+end
+
+% ---------------------------------------------------------------------
+% dtmc — discrete-time Markov chain (Tier-6).  Carries the row-stochastic
+% transition matrix P.  asymptotics(mc) returns the stationary distribution
+% (power iteration); simulate(mc, n) returns a state path.
+% ---------------------------------------------------------------------
+classdef dtmc
+    properties
+        P matrix
+        ModelKind
+    end
+    methods
+        function obj = dtmc(P)
+            if nargin < 1, P = zeros(2, 2); end
+            obj.P = P;
+            obj.ModelKind = 10;
+        end
+    end
+end

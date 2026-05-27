@@ -5577,6 +5577,14 @@ bool TensorLowering::rewriteBuiltinCalls() {
          {PtrTy, PtrTy}},
         {"matlab_econ_ssm_forecast", "matlab_econ_ssm_forecast", PtrTy,
          {PtrTy, F64, PtrTy}},
+        {"matlab_econ_bayeslm_estimate", "matlab_econ_bayeslm_estimate", PtrTy,
+         {PtrTy, PtrTy, PtrTy}},
+        {"matlab_econ_bayeslm_forecast", "matlab_econ_bayeslm_forecast", PtrTy,
+         {PtrTy, PtrTy}},
+        {"matlab_econ_dtmc_asymptotics", "matlab_econ_dtmc_asymptotics", PtrTy,
+         {PtrTy}},
+        {"matlab_econ_dtmc_simulate", "matlab_econ_dtmc_simulate", PtrTy,
+         {PtrTy, F64}},
         /* ===== DSP System Toolbox =====
          * System-Object step/lifecycle entries.  The classdef method body
          * forwards the receiver `obj` (PtrTy) + the input frame (PtrTy

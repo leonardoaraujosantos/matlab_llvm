@@ -142,6 +142,8 @@ void Resolver::registerBuiltins() {
     "irf", "egcitest", "jcitest", "jcontest",
     /* Tier-5: state-space methods (filter is already a builtin). */
     "smooth",
+    /* Tier-6: Markov-chain method (asymptotics). */
+    "asymptotics",
     /* Phase 6 — Symbolic Math Toolbox via SymPP. The link target
      * (matlab_sym_* runtime) is only present when the build was
      * configured -DMATLAB_LLVM_WITH_SYM=ON; without that the JIT/-emit-c
@@ -1792,7 +1794,7 @@ void Resolver::resolveStmt(Stmt &St, Scope *S) {
                 (Arg0Cls->Name == "arima" || Arg0Cls->Name == "garch" ||
                  Arg0Cls->Name == "egarch" || Arg0Cls->Name == "gjr" ||
                  Arg0Cls->Name == "varm" || Arg0Cls->Name == "ssm" ||
-                 Arg0Cls->Name == "dssm"))
+                 Arg0Cls->Name == "dssm" || Arg0Cls->Name == "bayeslm"))
               return Arg0Cls;
           }
         }

@@ -8585,6 +8585,47 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                 mlir::StringAttr::get(&MCtx, rt));
             return emitUnreg("matlab.call_builtin", {Mdl, Y}, PtrTy, L, {Cal});
           }
+          /* bayeslm: estimate(Mdl, X, y) [3-arg] mutates + returns receiver;
+           * forecast(Mdl, XNew) [2-arg] is the posterior-mean prediction. */
+          if (Cls0 && Cn0 == "bayeslm" && Nm == "estimate" &&
+              C.Args.size() == 3) {
+            mlir::Value Mdl = loadObj(C.Args[0]);
+            mlir::Value X   = lowerExpr(*C.Args[1]);
+            mlir::Value Y   = lowerExpr(*C.Args[2]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_econ_bayeslm_estimate"));
+            emitUnregOp("matlab.call_builtin", {Mdl, X, Y},
+                        {mlir::NoneType::get(&MCtx)}, L, {Cal});
+            return Mdl;
+          }
+          if (Cls0 && Cn0 == "bayeslm" && Nm == "forecast" &&
+              C.Args.size() == 2) {
+            mlir::Value Mdl  = loadObj(C.Args[0]);
+            mlir::Value XNew = lowerExpr(*C.Args[1]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_econ_bayeslm_forecast"));
+            return emitUnreg("matlab.call_builtin", {Mdl, XNew}, PtrTy, L, {Cal});
+          }
+          /* dtmc: asymptotics(mc) stationary dist; simulate(mc, n) path. */
+          if (Cls0 && Cn0 == "dtmc" && Nm == "asymptotics" &&
+              C.Args.size() == 1) {
+            mlir::Value Mc = loadObj(C.Args[0]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_econ_dtmc_asymptotics"));
+            return emitUnreg("matlab.call_builtin", {Mc}, PtrTy, L, {Cal});
+          }
+          if (Cls0 && Cn0 == "dtmc" && Nm == "simulate" &&
+              C.Args.size() == 2) {
+            mlir::Value Mc = loadObj(C.Args[0]);
+            mlir::Value Ns = lowerExpr(*C.Args[1]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_econ_dtmc_simulate"));
+            return emitUnreg("matlab.call_builtin", {Mc, Ns}, PtrTy, L, {Cal});
+          }
           if (fam && Nm == "estimate" && C.Args.size() == 2) {
             mlir::Value Tmpl = loadObj(C.Args[0]);
             mlir::Value Y    = lowerExpr(*C.Args[1]);

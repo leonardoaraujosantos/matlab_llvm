@@ -2195,3 +2195,125 @@ matlab_mat *matlab_econ_ssm_forecast(struct matlab_obj_s *mdl, double hh,
 }
 
 } // extern "C"
+
+/* ============================================================================
+ * §T6 — Bayesian linear regression (bayeslm) + Markov chains (dtmc)
+ * ----------------------------------------------------------------------------
+ * bayeslm: conjugate/diffuse Normal-Inverse-Gamma posterior — the posterior
+ * mean of beta under a diffuse prior is the OLS estimate; the posterior
+ * scale is the residual variance.  dtmc: discrete-time Markov chain over a
+ * transition matrix — stationary distribution via power iteration; path
+ * simulation via the cumulative row distributions.
+ * ==========================================================================*/
+
+extern "C" {
+
+/* estimate(Mdl, X, y) — Bayesian linear regression posterior (diffuse prior
+ * => posterior mean = OLS).  Mutates the receiver in place. */
+struct matlab_obj_s *matlab_econ_bayeslm_estimate(struct matlab_obj_s *mdl,
+                                                  matlab_mat *Xm,
+                                                  matlab_mat *Ym) {
+    if (!mdl || !Xm || !Xm->data) return mdl;
+    int64_t n = Xm->rows, p = Xm->cols;
+    std::vector<double> X(static_cast<size_t>(n * p));
+    for (int64_t i = 0; i < n * p; ++i) X[static_cast<size_t>(i)] = Xm->data[i];
+    std::vector<double> y = vecOf(Ym);
+    if (static_cast<int64_t>(y.size()) != n) return mdl;
+    std::vector<double> beta;
+    if (!ols(X, y, n, p, beta)) return mdl;
+    double sse = 0.0;
+    for (int64_t t = 0; t < n; ++t) {
+        double yhat = 0.0;
+        for (int64_t j = 0; j < p; ++j)
+            yhat += X[static_cast<size_t>(t * p + j)] * beta[static_cast<size_t>(j)];
+        double e = y[static_cast<size_t>(t)] - yhat;
+        sse += e * e;
+    }
+    double sigma2 = (n > p) ? sse / static_cast<double>(n - p) : sse;
+    matlab_mat *bm = mat_alloc(p, 1);
+    for (int64_t j = 0; j < p; ++j) bm->data[j] = beta[static_cast<size_t>(j)];
+    matlab_obj_set_mat(mdl, "Beta", 4, bm);
+    matlab_obj_set_f64(mdl, "Sigma2", 6, sigma2);
+    matlab_obj_set_f64(mdl, "NumPredictors", 13, static_cast<double>(p));
+    matlab_obj_set_f64(mdl, "ModelKind", 9, 9.0);
+    return mdl;
+}
+
+/* forecast(Mdl, XNew) — posterior-mean prediction XNew * Beta. */
+matlab_mat *matlab_econ_bayeslm_forecast(struct matlab_obj_s *mdl,
+                                         matlab_mat *Xm) {
+    if (!mdl || !Xm || !Xm->data) return mat_alloc(0, 0);
+    matlab_mat *bm = matlab_obj_get_mat(mdl, "Beta", 4);
+    if (!bm) return mat_alloc(0, 0);
+    int64_t n = Xm->rows, p = Xm->cols;
+    int64_t bp = bm->rows * bm->cols;
+    if (bp != p) return mat_alloc(0, 0);
+    matlab_mat *out = mat_alloc(n, 1);
+    for (int64_t t = 0; t < n; ++t) {
+        double s = 0.0;
+        for (int64_t j = 0; j < p; ++j)
+            s += Xm->data[t * p + j] * bm->data[j];
+        out->data[t] = s;
+    }
+    return out;
+}
+
+/* asymptotics(mc) — stationary distribution of the Markov chain, 1 x k.
+ * Power iteration on the row-stochastic transition matrix. */
+matlab_mat *matlab_econ_dtmc_asymptotics(struct matlab_obj_s *mc) {
+    if (!mc) return mat_alloc(0, 0);
+    matlab_mat *Pm = matlab_obj_get_mat(mc, "P", 1);
+    if (!Pm || !Pm->data) return mat_alloc(0, 0);
+    int64_t k = Pm->rows;
+    if (k < 1 || Pm->cols != k) return mat_alloc(0, 0);
+    std::vector<double> pi(static_cast<size_t>(k), 1.0 / static_cast<double>(k));
+    std::vector<double> nx(static_cast<size_t>(k), 0.0);
+    for (int it = 0; it < 2000; ++it) {
+        for (int64_t j = 0; j < k; ++j) {
+            double s = 0.0;
+            for (int64_t i = 0; i < k; ++i)
+                s += pi[static_cast<size_t>(i)] * Pm->data[i * k + j];
+            nx[static_cast<size_t>(j)] = s;
+        }
+        double diff = 0.0, sum = 0.0;
+        for (int64_t j = 0; j < k; ++j) sum += nx[static_cast<size_t>(j)];
+        if (sum > 0.0) for (int64_t j = 0; j < k; ++j) nx[static_cast<size_t>(j)] /= sum;
+        for (int64_t j = 0; j < k; ++j)
+            diff += std::fabs(nx[static_cast<size_t>(j)] - pi[static_cast<size_t>(j)]);
+        pi = nx;
+        if (diff < 1e-14) break;
+    }
+    matlab_mat *out = mat_alloc(1, k);
+    for (int64_t j = 0; j < k; ++j) out->data[j] = pi[static_cast<size_t>(j)];
+    return out;
+}
+
+/* simulate(mc, numSteps) — a state path (numSteps+1 x 1, 1-based states),
+ * starting from state 1, driven by the row cumulative distributions. */
+matlab_mat *matlab_econ_dtmc_simulate(struct matlab_obj_s *mc, double ns) {
+    if (!mc) return mat_alloc(0, 0);
+    int n = static_cast<int>(ns);
+    if (n < 1) return mat_alloc(0, 0);
+    matlab_mat *Pm = matlab_obj_get_mat(mc, "P", 1);
+    if (!Pm || !Pm->data) return mat_alloc(0, 0);
+    int64_t k = Pm->rows;
+    if (k < 1 || Pm->cols != k) return mat_alloc(0, 0);
+    Lcg rng{0xC0FFEE1234ULL};
+    matlab_mat *out = mat_alloc(n + 1, 1);
+    int64_t state = 0;            /* internal 0-based; emit 1-based */
+    out->data[0] = 1.0;
+    for (int t = 1; t <= n; ++t) {
+        double u = rng.next();
+        double cum = 0.0;
+        int64_t nextState = k - 1;
+        for (int64_t j = 0; j < k; ++j) {
+            cum += Pm->data[state * k + j];
+            if (u <= cum) { nextState = j; break; }
+        }
+        state = nextState;
+        out->data[t] = static_cast<double>(state + 1);
+    }
+    return out;
+}
+
+} // extern "C"

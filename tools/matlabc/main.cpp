@@ -2376,6 +2376,8 @@ static std::string buildReplPrelude(const std::string &Src) {
     {false, "varm",                   "econ_classdefs.m"},
     {false, "ssm",                    "econ_classdefs.m"},
     {false, "dssm",                   "econ_classdefs.m"},
+    {false, "bayeslm",                "econ_classdefs.m"},
+    {false, "dtmc",                   "econ_classdefs.m"},
     /* mStateflow Tier 4c — `mstateflow_helpers.m` exposes the small
      * MATLAB-level surface (emit / save-op / restore-op / active /
      * reset) that lets a REPL session drive a chart_tick function
@@ -11380,6 +11382,7 @@ int main(int Argc, char **Argv) {
       "gbm", "cir", "hwv", "simByEuler", "simBySolution",
       /* Econometrics Toolbox model objects (econ_classdefs.m). */
       "arima", "garch", "egarch", "gjr", "varm", "ssm", "dssm",
+      "bayeslm", "dtmc",
       /* GPU Coder T5 design-pattern helpers — runtime entries, no
        * prelude file needed.  Listed here only for the AOT-prelude
        * scanner's awareness (no leaf to map). */
@@ -11576,7 +11579,8 @@ int main(int Argc, char **Argv) {
     /* Econometrics Toolbox model objects — econ_classdefs.m umbrella. */
     if (ClsName == "arima" || ClsName == "garch" ||
         ClsName == "egarch" || ClsName == "gjr" || ClsName == "varm" ||
-        ClsName == "ssm" || ClsName == "dssm")
+        ClsName == "ssm" || ClsName == "dssm" ||
+        ClsName == "bayeslm" || ClsName == "dtmc")
       return "econ_classdefs.m";
     /* GPU Coder T5 design-pattern helpers are C runtime entries; no
      * classdef file to pull in. */
