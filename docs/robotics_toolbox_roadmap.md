@@ -101,7 +101,15 @@ plots route through Cairo 3-D), [`feature_status.md`](feature_status.md).
   is independently shippable and demoable; **T1 + T2 + T3 (~5 wk) close
   the manipulator forward/inverse-kinematics core** — the highest-value
   cut and the foundation every robotics demo needs.
-- **Status legend**: ✅ shipped · 🟡 partial · 🔵 not started.
+- **Status legend**: ✅ shipped · 🟡 partial · 🔵 not started. **All 6 tiers
+  shipped 2026-05-27 in one PR** (partial per the documented carve-downs):
+  T1 ✅ full transform surface, T2 🟡 (DH-only `setFixedTransform`, baked
+  `loadrobot('planar2'/'planar3')`, URDF carved), T3 ✅ LM-damped IK with
+  multi-return + `constraintPoseTarget`, T4 🟡 (cubic/trap/transform trajs +
+  compact massMatrix/inverseDynamics; bspline/minjerk/contopptraj/`forwardDynamics`/`jointSpaceMotionModel`
+  carved), T5 🟡 (diffdrive + occmap + PRM + pure-pursuit; other kinematics
+  + range sensor + VFH carved), T6 🟡 (collision primitives + simplified
+  RRT; CHOMP / GJK-EPA / particle filter carved).
   **Everything below is 🔵 not started** — but the substrate is deep:
   `ode45`, `pinv`/`svd`/`qr`/`mldivide`, `fminunc`/`lsqnonlin`, `interp1`,
   the PRNG, the STL importer, classdef, and Cairo plotting are all

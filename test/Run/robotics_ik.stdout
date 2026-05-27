@@ -1,0 +1,5 @@
+Loaded planar2 arm: 2 bodies
+Home end-effector: [2.00, 0.00]
+IK iters=5 exitflag=1 err=0.0000
+IK q   = [-0.337, 1.318]
+Final EE: [1.500, 0.500]

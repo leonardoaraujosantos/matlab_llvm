@@ -91,6 +91,7 @@ RUNTIME_SRCS=(
   "$ROOT/runtime/toolbox/finance/runtime_finance.cpp"
   "$ROOT/runtime/toolbox/econ/runtime_econ.cpp"
   "$ROOT/runtime/toolbox/fusion/runtime_fusion.cpp"
+  "$ROOT/runtime/toolbox/robotics/runtime_robotics.cpp"
   "$ROOT/runtime/toolbox/stateflow/runtime_mstateflow.cpp"
   "$ROOT/runtime/gpu/runtime_gpu.cpp"
   "$ROOT/runtime/toolbox/gpu/runtime_gpu_helpers.cpp"
