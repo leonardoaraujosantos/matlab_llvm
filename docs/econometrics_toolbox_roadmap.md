@@ -1,5 +1,18 @@
 # Econometrics Toolbox — Compatibility Roadmap
 
+> **STATUS — ALL 6 TIERS SHIPPED.** `runtime/toolbox/econ/`
+> (`runtime_econ.cpp` ~2.3 kLOC + `econ_classdefs.m`). T1 data-prep + the
+> full test surface · T2 `arima` (Hannan-Rissanen) · T3 GARCH/EGARCH/GJR
+> (Nelder-Mead MLE) · T4 `varm` + Engle-Granger/Johansen cointegration ·
+> T5 `ssm`/`dssm` Kalman filter/smoother · T6 `bayeslm` + `dtmc`. Seven
+> gating tests (`test/Run/econ_*.m`) + six headline examples
+> (`examples/econ/`). Built entirely over the shipped Optim / Stats /
+> LAPACK / System-Identification base — no external dependency. **Carved
+> to follow-ons:** `regARIMA` (hits the matrix-param-constructor frontend
+> limit via the estimate fresh-ctor path), Markov-switching `msVAR` (needs
+> the HMM Baum-Welch EM), the Econometric Modeler GUI, DSGE, HMC samplers,
+> and Bayesian/particle state-space.
+
 Scoped plan for what `matlab_llvm` (Sema + MLIR + Runtime + REPL/Debug
 + Plot) needs to ship in order to faithfully **compile and execute**,
 **debug/REPL**, and **demo** Econometrics-Toolbox programs.
