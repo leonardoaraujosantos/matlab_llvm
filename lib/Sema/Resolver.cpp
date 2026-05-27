@@ -503,6 +503,11 @@ void Resolver::registerBuiltins() {
     "matlab_fusion_assignmunkres",
     "matlab_fusion_gnn_init", "matlab_fusion_gnn_step",
     "matlab_fusion_gnn_numconfirmed",
+    /* ===== Sensor Fusion Tier-6 — track fusion + metrics + smoother ======= */
+    "trackFuser", "trackGOSPAMetric", "trackOSPAMetric",
+    "trackErrorMetrics", "rtsSmoother",
+    "matlab_fusion_covint", "matlab_fusion_gospa", "matlab_fusion_ospa",
+    "matlab_fusion_trackerror", "matlab_fusion_rts_smoother",
     "matlab_fusion_imu_init", "matlab_fusion_imu_step",
     "matlab_fusion_gps_init", "matlab_fusion_gps_step",
     "matlab_fusion_ahrs_init", "matlab_fusion_ahrs_step",

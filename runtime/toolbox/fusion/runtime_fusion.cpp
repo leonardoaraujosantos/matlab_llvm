@@ -1793,6 +1793,269 @@ matlab_mat *matlab_fusion_gnn_numconfirmed(void *obj_v) {
     return o;
 }
 
+// ---------------------------------------------------------------------------
+// Tier-6 — track fusion + metrics + RTS smoother
+// ---------------------------------------------------------------------------
+
+// trackFuser via covariance intersection (CI): given two Gaussian estimates
+// (x1, P1) and (x2, P2) of the same target, returns a fused (x, P) safely
+// even if the input estimates are correlated.  The mixing weight ω is chosen
+// to minimise trace(P_fused) via a coarse 1-D line search.
+//
+// Inputs:
+//   x1, x2 : nx × 1 state vectors
+//   P1, P2 : nx × nx covariance matrices (symmetric PSD)
+// Returns a packed matrix of size (nx + nx²) × 1 with x stacked on top of
+// vec(P) (row-major) — callers split with subscript reads.  This sidesteps
+// the lack of true multi-return on free-function builtins.
+matlab_mat *matlab_fusion_covint(matlab_mat *x1, matlab_mat *P1,
+                                  matlab_mat *x2, matlab_mat *P2) {
+    if (!x1 || !P1 || !x2 || !P2) return mat_alloc(0, 0);
+    int64_t n = x1->rows * x1->cols;
+    if (P1->rows != n || P2->rows != n) return mat_alloc(0, 0);
+
+    auto fuse_at = [&](double w, std::vector<double> &xf, std::vector<double> &Pf) {
+        // Pf^-1 = w P1^-1 + (1-w) P2^-1
+        std::vector<double> Pa(n * n), Pb(n * n);
+        for (int64_t i = 0; i < n * n; ++i) {
+            Pa[i] = P1->data[i];
+            Pb[i] = P2->data[i];
+        }
+        // Build the combined precision matrix.
+        std::vector<double> M(n * n, 0.0), Mw(n * n, 0.0);
+        // Trick: directly form P_fused = (w·P1^-1 + (1-w)·P2^-1)^-1 by solving
+        // P1·A = I and P2·B = I separately, mixing A and B, then inverting.
+        std::vector<double> I1(n * n, 0.0), I2(n * n, 0.0);
+        for (int64_t i = 0; i < n; ++i) { I1[i * n + i] = 1.0; I2[i * n + i] = 1.0; }
+        fusion::solve(Pa.data(), n, I1.data(), n);   // I1 := P1^-1
+        fusion::solve(Pb.data(), n, I2.data(), n);   // I2 := P2^-1
+        for (int64_t i = 0; i < n * n; ++i)
+            Mw[i] = w * I1[i] + (1.0 - w) * I2[i];
+        std::vector<double> Ic(n * n, 0.0);
+        for (int64_t i = 0; i < n; ++i) Ic[i * n + i] = 1.0;
+        fusion::solve(Mw.data(), n, Ic.data(), n);   // Ic := P_fused
+        // x_fused = P_fused · (w · P1^-1 · x1 + (1-w) · P2^-1 · x2)
+        std::vector<double> rhs(n, 0.0), t1(n, 0.0), t2(n, 0.0);
+        // Recompute P1^-1, P2^-1 (Mw was overwritten).
+        for (int64_t i = 0; i < n * n; ++i) {
+            Pa[i] = P1->data[i];
+            Pb[i] = P2->data[i];
+        }
+        for (int64_t i = 0; i < n * n; ++i) { I1[i] = 0.0; I2[i] = 0.0; }
+        for (int64_t i = 0; i < n; ++i)   { I1[i * n + i] = 1.0; I2[i * n + i] = 1.0; }
+        fusion::solve(Pa.data(), n, I1.data(), n);
+        fusion::solve(Pb.data(), n, I2.data(), n);
+        for (int64_t i = 0; i < n; ++i) {
+            double s1 = 0, s2 = 0;
+            for (int64_t j = 0; j < n; ++j) {
+                s1 += I1[i * n + j] * x1->data[j];
+                s2 += I2[i * n + j] * x2->data[j];
+            }
+            rhs[i] = w * s1 + (1.0 - w) * s2;
+        }
+        xf.assign(n, 0.0);
+        for (int64_t i = 0; i < n; ++i) {
+            double s = 0;
+            for (int64_t j = 0; j < n; ++j) s += Ic[i * n + j] * rhs[j];
+            xf[i] = s;
+        }
+        Pf.assign(Ic.begin(), Ic.end());
+    };
+
+    // Line-search ω ∈ [0,1] in 11 grid points; pick the one with min trace(Pf).
+    std::vector<double> xf_best, Pf_best;
+    double best_tr = 1e300;
+    for (int g = 0; g <= 10; ++g) {
+        double w = static_cast<double>(g) / 10.0;
+        std::vector<double> xf, Pf;
+        fuse_at(w, xf, Pf);
+        double tr = 0;
+        for (int64_t i = 0; i < n; ++i) tr += Pf[i * n + i];
+        if (tr < best_tr) { best_tr = tr; xf_best = xf; Pf_best = Pf; }
+    }
+    if (xf_best.empty()) return mat_alloc(0, 0);
+    // Pack: x_fused (n) on top of vec(P_fused) (n²).
+    matlab_mat *O = mat_alloc(n + n * n, 1);
+    for (int64_t i = 0; i < n; ++i)     O->data[i]     = xf_best[i];
+    for (int64_t i = 0; i < n * n; ++i) O->data[n + i] = Pf_best[i];
+    return O;
+}
+
+// trackGOSPAMetric(X, Y, c, p) — Generalized Optimal Sub-Pattern Assignment
+// distance.  X is m×D, Y is n×D (track and truth position rows); the
+// Euclidean distance is used per row.  c is the cutoff, p typically 2.
+//
+// d_GOSPA(X,Y) = ( sum_i min(c, d(x_i, y_assigned(i)))^p
+//                  + (c^p / 2) · (max(m,n) - h) )^(1/p)
+// where h is the number of assignments with finite cost (≤ c).
+//
+// Returns a 1×1 matrix.
+matlab_mat *matlab_fusion_gospa(matlab_mat *X, matlab_mat *Y, double c, double p) {
+    matlab_mat *o = mat_alloc(1, 1);
+    if (!X || !Y) return o;
+    int64_t m = X->rows, n = Y->rows;
+    int64_t D = X->cols;
+    if (D == 0 || Y->cols != D) return o;
+    if (p < 1.0) p = 2.0;
+    if (c <= 0)  c = 1.0;
+    // Build the m×n cost matrix of distances (capped at c).
+    std::vector<double> Cost(static_cast<size_t>(m * n), c);
+    for (int64_t i = 0; i < m; ++i) {
+        for (int64_t j = 0; j < n; ++j) {
+            double s = 0;
+            for (int64_t k = 0; k < D; ++k) {
+                double d = X->data[i * D + k] - Y->data[j * D + k];
+                s += d * d;
+            }
+            double dist = std::sqrt(s);
+            if (dist > c) dist = c;
+            Cost[i * n + j] = std::pow(dist, p);
+        }
+    }
+    // Solve the assignment via Munkres on the m×n cost.
+    int64_t hits = 0;
+    double assigned_sum = 0;
+    if (m > 0 && n > 0) {
+        matlab_mat C;
+        C.rows = m; C.cols = n;
+        std::vector<double> Cdup(Cost);
+        C.data = Cdup.data();
+        matlab_mat *A = matlab_fusion_assignmunkres(&C);
+        double cp = std::pow(c, p);
+        for (int64_t i = 0; i < m; ++i) {
+            int col = static_cast<int>(A->data[i]);
+            if (col >= 1 && col <= n) {
+                double cost = Cost[i * n + (col - 1)];
+                if (cost < cp - 1e-12) hits += 1;
+                assigned_sum += cost;
+            }
+        }
+    }
+    int64_t big = (m > n) ? m : n;
+    double cp = std::pow(c, p);
+    double penalty = (cp / 2.0) * static_cast<double>(big - hits);
+    double total = assigned_sum + penalty;
+    o->data[0] = std::pow(total, 1.0 / p);
+    return o;
+}
+
+// trackOSPAMetric(X, Y, c, p) — OSPA variant.  Same assignment, different
+// penalty form: averaged by max(m,n).
+matlab_mat *matlab_fusion_ospa(matlab_mat *X, matlab_mat *Y, double c, double p) {
+    matlab_mat *o = mat_alloc(1, 1);
+    if (!X || !Y) return o;
+    int64_t m = X->rows, n = Y->rows;
+    int64_t D = X->cols;
+    if (D == 0 || Y->cols != D) return o;
+    if (p < 1.0) p = 2.0;
+    if (c <= 0)  c = 1.0;
+    int64_t big = (m > n) ? m : n;
+    if (big == 0) return o;
+    std::vector<double> Cost(static_cast<size_t>(m * n), c);
+    for (int64_t i = 0; i < m; ++i) {
+        for (int64_t j = 0; j < n; ++j) {
+            double s = 0;
+            for (int64_t k = 0; k < D; ++k) {
+                double d = X->data[i * D + k] - Y->data[j * D + k];
+                s += d * d;
+            }
+            double dist = std::sqrt(s);
+            if (dist > c) dist = c;
+            Cost[i * n + j] = std::pow(dist, p);
+        }
+    }
+    double assigned_sum = 0;
+    int64_t h = 0;
+    if (m > 0 && n > 0) {
+        matlab_mat C; C.rows = m; C.cols = n;
+        std::vector<double> Cdup(Cost);
+        C.data = Cdup.data();
+        matlab_mat *A = matlab_fusion_assignmunkres(&C);
+        for (int64_t i = 0; i < m; ++i) {
+            int col = static_cast<int>(A->data[i]);
+            if (col >= 1 && col <= n) {
+                assigned_sum += Cost[i * n + (col - 1)];
+                h += 1;
+            }
+        }
+    }
+    double cp = std::pow(c, p);
+    double penalty = cp * static_cast<double>(big - h);
+    double total = (assigned_sum + penalty) / static_cast<double>(big);
+    o->data[0] = std::pow(total, 1.0 / p);
+    return o;
+}
+
+// trackErrorMetrics — simple RMSE accumulator over a track history matrix
+// (Tsteps × D) vs a truth history of the same shape.  Returns 1×1 RMSE.
+matlab_mat *matlab_fusion_trackerror(matlab_mat *Xhist, matlab_mat *Thist) {
+    matlab_mat *o = mat_alloc(1, 1);
+    if (!Xhist || !Thist) return o;
+    int64_t T = Xhist->rows;
+    int64_t D = Xhist->cols;
+    if (Thist->rows != T || Thist->cols != D || T == 0) return o;
+    double s = 0;
+    for (int64_t t = 0; t < T; ++t) {
+        for (int64_t k = 0; k < D; ++k) {
+            double d = Xhist->data[t * D + k] - Thist->data[t * D + k];
+            s += d * d;
+        }
+    }
+    o->data[0] = std::sqrt(s / static_cast<double>(T * D));
+    return o;
+}
+
+// rtsSmoother(F, Xhist, Phist) — Rauch-Tung-Striebel backward pass.
+//   F     : nx × nx state-transition matrix (constant across the history)
+//   Xhist : T  × nx forward-filter state rows
+//   Phist : T  × (nx·nx) forward-filter covariance rows (row-major flattened)
+// Returns a T × nx smoothed-state matrix.
+matlab_mat *matlab_fusion_rts_smoother(matlab_mat *F, matlab_mat *Xhist, matlab_mat *Phist) {
+    if (!F || !Xhist || !Phist) return mat_alloc(0, 0);
+    int64_t T  = Xhist->rows;
+    int64_t nx = Xhist->cols;
+    if (F->rows != nx || F->cols != nx) return mat_alloc(0, 0);
+    if (Phist->rows != T || Phist->cols != nx * nx) return mat_alloc(0, 0);
+    matlab_mat *Out = mat_alloc(T, nx);
+    if (T == 0) return Out;
+    // Initialise smoothed state to the last forward estimate.
+    for (int64_t k = 0; k < nx; ++k)
+        Out->data[(T - 1) * nx + k] = Xhist->data[(T - 1) * nx + k];
+    // Work buffers.
+    std::vector<double> Pk(nx * nx), Pkp(nx * nx), Pkp_inv(nx * nx);
+    std::vector<double> Ft(nx * nx), FPk(nx * nx), Ck(nx * nx);
+    fusion::tr(F->data, nx, nx, Ft.data());
+    // Walk backwards from T-2 to 0.
+    for (int64_t k = T - 2; k >= 0; --k) {
+        for (int64_t i = 0; i < nx * nx; ++i) Pk[i] = Phist->data[k * nx * nx + i];
+        // Predict covariance one step: Pk+1|k = F · Pk · F'.  We approximate
+        // here that the filter step's Q is already absorbed by Phist[k+1],
+        // so Pk+1|k ≈ F·Pk·F'.
+        std::vector<double> FP(nx * nx), Pp(nx * nx);
+        fusion::mm(F->data, nx, nx, Pk.data(), nx, FP.data());
+        fusion::mm(FP.data(), nx, nx, Ft.data(), nx, Pp.data());
+        // Smoother gain Ck = Pk · F' · Pp^-1.
+        std::vector<double> PkFt(nx * nx), Pp_inv(nx * nx, 0.0);
+        for (int64_t i = 0; i < nx; ++i) Pp_inv[i * nx + i] = 1.0;
+        std::vector<double> Pp_copy(Pp);
+        fusion::solve(Pp_copy.data(), nx, Pp_inv.data(), nx);
+        fusion::mm(Pk.data(), nx, nx, Ft.data(), nx, PkFt.data());
+        fusion::mm(PkFt.data(), nx, nx, Pp_inv.data(), nx, Ck.data());
+        // Smoothed mean: xs_k = xk + Ck · (xs_{k+1} - F · xk).
+        std::vector<double> Fxk(nx), diff(nx), Cd(nx);
+        for (int64_t i = 0; i < nx; ++i) {
+            double s = 0;
+            for (int64_t j = 0; j < nx; ++j) s += F->data[i * nx + j] * Xhist->data[k * nx + j];
+            Fxk[i] = s;
+            diff[i] = Out->data[(k + 1) * nx + i] - Fxk[i];
+        }
+        fusion::mm(Ck.data(), nx, nx, diff.data(), 1, Cd.data());
+        for (int64_t i = 0; i < nx; ++i)
+            Out->data[k * nx + i] = Xhist->data[k * nx + i] + Cd[i];
+    }
+    return Out;
+}
+
 // ---------- Tier-3.7 allanvar ---------------------------------------------
 //
 // Compute the Allan variance of x[0..N-1] sampled at fs Hz, over a set of

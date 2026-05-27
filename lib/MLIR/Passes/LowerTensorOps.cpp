@@ -5840,6 +5840,17 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"matlab_fusion_gnn_init",        "matlab_fusion_gnn_init",        PtrTy, {PtrTy, F64}},
         {"matlab_fusion_gnn_step",        "matlab_fusion_gnn_step",        PtrTy, {PtrTy, PtrTy, F64}},
         {"matlab_fusion_gnn_numconfirmed","matlab_fusion_gnn_numconfirmed",PtrTy, {PtrTy}},
+        /* Sensor Fusion Tier-6 — covariance intersection + GOSPA / OSPA + RMSE + RTS smoother. */
+        {"matlab_fusion_covint",  "matlab_fusion_covint",  PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy}},
+        {"trackFuser",            "matlab_fusion_covint",  PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy}},
+        {"matlab_fusion_gospa",   "matlab_fusion_gospa",   PtrTy, {PtrTy, PtrTy, F64, F64}},
+        {"trackGOSPAMetric",      "matlab_fusion_gospa",   PtrTy, {PtrTy, PtrTy, F64, F64}},
+        {"matlab_fusion_ospa",    "matlab_fusion_ospa",    PtrTy, {PtrTy, PtrTy, F64, F64}},
+        {"trackOSPAMetric",       "matlab_fusion_ospa",    PtrTy, {PtrTy, PtrTy, F64, F64}},
+        {"matlab_fusion_trackerror", "matlab_fusion_trackerror", PtrTy, {PtrTy, PtrTy}},
+        {"trackErrorMetrics",        "matlab_fusion_trackerror", PtrTy, {PtrTy, PtrTy}},
+        {"matlab_fusion_rts_smoother", "matlab_fusion_rts_smoother", PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"rtsSmoother",                "matlab_fusion_rts_smoother", PtrTy, {PtrTy, PtrTy, PtrTy}},
       };
       bool matched = false;
       for (const auto &E : pde_table) {

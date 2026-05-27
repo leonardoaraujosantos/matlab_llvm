@@ -1,0 +1,6 @@
+GOSPA(sensor A vs truth) = 1.054
+GOSPA(sensor B vs truth) = 1.068
+CI fused x = [10.500, 0.300]
+Sensor A track RMSE = 0.430
+RTS smoothed x[1] = 0.000 (forward was 0.0)
+RTS smoothed x[5] = 4.000 (forward was 4.0)

@@ -108,8 +108,11 @@ through Cairo), [`feature_status.md`](feature_status.md).
   carved down); **Tier-5 partial 🟡** (`assignmunkres` + `objectTrack` +
   `trackerGNN` shipped — closes the `gnn_air_traffic.m` tracer; `assignjv` /
   `assignauction` / `assignsd` / `trackerJPDA` / `trackerTOMHT` /
-  `fusionRadarSensor` carved down); **Tier-6 🔵** not started. The estimation
-  substrate is
+  `fusionRadarSensor` carved down); **Tier-6 partial 🟡** (`trackFuser`
+  covariance intersection + `trackGOSPAMetric` / `trackOSPAMetric` /
+  `trackErrorMetrics` + `rtsSmoother` shipped — closes `track_fusion_metrics.m`;
+  `trackerPHD` / OOSM retrodiction / `trackerGridRFS` carved down).
+  The estimation substrate is
   unusually deep: the EKF/UKF cores, ODE solvers, dense linalg, PRNG, and
   the single-filter classdef pattern are all shipped. The genuinely new
   surface is the **quaternion type**, the **sensor noise models**, the
@@ -459,7 +462,7 @@ object-API surface a *script* uses (quaternions / filters / IMU-GPS fusion
 | T3 | inertial sensors + orientation/pose fusion | ~2.5 wk | `imuSensor`/`gpsSensor` + Mahony-style `ahrsfilter`/`imufilter`/`complementaryFilter` + simplified `insfilterMARG` headline + `allanvar` (`tune` carved as follow-on) | ✅ |
 | T4 | trajectory + scenario generation | ~1.5 wk | `waypointTrajectory` (position-only) + `lla2ned`/`ned2lla` WGS-84 (full kinematicTrajectory/geoTrajectory/trackingScenario/theaterPlot are documented follow-ons) | 🟡 |
 | T5 | multi-object trackers + assignment | ~3 wk | `assignmunkres` (O(n³) Hungarian) + `objectTrack` + `trackerGNN` over constvel trackingEKFs with Mahalanobis gating + age-based confirmation (assignjv/auction/sd + trackerJPDA/TOMHT + fusionRadarSensor carved as follow-ons) | 🟡 |
-| T6 | track fusion + metrics + RFS + polish | ~2.5 wk | `trackFuser`/`staticDetectionFuser` + GOSPA/OSPA metrics + `trackerPHD` + OOSM | 🔵 |
+| T6 | track fusion + metrics + RFS + polish | ~2.5 wk | `trackFuser` covariance-intersection (trace-min ω line search) + `trackGOSPAMetric`/`trackOSPAMetric` (Munkres-based) + `trackErrorMetrics` RMSE + `rtsSmoother` (free-function RTS backward pass); `trackerPHD`/`staticDetectionFuser`/OOSM/`trackerGridRFS` carved down | 🟡 |
 | **Total** | | **~12.5 wk** | | |
 
 **Recommended slice order**: **T1 → T2 → T3 first** — this closes the

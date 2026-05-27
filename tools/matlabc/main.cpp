@@ -2340,6 +2340,11 @@ static std::string buildReplPrelude(const std::string &Src) {
     {false, "trackerGNN",          "fusion_classdefs.m"},
     {false, "objectTrack",         "fusion_classdefs.m"},
     {false, "numConfirmed",        "fusion_classdefs.m"},
+    {false, "trackFuser",          "fusion_classdefs.m"},
+    {false, "trackGOSPAMetric",    "fusion_classdefs.m"},
+    {false, "trackOSPAMetric",     "fusion_classdefs.m"},
+    {false, "trackErrorMetrics",   "fusion_classdefs.m"},
+    {false, "rtsSmoother",         "fusion_classdefs.m"},
     /* Global Optimization Toolbox Tier-2 — `gads_classdefs.m` holds the
      * MultiStart + GlobalSearch solver objects.  (`run` is too generic
      * to trigger on; the solver-object mentions pull the prelude.) */
@@ -11435,6 +11440,8 @@ int main(int Argc, char **Argv) {
       "cvmeas", "cameas", "ctmeas", "initcvekf", "initctekf",
       "waypointTrajectory", "lookupPose", "lla2ned", "ned2lla",
       "assignmunkres", "trackerGNN", "objectTrack", "numConfirmed",
+      "trackFuser", "trackGOSPAMetric", "trackOSPAMetric",
+      "trackErrorMetrics", "rtsSmoother",
       /* GPU Coder T5 design-pattern helpers — runtime entries, no
        * prelude file needed.  Listed here only for the AOT-prelude
        * scanner's awareness (no leaf to map). */
@@ -11654,7 +11661,10 @@ int main(int Argc, char **Argv) {
         ClsName == "waypointTrajectory" || ClsName == "lookupPose" ||
         ClsName == "lla2ned" || ClsName == "ned2lla" ||
         ClsName == "assignmunkres" || ClsName == "trackerGNN" ||
-        ClsName == "objectTrack" || ClsName == "numConfirmed")
+        ClsName == "objectTrack" || ClsName == "numConfirmed" ||
+        ClsName == "trackFuser" || ClsName == "trackGOSPAMetric" ||
+        ClsName == "trackOSPAMetric" || ClsName == "trackErrorMetrics" ||
+        ClsName == "rtsSmoother")
       return "fusion_classdefs.m";
     /* GPU Coder T5 design-pattern helpers are C runtime entries; no
      * classdef file to pull in. */
