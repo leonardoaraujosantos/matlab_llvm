@@ -1,0 +1,4 @@
+unicycle ddot = [1.000 0.000 0.500]
+bicycle ddot = [2.000 0.000 1.000]
+ackermann ddot = [2.000 0.000 1.000 0.300]
+bicycle pose after 1s: (0.999, 0.046, 0.101)

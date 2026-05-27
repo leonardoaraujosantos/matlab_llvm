@@ -2148,7 +2148,7 @@ static std::string buildReplPrelude(const std::string &Src) {
   static const char *kToolboxDirs[] = {
     "comm", "rf", "optim", "mpc", "ident", "gads", "pde", "prop", "sym",
     "stateflow", "antenna", "control", "stats", "images", "curvefit",
-    "dsp", "gpu", "finance", "econ", "fusion",
+    "dsp", "gpu", "finance", "econ", "fusion", "robotics",
   };
   std::vector<std::string> Files;
   auto add = [&](const std::string &Leaf) {
@@ -2345,6 +2345,67 @@ static std::string buildReplPrelude(const std::string &Src) {
     {false, "trackOSPAMetric",     "fusion_classdefs.m"},
     {false, "trackErrorMetrics",   "fusion_classdefs.m"},
     {false, "rtsSmoother",         "fusion_classdefs.m"},
+    /* Robotics System Toolbox — `robotics_classdefs.m` umbrella. */
+    {false, "se3",                       "robotics_classdefs.m"},
+    {false, "so3",                       "robotics_classdefs.m"},
+    {false, "rigidBodyTree",             "robotics_classdefs.m"},
+    {false, "addBody",                   "robotics_classdefs.m"},
+    {false, "getTransform",              "robotics_classdefs.m"},
+    {false, "geometricJacobian",         "robotics_classdefs.m"},
+    {false, "homeConfiguration",         "robotics_classdefs.m"},
+    {false, "randomConfiguration",       "robotics_classdefs.m"},
+    {false, "loadrobot",                 "robotics_classdefs.m"},
+    {false, "inverseKinematics",         "robotics_classdefs.m"},
+    {false, "constraintPoseTarget",      "robotics_classdefs.m"},
+    {false, "trvec2tform",               "robotics_classdefs.m"},
+    {false, "tform2trvec",               "robotics_classdefs.m"},
+    {false, "rotm2tform",                "robotics_classdefs.m"},
+    {false, "tform2rotm",                "robotics_classdefs.m"},
+    {false, "eul2tform",                 "robotics_classdefs.m"},
+    {false, "tform2eul",                 "robotics_classdefs.m"},
+    {false, "axang2rotm",                "robotics_classdefs.m"},
+    {false, "rotm2axang",                "robotics_classdefs.m"},
+    {false, "axang2tform",               "robotics_classdefs.m"},
+    {false, "tform2axang",               "robotics_classdefs.m"},
+    {false, "quat2tform",                "robotics_classdefs.m"},
+    {false, "tform2quat",                "robotics_classdefs.m"},
+    {false, "homtrans",                  "robotics_classdefs.m"},
+    {false, "wrapToPi",                  "robotics_classdefs.m"},
+    {false, "wrapTo2Pi",                 "robotics_classdefs.m"},
+    {false, "vecnorm",                   "robotics_classdefs.m"},
+    {false, "cubicpolytraj",             "robotics_classdefs.m"},
+    {false, "trapveltraj",               "robotics_classdefs.m"},
+    {false, "transformtraj",             "robotics_classdefs.m"},
+    {false, "massMatrix",                "robotics_classdefs.m"},
+    {false, "inverseDynamics",           "robotics_classdefs.m"},
+    {false, "forwardDynamics",           "robotics_classdefs.m"},
+    {false, "gravityTorque",             "robotics_classdefs.m"},
+    {false, "velocityProduct",           "robotics_classdefs.m"},
+    {false, "centerOfMass",              "robotics_classdefs.m"},
+    {false, "importrobot",               "robotics_classdefs.m"},
+    {false, "generalizedInverseKinematics","robotics_classdefs.m"},
+    {false, "constraintPositionTarget",  "robotics_classdefs.m"},
+    {false, "constraintOrientationTarget","robotics_classdefs.m"},
+    {false, "constraintJointBounds",     "robotics_classdefs.m"},
+    {false, "collisionCylinder",         "robotics_classdefs.m"},
+    {false, "collisionCapsule",          "robotics_classdefs.m"},
+    {false, "differentialDriveKinematics","robotics_classdefs.m"},
+    {false, "unicycleKinematics",        "robotics_classdefs.m"},
+    {false, "bicycleKinematics",         "robotics_classdefs.m"},
+    {false, "ackermannKinematics",       "robotics_classdefs.m"},
+    {false, "derivative",                "robotics_classdefs.m"},
+    {false, "binaryOccupancyMap",        "robotics_classdefs.m"},
+    {false, "mobileRobotPRM",            "robotics_classdefs.m"},
+    {false, "controllerPurePursuit",     "robotics_classdefs.m"},
+    {false, "setOccupancy",              "robotics_classdefs.m"},
+    {false, "getOccupancy",              "robotics_classdefs.m"},
+    {false, "checkOccupancy",            "robotics_classdefs.m"},
+    {false, "findpath",                  "robotics_classdefs.m"},
+    {false, "collisionBox",              "robotics_classdefs.m"},
+    {false, "collisionSphere",           "robotics_classdefs.m"},
+    {false, "checkCollision",            "robotics_classdefs.m"},
+    {false, "manipulatorRRT",            "robotics_classdefs.m"},
+    {false, "plan",                      "robotics_classdefs.m"},
     /* Global Optimization Toolbox Tier-2 — `gads_classdefs.m` holds the
      * MultiStart + GlobalSearch solver objects.  (`run` is too generic
      * to trigger on; the solver-object mentions pull the prelude.) */
@@ -11442,6 +11503,28 @@ int main(int Argc, char **Argv) {
       "assignmunkres", "trackerGNN", "objectTrack", "numConfirmed",
       "trackFuser", "trackGOSPAMetric", "trackOSPAMetric",
       "trackErrorMetrics", "rtsSmoother",
+      /* Robotics System Toolbox — `robotics_classdefs.m` umbrella. */
+      "se3", "so3", "rigidBodyTree", "addBody",
+      "getTransform", "geometricJacobian",
+      "homeConfiguration", "randomConfiguration", "loadrobot",
+      "inverseKinematics", "constraintPoseTarget",
+      "trvec2tform", "tform2trvec", "rotm2tform", "tform2rotm",
+      "eul2tform", "tform2eul", "axang2rotm", "rotm2axang",
+      "axang2tform", "tform2axang", "quat2tform", "tform2quat",
+      "homtrans", "wrapToPi", "wrapTo2Pi", "vecnorm",
+      "cubicpolytraj", "trapveltraj", "transformtraj",
+      "massMatrix", "inverseDynamics",
+      "forwardDynamics", "gravityTorque", "velocityProduct", "centerOfMass",
+      "importrobot", "generalizedInverseKinematics",
+      "constraintPositionTarget", "constraintOrientationTarget",
+      "constraintJointBounds", "collisionCylinder", "collisionCapsule",
+      "differentialDriveKinematics", "unicycleKinematics",
+      "bicycleKinematics", "ackermannKinematics", "derivative",
+      "binaryOccupancyMap",
+      "mobileRobotPRM", "controllerPurePursuit",
+      "setOccupancy", "getOccupancy", "checkOccupancy", "findpath",
+      "collisionBox", "collisionSphere", "checkCollision",
+      "manipulatorRRT", "plan",
       /* GPU Coder T5 design-pattern helpers — runtime entries, no
        * prelude file needed.  Listed here only for the AOT-prelude
        * scanner's awareness (no leaf to map). */
@@ -11666,6 +11749,43 @@ int main(int Argc, char **Argv) {
         ClsName == "trackOSPAMetric" || ClsName == "trackErrorMetrics" ||
         ClsName == "rtsSmoother")
       return "fusion_classdefs.m";
+    /* Robotics System Toolbox umbrella. */
+    if (ClsName == "se3" || ClsName == "so3" ||
+        ClsName == "rigidBodyTree" || ClsName == "addBody" ||
+        ClsName == "getTransform" || ClsName == "geometricJacobian" ||
+        ClsName == "homeConfiguration" || ClsName == "randomConfiguration" ||
+        ClsName == "loadrobot" ||
+        ClsName == "inverseKinematics" || ClsName == "constraintPoseTarget" ||
+        ClsName == "trvec2tform" || ClsName == "tform2trvec" ||
+        ClsName == "rotm2tform" || ClsName == "tform2rotm" ||
+        ClsName == "eul2tform" || ClsName == "tform2eul" ||
+        ClsName == "axang2rotm" || ClsName == "rotm2axang" ||
+        ClsName == "axang2tform" || ClsName == "tform2axang" ||
+        ClsName == "quat2tform" || ClsName == "tform2quat" ||
+        ClsName == "homtrans" || ClsName == "wrapToPi" ||
+        ClsName == "wrapTo2Pi" || ClsName == "vecnorm" ||
+        ClsName == "cubicpolytraj" || ClsName == "trapveltraj" ||
+        ClsName == "transformtraj" ||
+        ClsName == "massMatrix" || ClsName == "inverseDynamics" ||
+        ClsName == "forwardDynamics" || ClsName == "gravityTorque" ||
+        ClsName == "velocityProduct" || ClsName == "centerOfMass" ||
+        ClsName == "importrobot" ||
+        ClsName == "generalizedInverseKinematics" ||
+        ClsName == "constraintPositionTarget" ||
+        ClsName == "constraintOrientationTarget" ||
+        ClsName == "constraintJointBounds" ||
+        ClsName == "collisionCylinder" || ClsName == "collisionCapsule" ||
+        ClsName == "differentialDriveKinematics" ||
+        ClsName == "unicycleKinematics" || ClsName == "bicycleKinematics" ||
+        ClsName == "ackermannKinematics" || ClsName == "derivative" ||
+        ClsName == "binaryOccupancyMap" || ClsName == "mobileRobotPRM" ||
+        ClsName == "controllerPurePursuit" ||
+        ClsName == "setOccupancy" || ClsName == "getOccupancy" ||
+        ClsName == "checkOccupancy" || ClsName == "findpath" ||
+        ClsName == "collisionBox" || ClsName == "collisionSphere" ||
+        ClsName == "checkCollision" || ClsName == "manipulatorRRT" ||
+        ClsName == "plan")
+      return "robotics_classdefs.m";
     /* GPU Coder T5 design-pattern helpers are C runtime entries; no
      * classdef file to pull in. */
     return std::string();
@@ -11721,7 +11841,7 @@ int main(int Argc, char **Argv) {
     static const char *kToolboxDirs[] = {
       "comm", "rf", "optim", "mpc", "ident", "gads", "pde", "prop", "sym",
       "stateflow", "antenna", "control", "stats", "images", "curvefit",
-      "dsp", "gpu", "finance", "econ", "fusion",
+      "dsp", "gpu", "finance", "econ", "fusion", "robotics",
     };
     std::vector<std::string> Cands;
     for (const char *Tb : kToolboxDirs) {

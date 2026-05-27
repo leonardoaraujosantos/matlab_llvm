@@ -5929,6 +5929,27 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     if (C.Resolved == CallKind::Call) {
       auto *N = dynamic_cast<const NameExpr *>(C.Callee);
       auto PtrTyConst = mlir::LLVM::LLVMPointerType::get(&MCtx);
+      /* ===== Robotics factory functions returning a fresh rigidBodyTree =====
+       * `importrobot(file)` / `loadrobot(name)` allocate a rigidBodyTree
+       * shell and populate it from a URDF file / baked model.  These are
+       * free functions (Builtin binding), so they're intercepted here
+       * before the generic builtin dispatch. */
+      if (N && (N->Name == "importrobot" || N->Name == "loadrobot") &&
+          C.Args.size() == 1) {
+        mlir::NamedAttribute CtorCal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "rigidBodyTree__rigidBodyTree"));
+        mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+        mlir::Value Arg = lowerExpr(*C.Args[0]);
+        const char *rt = (N->Name == "importrobot") ? "matlab_robotics_importrobot"
+                                                     : "matlab_robotics_loadrobot";
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, rt));
+        emitUnregOp("matlab.call_builtin", {Obj, Arg},
+                    {mlir::NoneType::get(&MCtx)}, L, {Cal});
+        return Obj;
+      }
       /* Constructor call: `ClassName(args)` where ClassName resolves to
        * a user classdef. Route to the emitted `ClassName__ClassName`
        * function, returning a matlab_obj*. If the class has no explicit
@@ -6229,6 +6250,266 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
               mlir::StringAttr::get(&MCtx, "callee"),
               mlir::StringAttr::get(&MCtx, "matlab_fusion_waypoint_init"));
           emitUnregOp("matlab.call_builtin", {Obj, Wp, To},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        /* ===== Robotics Tier-1 — se3(T) / so3(R) constructor intercepts ===== */
+        if (CD->Name == "se3" && C.Args.size() == 1) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "se3__se3"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value T = lowerExpr(*C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_robotics_se3_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, T},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        if (CD->Name == "so3" && C.Args.size() == 1) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "so3__so3"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value R = lowerExpr(*C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_robotics_so3_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, R},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        /* ===== Robotics Tier-2 — rigidBodyTree (zero-arg + populator) ======== */
+        if (CD->Name == "rigidBodyTree" && C.Args.size() == 0) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "rigidBodyTree__rigidBodyTree"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_robotics_tree_init"));
+          emitUnregOp("matlab.call_builtin", {Obj},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        /* ===== Robotics Tier-3 — inverseKinematics(rb) ====================== */
+        if (CD->Name == "inverseKinematics" && C.Args.size() == 1) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "inverseKinematics__inverseKinematics"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Tr  = lowerExpr(*C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_robotics_ik_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, Tr},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        /* constraintPoseTarget(target_tform [, weights]) */
+        if (CD->Name == "constraintPoseTarget" &&
+            (C.Args.size() == 1 || C.Args.size() == 2)) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "constraintPoseTarget__constraintPoseTarget"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value T = lowerExpr(*C.Args[0]);
+          mlir::Value W = (C.Args.size() == 2) ? lowerExpr(*C.Args[1]) : T;
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_robotics_constraint_pose_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, T, W},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        /* constraintPositionTarget(target) / constraintOrientationTarget(target). */
+        if ((CD->Name == "constraintPositionTarget" ||
+             CD->Name == "constraintOrientationTarget") &&
+            (C.Args.size() == 1 || C.Args.size() == 2)) {
+          std::string Ctor = std::string(CD->Name) + "__" + std::string(CD->Name);
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, Ctor));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Tg = lowerExpr(*C.Args[0]);
+          mlir::Value W  = (C.Args.size() == 2) ? lowerExpr(*C.Args[1]) : Tg;
+          const char *rt = (CD->Name == "constraintPositionTarget")
+              ? "matlab_robotics_constraint_position_init"
+              : "matlab_robotics_constraint_orientation_init";
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, rt));
+          emitUnregOp("matlab.call_builtin", {Obj, Tg, W},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        /* generalizedInverseKinematics(rb). */
+        if (CD->Name == "generalizedInverseKinematics" && C.Args.size() == 1) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "generalizedInverseKinematics__generalizedInverseKinematics"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Tr  = lowerExpr(*C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_robotics_gik_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, Tr},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        /* ===== Robotics Tier-5 — diffdrive / occupancy map / PRM / pursuit == */
+        if (CD->Name == "differentialDriveKinematics" && C.Args.size() == 2) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "differentialDriveKinematics__differentialDriveKinematics"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Wr = lowerExpr(*C.Args[0]);
+          mlir::Value Tw = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_robotics_diffdrive_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, Wr, Tw},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        if (CD->Name == "unicycleKinematics" && C.Args.size() == 0) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "unicycleKinematics__unicycleKinematics"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_robotics_unicycle_init"));
+          mlir::Value WR = emitUnreg("matlab.const_float", {}, mlir::Float64Type::get(&MCtx), L,
+              {mlir::NamedAttribute(mlir::StringAttr::get(&MCtx, "value"),
+                   mlir::FloatAttr::get(mlir::Float64Type::get(&MCtx), 0.1))});
+          emitUnregOp("matlab.call_builtin", {Obj, WR}, {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        if ((CD->Name == "bicycleKinematics" || CD->Name == "ackermannKinematics") &&
+            (C.Args.size() == 0 || C.Args.size() == 1)) {
+          std::string Ctor = std::string(CD->Name) + "__" + std::string(CD->Name);
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, Ctor));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value WB = (C.Args.size() == 1) ? lowerExpr(*C.Args[0])
+              : emitUnreg("matlab.const_float", {}, mlir::Float64Type::get(&MCtx), L,
+                  {mlir::NamedAttribute(mlir::StringAttr::get(&MCtx, "value"),
+                       mlir::FloatAttr::get(mlir::Float64Type::get(&MCtx), 1.0))});
+          const char *rt = (CD->Name == "bicycleKinematics")
+              ? "matlab_robotics_bicycle_init" : "matlab_robotics_ackermann_init";
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, rt));
+          emitUnregOp("matlab.call_builtin", {Obj, WB}, {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        if (CD->Name == "binaryOccupancyMap" && C.Args.size() == 3) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "binaryOccupancyMap__binaryOccupancyMap"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value R = lowerExpr(*C.Args[0]);
+          mlir::Value Cl = lowerExpr(*C.Args[1]);
+          mlir::Value Rs = lowerExpr(*C.Args[2]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_robotics_occmap_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, R, Cl, Rs},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        if (CD->Name == "mobileRobotPRM" && C.Args.size() == 3) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "mobileRobotPRM__mobileRobotPRM"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Mp = lowerExpr(*C.Args[0]);
+          mlir::Value Nn = lowerExpr(*C.Args[1]);
+          mlir::Value Cd = lowerExpr(*C.Args[2]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_robotics_prm_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, Mp, Nn, Cd},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        if (CD->Name == "controllerPurePursuit" && C.Args.size() == 3) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "controllerPurePursuit__controllerPurePursuit"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Wp = lowerExpr(*C.Args[0]);
+          mlir::Value Lh = lowerExpr(*C.Args[1]);
+          mlir::Value Vm = lowerExpr(*C.Args[2]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_robotics_pursuit_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, Wp, Lh, Vm},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        /* ===== Robotics Tier-6 — collision primitives + manipulatorRRT ===== */
+        if (CD->Name == "collisionBox" && C.Args.size() == 3) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "collisionBox__collisionBox"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value X = lowerExpr(*C.Args[0]);
+          mlir::Value Y = lowerExpr(*C.Args[1]);
+          mlir::Value Z = lowerExpr(*C.Args[2]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_robotics_collbox_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, X, Y, Z},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        if (CD->Name == "collisionSphere" && C.Args.size() == 1) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "collisionSphere__collisionSphere"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Rv = lowerExpr(*C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_robotics_collsphere_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, Rv},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        if ((CD->Name == "collisionCylinder" || CD->Name == "collisionCapsule") &&
+            C.Args.size() == 2) {
+          std::string Ctor = std::string(CD->Name) + "__" + std::string(CD->Name);
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, Ctor));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Rv = lowerExpr(*C.Args[0]);
+          mlir::Value Lv = lowerExpr(*C.Args[1]);
+          const char *rt = (CD->Name == "collisionCylinder")
+              ? "matlab_robotics_collcyl_init" : "matlab_robotics_collcap_init";
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, rt));
+          emitUnregOp("matlab.call_builtin", {Obj, Rv, Lv},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        if (CD->Name == "manipulatorRRT" && C.Args.size() == 3) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "manipulatorRRT__manipulatorRRT"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Tr = lowerExpr(*C.Args[0]);
+          mlir::Value Cn = lowerExpr(*C.Args[1]);
+          mlir::Value Rd = lowerExpr(*C.Args[2]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_robotics_rrt_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, Tr, Cn, Rd},
                       {mlir::NoneType::get(&MCtx)}, L, {Cal});
           return Obj;
         }
@@ -9313,6 +9594,217 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
               mlir::StringAttr::get(&MCtx, "callee"),
               mlir::StringAttr::get(&MCtx, "matlab_fusion_gnn_numconfirmed"));
           return emitUnreg("matlab.call_builtin", {Obj}, PtrTy, L, {Cal});
+        }
+        /* ===== Robotics Tier-2 — rigidBodyTree methods ====================== */
+        if (Nm == "addBody" && Cls0 && Cn0 == "rigidBodyTree" && C.Args.size() == 5) {
+          // addBody(tree, dh_row, jt_code, lo, hi)
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value DH  = lowerExpr(*C.Args[1]);
+          mlir::Value JT  = lowerExpr(*C.Args[2]);
+          mlir::Value Lo  = lowerExpr(*C.Args[3]);
+          mlir::Value Hi  = lowerExpr(*C.Args[4]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_robotics_tree_addbody"));
+          return emitUnreg("matlab.call_builtin", {Obj, DH, JT, Lo, Hi}, PtrTy, L, {Cal});
+        }
+        if (Nm == "loadrobot" && Cls0 && Cn0 == "rigidBodyTree" && C.Args.size() == 2) {
+          // loadrobot(tree, name_string)
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Nm2 = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_robotics_loadrobot"));
+          return emitUnreg("matlab.call_builtin", {Obj, Nm2}, PtrTy, L, {Cal});
+        }
+        if (Nm == "importrobot" && Cls0 && Cn0 == "rigidBodyTree" && C.Args.size() == 2) {
+          // importrobot(tree, filename) — populate an existing tree in place
+          // (keeps the LHS class-pinned for downstream method dispatch).
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Fn  = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_robotics_importrobot"));
+          return emitUnreg("matlab.call_builtin", {Obj, Fn}, PtrTy, L, {Cal});
+        }
+        if (Nm == "getTransform" && Cls0 && Cn0 == "rigidBodyTree" && C.Args.size() == 2) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Qv  = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_robotics_getTransform"));
+          return emitUnreg("matlab.call_builtin", {Obj, Qv}, PtrTy, L, {Cal});
+        }
+        if (Nm == "geometricJacobian" && Cls0 && Cn0 == "rigidBodyTree" && C.Args.size() == 2) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Qv  = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_robotics_geometricJacobian"));
+          return emitUnreg("matlab.call_builtin", {Obj, Qv}, PtrTy, L, {Cal});
+        }
+        if (Nm == "homeConfiguration" && Cls0 && Cn0 == "rigidBodyTree" && C.Args.size() == 1) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_robotics_homeConfiguration"));
+          return emitUnreg("matlab.call_builtin", {Obj}, PtrTy, L, {Cal});
+        }
+        if (Nm == "randomConfiguration" && Cls0 && Cn0 == "rigidBodyTree" && C.Args.size() == 1) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_robotics_randomConfiguration"));
+          return emitUnreg("matlab.call_builtin", {Obj}, PtrTy, L, {Cal});
+        }
+        if (Nm == "massMatrix" && Cls0 && Cn0 == "rigidBodyTree" && C.Args.size() == 2) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Qv  = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_robotics_massMatrix"));
+          return emitUnreg("matlab.call_builtin", {Obj, Qv}, PtrTy, L, {Cal});
+        }
+        if (Nm == "inverseDynamics" && Cls0 && Cn0 == "rigidBodyTree" && C.Args.size() == 4) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Qv  = lowerExpr(*C.Args[1]);
+          mlir::Value Qd  = lowerExpr(*C.Args[2]);
+          mlir::Value Qdd = lowerExpr(*C.Args[3]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_robotics_inverseDynamics"));
+          return emitUnreg("matlab.call_builtin", {Obj, Qv, Qd, Qdd}, PtrTy, L, {Cal});
+        }
+        if (Nm == "forwardDynamics" && Cls0 && Cn0 == "rigidBodyTree" && C.Args.size() == 4) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Qv  = lowerExpr(*C.Args[1]);
+          mlir::Value Qd  = lowerExpr(*C.Args[2]);
+          mlir::Value Tau = lowerExpr(*C.Args[3]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_robotics_forwardDynamics"));
+          return emitUnreg("matlab.call_builtin", {Obj, Qv, Qd, Tau}, PtrTy, L, {Cal});
+        }
+        if (Nm == "gravityTorque" && Cls0 && Cn0 == "rigidBodyTree" && C.Args.size() == 2) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Qv  = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_robotics_gravityTorque"));
+          return emitUnreg("matlab.call_builtin", {Obj, Qv}, PtrTy, L, {Cal});
+        }
+        if (Nm == "velocityProduct" && Cls0 && Cn0 == "rigidBodyTree" && C.Args.size() == 3) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Qv  = lowerExpr(*C.Args[1]);
+          mlir::Value Qd  = lowerExpr(*C.Args[2]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_robotics_velocityProduct"));
+          return emitUnreg("matlab.call_builtin", {Obj, Qv, Qd}, PtrTy, L, {Cal});
+        }
+        if (Nm == "centerOfMass" && Cls0 && Cn0 == "rigidBodyTree" && C.Args.size() == 2) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Qv  = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_robotics_centerOfMass"));
+          return emitUnreg("matlab.call_builtin", {Obj, Qv}, PtrTy, L, {Cal});
+        }
+        /* ===== Robotics Tier-3 — inverseKinematics solve ===================== */
+        // ik(ik_obj, target_tform, q0, w_pos, w_ori) — call-syntax sugar on
+        // the inverseKinematics instance.  The MATLAB form is
+        // `[q,info] = ik(target, weights, q0)` — we expose the 5-arg flat form.
+        if (Nm == "solveik" && Cls0 && Cn0 == "inverseKinematics" && C.Args.size() == 5) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Tg  = lowerExpr(*C.Args[1]);
+          mlir::Value Q0  = lowerExpr(*C.Args[2]);
+          mlir::Value Wp  = lowerExpr(*C.Args[3]);
+          mlir::Value Wo  = lowerExpr(*C.Args[4]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_robotics_ik_solve"));
+          return emitUnreg("matlab.call_builtin", {Obj, Tg, Q0, Wp, Wo}, PtrTy, L, {Cal});
+        }
+        /* ===== Robotics Tier-5 — diffdrive derivative / occmap methods / PRM / pursuit == */
+        if (Nm == "derivative" && Cls0 &&
+            (Cn0 == "differentialDriveKinematics" || Cn0 == "unicycleKinematics" ||
+             Cn0 == "bicycleKinematics" || Cn0 == "ackermannKinematics") &&
+            C.Args.size() == 3) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value St  = lowerExpr(*C.Args[1]);
+          mlir::Value Cm  = lowerExpr(*C.Args[2]);
+          const char *rt;
+          if      (Cn0 == "unicycleKinematics")  rt = "matlab_robotics_unicycle_derivative";
+          else if (Cn0 == "bicycleKinematics")   rt = "matlab_robotics_bicycle_derivative";
+          else if (Cn0 == "ackermannKinematics") rt = "matlab_robotics_ackermann_derivative";
+          else                                   rt = "matlab_robotics_diffdrive_derivative";
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, rt));
+          return emitUnreg("matlab.call_builtin", {Obj, St, Cm}, PtrTy, L, {Cal});
+        }
+        if (Nm == "setOccupancy" && Cls0 && Cn0 == "binaryOccupancyMap" && C.Args.size() == 3) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value XY  = lowerExpr(*C.Args[1]);
+          mlir::Value V   = lowerExpr(*C.Args[2]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_robotics_occmap_set"));
+          return emitUnreg("matlab.call_builtin", {Obj, XY, V}, PtrTy, L, {Cal});
+        }
+        if (Nm == "getOccupancy" && Cls0 && Cn0 == "binaryOccupancyMap" && C.Args.size() == 2) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value XY  = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_robotics_occmap_get"));
+          return emitUnreg("matlab.call_builtin", {Obj, XY}, PtrTy, L, {Cal});
+        }
+        if (Nm == "checkOccupancy" && Cls0 && Cn0 == "binaryOccupancyMap" && C.Args.size() == 2) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value XY  = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_robotics_occmap_check"));
+          return emitUnreg("matlab.call_builtin", {Obj, XY}, PtrTy, L, {Cal});
+        }
+        if (Nm == "findpath" && Cls0 && Cn0 == "mobileRobotPRM" && C.Args.size() == 3) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Sxy = lowerExpr(*C.Args[1]);
+          mlir::Value Gxy = lowerExpr(*C.Args[2]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_robotics_prm_findpath"));
+          return emitUnreg("matlab.call_builtin", {Obj, Sxy, Gxy}, PtrTy, L, {Cal});
+        }
+        if (Nm == "step" && Cls0 && Cn0 == "controllerPurePursuit" && C.Args.size() == 2) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Po  = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_robotics_pursuit_step"));
+          return emitUnreg("matlab.call_builtin", {Obj, Po}, PtrTy, L, {Cal});
+        }
+        /* ===== Robotics Tier-6 — collision check + manipulatorRRT plan ===== */
+        if (Nm == "checkCollision" && Cls0 &&
+            (Cn0 == "collisionBox" || Cn0 == "collisionSphere" ||
+             Cn0 == "collisionCylinder" || Cn0 == "collisionCapsule") &&
+            C.Args.size() == 2) {
+          mlir::Value A = loadObj(C.Args[0]);
+          mlir::Value B = loadObj(C.Args[1]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_robotics_checkCollision"));
+          return emitUnreg("matlab.call_builtin", {A, B}, PtrTy, L, {Cal});
+        }
+        if (Nm == "plan" && Cls0 && Cn0 == "manipulatorRRT" && C.Args.size() == 3) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Qs  = lowerExpr(*C.Args[1]);
+          mlir::Value Qg  = lowerExpr(*C.Args[2]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_robotics_rrt_plan"));
+          return emitUnreg("matlab.call_builtin", {Obj, Qs, Qg}, PtrTy, L, {Cal});
         }
         /* recursiveLS step(obj, y, H) — RLS update with user regressor H. */
         if (Nm == "step" && Cls0 && Cn0 == "recursiveLS" && C.Args.size() == 3) {

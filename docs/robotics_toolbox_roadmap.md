@@ -101,7 +101,23 @@ plots route through Cairo 3-D), [`feature_status.md`](feature_status.md).
   is independently shippable and demoable; **T1 + T2 + T3 (~5 wk) close
   the manipulator forward/inverse-kinematics core** — the highest-value
   cut and the foundation every robotics demo needs.
-- **Status legend**: ✅ shipped · 🟡 partial · 🔵 not started.
+- **Status legend**: ✅ shipped · 🟡 partial · 🔵 not started. **All 6 tiers
+  shipped 2026-05-27 in one PR + a follow-on slice** (partial per the
+  documented carve-downs):
+  T1 ✅ full transform surface, T2 ✅ (DH `loadrobot('planar2'/'planar3')`
+  **+ URDF `importrobot`** — fixed-transform tree from `<joint>`/`<link>`/
+  `<inertial>`; full per-body `rigidBody`/`rigidBodyJoint` classes carved),
+  T3 ✅ LM-damped IK + `constraintPoseTarget` **+ `generalizedInverseKinematics`**
+  (multi-constraint LM with `constraintPositionTarget`/`constraintOrientationTarget`;
+  `analyticalInverseKinematics` carved), T4 ✅ cubic/trap/transform trajs **+
+  full CRBA/RNEA dynamics** (`inverseDynamics`/`massMatrix`/`forwardDynamics`/
+  `gravityTorque`/`velocityProduct`/`centerOfMass`; bspline/minjerk/contopptraj
+  + `jointSpaceMotionModel` carved), T5 ✅ (all four mobile kinematic models
+  diff-drive/unicycle/bicycle/ackermann + `derivative` + occmap + PRM +
+  pure-pursuit; range sensor + VFH + stateSpaceSE3 carved), T6 ✅
+  **orientation-aware GJK** `checkCollision` over box/sphere/cylinder/capsule
+  + simplified `manipulatorRRT` (EPA penetration depth + `collisionMesh` +
+  CHOMP + particle filter carved).
   **Everything below is 🔵 not started** — but the substrate is deep:
   `ode45`, `pinv`/`svd`/`qr`/`mldivide`, `fminunc`/`lsqnonlin`, `interp1`,
   the PRNG, the STL importer, classdef, and Cairo plotting are all

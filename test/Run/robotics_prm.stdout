@@ -1,0 +1,6 @@
+Occupancy at (10,9): 1
+Occupancy at (5,5):  0
+PRM nodes: 100
+Path waypoints: 3
+Pursuit cmd: v=0.50 omega=0.50
+ddot x=0.50 y=0.00 theta=0.50
