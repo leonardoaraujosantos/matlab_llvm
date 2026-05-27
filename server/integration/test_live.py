@@ -167,10 +167,21 @@ def test_plot_png(http, is_real, plot_supported):
     if not plot_supported:
         pytest.skip("matlabc built without -DMATLAB_LLVM_WITH_PLOT")
     sid = _session_id("plot")
+    # Default JSON response: artifact path is downloadable via /v1/files.
     r = http.post("/v1/plot", json={"source": "plot([1 2 3])", "session_id": sid})
     assert r.status_code == 200, r.text
-    assert r.headers["content-type"].startswith("image/png")
-    assert len(r.content) > 100  # PNG header alone is 8 bytes; real plots are bigger.
+    assert r.headers["content-type"].startswith("application/json")
+    body = r.json()
+    assert body["ok"] and body["format"] == "png" and body["artifacts"]
+    f = http.get(f"/v1/files/{body['artifacts'][0]}")
+    assert f.status_code == 200, f.text
+    assert f.content[:4] == b"\x89PNG"
+
+    # Raw opt-in: bytes streamed back directly.
+    r2 = http.post("/v1/plot?raw=true", json={"source": "plot([1 2 3])", "session_id": sid})
+    assert r2.status_code == 200, r2.text
+    assert r2.headers["content-type"].startswith("image/png")
+    assert len(r2.content) > 100  # PNG header alone is 8 bytes; real plots are bigger.
 
 
 def test_chat_completion_structure(http):

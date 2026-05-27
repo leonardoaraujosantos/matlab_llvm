@@ -96,8 +96,29 @@ class McpTokenResponse(BaseModel):
 
 # --- /v1/plot ------------------------------------------------------------
 class PlotRequest(SessionMixin):
+    # No pattern/regex constraint: any source accepted by /v1/repl is accepted
+    # here verbatim (the server only appends a saveas). See issue #56.
     source: str = Field(..., description="MATLAB plotting snippet (server appends saveas).")
     format: str | None = Field(default=None, description="png | svg | pdf")
+
+
+class PlotResponse(BaseModel):
+    """ReplResponse-shaped result for /v1/plot.
+
+    The produced figure path is surfaced in ``artifacts`` (download the bytes
+    via ``GET /v1/files/{path}``), mirroring /v1/repl. Pass ``?raw=true`` (or an
+    image/pdf ``Accept`` header) to stream the figure bytes back directly.
+    """
+
+    ok: bool
+    format: str = Field(description="png | svg | pdf")
+    stdout: str = ""
+    stderr: str = ""
+    timed_out: bool = False
+    truncated: bool = False
+    artifacts: list[str] = Field(
+        default=[], description="Produced figure path(s); download via /v1/files/{path}."
+    )
 
 
 # --- /v1/chat/completions (OpenAI-compatible) ----------------------------

@@ -26,7 +26,9 @@ Phases implemented on this branch:
   quotas, **stateful REPL sessions** (long-lived `matlabc -repl` per session,
   idle-evicted), a **warm pool** of pre-warmed workers, and a **tier-2 syscall
   sandbox** (bubblewrap/firejail/nsjail).
-- **`/v1/plot`** — run a plotting snippet and stream back PNG/SVG/PDF.
+- **`/v1/plot`** — run a plotting snippet; returns a `ReplResponse`-shaped JSON
+  whose `artifacts[]` points at the produced figure (download via `/v1/files`).
+  Pass `?raw=true` (or an image/pdf `Accept` header) to stream PNG/SVG/PDF bytes.
 - **Phase 0/8** — `Dockerfile` + `docker-compose.yaml` at the repo root.
 
 Deferred: only the CI/deploy half of Phase 8.
@@ -118,7 +120,7 @@ Without `just`: `cd server && uv run uvicorn main:app` (set
 | POST | `/v1/mcp/token` | mint an MCP bearer token bound to the caller's identity |
 | MCP  | `/mcp` | FastMCP tools over streamable-HTTP (bearer when `MCP_REQUIRE_AUTH`) |
 | POST | `/v1/chat/completions` | OpenAI-compatible chat grounded in the docs (RAG) |
-| POST | `/v1/plot` | run a plotting snippet, stream PNG/SVG/PDF (`?format=`) |
+| POST | `/v1/plot` | run a plotting snippet → JSON w/ `artifacts[]` (`?format=`, `?raw=true` for raw bytes) |
 
 Request bodies accept optional `user_id` / `session_id` (files endpoints take
 them as query params) which select the workspace directory.
