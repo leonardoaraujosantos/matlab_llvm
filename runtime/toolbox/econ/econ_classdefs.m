@@ -47,3 +47,82 @@ classdef arima
         end
     end
 end
+
+% ---------------------------------------------------------------------
+% garch / egarch / gjr — conditional-variance models (Tier-3).  All three
+% share a property set; the ModelKind discriminant (1=garch, 2=egarch,
+% 3=gjr) routes the shared matlab_econ_garch_* kernels.  P = number of
+% GARCH (lagged-variance) terms, Q = number of ARCH (lagged-squared-
+% innovation) terms.  Estimation is Gaussian MLE over a Nelder-Mead
+% simplex.
+% ---------------------------------------------------------------------
+classdef garch
+    properties
+        P; Q;
+        Constant       % conditional-variance constant (kappa)
+        GARCH matrix   % 1 x P lagged-variance coefficients
+        ARCH matrix    % 1 x Q lagged-squared-innovation coefficients
+        Leverage matrix% leverage coefficient (egarch/gjr)
+        Offset         % conditional-mean offset (sample mean)
+        Variance       % unconditional variance
+        ModelKind
+    end
+    methods
+        function obj = garch(P, Q)
+            if nargin < 1, P = 1; end
+            if nargin < 2, Q = 1; end
+            obj.P = P; obj.Q = Q;
+            obj.Constant = 0;
+            obj.GARCH = zeros(1, 1);
+            obj.ARCH = zeros(1, 1);
+            obj.Leverage = zeros(1, 1);
+            obj.Offset = 0;
+            obj.Variance = 1;
+            obj.ModelKind = 1;
+        end
+    end
+end
+
+classdef egarch
+    properties
+        P; Q;
+        Constant; GARCH matrix; ARCH matrix; Leverage matrix;
+        Offset; Variance; ModelKind
+    end
+    methods
+        function obj = egarch(P, Q)
+            if nargin < 1, P = 1; end
+            if nargin < 2, Q = 1; end
+            obj.P = P; obj.Q = Q;
+            obj.Constant = 0;
+            obj.GARCH = zeros(1, 1);
+            obj.ARCH = zeros(1, 1);
+            obj.Leverage = zeros(1, 1);
+            obj.Offset = 0;
+            obj.Variance = 1;
+            obj.ModelKind = 2;
+        end
+    end
+end
+
+classdef gjr
+    properties
+        P; Q;
+        Constant; GARCH matrix; ARCH matrix; Leverage matrix;
+        Offset; Variance; ModelKind
+    end
+    methods
+        function obj = gjr(P, Q)
+            if nargin < 1, P = 1; end
+            if nargin < 2, Q = 1; end
+            obj.P = P; obj.Q = Q;
+            obj.Constant = 0;
+            obj.GARCH = zeros(1, 1);
+            obj.ARCH = zeros(1, 1);
+            obj.Leverage = zeros(1, 1);
+            obj.Offset = 0;
+            obj.Variance = 1;
+            obj.ModelKind = 3;
+        end
+    end
+end

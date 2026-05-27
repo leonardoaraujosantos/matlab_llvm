@@ -1089,3 +1089,373 @@ matlab_mat *matlab_econ_arima_simulate(struct matlab_obj_s *mdl, double nn) {
 }
 
 } // extern "C"
+
+/* ============================================================================
+ * §T3 — Conditional Variance Models: garch / egarch / gjr
+ * ----------------------------------------------------------------------------
+ * Gaussian maximum likelihood of the conditional-variance recursion,
+ * maximised by a self-contained Nelder-Mead simplex (the parameter space is
+ * low-dimensional).  ModelKind discriminates the three variants (1=garch,
+ * 2=egarch, 3=gjr); one set of C-ABI entry points serves all three.
+ * ==========================================================================*/
+
+namespace {
+
+constexpr double kSqrt2OverPi = 0.7978845608028654; /* E|z|, z~N(0,1) */
+
+/* Conditional-variance recursion + Gaussian negative log-likelihood.
+ * kind: 1=garch(P,Q), 2=egarch(1,1), 3=gjr(1,1).  Layout of theta:
+ *   garch:  [kappa, gamma_1..P, alpha_1..Q]
+ *   egarch: [kappa, gamma, alpha, leverage]            (1,1)
+ *   gjr:    [kappa, gamma, alpha, leverage]            (1,1)
+ * Returns 1e18 for infeasible parameters (constraint barrier). */
+double garch_nll(const std::vector<double> &theta, int kind,
+                 const std::vector<double> &e, int P, int Q,
+                 double uncondVar) {
+    int64_t M = static_cast<int64_t>(e.size());
+    if (M < 5) return 1e18;
+    std::vector<double> h(static_cast<size_t>(M), uncondVar);
+    if (kind == 1) {
+        double kappa = theta[0];
+        if (kappa <= 1e-10) return 1e18;
+        double sg = 0.0, sa = 0.0;
+        for (int i = 0; i < P; ++i) {
+            if (theta[1 + i] < 0.0) return 1e18;
+            sg += theta[1 + i];
+        }
+        for (int j = 0; j < Q; ++j) {
+            if (theta[1 + P + j] < 0.0) return 1e18;
+            sa += theta[1 + P + j];
+        }
+        if (sg + sa >= 0.999) return 1e18;
+        int start = (P > Q ? P : Q);
+        for (int64_t t = start; t < M; ++t) {
+            double v = kappa;
+            for (int i = 0; i < P; ++i)
+                v += theta[1 + i] * h[static_cast<size_t>(t - 1 - i)];
+            for (int j = 0; j < Q; ++j)
+                v += theta[1 + P + j] *
+                     e[static_cast<size_t>(t - 1 - j)] *
+                     e[static_cast<size_t>(t - 1 - j)];
+            if (v <= 1e-12) return 1e18;
+            h[static_cast<size_t>(t)] = v;
+        }
+        double nll = 0.0;
+        for (int64_t t = start; t < M; ++t) {
+            double ht = h[static_cast<size_t>(t)];
+            nll += 0.5 * (std::log(2.0 * M_PI) + std::log(ht) +
+                          e[static_cast<size_t>(t)] *
+                              e[static_cast<size_t>(t)] / ht);
+        }
+        return nll;
+    }
+    if (kind == 3) {  /* gjr(1,1) */
+        double kappa = theta[0], g = theta[1], a = theta[2], xi = theta[3];
+        if (kappa <= 1e-10 || g < 0.0 || a < 0.0) return 1e18;
+        if (g + a + 0.5 * xi >= 0.999 || a + xi < 0.0) return 1e18;
+        for (int64_t t = 1; t < M; ++t) {
+            double em = e[static_cast<size_t>(t - 1)];
+            double ind = (em < 0.0) ? 1.0 : 0.0;
+            double v = kappa + g * h[static_cast<size_t>(t - 1)] +
+                       a * em * em + xi * em * em * ind;
+            if (v <= 1e-12) return 1e18;
+            h[static_cast<size_t>(t)] = v;
+        }
+        double nll = 0.0;
+        for (int64_t t = 1; t < M; ++t) {
+            double ht = h[static_cast<size_t>(t)];
+            nll += 0.5 * (std::log(2.0 * M_PI) + std::log(ht) +
+                          e[static_cast<size_t>(t)] *
+                              e[static_cast<size_t>(t)] / ht);
+        }
+        return nll;
+    }
+    /* egarch(1,1): log h_t = kappa + g*log h_{t-1}
+     *              + a*(|z|-E|z|) + xi*z,   z = e_{t-1}/sqrt(h_{t-1}) */
+    double kappa = theta[0], g = theta[1], a = theta[2], xi = theta[3];
+    if (std::fabs(g) >= 0.999) return 1e18;
+    std::vector<double> lh(static_cast<size_t>(M), std::log(uncondVar));
+    for (int64_t t = 1; t < M; ++t) {
+        double hp = std::exp(lh[static_cast<size_t>(t - 1)]);
+        double z = e[static_cast<size_t>(t - 1)] / std::sqrt(hp);
+        double v = kappa + g * lh[static_cast<size_t>(t - 1)] +
+                   a * (std::fabs(z) - kSqrt2OverPi) + xi * z;
+        lh[static_cast<size_t>(t)] = v;
+    }
+    double nll = 0.0;
+    for (int64_t t = 1; t < M; ++t) {
+        double ht = std::exp(lh[static_cast<size_t>(t)]);
+        if (ht <= 1e-12 || !std::isfinite(ht)) return 1e18;
+        nll += 0.5 * (std::log(2.0 * M_PI) + lh[static_cast<size_t>(t)] +
+                      e[static_cast<size_t>(t)] *
+                          e[static_cast<size_t>(t)] / ht);
+    }
+    return nll;
+}
+
+/* Nelder-Mead simplex minimisation of f over an n-dim parameter vector. */
+template <typename F>
+std::vector<double> nelder_mead(F f, std::vector<double> x0, int iters) {
+    int n = static_cast<int>(x0.size());
+    std::vector<std::vector<double>> S(n + 1, x0);
+    for (int i = 0; i < n; ++i) {
+        double step = (std::fabs(x0[static_cast<size_t>(i)]) > 1e-6)
+                          ? 0.1 * x0[static_cast<size_t>(i)]
+                          : 0.05;
+        S[i + 1][static_cast<size_t>(i)] += step;
+    }
+    std::vector<double> fv(n + 1);
+    for (int i = 0; i <= n; ++i) fv[static_cast<size_t>(i)] = f(S[i]);
+    for (int it = 0; it < iters; ++it) {
+        /* order */
+        for (int i = 0; i <= n; ++i)
+            for (int j = i + 1; j <= n; ++j)
+                if (fv[static_cast<size_t>(j)] < fv[static_cast<size_t>(i)]) {
+                    std::swap(fv[static_cast<size_t>(i)], fv[static_cast<size_t>(j)]);
+                    std::swap(S[i], S[j]);
+                }
+        /* centroid of all but worst */
+        std::vector<double> c(static_cast<size_t>(n), 0.0);
+        for (int i = 0; i < n; ++i)
+            for (int k = 0; k < n; ++k)
+                c[static_cast<size_t>(k)] += S[i][static_cast<size_t>(k)] / n;
+        std::vector<double> xr(static_cast<size_t>(n));
+        for (int k = 0; k < n; ++k)
+            xr[static_cast<size_t>(k)] =
+                c[static_cast<size_t>(k)] +
+                1.0 * (c[static_cast<size_t>(k)] - S[n][static_cast<size_t>(k)]);
+        double fr = f(xr);
+        if (fr < fv[0]) {
+            std::vector<double> xe(static_cast<size_t>(n));
+            for (int k = 0; k < n; ++k)
+                xe[static_cast<size_t>(k)] =
+                    c[static_cast<size_t>(k)] +
+                    2.0 * (c[static_cast<size_t>(k)] - S[n][static_cast<size_t>(k)]);
+            double fe = f(xe);
+            if (fe < fr) { S[n] = xe; fv[static_cast<size_t>(n)] = fe; }
+            else { S[n] = xr; fv[static_cast<size_t>(n)] = fr; }
+        } else if (fr < fv[static_cast<size_t>(n - 1)]) {
+            S[n] = xr; fv[static_cast<size_t>(n)] = fr;
+        } else {
+            std::vector<double> xc(static_cast<size_t>(n));
+            for (int k = 0; k < n; ++k)
+                xc[static_cast<size_t>(k)] =
+                    c[static_cast<size_t>(k)] +
+                    0.5 * (S[n][static_cast<size_t>(k)] - c[static_cast<size_t>(k)]);
+            double fc = f(xc);
+            if (fc < fv[static_cast<size_t>(n)]) {
+                S[n] = xc; fv[static_cast<size_t>(n)] = fc;
+            } else {
+                for (int i = 1; i <= n; ++i) {
+                    for (int k = 0; k < n; ++k)
+                        S[i][static_cast<size_t>(k)] =
+                            S[0][static_cast<size_t>(k)] +
+                            0.5 * (S[i][static_cast<size_t>(k)] -
+                                   S[0][static_cast<size_t>(k)]);
+                    fv[static_cast<size_t>(i)] = f(S[i]);
+                }
+            }
+        }
+    }
+    int best = 0;
+    for (int i = 1; i <= n; ++i)
+        if (fv[static_cast<size_t>(i)] < fv[static_cast<size_t>(best)]) best = i;
+    return S[best];
+}
+
+} // namespace
+
+extern "C" {
+
+/* estimate(fresh, template, y) for garch/egarch/gjr. */
+struct matlab_obj_s *matlab_econ_garch_estimate(struct matlab_obj_s *mdl,
+                                                 struct matlab_obj_s *tmpl,
+                                                 matlab_mat *Y) {
+    if (!mdl) return mdl;
+    int kind = static_cast<int>(matlab_obj_get_f64(tmpl, "ModelKind", 9));
+    int P = static_cast<int>(matlab_obj_get_f64(tmpl, "P", 1));
+    int Q = static_cast<int>(matlab_obj_get_f64(tmpl, "Q", 1));
+    if (P < 1) P = 1;
+    if (Q < 1) Q = 1;
+    matlab_obj_set_f64(mdl, "ModelKind", 9, static_cast<double>(kind));
+    matlab_obj_set_f64(mdl, "P", 1, static_cast<double>(P));
+    matlab_obj_set_f64(mdl, "Q", 1, static_cast<double>(Q));
+    std::vector<double> y = vecOf(Y);
+    double c = meanOf(y);
+    std::vector<double> e(y.size());
+    double var = 0.0;
+    for (size_t i = 0; i < y.size(); ++i) { e[i] = y[i] - c; var += e[i] * e[i]; }
+    var = (y.empty() ? 1.0 : var / static_cast<double>(y.size()));
+    if (var <= 0.0) var = 1.0;
+
+    std::vector<double> theta;
+    if (kind == 1) {
+        theta.assign(static_cast<size_t>(1 + P + Q), 0.0);
+        theta[0] = 0.1 * var;                     /* kappa */
+        for (int i = 0; i < P; ++i) theta[1 + i] = 0.8 / P;
+        for (int j = 0; j < Q; ++j) theta[1 + P + j] = 0.1 / Q;
+    } else {
+        theta.assign(4, 0.0);
+        if (kind == 2) { theta = {0.0, 0.9, 0.2, -0.05}; }     /* egarch */
+        else { theta[0] = 0.1 * var; theta[1] = 0.8; theta[2] = 0.05; theta[3] = 0.05; }
+    }
+    auto obj = [&](const std::vector<double> &th) {
+        return garch_nll(th, kind, e, P, Q, var);
+    };
+    std::vector<double> best = nelder_mead(obj, theta, 800);
+
+    matlab_obj_set_f64(mdl, "Offset", 6, c);
+    matlab_obj_set_f64(mdl, "Variance", 8, var);
+    if (kind == 1) {
+        matlab_obj_set_f64(mdl, "Constant", 8, best[0]);
+        matlab_mat *gm = mat_alloc(1, P);
+        for (int i = 0; i < P; ++i) gm->data[i] = best[1 + i];
+        matlab_mat *am = mat_alloc(1, Q);
+        for (int j = 0; j < Q; ++j) am->data[j] = best[1 + P + j];
+        matlab_obj_set_mat(mdl, "GARCH", 5, gm);
+        matlab_obj_set_mat(mdl, "ARCH", 4, am);
+        matlab_mat *lv = mat_alloc(1, 1);
+        matlab_obj_set_mat(mdl, "Leverage", 8, lv);
+    } else {
+        matlab_obj_set_f64(mdl, "Constant", 8, best[0]);
+        matlab_mat *gm = mat_alloc(1, 1); gm->data[0] = best[1];
+        matlab_mat *am = mat_alloc(1, 1); am->data[0] = best[2];
+        matlab_mat *lv = mat_alloc(1, 1); lv->data[0] = best[3];
+        matlab_obj_set_mat(mdl, "GARCH", 5, gm);
+        matlab_obj_set_mat(mdl, "ARCH", 4, am);
+        matlab_obj_set_mat(mdl, "Leverage", 8, lv);
+    }
+    return mdl;
+}
+
+/* infer(Mdl, y) — conditional variances h_t (column vector, length numel(y)). */
+matlab_mat *matlab_econ_garch_infer(struct matlab_obj_s *mdl, matlab_mat *Y) {
+    if (!mdl) return mat_alloc(0, 0);
+    int kind = static_cast<int>(matlab_obj_get_f64(mdl, "ModelKind", 9));
+    int P = static_cast<int>(matlab_obj_get_f64(mdl, "P", 1));
+    int Q = static_cast<int>(matlab_obj_get_f64(mdl, "Q", 1));
+    double c = matlab_obj_get_f64(mdl, "Offset", 6);
+    double kappa = matlab_obj_get_f64(mdl, "Constant", 8);
+    double var = matlab_obj_get_f64(mdl, "Variance", 8);
+    matlab_mat *gm = matlab_obj_get_mat(mdl, "GARCH", 5);
+    matlab_mat *am = matlab_obj_get_mat(mdl, "ARCH", 4);
+    matlab_mat *lv = matlab_obj_get_mat(mdl, "Leverage", 8);
+    std::vector<double> y = vecOf(Y);
+    int64_t M = static_cast<int64_t>(y.size());
+    std::vector<double> e(static_cast<size_t>(M));
+    for (int64_t i = 0; i < M; ++i) e[static_cast<size_t>(i)] = y[static_cast<size_t>(i)] - c;
+    std::vector<double> h(static_cast<size_t>(M), var);
+    if (kind == 1) {
+        int start = (P > Q ? P : Q);
+        for (int64_t t = start; t < M; ++t) {
+            double v = kappa;
+            for (int i = 0; i < P && gm; ++i)
+                v += gm->data[i] * h[static_cast<size_t>(t - 1 - i)];
+            for (int j = 0; j < Q && am; ++j)
+                v += am->data[j] * e[static_cast<size_t>(t - 1 - j)] *
+                     e[static_cast<size_t>(t - 1 - j)];
+            h[static_cast<size_t>(t)] = v;
+        }
+    } else if (kind == 3) {
+        double g = gm ? gm->data[0] : 0.0, a = am ? am->data[0] : 0.0,
+               xi = lv ? lv->data[0] : 0.0;
+        for (int64_t t = 1; t < M; ++t) {
+            double em = e[static_cast<size_t>(t - 1)];
+            double ind = (em < 0.0) ? 1.0 : 0.0;
+            h[static_cast<size_t>(t)] = kappa + g * h[static_cast<size_t>(t - 1)] +
+                                        a * em * em + xi * em * em * ind;
+        }
+    } else {
+        double g = gm ? gm->data[0] : 0.0, a = am ? am->data[0] : 0.0,
+               xi = lv ? lv->data[0] : 0.0;
+        std::vector<double> lh(static_cast<size_t>(M), std::log(var));
+        for (int64_t t = 1; t < M; ++t) {
+            double hp = std::exp(lh[static_cast<size_t>(t - 1)]);
+            double z = e[static_cast<size_t>(t - 1)] / std::sqrt(hp);
+            lh[static_cast<size_t>(t)] = kappa + g * lh[static_cast<size_t>(t - 1)] +
+                                         a * (std::fabs(z) - kSqrt2OverPi) + xi * z;
+            h[static_cast<size_t>(t)] = std::exp(lh[static_cast<size_t>(t)]);
+        }
+        h[0] = var;
+    }
+    return colVec(h);
+}
+
+/* forecast(Mdl, h, y) — h-step-ahead conditional-variance forecast. */
+matlab_mat *matlab_econ_garch_forecast(struct matlab_obj_s *mdl, double hh,
+                                       matlab_mat *Y) {
+    if (!mdl) return mat_alloc(0, 0);
+    int H = static_cast<int>(hh);
+    if (H < 1) return mat_alloc(0, 0);
+    int kind = static_cast<int>(matlab_obj_get_f64(mdl, "ModelKind", 9));
+    double kappa = matlab_obj_get_f64(mdl, "Constant", 8);
+    double var = matlab_obj_get_f64(mdl, "Variance", 8);
+    matlab_mat *gm = matlab_obj_get_mat(mdl, "GARCH", 5);
+    matlab_mat *am = matlab_obj_get_mat(mdl, "ARCH", 4);
+    /* last in-sample conditional variance */
+    matlab_mat *hin = matlab_econ_garch_infer(mdl, Y);
+    double hlast = (hin && hin->rows > 0) ? hin->data[hin->rows * hin->cols - 1] : var;
+    double g = gm ? gm->data[0] : 0.0, a = am ? am->data[0] : 0.0;
+    std::vector<double> f(static_cast<size_t>(H));
+    double persist = (kind == 2) ? g : (g + a);   /* egarch persistence ~ g */
+    double hf = hlast;
+    for (int k = 0; k < H; ++k) {
+        if (kind == 2) {
+            /* mean-revert log-variance toward kappa/(1-g) */
+            double lvar = (std::fabs(1.0 - g) < 1e-9) ? std::log(var)
+                            : kappa / (1.0 - g);
+            double lh = std::log(hf);
+            lh = kappa + g * lh;
+            (void)lvar;
+            hf = std::exp(lh);
+        } else {
+            hf = kappa + persist * hf;
+        }
+        f[static_cast<size_t>(k)] = hf;
+    }
+    return colVec(f);
+}
+
+/* simulate(Mdl, n) — one simulated return path of length n. */
+matlab_mat *matlab_econ_garch_simulate(struct matlab_obj_s *mdl, double nn) {
+    if (!mdl) return mat_alloc(0, 0);
+    int n = static_cast<int>(nn);
+    if (n < 1) return mat_alloc(0, 0);
+    int kind = static_cast<int>(matlab_obj_get_f64(mdl, "ModelKind", 9));
+    double c = matlab_obj_get_f64(mdl, "Offset", 6);
+    double kappa = matlab_obj_get_f64(mdl, "Constant", 8);
+    double var = matlab_obj_get_f64(mdl, "Variance", 8);
+    matlab_mat *gm = matlab_obj_get_mat(mdl, "GARCH", 5);
+    matlab_mat *am = matlab_obj_get_mat(mdl, "ARCH", 4);
+    matlab_mat *lv = matlab_obj_get_mat(mdl, "Leverage", 8);
+    double g = gm ? gm->data[0] : 0.0, a = am ? am->data[0] : 0.0,
+           xi = lv ? lv->data[0] : 0.0;
+    int burn = 100, M = n + burn;
+    Lcg rng{0x9e3779b97f4a7c15ULL};
+    std::vector<double> h(static_cast<size_t>(M), var), e(static_cast<size_t>(M), 0.0);
+    std::vector<double> lh(static_cast<size_t>(M), std::log(var));
+    for (int t = 1; t < M; ++t) {
+        if (kind == 1) {
+            h[static_cast<size_t>(t)] = kappa + g * h[static_cast<size_t>(t - 1)] +
+                a * e[static_cast<size_t>(t - 1)] * e[static_cast<size_t>(t - 1)];
+        } else if (kind == 3) {
+            double em = e[static_cast<size_t>(t - 1)];
+            double ind = (em < 0.0) ? 1.0 : 0.0;
+            h[static_cast<size_t>(t)] = kappa + g * h[static_cast<size_t>(t - 1)] +
+                a * em * em + xi * em * em * ind;
+        } else {
+            double hp = std::exp(lh[static_cast<size_t>(t - 1)]);
+            double z = e[static_cast<size_t>(t - 1)] / std::sqrt(hp);
+            lh[static_cast<size_t>(t)] = kappa + g * lh[static_cast<size_t>(t - 1)] +
+                a * (std::fabs(z) - kSqrt2OverPi) + xi * z;
+            h[static_cast<size_t>(t)] = std::exp(lh[static_cast<size_t>(t)]);
+        }
+        if (h[static_cast<size_t>(t)] <= 0.0) h[static_cast<size_t>(t)] = var;
+        e[static_cast<size_t>(t)] = std::sqrt(h[static_cast<size_t>(t)]) * normRand(rng);
+    }
+    std::vector<double> out(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) out[static_cast<size_t>(i)] = c + e[burn + i];
+    return colVec(out);
+}
+
+} // extern "C"

@@ -134,7 +134,9 @@ void Resolver::registerBuiltins() {
     "adftest", "pptest", "kpsstest", "lmctest", "vratiotest",
     /* Tier-2+: model-object methods (class-pinned in Lowering on the
      * receiver class so they coexist with System-Identification's
-     * idpoly forecast/etc).  `forecast`/`filter` are already builtins. */
+     * idpoly forecast/etc).  `forecast`/`filter` are already builtins.
+     * The model constructors (arima/garch/egarch/gjr/...) are NOT
+     * builtins — they resolve via the classdef auto-prepend. */
     "estimate", "infer", "simulate", "summarize",
     /* Phase 6 — Symbolic Math Toolbox via SymPP. The link target
      * (matlab_sym_* runtime) is only present when the build was
@@ -1783,7 +1785,8 @@ void Resolver::resolveStmt(Stmt &St, Scope *S) {
              * model class as the template, so downstream forecast/infer/
              * simulate dispatch (which keys on the receiver class) fires. */
             if (Arg0Cls && NX->Name == "estimate" &&
-                Arg0Cls->Name == "arima")
+                (Arg0Cls->Name == "arima" || Arg0Cls->Name == "garch" ||
+                 Arg0Cls->Name == "egarch" || Arg0Cls->Name == "gjr"))
               return Arg0Cls;
           }
         }
