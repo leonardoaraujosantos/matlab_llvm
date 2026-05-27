@@ -111,6 +111,32 @@ def test_repl_stateful_persists_across_calls(http):
     assert "41" in b["stdout"]
 
 
+def test_stateful_artifact_visible_via_files(http, is_real, plot_supported):
+    """Issue #55: a figure saved during a stateful REPL turn must be listable
+    and downloadable via /v1/files in the same session — the live server boots
+    with a warm pool, so the worker runs in an adopted pool dir, not det."""
+    if not is_real:
+        pytest.skip("needs the real matlabc, not the fake stub")
+    if not plot_supported:
+        pytest.skip("matlabc built without -DMATLAB_LLVM_WITH_PLOT")
+    sid = _session_id("artifact55")
+    r = http.post(
+        "/v1/repl",
+        json={"source": "plot(1:10); saveas(gcf, 'plot.png')", "session_id": sid, "stateful": True},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["stateful"] is True and body["ok"] is True
+    assert "plot.png" in body["artifacts"]
+
+    listing = http.get("/v1/files", params={"session_id": sid}).json()
+    assert "plot.png" in [f["path"] for f in listing["files"]]
+
+    f = http.get("/v1/files/plot.png", params={"session_id": sid})
+    assert f.status_code == 200, f.text
+    assert f.content[:4] == b"\x89PNG"
+
+
 _SOFT_SOURCE = "y = 2;\ndisp(y)\n"
 # SystemVerilog only synthesizes typed functions — mirrors test/EmitSV/add_scalar.m.
 _SV_SOURCE = (
