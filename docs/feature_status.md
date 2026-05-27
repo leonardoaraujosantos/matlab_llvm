@@ -187,10 +187,10 @@ In scope (subsets shipped, covered by dedicated docs):
 | N-D arrays (3-D) | 🟡 | `zeros(m,n,p)` / `ones(m,n,p)` + scalar `A(i,j,k)` read/write, `size(A, 3)`, `numel`, `ndims` |
 | N-D arrays (>3D) | ❌ | |
 | Sparse matrices | ❌ | |
-| `datetime` / `duration` | ✅ shipped (Phase 5.1) | Scalar `datetime` (Unix-epoch seconds) and `duration` descriptors with constructors (`datetime(y,m,d)`, `datetime(y,m,d,h,mn,s)`, `datetime("now")`, `seconds/minutes/hours/days/years(n)`), MATLAB-default display formatting, and arithmetic (`dt + dur → dt`, `dt - dt → dur`, `dur ± dur → dur`). UTC; civil-date math via Howard Hinnant's algorithm. C / Python / TypeScript runtimes byte-identical. Gating test: `test/Run/datetime_basic.m`. **Open follow-up**: vector / array forms, calendar arithmetic (months, years), zoned datetimes, `between`/`caldays`/`calmonths`/`calyears`. |
+| `datetime` / `duration` | ✅ shipped (Phase 5.1) | Scalar `datetime` (Unix-epoch seconds) and `duration` descriptors with constructors (`datetime(y,m,d)`, `datetime(y,m,d,h,mn,s)`, `datetime("now")`, `seconds/minutes/hours/days/years(n)`), MATLAB-default display formatting, and arithmetic (`dt + dur → dt`, `dt - dt → dur`, `dur ± dur → dur`). UTC; civil-date math via Howard Hinnant's algorithm. C / Python / TypeScript runtimes byte-identical. Gating test: `test/Run/datetime_basic.m`. Vector `datetime` / `duration` shipped (Phase 5.4): `datetime(...) + days(0:N)` → datetime column, `dt_vec - dt → dur_vec`, length / numel / indexing / disp (`test/Run/datetime_vec.m`). **Open follow-up**: calendar arithmetic (months, years), zoned datetimes, `between`/`caldays`/`calmonths`/`calyears`. |
 | `categorical` | ✅ shipped (Phase 5.2) | 1-D categorical built from a string-array literal (`categorical(["a","b","a"])`). Auto-deduplicates and alphabetically sorts category names; per-element codes are 1-based with 0 = `<undefined>`. Surfaces: `length(c)`, `numel(c)`, `categories(c)` (returns a cell of category strings), `iscategory(c, "name")`, `disp(c)`. C / Python / TypeScript runtimes byte-identical. Gating test: `test/Run/categorical_basic.m`. **Open follow-up**: `categorical(values, valueset, catnames)` full constructor, `addcats`/`removecats`/`mergecats`/`renamecats`, ordinal categoricals, comparison ops beyond `==`. |
 | `table` | ✅ shipped (Phase 5.3) | Column-major record with named variables; constructors `table(c1, c2, ...)` (auto-named Var1..VarN) and `table(c1, c2, ..., 'VariableNames', {n1, n2})`. Surfaces: `T.<name>` column read / write (with dynamic column add), `height(T)`, `width(T)`, `numel(T)`, `size(T, dim)`, `disp(T)` (right-aligned column body with header + underline). Each column stored as a `matlab_mat *`. C / Python / TypeScript runtimes byte-identical on the C/TS lanes; Python ships a `.stdout-python` override (numpy 2-D array repr for column print). Gating test: `test/Run/table_basic.m`. **Open follow-up**: heterogeneous columns (mixed numeric / string / categorical), row indexing `T(i,:)`, sub-table extraction, `readtable`/`writetable`. |
-| `timetable` | ❌ | Builds on `table` + `datetime` row index. |
+| `timetable` | ✅ shipped (Phase 5.4) | `table`-style column store + a `datetime` RowTimes axis. Constructors `timetable(c1,...,'VariableNames',{...},'RowTimes',dt)` + `table2timetable`. Surfaces: `TT.Var` / `TT.Time` dot-read, `TT(:,'col')` + `TT(idx,:)` subscripts, `TT.Properties.Description=`, `timerange(t1,t2,'closed'|...)` + `TT(tr,:)`, `retime(TT,'weekly',method)` (6 aggregators), `synchronize`, bracket horz-cat `[TT1 TT2]`, `fillmissing`/`summary`/`head`, `movavg`/`macd`, `plot(TT.Time,TT.Var)`. Gating: `test/Run/timetable_*.m` + `using_timetables_in_finance.m`. **Open follow-up**: `fints` migration, `withtol`, `rowfun` handle ABI, multi-column retime. |
 
 ### Symbolic Math Toolbox (`sym` / `syms`)
 
@@ -745,7 +745,7 @@ deliberate non-goals; see "Out of scope."
 | **Struct arrays** (`s(i).x`) | ✅ shipped (Phase 2) | Scalar fields work end-to-end; matrix-valued fields share the pre-existing tensor->ptr conversion gap with scalar structs and are deferred. |
 | **Sparse matrices** | Large | ~3–4 weeks. Sparse representation + sparse-aware linalg; or lean on SuiteSparse. |
 | **`varargout`** | ✅ shipped (Phase 1.2) | Pure (`function varargout = f(...)`) and mixed (`function [first, varargout] = f(...)`) forms; caller unpacks any LHS beyond the declared boundary from the matlab_cell* via `matlab_cell_get_mat`. Plain user-function multi-return (`[a, b] = swap(x, y)`) was also broken before this slice — both LHS got the same value — and is now wired through the same `matlab.call` (N results, `nargout` attr) shape the builtin path uses. Gating test: `test/Run/varargout_basic.m`. |
-| **`classdef` dependent types** (`datetime`, `categorical`, `table`) | ✅ shipped (Phase 5.1–5.3) | datetime / duration / categorical / table all backed by dedicated runtime descriptors; see the per-type rows above. `timetable` (5.4) still missing. |
+| **`classdef` dependent types** (`datetime`, `categorical`, `table`) | ✅ shipped (Phase 5.1–5.3) | datetime / duration / categorical / table / timetable all backed by dedicated runtime descriptors (timetable = Phase 5.4); see the per-type rows above. |
 | **`eval`, `evalin`, `assignin`** | Small | ~2–3 days. Evaluator already exists in `-repl`; hook it. |
 
 ### Built-in library breadth (incremental, each ~0.5–2 days)
@@ -821,7 +821,7 @@ remaining language-core runway:
 | 7 | `[U, S, V] = svd` (full SVD with U / V; today only singular values) | 1 wk | Scientific computing |
 | 8 | MATLAB `.mat` v5 file-format parser | 2 wk | Real data pipelines |
 | 9 | OOP events / listeners | 1 wk | Callback-heavy code |
-| 10 | `timetable` (builds on shipped `table` + `datetime`) | ~1 wk | Time-series analysis |
+| 10 | `timetable` — ✅ SHIPPED (Phase 5.4) | done | Time-series analysis (Financial Toolbox) |
 | 11 | System-Object lowering fix — gates the `comm.*` / RF / Antenna / Propagation classdef wrappers on the SO surface | 1 wk | Closes Comm Tier-3+, the SO-bearing rows of [`comm_toolbox_roadmap.md`](comm_toolbox_roadmap.md) §11.1 |
 
 For per-toolbox follow-ons, see the dedicated roadmap docs — each
@@ -932,7 +932,7 @@ tier closure + open follow-ons.
 - 3-D tensor surface (most elementwise / reduction ops reject 3-D
   inputs today; `A(:,:,k)` slicing follows from that)
 - Complex linalg tail (full complex `inv` / `det` / `svd` / `eig`)
-- `timetable` (builds on `table` + `datetime`)
+- `timetable` — ✅ shipped (Phase 5.4)
 - Full method-dispatch value-class semantics
 - MATLAB `.mat` v5 file-format compatibility
 - `regexp` / `regexprep` and the string tail

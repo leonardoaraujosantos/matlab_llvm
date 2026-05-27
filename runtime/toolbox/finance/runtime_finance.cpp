@@ -937,28 +937,17 @@ extern "C" matlab_mat *matlab_portfolio_estimate_frontier_points(
     return pts;
 }
 
-/* plotFrontier(P[, K]) — render the risk/return frontier curve via the
- * Cairo backend. Returns the Kx2 points so the value is still usable.
- * The render is WITH_PLOT-guarded; without plot it's a no-op compute. */
-#ifdef MATLAB_LLVM_WITH_PLOT
-extern "C" void matlab_plot2(matlab_mat *x, matlab_mat *y);
-#endif
+/* plotFrontier(P[, K]) — returns the Kx2 [risk, return] frontier points.
+ * The finance runtime deliberately does NOT reference the Cairo plot
+ * symbols (a toolbox TU pulling in matlab_plot2 breaks non-plot links
+ * in the test harness, which compiles every runtime TU with
+ * -DMATLAB_LLVM_WITH_PLOT=1 but only links the Cairo objects for
+ * `.requires-plot` fixtures). Callers that want a chart pass the
+ * returned columns to the ordinary `plot` builtin (see
+ * examples/finance/efficient_frontier.m). */
 extern "C" matlab_mat *matlab_portfolio_plot_frontier(
         struct matlab_obj_s *p, double n_pts) {
-    matlab_mat *pts = matlab_portfolio_estimate_frontier_points(p, n_pts);
-#ifdef MATLAB_LLVM_WITH_PLOT
-    if (pts && pts->data && pts->rows >= 2) {
-        int64_t K = pts->rows;
-        matlab_mat *xr = mat_alloc(K, 1);
-        matlab_mat *yr = mat_alloc(K, 1);
-        for (int64_t k = 0; k < K; ++k) {
-            xr->data[k] = pts->data[k*2 + 0];
-            yr->data[k] = pts->data[k*2 + 1];
-        }
-        matlab_plot2(xr, yr);
-    }
-#endif
-    return pts;
+    return matlab_portfolio_estimate_frontier_points(p, n_pts);
 }
 
 /* ============================================================================
