@@ -255,6 +255,90 @@ void matlab_fprintf_str(const char *fmt, int64_t n) {
     pthread_mutex_unlock(&matlab_io_mutex);
 }
 
+/* Box a scalar double into a fresh 1x1 matrix — used by the fprintf lowering
+ * to pass scalar value-args uniformly through the descriptor-array path. */
+matlab_mat *matlab_mat_scalar(double v) {
+    matlab_mat *m = mat_alloc(1, 1);
+    m->data[0] = v;
+    return m;
+}
+
+/* Variadic fprintf core (stdout).  `vals[i]` is a matlab_mat* when kinds[i]==0
+ * (numeric — every element is consumed, column-major) or a matlab_string* when
+ * kinds[i]==1.  The format string is expanded (escapes + %d->%.0f) once, then
+ * applied repeatedly, consuming one value per conversion spec and recycling the
+ * format until all values are used — MATLAB's fprintf semantics — which makes
+ * `fprintf('%.1f ', v)` print every element and `fprintf('%d %d %d\n', v)` fill
+ * all three specifiers.  `%s` consumes one whole string token. */
+void matlab_fprintf_vec(const char *fmt, int64_t fmtn,
+                        void **vals, int8_t *kinds, int64_t nargs) {
+    struct ml_str_ { char *data; int64_t len; };
+    if (fmtn < 0) fmtn = 0;
+    if (fmtn > 1023) fmtn = 1023;
+    char ebuf[1024];
+    int64_t elen = expand_escapes(ebuf, fmt, fmtn);
+    ebuf[elen] = '\0';
+
+    /* Flatten every argument into a token stream. */
+    struct Tok { bool isStr; double num; const char *s; int64_t slen; };
+    std::vector<Tok> toks;
+    for (int64_t i = 0; i < nargs; ++i) {
+        if (kinds[i] == 1) {
+            auto *ms = reinterpret_cast<ml_str_ *>(vals[i]);
+            toks.push_back({true, 0.0, ms ? ms->data : "", ms ? ms->len : 0});
+        } else {
+            matlab_mat *m = reinterpret_cast<matlab_mat *>(vals[i]);
+            if (!m) continue;
+            for (int64_t c = 0; c < m->cols; ++c)        /* column-major */
+                for (int64_t r = 0; r < m->rows; ++r)
+                    toks.push_back({false, m->data[r * m->cols + c], nullptr, 0});
+        }
+    }
+
+    pthread_mutex_lock(&matlab_io_mutex);
+    if (toks.empty()) { fwrite(ebuf, 1, (size_t)elen, stdout);
+                        pthread_mutex_unlock(&matlab_io_mutex); return; }
+
+    size_t ti = 0;
+    bool firstPass = true;
+    while (ti < toks.size() || firstPass) {
+        firstPass = false;
+        bool ranOut = false;
+        for (int64_t k = 0; k < elen && !ranOut; ) {
+            char c = ebuf[k];
+            if (c != '%') { putchar(c); ++k; continue; }
+            if (k + 1 < elen && ebuf[k + 1] == '%') { putchar('%'); k += 2; continue; }
+            int64_t j = k + 1;
+            while (j < elen && !strchr("diouxXeEfFgGsc", ebuf[j])) ++j;
+            if (j >= elen) { fwrite(ebuf + k, 1, (size_t)(elen - k), stdout); break; }
+            if (ti >= toks.size()) { ranOut = true; break; }  /* stop mid-format */
+            char conv = ebuf[j];
+            char spec[64];
+            int64_t sl = j - k + 1; if (sl > 63) sl = 63;
+            memcpy(spec, ebuf + k, (size_t)sl); spec[sl] = '\0';
+            const Tok &t = toks[ti++];
+            char out[1200];
+            if (conv == 's' || conv == 'c') {
+                if (t.isStr) fwrite(t.s, 1, (size_t)t.slen, stdout);
+                else { snprintf(out, sizeof out, "%g", t.num); fputs(out, stdout); }
+            } else if (conv == 'x' || conv == 'X' || conv == 'o') {
+                /* integer-base conversions survive escape-expansion; feed a
+                 * long long with an `ll` length modifier. */
+                char ispec[66]; memcpy(ispec, spec, (size_t)sl - 1);
+                ispec[sl - 1] = 'l'; ispec[sl] = 'l'; ispec[sl + 1] = conv; ispec[sl + 2] = '\0';
+                snprintf(out, sizeof out, ispec, (long long)t.num);
+                fputs(out, stdout);
+            } else {
+                snprintf(out, sizeof out, spec, t.isStr ? 0.0 : t.num);
+                fputs(out, stdout);
+            }
+            k = j + 1;
+        }
+        if (ranOut || ti >= toks.size()) break;
+    }
+    pthread_mutex_unlock(&matlab_io_mutex);
+}
+
 /*
  * parfor dispatcher: spawns one pthread per iteration of start:step:end.
  * `body(iv, state)` is called for each iteration. `state` is an opaque

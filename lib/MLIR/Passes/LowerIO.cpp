@@ -319,58 +319,86 @@ LogicalResult rewriteFprintfCall(Operation *Call, OpBuilder &B,
   if (!FmtPair) return failure();
   auto [FmtPtr, FmtLen] = *FmtPair;
 
-  /* Extra args go to the matlab_fprintf_f64_* runtime entries as f64.
-   * An f64 operand passes straight through; a ptr operand is a matrix
-   * descriptor — for the common case of a scalar-valued result that
-   * Sema couldn't pin to f64 (e.g. `max(v)` / `sum(v)`, typed `any` →
-   * a 1×1 matrix at runtime) we extract element 1 with
-   * matlab_subscript1_s.  Anything else (an unconverted tensor, a
-   * genuine multi-element matrix) still bails — printf-style format
-   * cycling over a matrix is a separate feature. */
   B.setInsertionPoint(Call);
   ModuleOp M = Call->getParentOfType<ModuleOp>();
-  SmallVector<Value, 6> DataArgs;
+  auto Loc = Call->getLoc();
+  Value FmtLenV = LLVM::ConstantOp::create(B, Loc, I64,
+                                           B.getI64IntegerAttr(FmtLen));
+
+  /* No value args -> the plain string path. */
+  unsigned NVals = NOps - 1;
+  if (NVals == 0) {
+    auto Fn = getOrInsertRuntimeFunc(B, M, "matlab_fprintf_str", VoidTy,
+                                     {PtrTy, I64});
+    LLVM::CallOp::create(B, Loc, Fn, ValueRange{FmtPtr, FmtLenV});
+    Call->erase();
+    return success();
+  }
+
+  /* Build a descriptor array (one ptr + one kind byte per value arg) and call
+   * the variadic runtime core, which expands every matrix element and recycles
+   * the format (MATLAB fprintf semantics) and handles `%s`.  The string-arg
+   * bitmask is attached by the frontend (LowerIO has no Sema types): bit i set
+   * => operand i is a string.  kind 0 = numeric matlab_mat*, 1 = matlab_string*. */
+  int64_t StrMask = 0;
+  if (auto MA = Call->getAttrOfType<IntegerAttr>("str_mask"))
+    StrMask = MA.getInt();
+
+  auto I8 = IntegerType::get(Ctx, 8);
+  auto ValsArrTy = LLVM::LLVMArrayType::get(PtrTy, NVals);
+  auto KindsArrTy = LLVM::LLVMArrayType::get(I8, NVals);
+  Value One = LLVM::ConstantOp::create(B, Loc, I64, B.getI64IntegerAttr(1));
+  Value ValsBuf = LLVM::AllocaOp::create(B, Loc, PtrTy, ValsArrTy, One, 0);
+  Value KindsBuf = LLVM::AllocaOp::create(B, Loc, PtrTy, KindsArrTy, One, 0);
+
   for (unsigned i = 1; i < NOps; ++i) {
     Value V = Call->getOperand(i);
-    Type T = V.getType();
-    if (T == F64) {
-      DataArgs.push_back(V);
-    } else if (T == PtrTy) {
-      auto Sub = getOrInsertRuntimeFunc(
-          B, M, "matlab_subscript1_s", F64, {PtrTy, F64});
-      Value One = LLVM::ConstantOp::create(
-          B, Call->getLoc(), F64, B.getF64FloatAttr(1.0));
-      auto Ext = LLVM::CallOp::create(B, Call->getLoc(), Sub,
-                                      ValueRange{V, One});
-      DataArgs.push_back(Ext.getResult());
+    bool IsStr = (StrMask >> i) & 1;
+    Value ValPtr;
+    int8_t Kind;
+    if (IsStr) {
+      Kind = 1;
+      if (auto Pair = materializeStringArg(V, B, Strings)) {  /* char literal */
+        auto [Sp, Sl] = *Pair;
+        auto Fn = getOrInsertRuntimeFunc(B, M, "matlab_string_from_literal",
+                                         PtrTy, {PtrTy, I64});
+        Value SlenV = LLVM::ConstantOp::create(B, Loc, I64,
+                                               B.getI64IntegerAttr(Sl));
+        ValPtr = LLVM::CallOp::create(B, Loc, Fn, ValueRange{Sp, SlenV})
+                     .getResult();
+      } else if (V.getType() == PtrTy) {           /* string variable */
+        ValPtr = V;
+      } else {
+        return failure();
+      }
     } else {
-      return failure();
+      Kind = 0;
+      if (V.getType() == F64) {                     /* scalar -> 1x1 box */
+        auto Fn = getOrInsertRuntimeFunc(B, M, "matlab_mat_scalar", PtrTy, {F64});
+        ValPtr = LLVM::CallOp::create(B, Loc, Fn, ValueRange{V}).getResult();
+      } else if (V.getType() == PtrTy) {            /* matrix descriptor */
+        ValPtr = V;
+      } else {
+        return failure();
+      }
     }
+    Value Idx = LLVM::ConstantOp::create(B, Loc, I64,
+                                         B.getI64IntegerAttr((int64_t)(i - 1)));
+    Value VGep = LLVM::GEPOp::create(B, Loc, PtrTy, PtrTy, ValsBuf,
+                                     ValueRange{Idx});
+    LLVM::StoreOp::create(B, Loc, ValPtr, VGep);
+    Value KGep = LLVM::GEPOp::create(B, Loc, PtrTy, I8, KindsBuf,
+                                     ValueRange{Idx});
+    Value KV = LLVM::ConstantOp::create(B, Loc, I8, B.getI8IntegerAttr(Kind));
+    LLVM::StoreOp::create(B, Loc, KV, KGep);
   }
 
-  Value FmtLenV = LLVM::ConstantOp::create(
-      B, Call->getLoc(), I64, B.getI64IntegerAttr(FmtLen));
-
-  SmallVector<Value, 6> Args{FmtPtr, FmtLenV};
-  for (Value V : DataArgs) Args.push_back(V);
-
-  /* Pick the matching runtime symbol by arity. */
-  StringRef Name;
-  SmallVector<Type, 6> Sig{PtrTy, I64};
-  switch (NOps) {
-    case 1: Name = "matlab_fprintf_str";  break;
-    case 2: Name = "matlab_fprintf_f64";   Sig.push_back(F64); break;
-    case 3: Name = "matlab_fprintf_f64_2"; Sig.append({F64, F64}); break;
-    case 4: Name = "matlab_fprintf_f64_3"; Sig.append({F64, F64, F64}); break;
-    case 5: Name = "matlab_fprintf_f64_4"; Sig.append({F64, F64, F64, F64}); break;
-    case 6: Name = "matlab_fprintf_f64_5"; Sig.append({F64, F64, F64, F64, F64}); break;
-    case 7: Name = "matlab_fprintf_f64_6"; Sig.append({F64, F64, F64, F64, F64, F64}); break;
-    case 8: Name = "matlab_fprintf_f64_7"; Sig.append({F64, F64, F64, F64, F64, F64, F64}); break;
-    case 9: Name = "matlab_fprintf_f64_8"; Sig.append({F64, F64, F64, F64, F64, F64, F64, F64}); break;
-    default: return failure();
-  }
-  auto Fn = getOrInsertRuntimeFunc(B, M, Name, VoidTy, Sig);
-  LLVM::CallOp::create(B, Call->getLoc(), Fn, Args);
+  Value NV = LLVM::ConstantOp::create(B, Loc, I64,
+                                      B.getI64IntegerAttr((int64_t)NVals));
+  auto Fn = getOrInsertRuntimeFunc(B, M, "matlab_fprintf_vec", VoidTy,
+                                   {PtrTy, I64, PtrTy, PtrTy, I64});
+  LLVM::CallOp::create(B, Loc, Fn,
+                       ValueRange{FmtPtr, FmtLenV, ValsBuf, KindsBuf, NV});
   Call->erase();
   return success();
 }
