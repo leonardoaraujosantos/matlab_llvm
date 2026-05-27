@@ -1512,6 +1512,13 @@ static const HelpEntry HelpTable[] = {
    "help\n"
    "help fft\n"
    "help classdef"},
+  {"ver", "REPL",
+   "ver\n       ver <name>\n       version",
+   "Product version + the shipped-toolbox inventory (with each toolbox's "
+   "shipped tier range). `ver <name>` filters by case-insensitive substring.",
+   "ver\n"
+   "ver robotics\n"
+   "version"},
   {"exit", "REPL",
    "exit\n       quit",
    "Leave the REPL. Ctrl-D does the same.",
@@ -1544,7 +1551,8 @@ static void printHelpOverview() {
             << "  =====================\n\n"
             << "  Usage:\n"
             << "    help               — this overview\n"
-            << "    help <topic>       — detailed help on a topic\n\n"
+            << "    help <topic>       — detailed help on a topic\n"
+            << "    ver                — product version + shipped toolboxes\n\n"
             << "  Topics (grouped):\n\n";
   // Group by `group` field, preserving first-seen order.
   std::vector<const char *> groups;
@@ -1570,6 +1578,104 @@ static void printHelpOverview() {
     }
     std::cout << "\n\n";
   }
+}
+
+/* ---- `ver` — product version + shipped-toolbox inventory --------------- *
+ * matlab_llvm's analogue of MATLAB's `ver`.  The version's minor number
+ * tracks the shipped-toolbox count (bump alongside the README badge). */
+static const char *kProductVersion = "0.23.0";
+static const char *kProductTagline =
+    "a MATLAB compiler + runtime on MLIR / LLVM";
+
+struct ToolboxInfo {
+  const char *name;     // display name
+  const char *tiers;    // shipped tier / status summary
+};
+
+/* Keep in sync with the README "Shipped Toolboxes" table. */
+static const ToolboxInfo kToolboxes[] = {
+  {"Signal Processing",                 "Tier 1-3"},
+  {"Control System",                    "Tier 1-4"},
+  {"Communications",                    "Tier 1-7"},
+  {"RF",                                "Tier 1-4 + Verilog-A"},
+  {"Antenna (subset)",                  "ANT Tier-2"},
+  {"Propagation Models",                "PROP Tier 1-3"},
+  {"Optimization",                      "Tier 1-5"},
+  {"Model Predictive Control",          "Tier 1-6"},
+  {"System Identification",             "Tier 1-6"},
+  {"Global Optimization",               "Tier 1-6"},
+  {"Statistics and Machine Learning",   "Tier 1-6"},
+  {"Image Processing",                  "Tier 1-6"},
+  {"Curve Fitting",                     "Tier 1-6"},
+  {"DSP System",                        "Tier 1-6 + DSP HDL 7-8"},
+  {"Wavelet",                           "Tier 1-6"},
+  {"Partial Differential Equation",     "Tier 1-4"},
+  {"Symbolic Math",                     "Tier 1-4 (SymPP)"},
+  {"Stateflow (mStateflow)",            "backend + DAP"},
+  {"Financial",                         "Tier 1-7"},
+  {"Econometrics",                      "Tier 1-6"},
+  {"Fixed-Point Designer",              "Tier 1-5"},
+  {"Sensor Fusion and Tracking",        "Tier 1-6"},
+  {"Robotics System",                   "Tier 1-6"},
+};
+
+static void printVersion(const std::string &filter) {
+  constexpr int N = static_cast<int>(sizeof(kToolboxes) / sizeof(kToolboxes[0]));
+  if (filter.empty()) {
+    std::cout << "\n--------------------------------------------------------------------------\n";
+    std::cout << "  matlab_llvm — " << kProductTagline << "\n";
+    std::cout << "  Version: " << kProductVersion << "   ·   " << N
+              << " toolbox surfaces shipped\n";
+    std::cout << "  Codegen: LLVM | C | C++ | Python | TypeScript | SystemVerilog | cocotb | Verilog-A\n";
+    std::cout << "--------------------------------------------------------------------------\n";
+  }
+  // Column-aligned toolbox list (filtered by case-insensitive substring).
+  std::string fl = filter;
+  for (char &c : fl) c = static_cast<char>(std::tolower((unsigned char)c));
+  int shown = 0;
+  for (const auto &t : kToolboxes) {
+    if (!fl.empty()) {
+      std::string nl = t.name;
+      for (char &c : nl) c = static_cast<char>(std::tolower((unsigned char)c));
+      if (nl.find(fl) == std::string::npos) continue;
+    }
+    std::cout << "  " << t.name;
+    int pad = 38 - static_cast<int>(std::strlen(t.name));
+    for (int i = 0; i < pad; ++i) std::cout << ' ';
+    std::cout << t.tiers << "\n";
+    ++shown;
+  }
+  if (!fl.empty() && shown == 0)
+    std::cout << "  no toolbox matching '" << filter << "'.\n";
+  std::cout << "\n";
+}
+
+/* Returns true if the line was handled as a `ver` / `version` command. */
+static bool tryHandleVer(const std::string &rawLine) {
+  std::string s = trimLR(rawLine);
+  while (!s.empty() && (s.back() == ';' || std::isspace((unsigned char)s.back())))
+    s.pop_back();
+  if (s.empty()) return false;
+  auto stripQuotes = [](std::string t) {
+    t = trimLR(t);
+    if (t.size() >= 2 &&
+        ((t.front() == '\'' && t.back() == '\'') ||
+         (t.front() == '"' && t.back() == '"')))
+      t = t.substr(1, t.size() - 2);
+    return trimLR(t);
+  };
+  if (s == "ver" || s == "version") { printVersion(""); return true; }
+  /* command form: `ver signal` */
+  if (s.size() > 4 && (s[3] == ' ' || s[3] == '\t') && s.compare(0, 3, "ver") == 0) {
+    printVersion(stripQuotes(s.substr(4)));
+    return true;
+  }
+  /* function form: `ver('signal')` / `ver()` */
+  if (s.size() >= 5 && s.compare(0, 4, "ver(") == 0 && s.back() == ')') {
+    printVersion(stripQuotes(s.substr(4, s.size() - 5)));
+    return true;
+  }
+  return false;
 }
 
 /* Returns true if the line was handled as a help command (caller should
@@ -1921,6 +2027,11 @@ int runRepl() {
     /* Help is a REPL-side UX affordance — not a real Sema builtin. Catch
      * it at the top level, before we feed the line into the pipeline. */
     if (Accum.empty() && tryHandleHelp(Line)) {
+      Editor.addHistory(Line);
+      continue;
+    }
+    /* `ver` / `version` — product version + shipped-toolbox inventory. */
+    if (Accum.empty() && tryHandleVer(Line)) {
       Editor.addHistory(Line);
       continue;
     }
