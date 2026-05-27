@@ -1583,7 +1583,7 @@ static void printHelpOverview() {
 /* ---- `ver` — product version + shipped-toolbox inventory --------------- *
  * matlab_llvm's analogue of MATLAB's `ver`.  The version's minor number
  * tracks the shipped-toolbox count (bump alongside the README badge). */
-static const char *kProductVersion = "0.23.0";
+static const char *kProductVersion = "0.24.0";
 static const char *kProductTagline =
     "a MATLAB compiler + runtime on MLIR / LLVM";
 
@@ -1617,6 +1617,7 @@ static const ToolboxInfo kToolboxes[] = {
   {"Fixed-Point Designer",              "Tier 1-5"},
   {"Sensor Fusion and Tracking",        "Tier 1-6"},
   {"Robotics System",                   "Tier 1-6"},
+  {"Navigation",                        "Tier 1-4"},
 };
 
 static void printVersion(const std::string &filter) {
@@ -2259,7 +2260,7 @@ static std::string buildReplPrelude(const std::string &Src) {
   static const char *kToolboxDirs[] = {
     "comm", "rf", "optim", "mpc", "ident", "gads", "pde", "prop", "sym",
     "stateflow", "antenna", "control", "stats", "images", "curvefit",
-    "dsp", "gpu", "finance", "econ", "fusion", "robotics",
+    "dsp", "gpu", "finance", "econ", "fusion", "robotics", "navigation",
   };
   std::vector<std::string> Files;
   auto add = [&](const std::string &Leaf) {
@@ -2517,6 +2518,25 @@ static std::string buildReplPrelude(const std::string &Src) {
     {false, "checkCollision",            "robotics_classdefs.m"},
     {false, "manipulatorRRT",            "robotics_classdefs.m"},
     {false, "plan",                      "robotics_classdefs.m"},
+    /* Navigation Toolbox — `navigation_classdefs.m` umbrella (Tiers 1–4). */
+    {false, "occupancyMap",              "navigation_classdefs.m"},
+    {false, "stateSpaceSE2",             "navigation_classdefs.m"},
+    {false, "stateSpaceDubins",          "navigation_classdefs.m"},
+    {false, "validatorOccupancyMap",     "navigation_classdefs.m"},
+    {false, "navPath",                   "navigation_classdefs.m"},
+    {false, "plannerRRT",                "navigation_classdefs.m"},
+    {false, "plannerRRTStar",            "navigation_classdefs.m"},
+    {false, "plannerAStarGrid",          "navigation_classdefs.m"},
+    {false, "lidarScan",                 "navigation_classdefs.m"},
+    {false, "lidarSLAM",                 "navigation_classdefs.m"},
+    {false, "poseGraph",                 "navigation_classdefs.m"},
+    {false, "isStateValid",              "navigation_classdefs.m"},
+    {false, "isMotionValid",             "navigation_classdefs.m"},
+    {false, "matchScans",                "navigation_classdefs.m"},
+    {false, "optimizePoseGraph",         "navigation_classdefs.m"},
+    {false, "addRelativePose",           "navigation_classdefs.m"},
+    {false, "shortenpath",               "navigation_classdefs.m"},
+    {false, "sampleUniform",             "navigation_classdefs.m"},
     /* Global Optimization Toolbox Tier-2 — `gads_classdefs.m` holds the
      * MultiStart + GlobalSearch solver objects.  (`run` is too generic
      * to trigger on; the solver-object mentions pull the prelude.) */
@@ -11636,6 +11656,12 @@ int main(int Argc, char **Argv) {
       "setOccupancy", "getOccupancy", "checkOccupancy", "findpath",
       "collisionBox", "collisionSphere", "checkCollision",
       "manipulatorRRT", "plan",
+      /* Navigation Toolbox — `navigation_classdefs.m` umbrella. */
+      "occupancyMap", "stateSpaceSE2", "stateSpaceDubins",
+      "validatorOccupancyMap", "navPath", "plannerRRT", "plannerRRTStar",
+      "plannerAStarGrid", "lidarScan", "lidarSLAM", "poseGraph",
+      "isStateValid", "isMotionValid", "matchScans", "optimizePoseGraph",
+      "addRelativePose", "shortenpath", "sampleUniform",
       /* GPU Coder T5 design-pattern helpers — runtime entries, no
        * prelude file needed.  Listed here only for the AOT-prelude
        * scanner's awareness (no leaf to map). */
@@ -11897,6 +11923,17 @@ int main(int Argc, char **Argv) {
         ClsName == "checkCollision" || ClsName == "manipulatorRRT" ||
         ClsName == "plan")
       return "robotics_classdefs.m";
+    /* Navigation Toolbox umbrella. */
+    if (ClsName == "occupancyMap" || ClsName == "stateSpaceSE2" ||
+        ClsName == "stateSpaceDubins" || ClsName == "validatorOccupancyMap" ||
+        ClsName == "navPath" || ClsName == "plannerRRT" ||
+        ClsName == "plannerRRTStar" || ClsName == "plannerAStarGrid" ||
+        ClsName == "lidarScan" || ClsName == "lidarSLAM" ||
+        ClsName == "poseGraph" || ClsName == "isStateValid" ||
+        ClsName == "isMotionValid" || ClsName == "matchScans" ||
+        ClsName == "optimizePoseGraph" || ClsName == "addRelativePose" ||
+        ClsName == "shortenpath" || ClsName == "sampleUniform")
+      return "navigation_classdefs.m";
     /* GPU Coder T5 design-pattern helpers are C runtime entries; no
      * classdef file to pull in. */
     return std::string();
@@ -11952,7 +11989,7 @@ int main(int Argc, char **Argv) {
     static const char *kToolboxDirs[] = {
       "comm", "rf", "optim", "mpc", "ident", "gads", "pde", "prop", "sym",
       "stateflow", "antenna", "control", "stats", "images", "curvefit",
-      "dsp", "gpu", "finance", "econ", "fusion", "robotics",
+      "dsp", "gpu", "finance", "econ", "fusion", "robotics", "navigation",
     };
     std::vector<std::string> Cands;
     for (const char *Tb : kToolboxDirs) {

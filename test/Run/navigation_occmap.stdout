@@ -1,0 +1,4 @@
+GridSize: 20 x 20
+occ(4,4)=1.0 free(1,1)=0.0
+check(4,4)=1 check(1,1)=0
+after inflate occ(3.5,4)=1

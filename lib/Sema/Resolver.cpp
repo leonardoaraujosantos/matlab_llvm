@@ -577,6 +577,31 @@ void Resolver::registerBuiltins() {
     "matlab_fusion_insmarg_fuse_accel", "matlab_fusion_insmarg_fuse_mag",
     "matlab_fusion_insmarg_fuse_gps",
     "matlab_fusion_allanvar",
+    /* ===== Navigation Toolbox — Tiers 1–4 ================================
+     * Class names (occupancyMap/stateSpaceSE2/stateSpaceDubins/
+     * validatorOccupancyMap/navPath/plannerRRT/plannerRRTStar/
+     * plannerAStarGrid/lidarScan/lidarSLAM/poseGraph) are NOT builtins —
+     * they resolve via the prelude.  Free functions + methods register here
+     * (`plan`/`setOccupancy`/`getOccupancy`/`checkOccupancy`/`derivative`
+     * already registered for Robotics — reused).  Method dispatch keys on
+     * arg-0's pinned class in Lowering.cpp. */
+    "inflate", "isStateValid", "isMotionValid",
+    "sampleUniform", "matchScans", "optimizePoseGraph",
+    "shortenpath", "addScan", "addRelativePose", "pathLength",
+    "distance", "interpolate",
+    "matlab_nav_occmap_init", "matlab_nav_occmap_set", "matlab_nav_occmap_get",
+    "matlab_nav_occmap_check", "matlab_nav_occmap_inflate", "matlab_nav_occmap_setgrid",
+    "matlab_nav_ss_se2_init", "matlab_nav_ss_dubins_init",
+    "matlab_nav_ss_distance", "matlab_nav_ss_interpolate", "matlab_nav_ss_sample",
+    "matlab_nav_validator_init", "matlab_nav_validator_isstate",
+    "matlab_nav_validator_ismotion",
+    "matlab_nav_path_init", "matlab_nav_path_length",
+    "matlab_nav_planner_init", "matlab_nav_planner_plan", "matlab_nav_shortenpath",
+    "matlab_nav_astar_init", "matlab_nav_astar_plan",
+    "matlab_nav_lidarscan_init", "matlab_nav_matchscans",
+    "matlab_nav_slam_init", "matlab_nav_slam_addscan",
+    "matlab_nav_posegraph_init", "matlab_nav_posegraph_addrel",
+    "matlab_nav_posegraph_optimize",
     /* Inverse Tustin: discrete-to-continuous. */
     "d2c_tustin",
     /* Tier 3.4 / 2.3 — gramians and state-space step response. */
