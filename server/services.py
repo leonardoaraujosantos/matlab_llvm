@@ -146,6 +146,10 @@ async def run_plot(
         "ok": produced and not res.timed_out,
         "file": str(out),
         "rel": out.name,
+        "stdout": res.stdout,
         "stderr": res.stderr,
         "timed_out": res.timed_out,
+        "truncated": res.stdout_truncated or res.stderr_truncated,
+        # Relative path the client downloads via GET /v1/files/{path}.
+        "artifacts": [out.name] if produced else [],
     }

@@ -103,7 +103,7 @@ def backend(tmp_path_factory):
         # Probe plot support for the optional plot test.
         try:
             r = httpx.post(
-                remote_url + "/v1/plot",
+                remote_url + "/v1/plot?raw=true",
                 headers={"Authorization": f"Bearer {token}"} if token else {},
                 json={"source": "plot([1 2 3])", "session_id": "probe_plot_support"},
                 timeout=60.0,
@@ -147,7 +147,7 @@ def backend(tmp_path_factory):
     plot_ok = is_real
     if plot_ok:
         try:
-            r = httpx.post(base + "/v1/plot", json={"source": "plot([1 2 3])", "session_id": "probe_plot_support"}, timeout=30.0)
+            r = httpx.post(base + "/v1/plot?raw=true", json={"source": "plot([1 2 3])", "session_id": "probe_plot_support"}, timeout=30.0)
             plot_ok = r.status_code == 200 and r.headers.get("content-type", "").startswith("image/")
         except Exception:
             plot_ok = False
