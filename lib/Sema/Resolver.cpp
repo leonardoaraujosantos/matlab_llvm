@@ -617,6 +617,21 @@ void Resolver::registerBuiltins() {
     "matlab_nav_pseudoranges", "matlab_nav_receiverposition",
     "matlab_nav_frenet_init", "matlab_nav_frenet_g2f", "matlab_nav_frenet_f2g",
     "matlab_nav_trajgen_init", "matlab_nav_trajgen_connect",
+    /* ===== Deep Learning Toolbox — Tiers 1-2 (dlarray + autodiff) =========
+     * `dlarray` is a class (resolves via prelude, NOT registered).  The
+     * activation/loss free-function names + extractdata + dlgradient register
+     * here; tanh/sum/mean/log/exp are already builtins (the Lowering arm only
+     * reroutes them when the argument is a dlarray). */
+    "relu", "sigmoid", "softmax", "crossentropy", "mse",
+    "extractdata", "dlgradient",
+    "matlab_dlnet_dlarray_init", "matlab_dlnet_extractdata",
+    "matlab_dlnet_plus", "matlab_dlnet_minus", "matlab_dlnet_mtimes",
+    "matlab_dlnet_times",
+    "matlab_dlnet_relu", "matlab_dlnet_sigmoid", "matlab_dlnet_tanh",
+    "matlab_dlnet_softmax", "matlab_dlnet_sum", "matlab_dlnet_mean",
+    "matlab_dlnet_log", "matlab_dlnet_exp",
+    "matlab_dlnet_crossentropy", "matlab_dlnet_mse",
+    "matlab_dlnet_grad", "matlab_dlnet_reset",
     /* Inverse Tustin: discrete-to-continuous. */
     "d2c_tustin",
     /* Tier 3.4 / 2.3 — gramians and state-space step response. */

@@ -5973,6 +5973,25 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"matlab_nav_frenet_f2g",       "matlab_nav_frenet_f2g",       PtrTy, {PtrTy, PtrTy}},
         {"matlab_nav_trajgen_init",     "matlab_nav_trajgen_init",     PtrTy, {PtrTy, PtrTy}},
         {"matlab_nav_trajgen_connect",  "matlab_nav_trajgen_connect",  PtrTy, {PtrTy, PtrTy, PtrTy, F64}},
+        /* ===== Deep Learning Toolbox Tiers 1-2 (dlarray + autodiff) ===== */
+        {"matlab_dlnet_dlarray_init",   "matlab_dlnet_dlarray_init",   PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_extractdata",    "matlab_dlnet_extractdata",    PtrTy, {PtrTy}},
+        {"matlab_dlnet_plus",           "matlab_dlnet_plus",           PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_dlnet_minus",          "matlab_dlnet_minus",          PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_dlnet_mtimes",         "matlab_dlnet_mtimes",         PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_dlnet_times",          "matlab_dlnet_times",          PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_dlnet_relu",           "matlab_dlnet_relu",           PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_sigmoid",        "matlab_dlnet_sigmoid",        PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_tanh",           "matlab_dlnet_tanh",           PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_softmax",        "matlab_dlnet_softmax",        PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_sum",            "matlab_dlnet_sum",            PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_mean",           "matlab_dlnet_mean",           PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_log",            "matlab_dlnet_log",            PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_exp",            "matlab_dlnet_exp",            PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_crossentropy",   "matlab_dlnet_crossentropy",   PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_dlnet_mse",            "matlab_dlnet_mse",            PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_dlnet_grad",           "matlab_dlnet_grad",           PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_reset",          "matlab_dlnet_reset",          PtrTy, {F64}},
       };
       bool matched = false;
       for (const auto &E : pde_table) {

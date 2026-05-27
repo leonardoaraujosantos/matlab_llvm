@@ -97,17 +97,30 @@ kernel. (ONNX/PyTorch/TF *import* is carved — see §10.)
   the catalogue** — see §9. **T1 + T2 (~7 wk) is the highest-value cut**: it
   delivers inference *and* the autodiff engine, after which training tiers are
   incremental.
-- **Status legend**: ✅ shipped · 🟡 partial · 🔵 not started. **Everything
-  below is 🔵 not started** — but the forward-pass substrate (matrix/conv/
-  activation kernel), the fixed-point/SV/cocotb lane, `bayesopt`, `ode45`, and
-  the classdef + handle ABI are all already in the runtime, so the genuinely
-  new code concentrates in the autodiff engine, the layer library, the
-  solvers, and the recurrent kernels.
+- **Status legend**: ✅ shipped · 🟡 partial · 🔵 not started. **T1 + T2 (the
+  dense surface) shipped 2026-05-27** (badge 24→25): the `dlarray` value type
+  over a **reverse-mode autodiff tape**, forward inference via operator
+  overloading (`W*X + b`, `relu`/`sigmoid`/`tanh`/`softmax`) and reductions/
+  losses (`sum`/`mean`/`crossentropy`/`mse`), plus `dlgradient` (verified
+  against finite differences to **1.24e-10**) and `extractdata`.  **2-D dense
+  only** — convolution + the 4-D `SSCB` tensor are carved (the runtime has no
+  rank-N type; see [`any_shape_roadmap.md`](any_shape_roadmap.md) Tier C), and
+  the object-array `dlnetwork`/layer-object container is carved (no classdef
+  array literals) — the *functional* "custom training loop" form is the shipped
+  surface.  **T3–T6 + the HDL track are 🔵 not started** — but T3 (training)
+  now rests on a working autodiff keystone, so the solvers are incremental.
+  The forward-pass substrate (matrix kernel), the fixed-point/SV/cocotb lane,
+  `bayesopt`, `ode45`, and the classdef + handle ABI are all already in the
+  runtime.
 - **No external dependencies** — matching project precedent.
+- **Discovered en route** (pre-existing, out of scope here): plain-matrix
+  copy-on-write is broken — `B = A; B(i) = v` mutates `A` (verified on a
+  dlnet-free script).  The shipped autodiff is unaffected; the gradient-check
+  example perturbs via matrix addition (fresh allocation) to sidestep it.
 
 ---
 
-## 3. Tier-1 — Inference: `dlnetwork` forward pass 🔵 (FOUNDATION)
+## 3. Tier-1 — Inference: `dlnetwork` forward pass 🟡 (FOUNDATION — dense shipped)
 
 *Load a network with known weights and run it. No autodiff. Pure composition
 of shipped matrix/conv/activation ops.* This is the "import a trained model
@@ -131,7 +144,7 @@ digit image, and report the predicted class + score. Closes the
 
 ---
 
-## 4. Tier-2 — The `dlarray` autodiff engine 🔵 (KEYSTONE)
+## 4. Tier-2 — The `dlarray` autodiff engine 🟡 (KEYSTONE — dense shipped)
 
 *Reverse-mode automatic differentiation over the supported op set — the single
 biggest new infrastructure piece, and the gate to all training.*

@@ -344,6 +344,7 @@ add_library(MatlabRuntime STATIC
     runtime/toolbox/fusion/runtime_fusion.cpp
     runtime/toolbox/robotics/runtime_robotics.cpp
     runtime/toolbox/navigation/runtime_navigation.cpp
+    runtime/toolbox/dlnet/runtime_dlnet.cpp
     runtime/toolbox/stateflow/runtime_mstateflow.cpp
     runtime/gpu/runtime_gpu.cpp
     runtime/toolbox/gpu/runtime_gpu_helpers.cpp
@@ -598,6 +599,7 @@ set_source_files_properties(
   runtime/toolbox/fusion/runtime_fusion.cpp
   runtime/toolbox/robotics/runtime_robotics.cpp
   runtime/toolbox/navigation/runtime_navigation.cpp
+  runtime/toolbox/dlnet/runtime_dlnet.cpp
   runtime/toolbox/rf/runtime_rf.cpp
   runtime/toolbox/prop/runtime_prop.cpp
   runtime/toolbox/stateflow/runtime_mstateflow.cpp

@@ -6267,6 +6267,20 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                       {mlir::NoneType::get(&MCtx)}, L, {Cal});
           return Obj;
         }
+        /* ===== Deep Learning Toolbox — dlarray(X) leaf wrap ============== */
+        if (CD->Name == "dlarray" && C.Args.size() == 1) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "dlarray__dlarray"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value X = lowerExpr(*C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_dlnet_dlarray_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, X},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
         if (CD->Name == "so3" && C.Args.size() == 1) {
           mlir::NamedAttribute CtorCal(
               mlir::StringAttr::get(&MCtx, "callee"),
@@ -7032,6 +7046,82 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                       {mlir::NoneType::get(&MCtx)}, L, {Cal2});
         }
         return Obj;
+      }
+      /* extractdata(x) -> the underlying matrix; dlgradient(loss, v) -> the
+       * gradient matrix (reverse sweep of the autodiff tape).  Both names are
+       * deep-learning-exclusive, so route unconditionally. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "extractdata" && C.Args.size() == 1) {
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        mlir::Value X = lowerExpr(*C.Args[0]);
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_dlnet_extractdata"));
+        return emitUnreg("matlab.call_builtin", {X}, PtrTy, L, {Cal});
+      }
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "dlgradient" && C.Args.size() == 2) {
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        mlir::Value Lv = lowerExpr(*C.Args[0]);
+        mlir::Value Vv = lowerExpr(*C.Args[1]);
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_dlnet_grad"));
+        return emitUnreg("matlab.call_builtin", {Lv, Vv}, PtrTy, L, {Cal});
+      }
+      /* ===== Deep Learning Toolbox — dlarray activation/reduction/loss ====
+       * relu/sigmoid/tanh/softmax/sum/mean/log/exp/crossentropy/mse on a
+       * dlarray-pinned argument route to the dlarray method (recording onto
+       * the autodiff tape).  pinnedDl recurses through operators + ctor calls
+       * + dlarray-returning calls so `relu(W*X+b)` is recognised via the
+       * pinned leaf W.  Falls through to the numeric builtin when no operand
+       * is a dlarray (so matrix `tanh`/`sum`/`log`/`exp` are unaffected). */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          C.Args.size() >= 1) {
+        static const llvm::StringSet<> DlFns = {
+            "relu", "sigmoid", "tanh", "softmax", "sum", "mean",
+            "log", "exp", "crossentropy", "mse"};
+        if (DlFns.contains(N->Name)) {
+          std::function<bool(const Expr *)> pinnedDl =
+              [&pinnedDl](const Expr *X) -> bool {
+            if (!X) return false;
+            if (auto *NE = dynamic_cast<const NameExpr *>(X))
+              return NE->Ref && NE->Ref->PinnedClass &&
+                     NE->Ref->PinnedClass->Name == "dlarray";
+            if (auto *Bi2 = dynamic_cast<const BinaryOpExpr *>(X))
+              return pinnedDl(Bi2->LHS) || pinnedDl(Bi2->RHS);
+            if (auto *U2 = dynamic_cast<const UnaryOpExpr *>(X))
+              return pinnedDl(U2->Operand);
+            if (auto *CX = dynamic_cast<const CallOrIndex *>(X)) {
+              if (auto *NX = dynamic_cast<const NameExpr *>(CX->Callee)) {
+                if (NX->Ref && NX->Ref->Kind == BindingKind::Class &&
+                    NX->Ref->ClassDef && NX->Ref->ClassDef->Name == "dlarray")
+                  return true;
+                static const llvm::StringSet<> DlRet = {
+                    "relu", "sigmoid", "tanh", "softmax", "sum", "mean",
+                    "log", "exp", "crossentropy", "mse", "dlarray"};
+                if (DlRet.contains(NX->Name))
+                  for (size_t i = 0; i < CX->Args.size(); ++i)
+                    if (pinnedDl(CX->Args[i])) return true;
+              }
+            }
+            return false;
+          };
+          bool anyDl = false;
+          for (size_t i = 0; i < C.Args.size(); ++i)
+            if (pinnedDl(C.Args[i])) { anyDl = true; break; }
+          if (anyDl) {
+            auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+            std::vector<mlir::Value> Vs;
+            for (size_t i = 0; i < C.Args.size(); ++i)
+              Vs.push_back(lowerExpr(*C.Args[i]));
+            std::string Callee = std::string("dlarray__") + std::string(N->Name);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, Callee));
+            return emitUnreg("matlab.call", Vs, PtrTy, L, {Cal});
+          }
+        }
       }
       /* bin(fi) / hex(fi) / dec(fi) — render the stored integer as a
        * matlab_string. The result is tagged through StringBindings on
