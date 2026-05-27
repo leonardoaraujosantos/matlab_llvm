@@ -66,6 +66,39 @@ def test_warm_pool_adopts_dir_and_migrates_files(monkeypatch):
     assert migrated_back is True
 
 
+def test_stateful_artifact_visible_via_files_resolver(monkeypatch):
+    """Issue #55: an artifact written during a *live* stateful turn lands in the
+    worker's adopted pool dir, not the deterministic dir. The session-aware
+    resolver that /v1/files* uses must surface it before the session is retired
+    (not only after migrate-back on eviction)."""
+    monkeypatch.setattr(settings, "warm_pool_size", 2)
+    import services
+
+    async def go():
+        await sessions.MANAGER.pool.fill(2)
+        det = sessions.workspace_for(None, "issue55")
+        # Stateful turn writes a figure into the worker's cwd (the pool dir).
+        await sessions.MANAGER.run_turn(None, "issue55", "saveas(gcf, 'plot.png')", timeout=3)
+        ws = sessions.MANAGER.workspace_of(None, "issue55")
+        # The mismatch condition holds: live ws is an adopted pool dir != det.
+        adopted = ".pool" in str(ws) and ws.resolve() != det.resolve()
+        # /v1/files resolution path must point at the live ws and see the file.
+        resolved_to_ws = services.resolve_workspace(None, "issue55").resolve() == ws.resolve()
+        listed = [f["path"] for f in services.list_workspace(session_id="issue55")]
+        data = services.read_workspace_file("plot.png", session_id="issue55")
+        # And the deterministic dir does NOT yet hold it (proving the old path 404s).
+        det_has_it = (det / "plot.png").exists()
+        await sessions.MANAGER.shutdown()
+        return adopted, resolved_to_ws, listed, data, det_has_it
+
+    adopted, resolved_to_ws, listed, data, det_has_it = _run(go())
+    assert adopted is True
+    assert resolved_to_ws is True
+    assert "plot.png" in listed
+    assert data[:4] == b"\x89PNG"
+    assert det_has_it is False
+
+
 def test_warm_pool_refills_after_acquire(monkeypatch):
     monkeypatch.setattr(settings, "warm_pool_size", 2)
     mgr = sessions.SessionManager()

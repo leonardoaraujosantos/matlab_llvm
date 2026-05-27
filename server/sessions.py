@@ -9,9 +9,12 @@ into stdout (``stderr=STDOUT``) so a turn's errors are captured inline.
 Warm pool: matlabc has no ``cd`` builtin, so a pre-spawned worker can't be
 retargeted to a session's deterministic workspace. Instead a pooled worker
 **adopts its own pool dir as the session workspace** — files staged in the
-deterministic dir are migrated in on adoption, and migrated back out (so they
-stay reachable via /v1/files) when the session is retired. The pool amortises
-matlabc's JIT cold-start: workers are pre-spawned and warmed with a no-op turn.
+deterministic dir are migrated in on adoption, and migrated back out when the
+session is retired (so they persist after the worker is gone). While the
+session is live, ``/v1/files*`` reaches artifacts via ``workspace_of`` (the
+adopted pool dir), so they are listable/downloadable mid-session — not only
+after retirement (issue #55). The pool amortises matlabc's JIT cold-start:
+workers are pre-spawned and warmed with a no-op turn.
 """
 
 from __future__ import annotations

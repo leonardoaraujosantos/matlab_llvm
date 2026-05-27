@@ -13,10 +13,10 @@ from fastapi import APIRouter, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
 
 import limits
+import services
 from config import settings
 from models import FileInfo, FileListResponse, UploadResponse
-from principal import effective_user
-from workspaces import list_files, resolve_in_workspace, workspace_for
+from workspaces import list_files, resolve_in_workspace
 
 router = APIRouter(prefix="/v1/files", tags=["files"])
 
@@ -29,7 +29,9 @@ async def upload(
     user_id: str | None = Query(default=None),
     session_id: str | None = Query(default=None),
 ) -> UploadResponse:
-    ws = workspace_for(effective_user(user_id), session_id)
+    # Session-aware: while a stateful REPL session is live, this resolves to the
+    # worker's adopted workspace, so uploads and REPL artifacts share one dir.
+    ws = services.resolve_workspace(user_id, session_id)
     name = (file.filename or "").strip()
     if not name:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "missing filename")
@@ -72,7 +74,7 @@ async def listing(
     user_id: str | None = Query(default=None),
     session_id: str | None = Query(default=None),
 ) -> FileListResponse:
-    ws = workspace_for(effective_user(user_id), session_id)
+    ws = services.resolve_workspace(user_id, session_id)
     return FileListResponse(
         files=[FileInfo(path=e.path, size=e.size, modified=e.modified) for e in list_files(ws)]
     )
@@ -84,7 +86,7 @@ async def download(
     user_id: str | None = Query(default=None),
     session_id: str | None = Query(default=None),
 ) -> FileResponse:
-    ws = workspace_for(effective_user(user_id), session_id)
+    ws = services.resolve_workspace(user_id, session_id)
     try:
         target = resolve_in_workspace(ws, path)
     except ValueError:
