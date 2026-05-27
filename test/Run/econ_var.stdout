@@ -1,0 +1,10 @@
+A11 = 0.47
+A22 = 0.40
+nseries = 2
+fc_rows = 5
+fc_cols = 2
+irf_rows = 10
+irf11 = 0.969
+eg_coint = 1
+jci_coint = 1
+eg_indep = 0

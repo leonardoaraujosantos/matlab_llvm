@@ -115,6 +115,35 @@ void Resolver::registerBuiltins() {
     /* Tier-6: SDE Monte Carlo. */
     "gbm", "bm", "cir", "hwv", "simByEuler", "simBySolution",
     "haltonseq", "optpricemc",
+    /* ----------------------------------------------------------------
+     * Econometrics Toolbox (docs/econometrics_toolbox_roadmap.md).
+     * Tier-1 is entirely function-form and routes through the
+     * LowerTensorOps Spec table.  Model-object method names that
+     * collide with System-Identification (estimate/forecast/infer/
+     * simulate/filter) are dispatched class-pinned in Lowering, so they
+     * coexist.
+     * ---------------------------------------------------------------- */
+    /* Tier-1: data prep. */
+    "price2ret", "ret2price", "hpfilter",
+    /* Tier-1: ACF / PACF. */
+    "autocorr", "parcorr", "crosscorr",
+    /* Tier-1: diagnostic + comparison tests. */
+    "lbqtest", "archtest", "aicbic", "lmtest", "waldtest", "lratiotest",
+    "hac", "fgls",
+    /* Tier-1: unit-root + stationarity tests. */
+    "adftest", "pptest", "kpsstest", "lmctest", "vratiotest",
+    /* Tier-2+: model-object methods (class-pinned in Lowering on the
+     * receiver class so they coexist with System-Identification's
+     * idpoly forecast/etc).  `forecast`/`filter` are already builtins.
+     * The model constructors (arima/garch/egarch/gjr/...) are NOT
+     * builtins — they resolve via the classdef auto-prepend. */
+    "estimate", "infer", "simulate", "summarize",
+    /* Tier-4: VAR impulse-response method + cointegration tests. */
+    "irf", "egcitest", "jcitest", "jcontest",
+    /* Tier-5: state-space methods (filter is already a builtin). */
+    "smooth",
+    /* Tier-6: Markov-chain method (asymptotics). */
+    "asymptotics",
     /* Phase 6 — Symbolic Math Toolbox via SymPP. The link target
      * (matlab_sym_* runtime) is only present when the build was
      * configured -DMATLAB_LLVM_WITH_SYM=ON; without that the JIT/-emit-c
@@ -1758,6 +1787,15 @@ void Resolver::resolveStmt(Stmt &St, Scope *S) {
                   Nm == "sminreal" || Nm == "modred")
                 return Arg0Cls;
             }
+            /* Econometrics: `EstMdl = estimate(Mdl, y)` returns the same
+             * model class as the template, so downstream forecast/infer/
+             * simulate dispatch (which keys on the receiver class) fires. */
+            if (Arg0Cls && NX->Name == "estimate" &&
+                (Arg0Cls->Name == "arima" || Arg0Cls->Name == "garch" ||
+                 Arg0Cls->Name == "egarch" || Arg0Cls->Name == "gjr" ||
+                 Arg0Cls->Name == "varm" || Arg0Cls->Name == "ssm" ||
+                 Arg0Cls->Name == "dssm" || Arg0Cls->Name == "bayeslm"))
+              return Arg0Cls;
           }
         }
       }

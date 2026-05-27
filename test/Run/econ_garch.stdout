@@ -1,0 +1,8 @@
+garch_persist = 0.97
+garch_kappa = 0.0178
+nhv = 600
+hv_mid = 0.6377
+nvf = 10
+vf10 = 0.7826
+gjr_kind = 3
+nsim = 50

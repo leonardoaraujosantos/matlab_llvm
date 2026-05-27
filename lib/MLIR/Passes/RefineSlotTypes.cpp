@@ -287,7 +287,13 @@ bool runRefineSlotTypes(mlir::ModuleOp M) {
             U->getNumOperands() == 2 &&
             U->getOperand(1) == Slot) {
           mlir::Type T = U->getOperand(0).getType();
-          if (!isScalarPrim(T)) { Consistent = false; break; }
+          /* Accept scalar primitives AND a consistent ranked-tensor type
+           * (e.g. a constructor param defaulting to `zeros(1,1)` stored
+           * into an otherwise-none param slot — the conditional-mean/
+           * state-space classdefs hit this when their 0-arg ctor runs). */
+          bool Refinable = isScalarPrim(T) ||
+                           mlir::isa<mlir::RankedTensorType>(T);
+          if (!Refinable) { Consistent = false; break; }
           if (!Any) { Stored = T; Any = true; }
           else if (Stored != T) { Consistent = false; break; }
         }

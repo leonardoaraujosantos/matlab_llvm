@@ -8539,6 +8539,158 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         }
 
         /* ============================================================
+         * Econometrics Toolbox — class-pinned-first-arg dispatch.  The
+         * generic method names estimate/forecast/infer/simulate/filter
+         * are routed by the receiver's class name (arima/garch/...) to
+         * the matlab_econ_* kernels, so they coexist with the System-
+         * Identification idpoly routes below.
+         * ============================================================ */
+        {
+          /* Is the receiver an Econometrics model class?  Pick the runtime
+           * family by class name: arima -> matlab_econ_arima_*; the
+           * conditional-variance trio (garch/egarch/gjr) shares
+           * matlab_econ_garch_* (which dispatches internally on ModelKind);
+           * the model constructor name is `<class>__<class>`. */
+          const char *fam = nullptr;        /* runtime prefix */
+          const char *ctor = nullptr;       /* fresh-object constructor */
+          if (Cls0 && Cn0 == "arima") { fam = "arima"; ctor = "arima__arima"; }
+          else if (Cls0 && (Cn0 == "garch" || Cn0 == "egarch" || Cn0 == "gjr")) {
+            fam = "garch";
+            ctor = (Cn0 == "garch") ? "garch__garch"
+                 : (Cn0 == "egarch") ? "egarch__egarch" : "gjr__gjr";
+          }
+          else if (Cls0 && Cn0 == "varm") { fam = "varm"; ctor = "varm__varm"; }
+          else if (Cls0 && (Cn0 == "ssm" || Cn0 == "dssm")) {
+            fam = "ssm";
+            ctor = (Cn0 == "ssm") ? "ssm__ssm" : "dssm__dssm";
+          }
+          /* irf(Mdl, numObs) — VAR impulse responses (varm only). */
+          if (Cls0 && Cn0 == "varm" && Nm == "irf" && C.Args.size() == 2) {
+            mlir::Value Mdl = loadObj(C.Args[0]);
+            mlir::Value No  = lowerExpr(*C.Args[1]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_econ_varm_irf"));
+            return emitUnreg("matlab.call_builtin", {Mdl, No}, PtrTy, L, {Cal});
+          }
+          /* filter(Mdl, Y) / smooth(Mdl, Y) — state-space Kalman (ssm/dssm). */
+          if (Cls0 && (Cn0 == "ssm" || Cn0 == "dssm") &&
+              (Nm == "filter" || Nm == "smooth") && C.Args.size() == 2) {
+            mlir::Value Mdl = loadObj(C.Args[0]);
+            mlir::Value Y   = lowerExpr(*C.Args[1]);
+            std::string rt = std::string("matlab_econ_ssm_") +
+                             (Nm == "filter" ? "filter" : "smooth");
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, rt));
+            return emitUnreg("matlab.call_builtin", {Mdl, Y}, PtrTy, L, {Cal});
+          }
+          /* bayeslm: estimate(Mdl, X, y) [3-arg] mutates + returns receiver;
+           * forecast(Mdl, XNew) [2-arg] is the posterior-mean prediction. */
+          if (Cls0 && Cn0 == "bayeslm" && Nm == "estimate" &&
+              C.Args.size() == 3) {
+            mlir::Value Mdl = loadObj(C.Args[0]);
+            mlir::Value X   = lowerExpr(*C.Args[1]);
+            mlir::Value Y   = lowerExpr(*C.Args[2]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_econ_bayeslm_estimate"));
+            emitUnregOp("matlab.call_builtin", {Mdl, X, Y},
+                        {mlir::NoneType::get(&MCtx)}, L, {Cal});
+            return Mdl;
+          }
+          if (Cls0 && Cn0 == "bayeslm" && Nm == "forecast" &&
+              C.Args.size() == 2) {
+            mlir::Value Mdl  = loadObj(C.Args[0]);
+            mlir::Value XNew = lowerExpr(*C.Args[1]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_econ_bayeslm_forecast"));
+            return emitUnreg("matlab.call_builtin", {Mdl, XNew}, PtrTy, L, {Cal});
+          }
+          /* dtmc: asymptotics(mc) stationary dist; simulate(mc, n) path. */
+          if (Cls0 && Cn0 == "dtmc" && Nm == "asymptotics" &&
+              C.Args.size() == 1) {
+            mlir::Value Mc = loadObj(C.Args[0]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_econ_dtmc_asymptotics"));
+            return emitUnreg("matlab.call_builtin", {Mc}, PtrTy, L, {Cal});
+          }
+          if (Cls0 && Cn0 == "dtmc" && Nm == "simulate" &&
+              C.Args.size() == 2) {
+            mlir::Value Mc = loadObj(C.Args[0]);
+            mlir::Value Ns = lowerExpr(*C.Args[1]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_econ_dtmc_simulate"));
+            return emitUnreg("matlab.call_builtin", {Mc, Ns}, PtrTy, L, {Cal});
+          }
+          if (fam && Nm == "estimate" && C.Args.size() == 2) {
+            mlir::Value Tmpl = loadObj(C.Args[0]);
+            mlir::Value Y    = lowerExpr(*C.Args[1]);
+            std::string rt = std::string("matlab_econ_") + fam + "_estimate";
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, rt));
+            /* ssm/dssm: mutate the template in place and return it (the
+             * matrix-typed system matrices make the zero-arg fresh-ctor
+             * path hit a param-slot typing limit; the receiver already
+             * carries the ssm class so the result propagates correctly). */
+            if (std::string(fam) == "ssm") {
+              emitUnregOp("matlab.call_builtin", {Tmpl, Y},
+                          {mlir::NoneType::get(&MCtx)}, L, {Cal});
+              return Tmpl;
+            }
+            /* Other families: allocate a FRESH model via the zero-arg ctor
+             * (so the result carries the model class, exactly like armax
+             * returns a fresh idpoly), then populate it in place from the
+             * template orders + data. */
+            mlir::NamedAttribute CtorCal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, ctor));
+            mlir::Value Model =
+                emitUnreg("matlab.call", {}, PtrTy, L, {CtorCal});
+            emitUnregOp("matlab.call_builtin", {Model, Tmpl, Y},
+                        {mlir::NoneType::get(&MCtx)}, L, {Cal});
+            return Model;
+          }
+          if (fam && Nm == "forecast" && C.Args.size() == 3) {
+            /* yF = forecast(Mdl, numPeriods, Y0) */
+            mlir::Value Mdl = loadObj(C.Args[0]);
+            mlir::Value H   = lowerExpr(*C.Args[1]);
+            mlir::Value Y0  = lowerExpr(*C.Args[2]);
+            std::string rt = std::string("matlab_econ_") + fam + "_forecast";
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, rt));
+            return emitUnreg("matlab.call_builtin", {Mdl, H, Y0}, PtrTy, L,
+                             {Cal});
+          }
+          if (fam && Nm == "infer" && C.Args.size() == 2) {
+            /* E = infer(Mdl, Y) — residuals (arima) or conditional
+             * variances (garch family). */
+            mlir::Value Mdl = loadObj(C.Args[0]);
+            mlir::Value Y   = lowerExpr(*C.Args[1]);
+            std::string rt = std::string("matlab_econ_") + fam + "_infer";
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, rt));
+            return emitUnreg("matlab.call_builtin", {Mdl, Y}, PtrTy, L, {Cal});
+          }
+          if (fam && Nm == "simulate" && C.Args.size() == 2) {
+            /* Y = simulate(Mdl, numObs) */
+            mlir::Value Mdl = loadObj(C.Args[0]);
+            mlir::Value N   = lowerExpr(*C.Args[1]);
+            std::string rt = std::string("matlab_econ_") + fam + "_simulate";
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, rt));
+            return emitUnreg("matlab.call_builtin", {Mdl, N}, PtrTy, L, {Cal});
+          }
+        }
+
+        /* ============================================================
          * System Identification Toolbox Tier-1 — class-pinned-first-arg
          * dispatch.  arx / ar return a fresh idpoly (allocated via the
          * zero-arg ctor, then populated by the runtime in place — same
