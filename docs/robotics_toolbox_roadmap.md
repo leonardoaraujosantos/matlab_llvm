@@ -420,10 +420,9 @@ matching the Image `image_png_roundtrip` precedent).
 | `robotics_purepursuit.m` | T5 | `controllerPurePursuit` drives `differentialDriveKinematics` to the goal |
 | `robotics_collision.m` | T6 | `checkCollision` true/false + distance on known box/sphere pairs |
 
-Target: **~11 gating tests** (one+ per major surface), in line with Image
-(10) and Stats (12). Full regression must stay green (currently 465
-run-tests) — the badge bumps to **17 toolboxes** (or higher if the other
-queued toolboxes land first). **Note**: only a few stateful objects share
+Target: **~7 gating tests** (one+ per major surface). Full regression must
+stay green — **shipped 2026-05-27 as the 23rd toolbox**, run-tests 587.
+**Note**: only a few stateful objects share
 the System-Object lowering fix, so this toolbox is largely shippable
 *without* waiting on it (unlike Fusion/DSP).
 

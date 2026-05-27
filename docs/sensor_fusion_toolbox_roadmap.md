@@ -405,10 +405,9 @@ matching the Image `image_png_roundtrip` precedent).
 | `fusion_trackergnn.m` | T5 | `trackerGNN` confirms N tracks on a clean multi-target scenario |
 | `fusion_gospa.m` | T6 | `trackGOSPAMetric` on known track-vs-truth = expected distance |
 
-Target: **~11 gating tests** (one+ per major surface), in line with
-Image (10) and Stats (12). Full regression must stay green (currently 465
-run-tests) — the badge bumps to **17 toolboxes** (or higher if Curve
-Fitting / Wavelet / DSP land first). **Note**: the stateful-tracker tiers
+Target: **~5 gating tests** (one+ per major surface). Full regression must
+stay green — **shipped 2026-05-27 as the 22nd toolbox**. **Note**: the
+stateful-tracker tiers
 (2/3/5/6) share the System-Object lowering fix with DSP/Comm, so
 sequencing this after (or alongside) DSP Tier-1 amortises that cost.
 

@@ -588,7 +588,7 @@ hand-coded, MathWorks-free surfaces**: Symbolic Math via SymPP (Tiers
 1 → 4, see [`symbolic_toolbox_roadmap.md`](symbolic_toolbox_roadmap.md))
 and Optimization Toolbox (Tiers 1 → 5, see
 [`optim_toolbox_roadmap.md`](optim_toolbox_roadmap.md)) — no external
-runtime dependency, full `-emit-*` participation. Sixteen toolbox
+runtime dependency, full `-emit-*` participation. Twenty-three toolbox
 surfaces ship today; the next candidates are in §16 below.
 
 ---
@@ -669,14 +669,18 @@ edge-element vector EM.
 
 ### 16. Future toolboxes — drafted compatibility roadmaps 🔵
 
-After the **nineteen shipped toolbox surfaces** (see
+After the **twenty-three shipped toolbox surfaces** (see
 [`feature_status.md`](feature_status.md) and the README's
-"Shipped Toolboxes" table — Curve Fitting, Wavelet, DSP System + DSP HDL,
-and GPU Coder were drafted here and have since shipped), two of the
-original drafts remain — **full tiered compatibility roadmaps**, same
-format as the shipped ones: per-tier function tables, reusable-infra
-map, headline tracer-bullet, Compile/Execute · Debug/REPL · examples ·
-tests breakdown, carve-outs, effort summary. They are ordered by
+"Shipped Toolboxes" table), **every roadmap originally drafted in this
+section has since shipped** — Curve Fitting, Wavelet, DSP System + DSP HDL,
+Sensor Fusion and Tracking, and Robotics System.  The table below is kept
+as the historical record of those drafts (all ✅).  The genuinely-unshipped
+candidates now are GPU Coder Tiers 2+ (multi-backend kernel emit; T1
+shipped), Computer Vision, and the carve-down follow-ons listed in each
+shipped toolbox's roadmap.  Each draft was a **full tiered compatibility
+roadmap**: per-tier function tables, reusable-infra map, headline
+tracer-bullet, Compile/Execute · Debug/REPL · examples · tests breakdown,
+carve-outs, effort summary. They were ordered by
 **gain** (demand × reuse of the already-shipped substrate — so cost is
 low and payoff high):
 
@@ -685,8 +689,8 @@ low and payoff high):
 | 1 | **Curve Fitting** ✅ | [`curve_fitting_toolbox_roadmap.md`](curve_fitting_toolbox_roadmap.md) | 6 · shipped | rode shipped `polyfit`/`polyval`/`interp1` + Optim `lsqcurvefit`/`lsqnonlin` | `census_fit.m` (`fit`→`gof`→forecast→`plot`) |
 | 2 | **Wavelet** ✅ | [`wavelet_toolbox_roadmap.md`](wavelet_toolbox_roadmap.md) | 6 · shipped | extended Signal — `conv`/`fft`/`dct`/`fwht`/`upfirdn` + Image `psnr` + Stats `fitcsvm` | `denoise_signal.m` (`wavedec`→`wthresh`→`waverec`) |
 | 3 | **DSP System + DSP HDL** ✅ | [`dsp_toolbox_roadmap.md`](dsp_toolbox_roadmap.md) | 8 · shipped | Signal filters + `fi` + emit-SV/cocotb lane; **T1 SO model unblocked Comm/RF SO tiers** | `dsphdl_fir_stream.m` (fixed-point FIR → synthesizable SV + cocotb SIL) |
-| 4 | **Sensor Fusion and Tracking** | [`sensor_fusion_toolbox_roadmap.md`](sensor_fusion_toolbox_roadmap.md) | 6 · ~12.5 wk | **EKF/UKF cores already shipped** (Ident T5); ODE + linalg + PRNG | `imu_gps_fusion.m` (IMU+GPS → `insfilterMARG`) |
-| 5 | **Robotics System** | [`robotics_toolbox_roadmap.md`](robotics_toolbox_roadmap.md) | 6 · ~13 wk | **IK is `lsqnonlin`/`fminunc`** (Optim shipped); FK/Jacobian = linalg; URDF meshes reuse the PDE STL importer | `ik_path_trace.m` (`loadrobot`→`inverseKinematics`) |
+| 4 | **Sensor Fusion and Tracking** ✅ | [`sensor_fusion_toolbox_roadmap.md`](sensor_fusion_toolbox_roadmap.md) | 6 · shipped | **EKF/UKF cores already shipped** (Ident T5); ODE + linalg + PRNG | `imu_gps_fusion.m` (IMU+GPS → `insfilterMARG`) |
+| 5 | **Robotics System** ✅ | [`robotics_toolbox_roadmap.md`](robotics_toolbox_roadmap.md) | 6 · shipped | **IK is `lsqnonlin`/`fminunc`** (Optim shipped); FK/Jacobian = linalg; URDF import + full dynamics + GJK shipped | `ik_path_trace.m` (`loadrobot`→`inverseKinematics`) |
 
 **Cross-cutting sequencing:**
 

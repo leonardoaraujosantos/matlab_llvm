@@ -22,7 +22,7 @@ Out of scope:
 In scope (subsets shipped, covered by dedicated docs):
 - **Plotting**: headless Cairo-backed `plot` / `bar` / `surf` / etc. with
   PNG/SVG/PDF output. See [`plotting.md`](plotting.md).
-- **Toolboxes (thirteen shipped surfaces)** — earlier revisions of this
+- **Toolboxes (twenty-three shipped surfaces)** — earlier revisions of this
   doc listed toolboxes as out of scope; that scope has expanded. The
   runtime now ships practical subsets of:
   Signal Processing ([`signal_toolbox_roadmap.md`](signal_toolbox_roadmap.md)),
@@ -72,6 +72,32 @@ In scope (subsets shipped, covered by dedicated docs):
   `wpdec`/`wprec`/`besttree`; special topics `emd`/`vmd`/`ewt`/
   `matchingPursuit` + `waveletScattering`→`fitcsvm` — the `denoise_signal`
   headline (SNR +21 dB) is closed).
+  A nineteenth — DSP System (+ DSP HDL)
+  ([`dsp_toolbox_roadmap.md`](dsp_toolbox_roadmap.md)) — ships Tiers 1-6
+  (System-Object filter/adaptive/multirate/source/spectral surface) plus
+  the DSP HDL T7-8 simulation lane; its Tier-1 SO model unblocked the
+  Comm/RF System-Object tiers.
+  A twentieth — Financial
+  ([`financial_toolbox_roadmap.md`](financial_toolbox_roadmap.md)) — ships
+  all 7 tiers (dates/cashflows/bonds, performance + Black-Scholes,
+  `Portfolio` mean-variance, credit/ECM, `PortfolioCVaR`/`MAD`, SDE Monte
+  Carlo, Black-Litterman/risk-parity) + the `timetable` foundation.
+  A twenty-first — Econometrics
+  ([`econometrics_toolbox_roadmap.md`](econometrics_toolbox_roadmap.md)) —
+  ships all 6 tiers (`arima`/`garch`/`varm`/`ssm`/`bayeslm`/`dtmc` +
+  the diagnostic/unit-root/cointegration test surface).
+  A twenty-second — Sensor Fusion and Tracking
+  ([`sensor_fusion_toolbox_roadmap.md`](sensor_fusion_toolbox_roadmap.md)) —
+  ships all 6 tiers (`quaternion` + tracking filters + IMU/GPS sensors +
+  `insfilterMARG` + multi-object `trackerGNN` + track fusion / GOSPA);
+  the `imu_gps_fusion` and `gnn_air_traffic` headlines are closed.
+  A twenty-third — Robotics System
+  ([`robotics_toolbox_roadmap.md`](robotics_toolbox_roadmap.md)) — ships all
+  6 tiers (transforms + `rigidBodyTree` FK/Jacobian + `inverseKinematics` +
+  URDF `importrobot` + full CRBA/RNEA dynamics + `generalizedInverseKinematics`
+  + trajectories + mobile kinematics + occupancy-map PRM + GJK collision +
+  `manipulatorRRT`); the `ik_path_trace` and `diffdrive_prm` headlines are
+  closed.
   Apps / Live Editor / GUIs / Simulink integration for each are
   individually carved out — see the per-toolbox roadmap.
 - **Core-compiler roadmap (not a toolbox):**
@@ -916,13 +942,16 @@ toolbox subsets.
   `fi` Q-format scalar + 1-D array arithmetic with 5 rounding modes;
   `numerictype` + `fimath` first-class objects.
 
-### Thirteen shipped toolbox surfaces
+### Twenty-three shipped toolbox surfaces
 
 Signal Processing · Control System · Communications · RF · Antenna ·
-Propagation Models · Optimization · Model Predictive Control · **System
-Identification** · Partial Differential Equation · Symbolic Math (opt-in
-via SymPP) · Fixed-Point Designer · Stateflow (mStateflow). Plus
-headless plotting (Cairo) and Verilog-A export.
+Propagation Models · Optimization · Model Predictive Control · System
+Identification · Global Optimization · Statistics and Machine Learning ·
+Image Processing · Curve Fitting · DSP System (+ DSP HDL) · Wavelet ·
+Partial Differential Equation · Symbolic Math (opt-in via SymPP) ·
+Stateflow (mStateflow) · Financial · Econometrics · Fixed-Point Designer ·
+Sensor Fusion and Tracking · Robotics System. Plus headless plotting
+(Cairo) and Verilog-A export.
 See the per-toolbox roadmap docs in §9 for each toolbox's current
 tier closure + open follow-ons.
 
