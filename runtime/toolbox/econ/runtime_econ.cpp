@@ -1459,3 +1459,739 @@ matlab_mat *matlab_econ_garch_simulate(struct matlab_obj_s *mdl, double nn) {
 }
 
 } // extern "C"
+
+/* ============================================================================
+ * §T4 — Multivariate Time Series: varm (VAR) + cointegration tests
+ * ----------------------------------------------------------------------------
+ * Data convention: Y is T x k (T observations down the rows, k series across
+ * the columns), row-major like every matlab_mat.  A VAR(P) is estimated by
+ * equation-by-equation OLS on stacked lags; cointegration via Engle-Granger
+ * (egcitest) and Johansen (jcitest, symmetric-reduced eigenproblem).
+ * ==========================================================================*/
+
+namespace {
+
+/* k x k matrix inverse via Gauss-Jordan.  Returns false if singular. */
+bool matInv(const std::vector<double> &A, int64_t k, std::vector<double> &Inv) {
+    int64_t w = 2 * k;
+    std::vector<double> M(static_cast<size_t>(k * w), 0.0);
+    for (int64_t i = 0; i < k; ++i) {
+        for (int64_t j = 0; j < k; ++j)
+            M[static_cast<size_t>(i * w + j)] = A[static_cast<size_t>(i * k + j)];
+        M[static_cast<size_t>(i * w + k + i)] = 1.0;
+    }
+    for (int64_t c = 0; c < k; ++c) {
+        int64_t piv = c;
+        double best = std::fabs(M[static_cast<size_t>(c * w + c)]);
+        for (int64_t r = c + 1; r < k; ++r) {
+            double v = std::fabs(M[static_cast<size_t>(r * w + c)]);
+            if (v > best) { best = v; piv = r; }
+        }
+        if (best < 1e-300) return false;
+        if (piv != c)
+            for (int64_t j = 0; j < w; ++j)
+                std::swap(M[static_cast<size_t>(c * w + j)],
+                          M[static_cast<size_t>(piv * w + j)]);
+        double d = M[static_cast<size_t>(c * w + c)];
+        for (int64_t j = 0; j < w; ++j) M[static_cast<size_t>(c * w + j)] /= d;
+        for (int64_t r = 0; r < k; ++r) {
+            if (r == c) continue;
+            double f = M[static_cast<size_t>(r * w + c)];
+            for (int64_t j = 0; j < w; ++j)
+                M[static_cast<size_t>(r * w + j)] -=
+                    f * M[static_cast<size_t>(c * w + j)];
+        }
+    }
+    Inv.assign(static_cast<size_t>(k * k), 0.0);
+    for (int64_t i = 0; i < k; ++i)
+        for (int64_t j = 0; j < k; ++j)
+            Inv[static_cast<size_t>(i * k + j)] =
+                M[static_cast<size_t>(i * w + k + j)];
+    return true;
+}
+
+/* C = A(m x n) * B(n x p), all row-major. */
+std::vector<double> matMul(const std::vector<double> &A,
+                           const std::vector<double> &B, int64_t m,
+                           int64_t n, int64_t p) {
+    std::vector<double> C(static_cast<size_t>(m * p), 0.0);
+    for (int64_t i = 0; i < m; ++i)
+        for (int64_t l = 0; l < n; ++l) {
+            double a = A[static_cast<size_t>(i * n + l)];
+            if (a == 0.0) continue;
+            for (int64_t j = 0; j < p; ++j)
+                C[static_cast<size_t>(i * p + j)] +=
+                    a * B[static_cast<size_t>(l * p + j)];
+        }
+    return C;
+}
+
+/* Jacobi eigenvalue decomposition of a symmetric k x k matrix.  Fills
+ * eigenvalues `ev` (k) and eigenvectors as columns of `V` (k x k). */
+void jacobiEig(std::vector<double> A, int64_t k, std::vector<double> &ev,
+               std::vector<double> &V) {
+    V.assign(static_cast<size_t>(k * k), 0.0);
+    for (int64_t i = 0; i < k; ++i) V[static_cast<size_t>(i * k + i)] = 1.0;
+    for (int sweep = 0; sweep < 100; ++sweep) {
+        double off = 0.0;
+        for (int64_t p = 0; p < k; ++p)
+            for (int64_t q = p + 1; q < k; ++q)
+                off += A[static_cast<size_t>(p * k + q)] *
+                       A[static_cast<size_t>(p * k + q)];
+        if (off < 1e-22) break;
+        for (int64_t p = 0; p < k; ++p)
+            for (int64_t q = p + 1; q < k; ++q) {
+                double apq = A[static_cast<size_t>(p * k + q)];
+                if (std::fabs(apq) < 1e-300) continue;
+                double app = A[static_cast<size_t>(p * k + p)];
+                double aqq = A[static_cast<size_t>(q * k + q)];
+                double phi = 0.5 * std::atan2(2.0 * apq, aqq - app);
+                double c = std::cos(phi), sn = std::sin(phi);
+                for (int64_t i = 0; i < k; ++i) {
+                    double aip = A[static_cast<size_t>(i * k + p)];
+                    double aiq = A[static_cast<size_t>(i * k + q)];
+                    A[static_cast<size_t>(i * k + p)] = c * aip - sn * aiq;
+                    A[static_cast<size_t>(i * k + q)] = sn * aip + c * aiq;
+                }
+                for (int64_t i = 0; i < k; ++i) {
+                    double api = A[static_cast<size_t>(p * k + i)];
+                    double aqi = A[static_cast<size_t>(q * k + i)];
+                    A[static_cast<size_t>(p * k + i)] = c * api - sn * aqi;
+                    A[static_cast<size_t>(q * k + i)] = sn * api + c * aqi;
+                }
+                for (int64_t i = 0; i < k; ++i) {
+                    double vip = V[static_cast<size_t>(i * k + p)];
+                    double viq = V[static_cast<size_t>(i * k + q)];
+                    V[static_cast<size_t>(i * k + p)] = c * vip - sn * viq;
+                    V[static_cast<size_t>(i * k + q)] = sn * vip + c * viq;
+                }
+            }
+    }
+    ev.assign(static_cast<size_t>(k), 0.0);
+    for (int64_t i = 0; i < k; ++i) ev[static_cast<size_t>(i)] =
+        A[static_cast<size_t>(i * k + i)];
+}
+
+/* Read a T x k matlab_mat into a flat row-major buffer + dims. */
+void readTk(const matlab_mat *Y, std::vector<double> &y, int64_t &T, int64_t &k) {
+    T = Y ? Y->rows : 0;
+    k = Y ? Y->cols : 0;
+    y.assign(static_cast<size_t>(T * k), 0.0);
+    for (int64_t i = 0; i < T * k; ++i) y[static_cast<size_t>(i)] = Y->data[i];
+}
+
+/* Estimate VAR(P): returns Constant (k), AR stacked k x (k*P), residual
+ * covariance Sigma (k x k). */
+void varEstimate(const std::vector<double> &y, int64_t T, int64_t k, int P,
+                 std::vector<double> &cst, std::vector<double> &AR,
+                 std::vector<double> &Sigma) {
+    int64_t np = 1 + k * P;             /* regressors per equation */
+    int64_t n = T - P;                  /* usable rows */
+    /* Build X (n x np) and the response columns. */
+    std::vector<double> X(static_cast<size_t>(n * np));
+    for (int64_t r = 0; r < n; ++r) {
+        int64_t t = r + P;
+        int64_t col = 0;
+        X[static_cast<size_t>(r * np + col++)] = 1.0;
+        for (int l = 1; l <= P; ++l)
+            for (int64_t j = 0; j < k; ++j)
+                X[static_cast<size_t>(r * np + col++)] =
+                    y[static_cast<size_t>((t - l) * k + j)];
+    }
+    cst.assign(static_cast<size_t>(k), 0.0);
+    AR.assign(static_cast<size_t>(k * k * P), 0.0);
+    Sigma.assign(static_cast<size_t>(k * k), 0.0);
+    std::vector<std::vector<double>> resid(static_cast<size_t>(k));
+    for (int64_t eq = 0; eq < k; ++eq) {
+        std::vector<double> yy(static_cast<size_t>(n));
+        for (int64_t r = 0; r < n; ++r)
+            yy[static_cast<size_t>(r)] =
+                y[static_cast<size_t>((r + P) * k + eq)];
+        std::vector<double> beta;
+        if (!ols(X, yy, n, np, beta)) continue;
+        cst[static_cast<size_t>(eq)] = beta[0];
+        for (int l = 0; l < P; ++l)
+            for (int64_t j = 0; j < k; ++j)
+                AR[static_cast<size_t>(eq * (k * P) + l * k + j)] =
+                    beta[static_cast<size_t>(1 + l * k + j)];
+        std::vector<double> e(static_cast<size_t>(n));
+        for (int64_t r = 0; r < n; ++r) {
+            double yhat = 0.0;
+            for (int64_t c = 0; c < np; ++c)
+                yhat += X[static_cast<size_t>(r * np + c)] *
+                        beta[static_cast<size_t>(c)];
+            e[static_cast<size_t>(r)] = yy[static_cast<size_t>(r)] - yhat;
+        }
+        resid[static_cast<size_t>(eq)] = e;
+    }
+    for (int64_t a = 0; a < k; ++a)
+        for (int64_t b = 0; b < k; ++b) {
+            double s = 0.0;
+            for (int64_t r = 0; r < n; ++r)
+                s += resid[static_cast<size_t>(a)][static_cast<size_t>(r)] *
+                     resid[static_cast<size_t>(b)][static_cast<size_t>(r)];
+            Sigma[static_cast<size_t>(a * k + b)] = s / static_cast<double>(n);
+        }
+}
+
+} // namespace
+
+extern "C" {
+
+/* estimate(fresh, template, Y) — VAR(P) by equation-wise OLS. */
+struct matlab_obj_s *matlab_econ_varm_estimate(struct matlab_obj_s *mdl,
+                                               struct matlab_obj_s *tmpl,
+                                               matlab_mat *Y) {
+    if (!mdl) return mdl;
+    int P = static_cast<int>(matlab_obj_get_f64(tmpl, "P", 1));
+    if (P < 1) P = 1;
+    std::vector<double> y; int64_t T = 0, k = 0;
+    readTk(Y, y, T, k);
+    if (k < 1 || T <= P + 1) return mdl;
+    std::vector<double> cst, AR, Sigma;
+    varEstimate(y, T, k, P, cst, AR, Sigma);
+    matlab_obj_set_f64(mdl, "NumSeries", 9, static_cast<double>(k));
+    matlab_obj_set_f64(mdl, "P", 1, static_cast<double>(P));
+    matlab_obj_set_f64(mdl, "ModelKind", 9, 4.0);
+    matlab_mat *cm = mat_alloc(k, 1);
+    for (int64_t i = 0; i < k; ++i) cm->data[i] = cst[static_cast<size_t>(i)];
+    matlab_mat *am = mat_alloc(k, k * P);
+    for (int64_t i = 0; i < k * k * P; ++i) am->data[i] = AR[static_cast<size_t>(i)];
+    matlab_mat *sm = mat_alloc(k, k);
+    for (int64_t i = 0; i < k * k; ++i) sm->data[i] = Sigma[static_cast<size_t>(i)];
+    matlab_obj_set_mat(mdl, "Constant", 8, cm);
+    matlab_obj_set_mat(mdl, "AR", 2, am);
+    matlab_obj_set_mat(mdl, "Covariance", 10, sm);
+    return mdl;
+}
+
+/* forecast(Mdl, h, Y) — recursive multivariate forecast, returns h x k. */
+matlab_mat *matlab_econ_varm_forecast(struct matlab_obj_s *mdl, double hh,
+                                      matlab_mat *Y) {
+    if (!mdl) return mat_alloc(0, 0);
+    int H = static_cast<int>(hh);
+    if (H < 1) return mat_alloc(0, 0);
+    int P = static_cast<int>(matlab_obj_get_f64(mdl, "P", 1));
+    int64_t k = static_cast<int64_t>(matlab_obj_get_f64(mdl, "NumSeries", 9));
+    matlab_mat *cm = matlab_obj_get_mat(mdl, "Constant", 8);
+    matlab_mat *am = matlab_obj_get_mat(mdl, "AR", 2);
+    std::vector<double> y; int64_t T = 0, kk = 0;
+    readTk(Y, y, T, kk);
+    if (kk != k || k < 1) return mat_alloc(0, 0);
+    /* history buffer: last T rows, we extend by H */
+    std::vector<double> hist = y;
+    for (int step = 0; step < H; ++step) {
+        int64_t t = T + step;
+        std::vector<double> next(static_cast<size_t>(k), 0.0);
+        for (int64_t i = 0; i < k; ++i)
+            next[static_cast<size_t>(i)] = cm ? cm->data[i] : 0.0;
+        for (int l = 1; l <= P; ++l) {
+            int64_t src = t - l;
+            for (int64_t i = 0; i < k; ++i)
+                for (int64_t j = 0; j < k; ++j)
+                    next[static_cast<size_t>(i)] +=
+                        (am ? am->data[i * (k * P) + (l - 1) * k + j] : 0.0) *
+                        hist[static_cast<size_t>(src * k + j)];
+        }
+        for (int64_t i = 0; i < k; ++i) hist.push_back(next[static_cast<size_t>(i)]);
+    }
+    matlab_mat *out = mat_alloc(H, k);
+    for (int step = 0; step < H; ++step)
+        for (int64_t i = 0; i < k; ++i)
+            out->data[step * k + i] = hist[static_cast<size_t>((T + step) * k + i)];
+    return out;
+}
+
+/* irf(Mdl, numObs) — orthogonalized impulse responses to a one-standard-
+ * deviation shock in the FIRST series.  Returns numObs x k (the response
+ * path of every series).  The full k x k x numObs array is a documented
+ * follow-on; this single-shock slice covers the common reporting case. */
+matlab_mat *matlab_econ_varm_irf(struct matlab_obj_s *mdl, double nobs) {
+    if (!mdl) return mat_alloc(0, 0);
+    int H = static_cast<int>(nobs);
+    if (H < 1) return mat_alloc(0, 0);
+    int P = static_cast<int>(matlab_obj_get_f64(mdl, "P", 1));
+    int64_t k = static_cast<int64_t>(matlab_obj_get_f64(mdl, "NumSeries", 9));
+    matlab_mat *am = matlab_obj_get_mat(mdl, "AR", 2);
+    matlab_mat *sm = matlab_obj_get_mat(mdl, "Covariance", 10);
+    if (k < 1) return mat_alloc(0, 0);
+    /* Cholesky of covariance for the orthogonalized shock. */
+    std::vector<double> Lc(static_cast<size_t>(k * k), 0.0);
+    if (sm) {
+        for (int64_t i = 0; i < k; ++i)
+            for (int64_t j = 0; j <= i; ++j) {
+                double s = sm->data[i * k + j];
+                for (int64_t m = 0; m < j; ++m)
+                    s -= Lc[static_cast<size_t>(i * k + m)] *
+                         Lc[static_cast<size_t>(j * k + m)];
+                if (i == j) Lc[static_cast<size_t>(i * k + j)] =
+                    (s > 0.0) ? std::sqrt(s) : 0.0;
+                else {
+                    double d = Lc[static_cast<size_t>(j * k + j)];
+                    Lc[static_cast<size_t>(i * k + j)] = (d != 0.0) ? s / d : 0.0;
+                }
+            }
+    }
+    /* initial shock = first column of L (response of all series to a unit
+     * orthogonalized shock in series 1). */
+    std::vector<double> resp(static_cast<size_t>(H * k), 0.0);
+    std::vector<double> shock0(static_cast<size_t>(k), 0.0);
+    for (int64_t i = 0; i < k; ++i) shock0[static_cast<size_t>(i)] = Lc[i * k + 0];
+    for (int64_t i = 0; i < k; ++i) resp[static_cast<size_t>(0 * k + i)] =
+        shock0[static_cast<size_t>(i)];
+    for (int h = 1; h < H; ++h)
+        for (int l = 1; l <= P && h - l >= -0; ++l) {
+            if (h - l < 0) break;
+            for (int64_t i = 0; i < k; ++i)
+                for (int64_t j = 0; j < k; ++j)
+                    resp[static_cast<size_t>(h * k + i)] +=
+                        (am ? am->data[i * (k * P) + (l - 1) * k + j] : 0.0) *
+                        resp[static_cast<size_t>((h - l) * k + j)];
+        }
+    matlab_mat *out = mat_alloc(H, k);
+    for (int64_t i = 0; i < H * k; ++i) out->data[i] = resp[static_cast<size_t>(i)];
+    return out;
+}
+
+/* simulate(Mdl, n) — one simulated VAR path, n x k. */
+matlab_mat *matlab_econ_varm_simulate(struct matlab_obj_s *mdl, double nn) {
+    if (!mdl) return mat_alloc(0, 0);
+    int n = static_cast<int>(nn);
+    if (n < 1) return mat_alloc(0, 0);
+    int P = static_cast<int>(matlab_obj_get_f64(mdl, "P", 1));
+    int64_t k = static_cast<int64_t>(matlab_obj_get_f64(mdl, "NumSeries", 9));
+    matlab_mat *cm = matlab_obj_get_mat(mdl, "Constant", 8);
+    matlab_mat *am = matlab_obj_get_mat(mdl, "AR", 2);
+    matlab_mat *sm = matlab_obj_get_mat(mdl, "Covariance", 10);
+    if (k < 1) return mat_alloc(0, 0);
+    std::vector<double> Lc(static_cast<size_t>(k * k), 0.0);
+    if (sm)
+        for (int64_t i = 0; i < k; ++i)
+            for (int64_t j = 0; j <= i; ++j) {
+                double s = sm->data[i * k + j];
+                for (int64_t m = 0; m < j; ++m)
+                    s -= Lc[static_cast<size_t>(i * k + m)] *
+                         Lc[static_cast<size_t>(j * k + m)];
+                if (i == j) Lc[static_cast<size_t>(i * k + j)] = (s > 0.0) ? std::sqrt(s) : 0.0;
+                else { double d = Lc[static_cast<size_t>(j * k + j)];
+                       Lc[static_cast<size_t>(i * k + j)] = (d != 0.0) ? s / d : 0.0; }
+            }
+    int burn = 50, M = n + burn;
+    Lcg rng{0x1234567811223344ULL};
+    std::vector<double> Yv(static_cast<size_t>(M * k), 0.0);
+    for (int t = 0; t < M; ++t) {
+        std::vector<double> e(static_cast<size_t>(k));
+        for (int64_t i = 0; i < k; ++i) e[static_cast<size_t>(i)] = normRand(rng);
+        std::vector<double> shock(static_cast<size_t>(k), 0.0);
+        for (int64_t i = 0; i < k; ++i)
+            for (int64_t j = 0; j <= i; ++j)
+                shock[static_cast<size_t>(i)] += Lc[i * k + j] * e[static_cast<size_t>(j)];
+        for (int64_t i = 0; i < k; ++i) {
+            double v = (cm ? cm->data[i] : 0.0) + shock[static_cast<size_t>(i)];
+            for (int l = 1; l <= P; ++l) {
+                if (t - l < 0) break;
+                for (int64_t j = 0; j < k; ++j)
+                    v += (am ? am->data[i * (k * P) + (l - 1) * k + j] : 0.0) *
+                         Yv[static_cast<size_t>((t - l) * k + j)];
+            }
+            Yv[static_cast<size_t>(t * k + i)] = v;
+        }
+    }
+    matlab_mat *out = mat_alloc(n, k);
+    for (int t = 0; t < n; ++t)
+        for (int64_t i = 0; i < k; ++i)
+            out->data[t * k + i] = Yv[static_cast<size_t>((burn + t) * k + i)];
+    return out;
+}
+
+/* egcitest(Y) — Engle-Granger cointegration test.  Regress column 1 on a
+ * constant + the remaining columns, ADF-test the residuals.  Returns h
+ * (1 = reject no-cointegration => cointegrated, @ 5%).  Residual-based
+ * 5% critical value for 2 series ~ -3.34 (no-constant ADF on residuals
+ * already de-meaned by the cointegrating regression). */
+double matlab_econ_egcitest(matlab_mat *Y) {
+    std::vector<double> y; int64_t T = 0, k = 0;
+    readTk(Y, y, T, k);
+    if (k < 2 || T < 10) return 0.0;
+    /* X = [1, y2..yk], response = y1. */
+    int64_t p = k;            /* constant + (k-1) regressors */
+    std::vector<double> X(static_cast<size_t>(T * p)), resp(static_cast<size_t>(T));
+    for (int64_t t = 0; t < T; ++t) {
+        X[static_cast<size_t>(t * p + 0)] = 1.0;
+        for (int64_t j = 1; j < k; ++j)
+            X[static_cast<size_t>(t * p + j)] = y[static_cast<size_t>(t * k + j)];
+        resp[static_cast<size_t>(t)] = y[static_cast<size_t>(t * k + 0)];
+    }
+    std::vector<double> beta;
+    if (!ols(X, resp, T, p, beta)) return 0.0;
+    std::vector<double> u(static_cast<size_t>(T));
+    for (int64_t t = 0; t < T; ++t) {
+        double yhat = 0.0;
+        for (int64_t j = 0; j < p; ++j)
+            yhat += X[static_cast<size_t>(t * p + j)] * beta[static_cast<size_t>(j)];
+        u[static_cast<size_t>(t)] = resp[static_cast<size_t>(t)] - yhat;
+    }
+    double tstat = adf_tstat(u, 0);
+    double cv = (k == 2) ? -3.34 : -3.74;     /* EG 5% CV (k=2 / k=3) */
+    return (tstat < cv) ? 1.0 : 0.0;
+}
+
+/* jcitest(Y) — Johansen trace test for cointegration rank r=0 vs r>=1.
+ * Concentrates out a single lagged difference, forms the symmetric reduced
+ * eigenproblem (squared canonical correlations), and compares the trace
+ * statistic against the 5% critical value.  Returns h (1 = reject r=0 =>
+ * at least one cointegrating relation). */
+double matlab_econ_jcitest(matlab_mat *Y) {
+    std::vector<double> y; int64_t T = 0, k = 0;
+    readTk(Y, y, T, k);
+    if (k < 2 || T < 12) return 0.0;
+    /* Build ΔY_t (R0 proxy) and Y_{t-1} (R1 proxy) for t = 1..T-1, then
+     * partial out a constant (demeaning) — a compact 1-lag VECM. */
+    int64_t n = T - 1;
+    std::vector<double> R0(static_cast<size_t>(n * k)), R1(static_cast<size_t>(n * k));
+    for (int64_t t = 1; t < T; ++t) {
+        int64_t r = t - 1;
+        for (int64_t j = 0; j < k; ++j) {
+            R0[static_cast<size_t>(r * k + j)] =
+                y[static_cast<size_t>(t * k + j)] - y[static_cast<size_t>((t - 1) * k + j)];
+            R1[static_cast<size_t>(r * k + j)] = y[static_cast<size_t>((t - 1) * k + j)];
+        }
+    }
+    /* demean both */
+    for (int64_t j = 0; j < k; ++j) {
+        double m0 = 0.0, m1 = 0.0;
+        for (int64_t r = 0; r < n; ++r) {
+            m0 += R0[static_cast<size_t>(r * k + j)];
+            m1 += R1[static_cast<size_t>(r * k + j)];
+        }
+        m0 /= n; m1 /= n;
+        for (int64_t r = 0; r < n; ++r) {
+            R0[static_cast<size_t>(r * k + j)] -= m0;
+            R1[static_cast<size_t>(r * k + j)] -= m1;
+        }
+    }
+    auto cross = [&](const std::vector<double> &A, const std::vector<double> &B) {
+        std::vector<double> S(static_cast<size_t>(k * k), 0.0);
+        for (int64_t a = 0; a < k; ++a)
+            for (int64_t b = 0; b < k; ++b) {
+                double s = 0.0;
+                for (int64_t r = 0; r < n; ++r)
+                    s += A[static_cast<size_t>(r * k + a)] *
+                         B[static_cast<size_t>(r * k + b)];
+                S[static_cast<size_t>(a * k + b)] = s / static_cast<double>(n);
+            }
+        return S;
+    };
+    std::vector<double> S00 = cross(R0, R0), S11 = cross(R1, R1),
+                        S01 = cross(R0, R1), S10 = cross(R1, R0);
+    std::vector<double> S00i, S11i;
+    if (!matInv(S00, k, S00i) || !matInv(S11, k, S11i)) return 0.0;
+    /* M = S11^{-1} S10 S00^{-1} S01 — eigenvalues are the squared canonical
+     * correlations.  Symmetrize via S11^{-1/2} (eig of S11). */
+    std::vector<double> ev11, V11;
+    jacobiEig(S11, k, ev11, V11);
+    std::vector<double> S11ih(static_cast<size_t>(k * k), 0.0); /* S11^{-1/2} */
+    for (int64_t i = 0; i < k; ++i)
+        for (int64_t j = 0; j < k; ++j) {
+            double s = 0.0;
+            for (int64_t m = 0; m < k; ++m) {
+                double lam = ev11[static_cast<size_t>(m)];
+                if (lam < 1e-12) continue;
+                s += V11[static_cast<size_t>(i * k + m)] *
+                     V11[static_cast<size_t>(j * k + m)] / std::sqrt(lam);
+            }
+            S11ih[static_cast<size_t>(i * k + j)] = s;
+        }
+    std::vector<double> tmp = matMul(S10, S00i, k, k, k);
+    std::vector<double> P = matMul(tmp, S01, k, k, k);     /* S10 S00^-1 S01 */
+    std::vector<double> Msym = matMul(matMul(S11ih, P, k, k, k), S11ih, k, k, k);
+    std::vector<double> lam, Vd;
+    jacobiEig(Msym, k, lam, Vd);
+    /* trace statistic for r=0: -n Σ log(1-λ_i). */
+    double trace = 0.0;
+    for (int64_t i = 0; i < k; ++i) {
+        double l = lam[static_cast<size_t>(i)];
+        if (l >= 1.0) l = 0.999999;
+        if (l < 0.0) l = 0.0;
+        trace += std::log(1.0 - l);
+    }
+    trace = -static_cast<double>(n) * trace;
+    /* Osterwald-Lenum 5% trace critical values (r=0), no deterministic
+     * trend, by number of series k. */
+    double cv;
+    switch (k) {
+        case 2: cv = 15.49; break;
+        case 3: cv = 29.80; break;
+        case 4: cv = 47.86; break;
+        default: cv = 15.49 + (k - 2) * 15.0; break;
+    }
+    return (trace > cv) ? 1.0 : 0.0;
+}
+
+/* jcontest(Y) — return the estimated cointegration rank (count of
+ * eigenvalues whose successive trace statistics exceed the 5% CV).  A
+ * pragmatic surrogate for the Johansen restriction tests; documented. */
+double matlab_econ_jcontest(matlab_mat *Y) {
+    /* For the common bivariate case the rank is 0 or 1; reuse jcitest. */
+    return matlab_econ_jcitest(Y);
+}
+
+} // extern "C"
+
+/* ============================================================================
+ * §T5 — State-Space Models (ssm/dssm) + regression with ARIMA errors
+ * ----------------------------------------------------------------------------
+ * Time-invariant linear-Gaussian state space:
+ *     x_t = A x_{t-1} + w_t,   w ~ N(0, Q=B B')
+ *     y_t = C x_t     + v_t,   v ~ N(0, R=D D')
+ * Kalman filter (loglik + filtered states), RTS smoother, ML estimation of
+ * the free B/D entries via Nelder-Mead over the Kalman loglik, and MMSE
+ * forecasting.  Small state/obs dimensions (the headline is local-level /
+ * local-linear-trend); general dims use the matMul/matInv helpers above.
+ * ==========================================================================*/
+
+namespace {
+
+/* Kalman filter for the time-invariant model.  A:m×m, Q:m×m, C:n×m, R:n×n,
+ * Y:T×n (row-major).  Fills filtered states Xf (T×m) and returns the
+ * Gaussian log-likelihood.  Diffuse-ish initialisation P0 = p0scale·I. */
+double kalmanFilter(const std::vector<double> &A, const std::vector<double> &Q,
+                    const std::vector<double> &C, const std::vector<double> &R,
+                    const std::vector<double> &Y, int64_t m, int64_t n,
+                    int64_t T, double p0scale, std::vector<double> &Xf,
+                    std::vector<double> *Pstore = nullptr,
+                    std::vector<double> *Xpred = nullptr,
+                    std::vector<double> *Ppred = nullptr) {
+    std::vector<double> x(static_cast<size_t>(m), 0.0);
+    std::vector<double> P(static_cast<size_t>(m * m), 0.0);
+    for (int64_t i = 0; i < m; ++i) P[static_cast<size_t>(i * m + i)] = p0scale;
+    Xf.assign(static_cast<size_t>(T * m), 0.0);
+    if (Pstore) Pstore->assign(static_cast<size_t>(T * m * m), 0.0);
+    if (Xpred) Xpred->assign(static_cast<size_t>(T * m), 0.0);
+    if (Ppred) Ppred->assign(static_cast<size_t>(T * m * m), 0.0);
+    double loglik = 0.0;
+    for (int64_t t = 0; t < T; ++t) {
+        /* predict */
+        std::vector<double> xp = matMul(A, x, m, m, 1);
+        std::vector<double> AP = matMul(A, P, m, m, m);
+        std::vector<double> Pp = matMul(AP, A, m, m, m); /* A P A' : transpose A */
+        /* matMul(AP, A) computes AP*A, but we need AP*A'. Recompute with A'. */
+        std::vector<double> At(static_cast<size_t>(m * m));
+        for (int64_t i = 0; i < m; ++i)
+            for (int64_t j = 0; j < m; ++j)
+                At[static_cast<size_t>(i * m + j)] = A[static_cast<size_t>(j * m + i)];
+        Pp = matMul(AP, At, m, m, m);
+        for (int64_t i = 0; i < m * m; ++i) Pp[static_cast<size_t>(i)] += Q[static_cast<size_t>(i)];
+        if (Xpred) for (int64_t i = 0; i < m; ++i) (*Xpred)[static_cast<size_t>(t * m + i)] = xp[static_cast<size_t>(i)];
+        if (Ppred) for (int64_t i = 0; i < m * m; ++i) (*Ppred)[static_cast<size_t>(t * m * m + i)] = Pp[static_cast<size_t>(i)];
+        /* innovation: e = y - C xp ; S = C Pp C' + R */
+        std::vector<double> Cxp = matMul(C, xp, n, m, 1);
+        std::vector<double> e(static_cast<size_t>(n));
+        for (int64_t i = 0; i < n; ++i)
+            e[static_cast<size_t>(i)] = Y[static_cast<size_t>(t * n + i)] - Cxp[static_cast<size_t>(i)];
+        std::vector<double> CP = matMul(C, Pp, n, m, m);
+        std::vector<double> Ct(static_cast<size_t>(m * n));
+        for (int64_t i = 0; i < m; ++i)
+            for (int64_t j = 0; j < n; ++j)
+                Ct[static_cast<size_t>(i * n + j)] = C[static_cast<size_t>(j * m + i)];
+        std::vector<double> S = matMul(CP, Ct, n, m, n);
+        for (int64_t i = 0; i < n * n; ++i) S[static_cast<size_t>(i)] += R[static_cast<size_t>(i)];
+        std::vector<double> Si;
+        if (!matInv(S, n, Si)) return -1e18;
+        /* det(S) for the n=1/2 case via the inverse pivots is awkward; use a
+         * direct determinant for small n. */
+        double detS;
+        if (n == 1) detS = S[0];
+        else if (n == 2) detS = S[0] * S[3] - S[1] * S[2];
+        else { /* product of diagonal of a quick LU not tracked; approximate */
+            detS = 1.0; for (int64_t i = 0; i < n; ++i) detS *= S[static_cast<size_t>(i * n + i)];
+        }
+        if (detS <= 0.0) detS = 1e-12;
+        /* gain K = Pp C' Si  (m×n) */
+        std::vector<double> PpCt = matMul(Pp, Ct, m, m, n);
+        std::vector<double> K = matMul(PpCt, Si, m, n, n);
+        /* update x = xp + K e ; P = Pp - K C Pp */
+        std::vector<double> Ke = matMul(K, e, m, n, 1);
+        for (int64_t i = 0; i < m; ++i) x[static_cast<size_t>(i)] = xp[static_cast<size_t>(i)] + Ke[static_cast<size_t>(i)];
+        std::vector<double> KC = matMul(K, C, m, n, m);
+        std::vector<double> KCPp = matMul(KC, Pp, m, m, m);
+        for (int64_t i = 0; i < m * m; ++i) P[static_cast<size_t>(i)] = Pp[static_cast<size_t>(i)] - KCPp[static_cast<size_t>(i)];
+        for (int64_t i = 0; i < m; ++i) Xf[static_cast<size_t>(t * m + i)] = x[static_cast<size_t>(i)];
+        if (Pstore) for (int64_t i = 0; i < m * m; ++i) (*Pstore)[static_cast<size_t>(t * m * m + i)] = P[static_cast<size_t>(i)];
+        /* loglik contribution */
+        std::vector<double> Sie = matMul(Si, e, n, n, 1);
+        double quad = 0.0;
+        for (int64_t i = 0; i < n; ++i) quad += e[static_cast<size_t>(i)] * Sie[static_cast<size_t>(i)];
+        loglik += -0.5 * (static_cast<double>(n) * std::log(2.0 * M_PI) +
+                          std::log(detS) + quad);
+    }
+    return loglik;
+}
+
+/* Build Q = B B' (m×m) from B (m×kb), R = D D' (n×n) from D (n×hd). */
+std::vector<double> gram(const std::vector<double> &B, int64_t r, int64_t c) {
+    std::vector<double> G(static_cast<size_t>(r * r), 0.0);
+    for (int64_t i = 0; i < r; ++i)
+        for (int64_t j = 0; j < r; ++j) {
+            double s = 0.0;
+            for (int64_t l = 0; l < c; ++l)
+                s += B[static_cast<size_t>(i * c + l)] * B[static_cast<size_t>(j * c + l)];
+            G[static_cast<size_t>(i * r + j)] = s;
+        }
+    return G;
+}
+
+} // namespace
+
+namespace {
+
+/* Pull A/B/C/D + dims off an ssm object into flat buffers. */
+struct SSM { std::vector<double> A, B, C, D; int64_t m, n, kb, hd; };
+bool readSSM(struct matlab_obj_s *o, SSM &s) {
+    matlab_mat *Am = matlab_obj_get_mat(o, "A", 1);
+    matlab_mat *Bm = matlab_obj_get_mat(o, "B", 1);
+    matlab_mat *Cm = matlab_obj_get_mat(o, "C", 1);
+    matlab_mat *Dm = matlab_obj_get_mat(o, "D", 1);
+    if (!Am || !Cm) return false;
+    s.m = Am->rows; s.n = Cm->rows;
+    s.kb = Bm ? Bm->cols : s.m;
+    s.hd = Dm ? Dm->cols : s.n;
+    s.A.assign(static_cast<size_t>(s.m * s.m), 0.0);
+    for (int64_t i = 0; i < s.m * s.m; ++i) s.A[static_cast<size_t>(i)] = Am->data[i];
+    s.C.assign(static_cast<size_t>(s.n * s.m), 0.0);
+    for (int64_t i = 0; i < s.n * s.m; ++i) s.C[static_cast<size_t>(i)] = Cm->data[i];
+    s.B.assign(static_cast<size_t>(s.m * s.kb), 0.0);
+    if (Bm) for (int64_t i = 0; i < s.m * s.kb; ++i) s.B[static_cast<size_t>(i)] = Bm->data[i];
+    s.D.assign(static_cast<size_t>(s.n * s.hd), 0.0);
+    if (Dm) for (int64_t i = 0; i < s.n * s.hd; ++i) s.D[static_cast<size_t>(i)] = Dm->data[i];
+    return true;
+}
+
+} // namespace
+
+extern "C" {
+
+/* estimate(Mdl, Y) for ssm/dssm — ML over the free B/D entries (state- and
+ * observation-disturbance loadings); A and C structure fixed.  Mutates the
+ * receiver in place (the matrix-typed system matrices make a fresh zero-arg
+ * ctor hit a frontend param-slot typing limit). */
+struct matlab_obj_s *matlab_econ_ssm_estimate(struct matlab_obj_s *mdl,
+                                              matlab_mat *Ym) {
+    if (!mdl) return mdl;
+    SSM s;
+    if (!readSSM(mdl, s)) return mdl;
+    int kind = static_cast<int>(matlab_obj_get_f64(mdl, "ModelKind", 9));
+    int64_t m = s.m, n = s.n, kb = s.kb, hd = s.hd;
+    std::vector<double> Y; int64_t T = 0, nc = 0;
+    readTk(Ym, Y, T, nc);
+    if (nc != n || T < 3) return mdl;
+    double p0 = (kind == 7) ? 1e7 : 1e4;   /* dssm = diffuse-ish */
+    std::vector<double> theta;
+    for (int64_t i = 0; i < m * kb; ++i)
+        theta.push_back(s.B[static_cast<size_t>(i)] != 0.0 ? s.B[static_cast<size_t>(i)] : 0.5);
+    for (int64_t i = 0; i < n * hd; ++i)
+        theta.push_back(s.D[static_cast<size_t>(i)] != 0.0 ? s.D[static_cast<size_t>(i)] : 0.5);
+    auto negloglik = [&](const std::vector<double> &th) -> double {
+        std::vector<double> B(static_cast<size_t>(m * kb)), D(static_cast<size_t>(n * hd));
+        for (int64_t i = 0; i < m * kb; ++i) B[static_cast<size_t>(i)] = th[static_cast<size_t>(i)];
+        for (int64_t i = 0; i < n * hd; ++i) D[static_cast<size_t>(i)] = th[static_cast<size_t>(m * kb + i)];
+        std::vector<double> Q = gram(B, m, kb), R = gram(D, n, hd);
+        for (int64_t i = 0; i < n; ++i) R[static_cast<size_t>(i * n + i)] += 1e-8;
+        std::vector<double> Xf;
+        double ll = kalmanFilter(s.A, Q, s.C, R, Y, m, n, T, p0, Xf);
+        return -ll;
+    };
+    std::vector<double> best = nelder_mead(negloglik, theta, 600);
+    matlab_mat *Bo = mat_alloc(m, kb);
+    for (int64_t i = 0; i < m * kb; ++i) Bo->data[i] = best[static_cast<size_t>(i)];
+    matlab_mat *Do = mat_alloc(n, hd);
+    for (int64_t i = 0; i < n * hd; ++i) Do->data[i] = best[static_cast<size_t>(m * kb + i)];
+    matlab_mat *Ao = mat_alloc(m, m);
+    for (int64_t i = 0; i < m * m; ++i) Ao->data[i] = s.A[static_cast<size_t>(i)];
+    matlab_mat *Co = mat_alloc(n, m);
+    for (int64_t i = 0; i < n * m; ++i) Co->data[i] = s.C[static_cast<size_t>(i)];
+    matlab_obj_set_mat(mdl, "A", 1, Ao);
+    matlab_obj_set_mat(mdl, "B", 1, Bo);
+    matlab_obj_set_mat(mdl, "C", 1, Co);
+    matlab_obj_set_mat(mdl, "D", 1, Do);
+    matlab_obj_set_f64(mdl, "ModelKind", 9, static_cast<double>(kind));
+    return mdl;
+}
+
+/* filter(Mdl, Y) — Kalman-filtered states, returns T×m. */
+matlab_mat *matlab_econ_ssm_filter(struct matlab_obj_s *mdl, matlab_mat *Ym) {
+    SSM s; if (!readSSM(mdl, s)) return mat_alloc(0, 0);
+    int kind = static_cast<int>(matlab_obj_get_f64(mdl, "ModelKind", 9));
+    std::vector<double> Y; int64_t T = 0, nc = 0; readTk(Ym, Y, T, nc);
+    if (nc != s.n) return mat_alloc(0, 0);
+    std::vector<double> Q = gram(s.B, s.m, s.kb), R = gram(s.D, s.n, s.hd);
+    for (int64_t i = 0; i < s.n; ++i) R[static_cast<size_t>(i * s.n + i)] += 1e-8;
+    std::vector<double> Xf;
+    kalmanFilter(s.A, Q, s.C, R, Y, s.m, s.n, T, (kind == 7 ? 1e7 : 1e4), Xf);
+    matlab_mat *out = mat_alloc(T, s.m);
+    for (int64_t i = 0; i < T * s.m; ++i) out->data[i] = Xf[static_cast<size_t>(i)];
+    return out;
+}
+
+/* smooth(Mdl, Y) — RTS-smoothed states, returns T×m. */
+matlab_mat *matlab_econ_ssm_smooth(struct matlab_obj_s *mdl, matlab_mat *Ym) {
+    SSM s; if (!readSSM(mdl, s)) return mat_alloc(0, 0);
+    int kind = static_cast<int>(matlab_obj_get_f64(mdl, "ModelKind", 9));
+    int64_t m = s.m, n = s.n;
+    std::vector<double> Y; int64_t T = 0, nc = 0; readTk(Ym, Y, T, nc);
+    if (nc != n || T < 1) return mat_alloc(0, 0);
+    std::vector<double> Q = gram(s.B, m, s.kb), R = gram(s.D, n, s.hd);
+    for (int64_t i = 0; i < n; ++i) R[static_cast<size_t>(i * n + i)] += 1e-8;
+    std::vector<double> Xf, Pf, Xp, Pp;
+    kalmanFilter(s.A, Q, s.C, R, Y, m, n, T, (kind == 7 ? 1e7 : 1e4), Xf, &Pf, &Xp, &Pp);
+    std::vector<double> Xs = Xf;
+    std::vector<double> At(static_cast<size_t>(m * m));
+    for (int64_t i = 0; i < m; ++i)
+        for (int64_t j = 0; j < m; ++j) At[static_cast<size_t>(i * m + j)] = s.A[static_cast<size_t>(j * m + i)];
+    for (int64_t t = T - 2; t >= 0; --t) {
+        std::vector<double> Pft(Pf.begin() + t * m * m, Pf.begin() + (t + 1) * m * m);
+        std::vector<double> Ppn(Pp.begin() + (t + 1) * m * m, Pp.begin() + (t + 2) * m * m);
+        std::vector<double> Ppni;
+        if (!matInv(Ppn, m, Ppni)) continue;
+        std::vector<double> PfAt = matMul(Pft, At, m, m, m);
+        std::vector<double> J = matMul(PfAt, Ppni, m, m, m);
+        std::vector<double> diff(static_cast<size_t>(m));
+        for (int64_t i = 0; i < m; ++i)
+            diff[static_cast<size_t>(i)] = Xs[static_cast<size_t>((t + 1) * m + i)] -
+                                           Xp[static_cast<size_t>((t + 1) * m + i)];
+        std::vector<double> Jd = matMul(J, diff, m, m, 1);
+        for (int64_t i = 0; i < m; ++i)
+            Xs[static_cast<size_t>(t * m + i)] = Xf[static_cast<size_t>(t * m + i)] +
+                                                 Jd[static_cast<size_t>(i)];
+    }
+    matlab_mat *out = mat_alloc(T, m);
+    for (int64_t i = 0; i < T * m; ++i) out->data[i] = Xs[static_cast<size_t>(i)];
+    return out;
+}
+
+/* forecast(Mdl, h, Y) — h-step observation forecasts, returns h×n. */
+matlab_mat *matlab_econ_ssm_forecast(struct matlab_obj_s *mdl, double hh,
+                                     matlab_mat *Ym) {
+    SSM s; if (!readSSM(mdl, s)) return mat_alloc(0, 0);
+    int H = static_cast<int>(hh);
+    if (H < 1) return mat_alloc(0, 0);
+    int kind = static_cast<int>(matlab_obj_get_f64(mdl, "ModelKind", 9));
+    int64_t m = s.m, n = s.n;
+    std::vector<double> Y; int64_t T = 0, nc = 0; readTk(Ym, Y, T, nc);
+    if (nc != n) return mat_alloc(0, 0);
+    std::vector<double> Q = gram(s.B, m, s.kb), R = gram(s.D, n, s.hd);
+    for (int64_t i = 0; i < n; ++i) R[static_cast<size_t>(i * n + i)] += 1e-8;
+    std::vector<double> Xf;
+    kalmanFilter(s.A, Q, s.C, R, Y, m, n, T, (kind == 7 ? 1e7 : 1e4), Xf);
+    std::vector<double> x(static_cast<size_t>(m));
+    for (int64_t i = 0; i < m; ++i) x[static_cast<size_t>(i)] = Xf[static_cast<size_t>((T - 1) * m + i)];
+    matlab_mat *out = mat_alloc(H, n);
+    for (int h = 0; h < H; ++h) {
+        x = matMul(s.A, x, m, m, 1);
+        std::vector<double> y = matMul(s.C, x, n, m, 1);
+        for (int64_t i = 0; i < n; ++i) out->data[h * n + i] = y[static_cast<size_t>(i)];
+    }
+    return out;
+}
+
+} // extern "C"

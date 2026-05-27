@@ -1,0 +1,6 @@
+kind = 6
+nfilt = 200
+nsmooth = 200
+obs_sse = 209.2
+smooth_sse = 31.8
+nfc = 5

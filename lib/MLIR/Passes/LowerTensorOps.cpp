@@ -1835,6 +1835,16 @@ bool TensorLowering::rewriteBuiltinCalls() {
         IsMat = true;
       }
       if (IsString && Val.getType() != PtrTy) continue;
+      /* A matrix-typed property assigned a SCALAR (f64) value — e.g. a
+       * 1x1 `[1]` passed to a constructor that stores it as a matrix
+       * (local-level ssm A/B/C/D).  Box the scalar into a 1x1 matrix so
+       * the property still reads back via matlab_obj_get_mat. */
+      if (IsMat && Val.getType() == F64) {
+        B.setInsertionPoint(Call);
+        auto Box = rt("matlab_mat_from_scalar", PtrTy, {F64});
+        Val = LLVM::CallOp::create(B, Call->getLoc(), Box, ValueRange{Val})
+                  .getResult();
+      }
       if (IsMat && Val.getType() != PtrTy) continue;
       if (!IsMat && !IsString && Val.getType() != F64) continue;
       B.setInsertionPoint(Call);
@@ -5551,6 +5561,22 @@ bool TensorLowering::rewriteBuiltinCalls() {
          {PtrTy, PtrTy}},
         {"matlab_econ_garch_simulate", "matlab_econ_garch_simulate", PtrTy,
          {PtrTy, F64}},
+        {"matlab_econ_varm_estimate", "matlab_econ_varm_estimate", PtrTy,
+         {PtrTy, PtrTy, PtrTy}},
+        {"matlab_econ_varm_forecast", "matlab_econ_varm_forecast", PtrTy,
+         {PtrTy, F64, PtrTy}},
+        {"matlab_econ_varm_simulate", "matlab_econ_varm_simulate", PtrTy,
+         {PtrTy, F64}},
+        {"matlab_econ_varm_irf", "matlab_econ_varm_irf", PtrTy,
+         {PtrTy, F64}},
+        {"matlab_econ_ssm_estimate", "matlab_econ_ssm_estimate", PtrTy,
+         {PtrTy, PtrTy}},
+        {"matlab_econ_ssm_filter", "matlab_econ_ssm_filter", PtrTy,
+         {PtrTy, PtrTy}},
+        {"matlab_econ_ssm_smooth", "matlab_econ_ssm_smooth", PtrTy,
+         {PtrTy, PtrTy}},
+        {"matlab_econ_ssm_forecast", "matlab_econ_ssm_forecast", PtrTy,
+         {PtrTy, F64, PtrTy}},
         /* ===== DSP System Toolbox =====
          * System-Object step/lifecycle entries.  The classdef method body
          * forwards the receiver `obj` (PtrTy) + the input frame (PtrTy
@@ -7111,6 +7137,10 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"kpsstest",   "matlab_econ_kpsstest",   0, "p"},
       {"lmctest",    "matlab_econ_lmctest",    0, "p"},
       {"vratiotest", "matlab_econ_vratiotest", 0, "p"},
+      /* Tier-4 cointegration tests (function-form). */
+      {"egcitest",   "matlab_econ_egcitest",   0, "p"},
+      {"jcitest",    "matlab_econ_jcitest",    0, "p"},
+      {"jcontest",   "matlab_econ_jcontest",   0, "p"},
     };
 
     // Pick the first entry with name + arity + TYPE match so overloaded

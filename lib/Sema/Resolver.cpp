@@ -138,6 +138,10 @@ void Resolver::registerBuiltins() {
      * The model constructors (arima/garch/egarch/gjr/...) are NOT
      * builtins — they resolve via the classdef auto-prepend. */
     "estimate", "infer", "simulate", "summarize",
+    /* Tier-4: VAR impulse-response method + cointegration tests. */
+    "irf", "egcitest", "jcitest", "jcontest",
+    /* Tier-5: state-space methods (filter is already a builtin). */
+    "smooth",
     /* Phase 6 — Symbolic Math Toolbox via SymPP. The link target
      * (matlab_sym_* runtime) is only present when the build was
      * configured -DMATLAB_LLVM_WITH_SYM=ON; without that the JIT/-emit-c
@@ -1786,7 +1790,9 @@ void Resolver::resolveStmt(Stmt &St, Scope *S) {
              * simulate dispatch (which keys on the receiver class) fires. */
             if (Arg0Cls && NX->Name == "estimate" &&
                 (Arg0Cls->Name == "arima" || Arg0Cls->Name == "garch" ||
-                 Arg0Cls->Name == "egarch" || Arg0Cls->Name == "gjr"))
+                 Arg0Cls->Name == "egarch" || Arg0Cls->Name == "gjr" ||
+                 Arg0Cls->Name == "varm" || Arg0Cls->Name == "ssm" ||
+                 Arg0Cls->Name == "dssm"))
               return Arg0Cls;
           }
         }

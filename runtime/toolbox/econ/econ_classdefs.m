@@ -126,3 +126,72 @@ classdef gjr
         end
     end
 end
+
+% ---------------------------------------------------------------------
+% varm — vector autoregression VAR(P) for k series (Tier-4).  Constant is
+% k x 1; AR is the lag-coefficient matrices stacked horizontally k x (k*P);
+% Covariance is the k x k residual covariance.  estimate runs equation-wise
+% OLS; forecast/simulate/irf operate on the stacked coefficients.
+% ---------------------------------------------------------------------
+classdef varm
+    properties
+        NumSeries
+        P
+        Constant matrix
+        AR matrix
+        Covariance matrix
+        ModelKind
+    end
+    methods
+        function obj = varm(numSeries, numLags)
+            if nargin < 1, numSeries = 1; end
+            if nargin < 2, numLags = 1; end
+            obj.NumSeries = numSeries;
+            obj.P = numLags;
+            obj.Constant = zeros(1, 1);
+            obj.AR = zeros(1, 1);
+            obj.Covariance = zeros(1, 1);
+            obj.ModelKind = 4;
+        end
+    end
+end
+
+% ---------------------------------------------------------------------
+% ssm / dssm — linear-Gaussian state-space models (Tier-5).
+%   x_t = A x_{t-1} + B w_t,   y_t = C x_t + D v_t
+% estimate runs Kalman-filter ML over the free B/D entries; filter/smooth
+% return the (filtered / RTS-smoothed) latent states; forecast extrapolates
+% the observation equation.  dssm is the diffuse-initialization variant
+% (ModelKind 7); ssm is ModelKind 6.
+% ---------------------------------------------------------------------
+classdef ssm
+    properties
+        A matrix; B matrix; C matrix; D matrix; ModelKind
+    end
+    methods
+        function obj = ssm(a, b, c, d)
+            if nargin < 1, a = zeros(1, 1); end
+            if nargin < 2, b = zeros(1, 1); end
+            if nargin < 3, c = zeros(1, 1); end
+            if nargin < 4, d = zeros(1, 1); end
+            obj.A = a; obj.B = b; obj.C = c; obj.D = d;
+            obj.ModelKind = 6;
+        end
+    end
+end
+
+classdef dssm
+    properties
+        A matrix; B matrix; C matrix; D matrix; ModelKind
+    end
+    methods
+        function obj = dssm(a, b, c, d)
+            if nargin < 1, a = zeros(1, 1); end
+            if nargin < 2, b = zeros(1, 1); end
+            if nargin < 3, c = zeros(1, 1); end
+            if nargin < 4, d = zeros(1, 1); end
+            obj.A = a; obj.B = b; obj.C = c; obj.D = d;
+            obj.ModelKind = 7;
+        end
+    end
+end

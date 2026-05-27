@@ -8559,22 +8559,57 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             ctor = (Cn0 == "garch") ? "garch__garch"
                  : (Cn0 == "egarch") ? "egarch__egarch" : "gjr__gjr";
           }
+          else if (Cls0 && Cn0 == "varm") { fam = "varm"; ctor = "varm__varm"; }
+          else if (Cls0 && (Cn0 == "ssm" || Cn0 == "dssm")) {
+            fam = "ssm";
+            ctor = (Cn0 == "ssm") ? "ssm__ssm" : "dssm__dssm";
+          }
+          /* irf(Mdl, numObs) — VAR impulse responses (varm only). */
+          if (Cls0 && Cn0 == "varm" && Nm == "irf" && C.Args.size() == 2) {
+            mlir::Value Mdl = loadObj(C.Args[0]);
+            mlir::Value No  = lowerExpr(*C.Args[1]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_econ_varm_irf"));
+            return emitUnreg("matlab.call_builtin", {Mdl, No}, PtrTy, L, {Cal});
+          }
+          /* filter(Mdl, Y) / smooth(Mdl, Y) — state-space Kalman (ssm/dssm). */
+          if (Cls0 && (Cn0 == "ssm" || Cn0 == "dssm") &&
+              (Nm == "filter" || Nm == "smooth") && C.Args.size() == 2) {
+            mlir::Value Mdl = loadObj(C.Args[0]);
+            mlir::Value Y   = lowerExpr(*C.Args[1]);
+            std::string rt = std::string("matlab_econ_ssm_") +
+                             (Nm == "filter" ? "filter" : "smooth");
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, rt));
+            return emitUnreg("matlab.call_builtin", {Mdl, Y}, PtrTy, L, {Cal});
+          }
           if (fam && Nm == "estimate" && C.Args.size() == 2) {
-            /* EstMdl = estimate(Mdl, y) — allocate a FRESH model via the
-             * zero-arg ctor (so the result carries the model class, exactly
-             * like armax returns a fresh idpoly), then populate in place
-             * from the template orders + data. */
             mlir::Value Tmpl = loadObj(C.Args[0]);
             mlir::Value Y    = lowerExpr(*C.Args[1]);
+            std::string rt = std::string("matlab_econ_") + fam + "_estimate";
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, rt));
+            /* ssm/dssm: mutate the template in place and return it (the
+             * matrix-typed system matrices make the zero-arg fresh-ctor
+             * path hit a param-slot typing limit; the receiver already
+             * carries the ssm class so the result propagates correctly). */
+            if (std::string(fam) == "ssm") {
+              emitUnregOp("matlab.call_builtin", {Tmpl, Y},
+                          {mlir::NoneType::get(&MCtx)}, L, {Cal});
+              return Tmpl;
+            }
+            /* Other families: allocate a FRESH model via the zero-arg ctor
+             * (so the result carries the model class, exactly like armax
+             * returns a fresh idpoly), then populate it in place from the
+             * template orders + data. */
             mlir::NamedAttribute CtorCal(
                 mlir::StringAttr::get(&MCtx, "callee"),
                 mlir::StringAttr::get(&MCtx, ctor));
             mlir::Value Model =
                 emitUnreg("matlab.call", {}, PtrTy, L, {CtorCal});
-            std::string rt = std::string("matlab_econ_") + fam + "_estimate";
-            mlir::NamedAttribute Cal(
-                mlir::StringAttr::get(&MCtx, "callee"),
-                mlir::StringAttr::get(&MCtx, rt));
             emitUnregOp("matlab.call_builtin", {Model, Tmpl, Y},
                         {mlir::NoneType::get(&MCtx)}, L, {Cal});
             return Model;
