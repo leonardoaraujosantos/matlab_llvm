@@ -5953,6 +5953,26 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"matlab_nav_posegraph_init",   "matlab_nav_posegraph_init",   PtrTy, {PtrTy}},
         {"matlab_nav_posegraph_addrel", "matlab_nav_posegraph_addrel", PtrTy, {PtrTy, PtrTy, F64, F64}},
         {"matlab_nav_posegraph_optimize","matlab_nav_posegraph_optimize",PtrTy,{PtrTy}},
+        /* ===== Navigation Tiers 5–6 ===================================== */
+        {"matlab_nav_vfh_step",         "matlab_nav_vfh_step",         PtrTy, {PtrTy, PtrTy, PtrTy, F64}},
+        {"matlab_nav_mcl_init",         "matlab_nav_mcl_init",         PtrTy, {PtrTy, PtrTy}},
+        {"matlab_nav_mcl_step",         "matlab_nav_mcl_step",         PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy}},
+        {"matlab_nav_pf_initialize",    "matlab_nav_pf_initialize",    PtrTy, {PtrTy, F64, PtrTy, PtrTy}},
+        {"matlab_nav_pf_predict",       "matlab_nav_pf_predict",       PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_nav_pf_correct",       "matlab_nav_pf_correct",       PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy}},
+        {"matlab_nav_pf_estimate",      "matlab_nav_pf_estimate",      PtrTy, {PtrTy}},
+        {"matlab_nav_gnss_step",        "matlab_nav_gnss_step",        PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"gnssconstellation",           "matlab_nav_gnssconstellation",PtrTy, {F64}},
+        {"matlab_nav_gnssconstellation","matlab_nav_gnssconstellation",PtrTy, {F64}},
+        {"pseudoranges",                "matlab_nav_pseudoranges",     PtrTy, {PtrTy, PtrTy}},
+        {"matlab_nav_pseudoranges",     "matlab_nav_pseudoranges",     PtrTy, {PtrTy, PtrTy}},
+        {"receiverposition",            "matlab_nav_receiverposition", PtrTy, {PtrTy, PtrTy}},
+        {"matlab_nav_receiverposition", "matlab_nav_receiverposition", PtrTy, {PtrTy, PtrTy}},
+        {"matlab_nav_frenet_init",      "matlab_nav_frenet_init",      PtrTy, {PtrTy, PtrTy}},
+        {"matlab_nav_frenet_g2f",       "matlab_nav_frenet_g2f",       PtrTy, {PtrTy, PtrTy}},
+        {"matlab_nav_frenet_f2g",       "matlab_nav_frenet_f2g",       PtrTy, {PtrTy, PtrTy}},
+        {"matlab_nav_trajgen_init",     "matlab_nav_trajgen_init",     PtrTy, {PtrTy, PtrTy}},
+        {"matlab_nav_trajgen_connect",  "matlab_nav_trajgen_connect",  PtrTy, {PtrTy, PtrTy, PtrTy, F64}},
       };
       bool matched = false;
       for (const auto &E : pde_table) {

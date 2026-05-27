@@ -1617,7 +1617,7 @@ static const ToolboxInfo kToolboxes[] = {
   {"Fixed-Point Designer",              "Tier 1-5"},
   {"Sensor Fusion and Tracking",        "Tier 1-6"},
   {"Robotics System",                   "Tier 1-6"},
-  {"Navigation",                        "Tier 1-4"},
+  {"Navigation",                        "Tier 1-6"},
 };
 
 static void printVersion(const std::string &filter) {
@@ -2537,6 +2537,17 @@ static std::string buildReplPrelude(const std::string &Src) {
     {false, "addRelativePose",           "navigation_classdefs.m"},
     {false, "shortenpath",               "navigation_classdefs.m"},
     {false, "sampleUniform",             "navigation_classdefs.m"},
+    {false, "controllerVFH",             "navigation_classdefs.m"},
+    {false, "monteCarloLocalization",    "navigation_classdefs.m"},
+    {false, "stateEstimatorPF",          "navigation_classdefs.m"},
+    {false, "gnssSensor",                "navigation_classdefs.m"},
+    {false, "referencePathFrenet",       "navigation_classdefs.m"},
+    {false, "trajectoryGeneratorFrenet", "navigation_classdefs.m"},
+    {false, "getStateEstimate",          "navigation_classdefs.m"},
+    {false, "global2frenet",             "navigation_classdefs.m"},
+    {false, "frenet2global",             "navigation_classdefs.m"},
+    {false, "gnssconstellation",         "navigation_classdefs.m"},
+    {false, "receiverposition",          "navigation_classdefs.m"},
     /* Global Optimization Toolbox Tier-2 — `gads_classdefs.m` holds the
      * MultiStart + GlobalSearch solver objects.  (`run` is too generic
      * to trigger on; the solver-object mentions pull the prelude.) */
@@ -11662,6 +11673,10 @@ int main(int Argc, char **Argv) {
       "plannerAStarGrid", "lidarScan", "lidarSLAM", "poseGraph",
       "isStateValid", "isMotionValid", "matchScans", "optimizePoseGraph",
       "addRelativePose", "shortenpath", "sampleUniform",
+      "controllerVFH", "monteCarloLocalization", "stateEstimatorPF",
+      "gnssSensor", "referencePathFrenet", "trajectoryGeneratorFrenet",
+      "getStateEstimate", "global2frenet", "frenet2global",
+      "gnssconstellation", "receiverposition",
       /* GPU Coder T5 design-pattern helpers — runtime entries, no
        * prelude file needed.  Listed here only for the AOT-prelude
        * scanner's awareness (no leaf to map). */
@@ -11932,7 +11947,14 @@ int main(int Argc, char **Argv) {
         ClsName == "poseGraph" || ClsName == "isStateValid" ||
         ClsName == "isMotionValid" || ClsName == "matchScans" ||
         ClsName == "optimizePoseGraph" || ClsName == "addRelativePose" ||
-        ClsName == "shortenpath" || ClsName == "sampleUniform")
+        ClsName == "shortenpath" || ClsName == "sampleUniform" ||
+        ClsName == "controllerVFH" || ClsName == "monteCarloLocalization" ||
+        ClsName == "stateEstimatorPF" || ClsName == "gnssSensor" ||
+        ClsName == "referencePathFrenet" ||
+        ClsName == "trajectoryGeneratorFrenet" ||
+        ClsName == "getStateEstimate" || ClsName == "global2frenet" ||
+        ClsName == "frenet2global" || ClsName == "gnssconstellation" ||
+        ClsName == "receiverposition")
       return "navigation_classdefs.m";
     /* GPU Coder T5 design-pattern helpers are C runtime entries; no
      * classdef file to pull in. */

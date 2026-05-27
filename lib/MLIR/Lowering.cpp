@@ -6643,6 +6643,46 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                       {mlir::NoneType::get(&MCtx)}, L, {Cal});
           return Obj;
         }
+        /* ===== Navigation Tier-5/6 — single-obj-arg ctor intercepts ======= */
+        if (CD->Name == "monteCarloLocalization" && C.Args.size() == 1) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "monteCarloLocalization__monteCarloLocalization"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Mp = lowerExpr(*C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_mcl_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, Mp},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        if (CD->Name == "referencePathFrenet" && C.Args.size() == 1) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "referencePathFrenet__referencePathFrenet"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Wp = lowerExpr(*C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_frenet_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, Wp},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        if (CD->Name == "trajectoryGeneratorFrenet" && C.Args.size() == 1) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "trajectoryGeneratorFrenet__trajectoryGeneratorFrenet"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Rp = lowerExpr(*C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_trajgen_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, Rp},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
         /* ===== Sensor Fusion Tier-5 — trackerGNN(maxTracks) ==================
          * One-arg ctor.  Empty tracker. */
         if (CD->Name == "trackerGNN" && C.Args.size() == 1) {
@@ -10080,6 +10120,94 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
               mlir::StringAttr::get(&MCtx, "matlab_nav_posegraph_optimize"));
           return emitUnreg("matlab.call_builtin", {Obj}, PtrTy, L, {Cal});
+        }
+        /* ===== Navigation Tier-5/6 — method + free-fn dispatch =========== */
+        // controllerVFH: step(vfh, ranges, angles, targetDir) -> steering.
+        if (Nm == "step" && Cls0 && Cn0 == "controllerVFH" && C.Args.size() == 4) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Rg  = lowerExpr(*C.Args[1]);
+          mlir::Value An  = lowerExpr(*C.Args[2]);
+          mlir::Value Td  = lowerExpr(*C.Args[3]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_vfh_step"));
+          return emitUnreg("matlab.call_builtin", {Obj, Rg, An, Td}, PtrTy, L, {Cal});
+        }
+        // monteCarloLocalization: step(mcl, odom, ranges, angles) -> pose.
+        if (Nm == "step" && Cls0 && Cn0 == "monteCarloLocalization" && C.Args.size() == 4) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Od  = lowerExpr(*C.Args[1]);
+          mlir::Value Rg  = lowerExpr(*C.Args[2]);
+          mlir::Value An  = lowerExpr(*C.Args[3]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_mcl_step"));
+          return emitUnreg("matlab.call_builtin", {Obj, Od, Rg, An}, PtrTy, L, {Cal});
+        }
+        // stateEstimatorPF: initialize / predict / correct / getStateEstimate.
+        if (Nm == "initialize" && Cls0 && Cn0 == "stateEstimatorPF" && C.Args.size() == 4) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Nn  = lowerExpr(*C.Args[1]);
+          mlir::Value Mn  = lowerExpr(*C.Args[2]);
+          mlir::Value Cv  = lowerExpr(*C.Args[3]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_pf_initialize"));
+          return emitUnreg("matlab.call_builtin", {Obj, Nn, Mn, Cv}, PtrTy, L, {Cal});
+        }
+        if (Nm == "predict" && Cls0 && Cn0 == "stateEstimatorPF" && C.Args.size() == 3) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Av  = lowerExpr(*C.Args[1]);
+          mlir::Value Qv  = lowerExpr(*C.Args[2]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_pf_predict"));
+          return emitUnreg("matlab.call_builtin", {Obj, Av, Qv}, PtrTy, L, {Cal});
+        }
+        if (Nm == "correct" && Cls0 && Cn0 == "stateEstimatorPF" && C.Args.size() == 4) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Zv  = lowerExpr(*C.Args[1]);
+          mlir::Value Hv  = lowerExpr(*C.Args[2]);
+          mlir::Value Rv  = lowerExpr(*C.Args[3]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_pf_correct"));
+          return emitUnreg("matlab.call_builtin", {Obj, Zv, Hv, Rv}, PtrTy, L, {Cal});
+        }
+        if (Nm == "getStateEstimate" && Cls0 && Cn0 == "stateEstimatorPF" && C.Args.size() == 1) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_pf_estimate"));
+          return emitUnreg("matlab.call_builtin", {Obj}, PtrTy, L, {Cal});
+        }
+        // gnssSensor: step(gnss, lla, vel) -> noisy [lla vel].
+        if (Nm == "step" && Cls0 && Cn0 == "gnssSensor" && C.Args.size() == 3) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value La  = lowerExpr(*C.Args[1]);
+          mlir::Value Ve  = lowerExpr(*C.Args[2]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_gnss_step"));
+          return emitUnreg("matlab.call_builtin", {Obj, La, Ve}, PtrTy, L, {Cal});
+        }
+        // referencePathFrenet: global2frenet / frenet2global.
+        if (Nm == "global2frenet" && Cls0 && Cn0 == "referencePathFrenet" && C.Args.size() == 2) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Gv  = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_frenet_g2f"));
+          return emitUnreg("matlab.call_builtin", {Obj, Gv}, PtrTy, L, {Cal});
+        }
+        if (Nm == "frenet2global" && Cls0 && Cn0 == "referencePathFrenet" && C.Args.size() == 2) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Fv  = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_frenet_f2g"));
+          return emitUnreg("matlab.call_builtin", {Obj, Fv}, PtrTy, L, {Cal});
+        }
+        // trajectoryGeneratorFrenet: connect(trajgen, init, term, T) -> traj.
+        if (Nm == "connect" && Cls0 && Cn0 == "trajectoryGeneratorFrenet" && C.Args.size() == 4) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value In  = lowerExpr(*C.Args[1]);
+          mlir::Value Tm  = lowerExpr(*C.Args[2]);
+          mlir::Value Tt  = lowerExpr(*C.Args[3]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nav_trajgen_connect"));
+          return emitUnreg("matlab.call_builtin", {Obj, In, Tm, Tt}, PtrTy, L, {Cal});
         }
         /* recursiveLS step(obj, y, H) — RLS update with user regressor H. */
         if (Nm == "step" && Cls0 && Cn0 == "recursiveLS" && C.Args.size() == 3) {

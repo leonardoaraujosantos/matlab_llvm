@@ -117,29 +117,35 @@ for pose-graph / factor-graph optimisation), [`plotting.md`](plotting.md)
   highest-value cut given the just-shipped Robotics mobile-robot stack.
   **T1 + T2 + T3 + T4 (~8.5 wk) close the SLAM half.**
 - **Status legend**: ✅ shipped · 🟡 partial · 🔵 not started.
-  **Tiers 1–4 shipped 2026-05-27** (one PR, badge 23→24), hand-coded over
-  the just-shipped Robotics + Sensor Fusion bases (no g2o/GTSAM/Ceres/PCL/
-  OMPL): **T1 ✅** `occupancyMap` (probabilistic grid + set/get/check/inflate
-  + world limits) + `stateSpaceSE2`/`stateSpaceDubins` (`distance`/
-  `interpolate`/`sampleUniform`) + `validatorOccupancyMap` (`isStateValid`/
-  `isMotionValid`) + `navPath` (`stateSpaceSE3`/Reeds-Shepp carved); **T2 ✅**
-  (**headline `nav_rrt_plan.m`**) `plannerRRT` + `plannerRRTStar` (goal-biased
-  sample/steer/extend + RRT\* rewiring) + `plannerAStarGrid` (8-conn grid A\*)
-  + `plan` + `shortenpath` (`plannerHybridAStar`/`plannerBiRRT` carved);
-  **T3 ✅** `lidarScan` + `matchScans` (2-D closed-form ICP) + `lidarSLAM`
-  (`addScan` incremental) (NDT / `matchScansGrid` / scan-context loop closure
-  carved); **T4 ✅** `poseGraph` (SE2) + `optimizePoseGraph` (SE2-manifold
-  Gauss-Newton, node 1 fixed) (`poseGraph3D` / `factorGraph` carved). **T5/T6
-  🔵 not started** — MCL/`stateEstimatorPF`/`controllerVFH` + GNSS/Frenet/
-  `insEKF`. Wiring notes + traps captured in the project auto-memory.
-  Examples mirror four MathWorks UG pages: `nav_rotations.m`,
-  `nav_imu_intro.m`, `nav_ground_vehicle.m` (IMU+GPS → `insfilterMARG`),
-  `nav_rrt_plan.m`.  Six gating tests `navigation_{occmap,statespace,astar,
-  scanmatch,posegraph,planner}.m`.
-  The genuinely new code was the **planner framework + state spaces**, the
-  **scan matcher + lidar SLAM**, and the **pose-graph optimiser**; the **MCL
-  + VFH** reactive layer and the **GNSS positioning + Frenet** trajectory
-  layer remain the T5/T6 follow-ons.
+  **All 6 tiers shipped 2026-05-27** (badge 23→24), hand-coded over the
+  just-shipped Robotics + Sensor Fusion bases (no g2o/GTSAM/Ceres/PCL/OMPL):
+  **T1 ✅** `occupancyMap` (probabilistic grid + set/get/check/inflate + world
+  limits) + `stateSpaceSE2`/`stateSpaceDubins` (`distance`/`interpolate`/
+  `sampleUniform`) + `validatorOccupancyMap` (`isStateValid`/`isMotionValid`)
+  + `navPath` (`stateSpaceSE3`/Reeds-Shepp carved); **T2 ✅** (**headline
+  `nav_rrt_plan.m`**) `plannerRRT` + `plannerRRTStar` (goal-biased sample/
+  steer/extend + RRT\* rewiring) + `plannerAStarGrid` (8-conn grid A\*) +
+  `plan` + `shortenpath` (`plannerHybridAStar`/`plannerBiRRT` carved); **T3 ✅**
+  `lidarScan` + `matchScans` (2-D closed-form ICP) + `lidarSLAM` (`addScan`
+  incremental) (NDT / `matchScansGrid` / scan-context loop closure carved);
+  **T4 ✅** `poseGraph` (SE2) + `optimizePoseGraph` (SE2-manifold Gauss-Newton,
+  node 1 fixed) (`poseGraph3D` / `factorGraph` carved); **T5 ✅** `controllerVFH`
+  (polar-histogram reactive steering) + `monteCarloLocalization` (particle
+  filter on the occupancyMap — odometry motion + likelihood-field correct +
+  low-variance resample) + `stateEstimatorPF` (generic linear-Gaussian PF
+  initialize/predict/correct/getStateEstimate) (`odometryMotionModel`/
+  `likelihoodFieldSensorModel` standalone objects + arbitrary PF handle forms
+  carved); **T6 ✅** `gnssSensor` + `gnssconstellation` + `pseudoranges` +
+  `receiverposition` (iterative-LS WGS-84 ECEF trilateration + clock bias) +
+  `referencePathFrenet` (`global2frenet`/`frenet2global`) +
+  `trajectoryGeneratorFrenet` (`connect` quintic lane-change) (`nmeaParser`/
+  `rinexread`/`insEKF` + real almanac/ephemeris constellation carved).
+  Wiring notes + traps captured in the project auto-memory.
+  Examples mirror eight MathWorks UG pages: `nav_rotations.m`, `nav_imu_intro.m`,
+  `nav_ground_vehicle.m` (IMU+GPS → `insfilterMARG`), `nav_rrt_plan.m`,
+  `nav_vfh_avoid.m`, `nav_mcl_localize.m`, `nav_gnss_position.m`,
+  `nav_frenet_planner.m`.  Eleven gating tests `navigation_{occmap,statespace,
+  astar,scanmatch,posegraph,planner,vfh,gnss,frenet,pf,mcl}.m`.
 - **No external dependencies**: matching project precedent — planners hand-
   coded over the PRNG + the shipped occupancy grid; scan matching via a
   hand-coded ICP/NDT over `svd`/`mldivide`; pose-graph / factor-graph
@@ -301,7 +307,7 @@ equations are solved dense for the modest graph sizes the examples use
 
 ---
 
-## 6. Tier-5 — Localisation + reactive control 🔵
+## 6. Tier-5 — Localisation + reactive control ✅
 
 Goal: the on-line localisation + obstacle-avoidance layer.
 
@@ -329,7 +335,7 @@ alloc-then-populate + in-place-update pattern already works.
 
 ---
 
-## 7. Tier-6 — GNSS positioning + Frenet trajectories + polish 🔵
+## 7. Tier-6 — GNSS positioning + Frenet trajectories + polish ✅
 
 Goal: the satellite-navigation + structured-road-trajectory layer, plus the
 flexible inertial-fusion framework and the remaining polish.
@@ -503,8 +509,8 @@ optimisation / MCL + VFH / GNSS positioning + Frenet) is in Tiers 1–6.
 | T2 | sampling/search planners | ~2.5 wk | `plannerRRT`/`RRTStar`/`AStarGrid` + `shortenpath` smoothing (BiRRT/HybridAStar carved) | ✅ |
 | T3 | lidar scan matching + SLAM | ~2 wk | `lidarScan`/`matchScans` (ICP)/`lidarSLAM` (matchScansGrid/buildMap carved) | ✅ |
 | T4 | pose-graph + factor-graph optimisation | ~2.5 wk | `poseGraph` (SE2) + `optimizePoseGraph` (manifold GN) (poseGraph3D/factorGraph carved) | ✅ |
-| T5 | localisation + reactive control | ~2 wk | `monteCarloLocalization` + motion/sensor models + `stateEstimatorPF` + `controllerVFH` | 🔵 |
-| T6 | GNSS + Frenet + polish | ~2 wk | `gnssSensor`/`gnssconstellation`/`pseudoranges`/`receiverposition` + `nmeaParser`/`rinexread` + Frenet + `insEKF` | 🔵 |
+| T5 | localisation + reactive control | ~2 wk | `monteCarloLocalization` + `stateEstimatorPF` + `controllerVFH` (standalone motion/sensor model objects carved) | ✅ |
+| T6 | GNSS + Frenet + polish | ~2 wk | `gnssSensor`/`gnssconstellation`/`pseudoranges`/`receiverposition` + Frenet `referencePathFrenet`/`trajectoryGeneratorFrenet` (`nmeaParser`/`rinexread`/`insEKF` carved) | ✅ |
 | **Total** | | **~12.5 wk** | | |
 
 **Recommended slice order**: **T1 → T2 first** — this closes the

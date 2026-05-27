@@ -602,6 +602,21 @@ void Resolver::registerBuiltins() {
     "matlab_nav_slam_init", "matlab_nav_slam_addscan",
     "matlab_nav_posegraph_init", "matlab_nav_posegraph_addrel",
     "matlab_nav_posegraph_optimize",
+    /* Navigation Tiers 5-6 — localisation / reactive control / GNSS / Frenet.
+     * Class names (controllerVFH/monteCarloLocalization/stateEstimatorPF/
+     * gnssSensor/referencePathFrenet/trajectoryGeneratorFrenet) resolve via
+     * the prelude; step/predict/correct reused from fusion/ident. */
+    "initialize", "getStateEstimate",
+    "global2frenet", "frenet2global", "connect",
+    "gnssconstellation", "pseudoranges", "receiverposition",
+    "matlab_nav_vfh_step",
+    "matlab_nav_mcl_init", "matlab_nav_mcl_step",
+    "matlab_nav_pf_initialize", "matlab_nav_pf_predict",
+    "matlab_nav_pf_correct", "matlab_nav_pf_estimate",
+    "matlab_nav_gnss_step", "matlab_nav_gnssconstellation",
+    "matlab_nav_pseudoranges", "matlab_nav_receiverposition",
+    "matlab_nav_frenet_init", "matlab_nav_frenet_g2f", "matlab_nav_frenet_f2g",
+    "matlab_nav_trajgen_init", "matlab_nav_trajgen_connect",
     /* Inverse Tustin: discrete-to-continuous. */
     "d2c_tustin",
     /* Tier 3.4 / 2.3 — gramians and state-space step response. */

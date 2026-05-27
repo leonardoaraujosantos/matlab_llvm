@@ -841,3 +841,534 @@ matlab_mat *matlab_nav_posegraph_optimize(void *obj_v) {
 }
 
 }  // extern "C"
+
+// ===========================================================================
+// Tier-5 / Tier-6 shared helpers
+// ===========================================================================
+extern "C" matlab_mat *matlab_randn(double m, double n);
+
+namespace nav {
+
+// WGS-84 geodetic <-> ECEF.
+constexpr double WGS84_A = 6378137.0;
+constexpr double WGS84_E2 = 6.69437999014e-3;
+void lla_to_ecef(double lat_deg, double lon_deg, double alt, double e[3]) {
+    double lat = lat_deg * M_PI / 180.0, lon = lon_deg * M_PI / 180.0;
+    double sl = std::sin(lat), cl = std::cos(lat);
+    double N = WGS84_A / std::sqrt(1.0 - WGS84_E2 * sl * sl);
+    e[0] = (N + alt) * cl * std::cos(lon);
+    e[1] = (N + alt) * cl * std::sin(lon);
+    e[2] = (N * (1.0 - WGS84_E2) + alt) * sl;
+}
+void ecef_to_lla(const double e[3], double lla[3]) {
+    double lon = std::atan2(e[1], e[0]);
+    double p = std::hypot(e[0], e[1]);
+    double lat = std::atan2(e[2], p * (1.0 - WGS84_E2));
+    for (int it = 0; it < 8; ++it) {                  // Bowring iteration
+        double sl = std::sin(lat);
+        double N = WGS84_A / std::sqrt(1.0 - WGS84_E2 * sl * sl);
+        double alt = p / std::cos(lat) - N;
+        lat = std::atan2(e[2], p * (1.0 - WGS84_E2 * N / (N + alt)));
+    }
+    double sl = std::sin(lat);
+    double N = WGS84_A / std::sqrt(1.0 - WGS84_E2 * sl * sl);
+    lla[0] = lat * 180.0 / M_PI;
+    lla[1] = lon * 180.0 / M_PI;
+    lla[2] = p / std::cos(lat) - N;
+}
+
+// Low-variance resampler: indices drawn proportional to (normalised) weights.
+void low_variance_resample(const std::vector<double> &w, std::vector<int> &idx) {
+    int N = static_cast<int>(w.size());
+    idx.resize(N);
+    double r0 = matlab_rand(1.0, 1.0)->data[0] / N;
+    double c = w[0];
+    int i = 0;
+    for (int m = 0; m < N; ++m) {
+        double U = r0 + static_cast<double>(m) / N;
+        while (U > c && i < N - 1) { ++i; c += w[i]; }
+        idx[m] = i;
+    }
+}
+
+}  // namespace nav
+
+extern "C" {
+
+// ===========================================================================
+// Tier-5 — controllerVFH (Vector Field Histogram reactive steering)
+// ===========================================================================
+// step(vfh, ranges, angles, targetDir) -> steering direction (rad).  Builds a
+// binary polar obstacle histogram (obstacles enlarged by RobotRadius +
+// SafetyDistance), then returns the free-sector direction closest to the
+// target (weighted lightly toward straight-ahead).  NaN if fully blocked.
+matlab_mat *matlab_nav_vfh_step(void *obj_v, matlab_mat *ranges, matlab_mat *angles, double target) {
+    matlab_mat *o = mat_alloc(1, 1);
+    int S = static_cast<int>(nav::obj_get_f64(obj_v, "NumAngularSectors"));
+    if (S < 8) S = 180;
+    double dmin = 0.0, dmax = 3.0;
+    matlab_mat *DL = nav::obj_get_mat(obj_v, "DistanceLimits");
+    if (DL && DL->rows * DL->cols >= 2) { dmin = DL->data[0]; dmax = DL->data[1]; }
+    double rr = nav::obj_get_f64(obj_v, "RobotRadius") + nav::obj_get_f64(obj_v, "SafetyDistance");
+    double thr = nav::obj_get_f64(obj_v, "HistogramThreshold"); if (thr <= 0) thr = 1.0;
+    double wtgt = nav::obj_get_f64(obj_v, "TargetDirectionWeight"); if (wtgt <= 0) wtgt = 5.0;
+
+    std::vector<double> hist(S, 0.0);
+    int64_t n = ranges ? ranges->rows * ranges->cols : 0;
+    for (int64_t k = 0; k < n; ++k) {
+        double r = ranges->data[k];
+        double a = angles ? angles->data[k] : 0.0;
+        if (!(r > dmin) || r > dmax || !std::isfinite(r)) continue;
+        double mag = (dmax - r) / dmax;                  // closer => bigger
+        double enlarge = (r > 1e-6) ? std::asin(std::min(1.0, rr / r)) : M_PI;
+        for (double da = -enlarge; da <= enlarge; da += (M_PI / S)) {
+            double ang = nav::wrap_pi(a + da);
+            int s = static_cast<int>((ang + M_PI) / (2 * M_PI) * S);
+            if (s < 0) s = 0; if (s >= S) s = S - 1;
+            hist[s] += mag;
+        }
+    }
+    // Free sectors + pick the one whose centre direction minimises the cost.
+    double best = 1e300, bestDir = std::nan("");
+    for (int s = 0; s < S; ++s) {
+        if (hist[s] >= thr) continue;
+        double dir = -M_PI + (s + 0.5) * (2 * M_PI / S);
+        double cost = wtgt * std::fabs(nav::wrap_pi(dir - target)) + std::fabs(dir);
+        if (cost < best) { best = cost; bestDir = dir; }
+    }
+    o->data[0] = bestDir;
+    return o;
+}
+
+// ===========================================================================
+// Tier-5 — monteCarloLocalization (particle filter on an occupancyMap)
+// ===========================================================================
+// Stores Particles (N×3), Weights (N×1), the cloned map metadata, the list of
+// occupied cell centres OccCells (K×2) for the likelihood field, PrevOdom, and
+// the running pose estimate.
+matlab_mat *matlab_nav_mcl_init(void *obj_v, void *map_v) {
+    matlab_mat *G = nav::obj_get_mat(map_v, "Grid");
+    double res = nav::obj_get_f64(map_v, "Resolution"); if (res <= 0) res = 1.0;
+    double occ = nav::obj_get_f64(map_v, "OccupiedThreshold"); if (occ <= 0) occ = 0.65;
+    nav::obj_set_f64(obj_v, "Resolution", res);
+    int64_t R = G ? G->rows : 0, C = G ? G->cols : 0;
+    // Occupied cell world-centres (origin lower-left, row 0 = top).
+    std::vector<double> oc;
+    for (int64_t i = 0; i < R; ++i)
+        for (int64_t j = 0; j < C; ++j)
+            if (G->data[i * C + j] >= occ) {
+                oc.push_back((j + 0.5) / res);
+                oc.push_back((R - 1 - i + 0.5) / res);
+            }
+    int64_t K = static_cast<int64_t>(oc.size() / 2);
+    matlab_mat *OC = mat_alloc(K, 2);
+    for (int64_t i = 0; i < K * 2; ++i) OC->data[i] = oc[i];
+    nav::obj_set_mat(obj_v, "OccCells", OC);
+    // Initialise particles uniformly over the map extent.
+    int N = static_cast<int>(nav::obj_get_f64(obj_v, "NumParticles"));
+    if (N < 50) N = 500;
+    double xext = static_cast<double>(C) / res, yext = static_cast<double>(R) / res;
+    matlab_mat *P = mat_alloc(N, 3), *W = mat_alloc(N, 1);
+    matlab_mat *U = matlab_rand(static_cast<double>(N), 3.0);
+    for (int i = 0; i < N; ++i) {
+        P->data[i*3+0] = U->data[i*3+0] * xext;
+        P->data[i*3+1] = U->data[i*3+1] * yext;
+        P->data[i*3+2] = (U->data[i*3+2] * 2 - 1) * M_PI;
+        W->data[i] = 1.0 / N;
+    }
+    nav::obj_set_mat(obj_v, "Particles", P);
+    nav::obj_set_mat(obj_v, "Weights", W);
+    nav::obj_set_f64(obj_v, "HasPrev", 0);
+    nav::obj_set_mat(obj_v, "PrevOdom", mat_alloc(1, 3));
+    return mat_alloc(0, 0);
+}
+
+// step(mcl, odomPose, ranges, angles) -> estimated pose (1×3).
+matlab_mat *matlab_nav_mcl_step(void *obj_v, matlab_mat *odom, matlab_mat *ranges, matlab_mat *angles) {
+    matlab_mat *P = nav::obj_get_mat(obj_v, "Particles");
+    matlab_mat *OC = nav::obj_get_mat(obj_v, "OccCells");
+    matlab_mat *Prev = nav::obj_get_mat(obj_v, "PrevOdom");
+    double hasPrev = nav::obj_get_f64(obj_v, "HasPrev");
+    if (!P || !odom || odom->rows * odom->cols < 3) return mat_alloc(1, 3);
+    int N = static_cast<int>(P->rows);
+    double cx = odom->data[0], cy = odom->data[1], cth = odom->data[2];
+
+    if (hasPrev <= 0.5) {
+        // First update: seed the particle cloud around the initial odometry
+        // pose (small spread) — the non-global "I start roughly here" prior.
+        // Subsequent odometry deltas then move the coherent cloud.
+        matlab_mat *Z = matlab_randn(static_cast<double>(N), 3.0);
+        for (int i = 0; i < N; ++i) {
+            P->data[i*3+0] = cx + 0.5 * Z->data[i*3+0];
+            P->data[i*3+1] = cy + 0.5 * Z->data[i*3+1];
+            P->data[i*3+2] = nav::wrap_pi(cth + 0.1 * Z->data[i*3+2]);
+        }
+    }
+
+    if (hasPrev > 0.5) {
+        // Odometry motion model (rot1, trans, rot2) per particle + noise.
+        double px = Prev->data[0], py = Prev->data[1], pth = Prev->data[2];
+        double dx = cx - px, dy = cy - py;
+        double trans = std::hypot(dx, dy);
+        double rot1 = (trans > 1e-6) ? nav::wrap_pi(std::atan2(dy, dx) - pth) : 0.0;
+        double rot2 = nav::wrap_pi(nav::wrap_pi(cth - pth) - rot1);
+        double an = 0.05, tn = 0.05;
+        matlab_mat *Z = matlab_randn(static_cast<double>(N), 3.0);
+        for (int i = 0; i < N; ++i) {
+            double r1 = rot1 + an * Z->data[i*3+0];
+            double tt = trans + tn * Z->data[i*3+1];
+            double r2 = rot2 + an * Z->data[i*3+2];
+            double th1 = P->data[i*3+2] + r1;
+            P->data[i*3+0] += tt * std::cos(th1);
+            P->data[i*3+1] += tt * std::sin(th1);
+            P->data[i*3+2] = nav::wrap_pi(P->data[i*3+2] + r1 + r2);
+        }
+        // Measurement update via likelihood field (subsampled beams).
+        int64_t K = OC ? OC->rows : 0;
+        int64_t nb = ranges ? ranges->rows * ranges->cols : 0;
+        int stride = (nb > 30) ? static_cast<int>(nb / 30) : 1;
+        double sigma = 0.3;
+        std::vector<double> w(N, 0.0); double wsum = 0.0;
+        for (int i = 0; i < N; ++i) {
+            double logw = 0.0;
+            for (int64_t b = 0; b < nb && K > 0; b += stride) {
+                double r = ranges->data[b], a = angles->data[b];
+                if (!std::isfinite(r) || r <= 0) continue;
+                double ex = P->data[i*3+0] + r * std::cos(P->data[i*3+2] + a);
+                double ey = P->data[i*3+1] + r * std::sin(P->data[i*3+2] + a);
+                double bd = 1e300;
+                for (int64_t c = 0; c < K; ++c) {
+                    double ddx = OC->data[c*2+0]-ex, ddy = OC->data[c*2+1]-ey;
+                    double d2 = ddx*ddx + ddy*ddy;
+                    if (d2 < bd) bd = d2;
+                }
+                logw += -bd / (2 * sigma * sigma);
+            }
+            w[i] = std::exp(logw);
+            wsum += w[i];
+        }
+        if (wsum > 1e-300) {
+            for (int i = 0; i < N; ++i) w[i] /= wsum;
+            std::vector<int> idx; nav::low_variance_resample(w, idx);
+            matlab_mat *P2 = mat_alloc(N, 3);
+            for (int i = 0; i < N; ++i)
+                for (int d = 0; d < 3; ++d) P2->data[i*3+d] = P->data[idx[i]*3+d];
+            nav::obj_set_mat(obj_v, "Particles", P2);
+            P = P2;
+        }
+    }
+    // Estimate = particle mean (circular mean for θ).
+    double mx = 0, my = 0, sc = 0, ss = 0;
+    for (int i = 0; i < N; ++i) {
+        mx += P->data[i*3+0]; my += P->data[i*3+1];
+        sc += std::cos(P->data[i*3+2]); ss += std::sin(P->data[i*3+2]);
+    }
+    matlab_mat *est = mat_alloc(1, 3);
+    est->data[0] = mx / N; est->data[1] = my / N; est->data[2] = std::atan2(ss, sc);
+    nav::obj_set_mat(obj_v, "Pose", est);
+    matlab_mat *pv = mat_alloc(1, 3);
+    pv->data[0] = cx; pv->data[1] = cy; pv->data[2] = cth;
+    nav::obj_set_mat(obj_v, "PrevOdom", pv);
+    nav::obj_set_f64(obj_v, "HasPrev", 1);
+    matlab_mat *out = mat_alloc(1, 3);
+    out->data[0] = est->data[0]; out->data[1] = est->data[1]; out->data[2] = est->data[2];
+    return out;
+}
+
+// ===========================================================================
+// Tier-5 — stateEstimatorPF (generic linear-Gaussian particle filter)
+// ===========================================================================
+// Built-in additive-Gaussian motion + linear-measurement model.  The arbitrary
+// StateTransitionFcn / MeasurementLikelihoodFcn handle forms are carved.
+matlab_mat *matlab_nav_pf_initialize(void *obj_v, double Nd, matlab_mat *mean, matlab_mat *cov) {
+    int N = static_cast<int>(Nd); if (N < 1) N = 1000;
+    int D = mean ? static_cast<int>(mean->rows * mean->cols) : 1;
+    matlab_mat *P = mat_alloc(N, D), *W = mat_alloc(N, 1);
+    matlab_mat *Z = matlab_randn(static_cast<double>(N), static_cast<double>(D));
+    for (int i = 0; i < N; ++i) {
+        for (int d = 0; d < D; ++d) {
+            double sd = (cov && cov->rows * cov->cols >= D) ? std::sqrt(std::fabs(cov->data[d])) : 1.0;
+            P->data[i*D+d] = mean->data[d] + sd * Z->data[i*D+d];
+        }
+        W->data[i] = 1.0 / N;
+    }
+    nav::obj_set_mat(obj_v, "Particles", P);
+    nav::obj_set_mat(obj_v, "Weights", W);
+    nav::obj_set_f64(obj_v, "NumStateVariables", D);
+    return mat_alloc(0, 0);
+}
+
+// predict(pf, A, procStd): x' = A·x + N(0, procStd) per state dim.
+matlab_mat *matlab_nav_pf_predict(void *obj_v, matlab_mat *A, matlab_mat *pstd) {
+    matlab_mat *P = nav::obj_get_mat(obj_v, "Particles");
+    if (!P) return mat_alloc(0, 0);
+    int N = static_cast<int>(P->rows), D = static_cast<int>(P->cols);
+    matlab_mat *Z = matlab_randn(static_cast<double>(N), static_cast<double>(D));
+    std::vector<double> tmp(D);
+    for (int i = 0; i < N; ++i) {
+        for (int r = 0; r < D; ++r) {
+            double s = 0;
+            for (int c = 0; c < D; ++c) s += A->data[r*D+c] * P->data[i*D+c];
+            double sd = (pstd && pstd->rows*pstd->cols >= D) ? pstd->data[r] : 0.1;
+            tmp[r] = s + sd * Z->data[i*D+r];
+        }
+        for (int r = 0; r < D; ++r) P->data[i*D+r] = tmp[r];
+    }
+    return mat_alloc(0, 0);
+}
+
+// correct(pf, z, H, measStd): weight by Gaussian(z − H·x), normalise, resample.
+matlab_mat *matlab_nav_pf_correct(void *obj_v, matlab_mat *z, matlab_mat *H, matlab_mat *mstd) {
+    matlab_mat *P = nav::obj_get_mat(obj_v, "Particles");
+    if (!P || !z || !H) return mat_alloc(0, 0);
+    int N = static_cast<int>(P->rows), D = static_cast<int>(P->cols);
+    int M = static_cast<int>(z->rows * z->cols);
+    std::vector<double> w(N, 0.0); double wsum = 0;
+    for (int i = 0; i < N; ++i) {
+        double logw = 0;
+        for (int m = 0; m < M; ++m) {
+            double pred = 0;
+            for (int c = 0; c < D; ++c) pred += H->data[m*D+c] * P->data[i*D+c];
+            double sd = (mstd && mstd->rows*mstd->cols >= M) ? mstd->data[m] : 1.0;
+            double e = z->data[m] - pred;
+            logw += -e*e / (2*sd*sd);
+        }
+        w[i] = std::exp(logw); wsum += w[i];
+    }
+    if (wsum > 1e-300) {
+        for (int i = 0; i < N; ++i) w[i] /= wsum;
+        std::vector<int> idx; nav::low_variance_resample(w, idx);
+        matlab_mat *P2 = mat_alloc(N, D);
+        for (int i = 0; i < N; ++i)
+            for (int d = 0; d < D; ++d) P2->data[i*D+d] = P->data[idx[i]*D+d];
+        nav::obj_set_mat(obj_v, "Particles", P2);
+    }
+    return mat_alloc(0, 0);
+}
+
+matlab_mat *matlab_nav_pf_estimate(void *obj_v) {
+    matlab_mat *P = nav::obj_get_mat(obj_v, "Particles");
+    if (!P) return mat_alloc(1, 1);
+    int N = static_cast<int>(P->rows), D = static_cast<int>(P->cols);
+    matlab_mat *est = mat_alloc(1, D);
+    for (int d = 0; d < D; ++d) { double s = 0; for (int i = 0; i < N; ++i) s += P->data[i*D+d]; est->data[d] = s / N; }
+    return est;
+}
+
+// ===========================================================================
+// Tier-6 — GNSS positioning
+// ===========================================================================
+// gnssSensor step: true [lat lon alt] (+ optional 3-vel) -> noisy [lla vel].
+matlab_mat *matlab_nav_gnss_step(void *obj_v, matlab_mat *lla, matlab_mat *vel) {
+    double hsig = nav::obj_get_f64(obj_v, "HorizontalPositionAccuracy"); if (hsig <= 0) hsig = 1.6;
+    double vsig = nav::obj_get_f64(obj_v, "VerticalPositionAccuracy"); if (vsig <= 0) vsig = 3.0;
+    matlab_mat *o = mat_alloc(1, 6);
+    matlab_mat *Z = matlab_randn(6.0, 1.0);
+    double lat = lla ? lla->data[0] : 0.0;
+    double mPerDegLat = 111320.0;
+    double mPerDegLon = 111320.0 * std::cos(lat * M_PI / 180.0);
+    o->data[0] = (lla ? lla->data[0] : 0) + hsig * Z->data[0] / mPerDegLat;
+    o->data[1] = (lla ? lla->data[1] : 0) + hsig * Z->data[1] / (mPerDegLon > 1 ? mPerDegLon : 1);
+    o->data[2] = (lla && lla->rows*lla->cols >= 3 ? lla->data[2] : 0) + vsig * Z->data[2];
+    for (int i = 0; i < 3; ++i)
+        o->data[3+i] = (vel && vel->rows*vel->cols > i ? vel->data[i] : 0) + 0.1 * Z->data[3+i];
+    return o;
+}
+
+// gnssconstellation(): a deterministic 8-satellite GPS-altitude geometry
+// (ECEF, ~26560 km orbital radius) spread across azimuth/elevation — a
+// stand-in for an almanac/ephemeris-driven constellation.
+matlab_mat *matlab_nav_gnssconstellation(double dummy) {
+    (void)dummy;
+    const int NS = 8;
+    const double Rsat = 26560000.0;
+    matlab_mat *S = mat_alloc(NS, 3);
+    for (int i = 0; i < NS; ++i) {
+        double az = 2 * M_PI * i / NS;
+        double el = (M_PI / 6) + (M_PI / 3) * ((i % 3) / 2.0);   // 30..90 deg
+        S->data[i*3+0] = Rsat * std::cos(el) * std::cos(az);
+        S->data[i*3+1] = Rsat * std::cos(el) * std::sin(az);
+        S->data[i*3+2] = Rsat * std::sin(el);
+    }
+    return S;
+}
+
+// pseudoranges(recLLA, satECEF) -> N×1 geometric ranges (no clock bias).
+matlab_mat *matlab_nav_pseudoranges(matlab_mat *recLLA, matlab_mat *satECEF) {
+    if (!recLLA || !satECEF) return mat_alloc(0, 1);
+    double r[3];
+    nav::lla_to_ecef(recLLA->data[0], recLLA->data[1],
+                     recLLA->rows*recLLA->cols >= 3 ? recLLA->data[2] : 0.0, r);
+    int64_t NS = satECEF->rows;
+    matlab_mat *pr = mat_alloc(NS, 1);
+    for (int64_t i = 0; i < NS; ++i) {
+        double dx = satECEF->data[i*3+0]-r[0];
+        double dy = satECEF->data[i*3+1]-r[1];
+        double dz = satECEF->data[i*3+2]-r[2];
+        pr->data[i] = std::sqrt(dx*dx + dy*dy + dz*dz);
+    }
+    return pr;
+}
+
+// receiverposition(pseudoranges, satECEF) -> estimated [lat lon alt] via
+// iterative least-squares (solves for ECEF position + clock bias).
+matlab_mat *matlab_nav_receiverposition(matlab_mat *pr, matlab_mat *satECEF) {
+    matlab_mat *out = mat_alloc(1, 3);
+    if (!pr || !satECEF || satECEF->rows < 4) return out;
+    int64_t NS = satECEF->rows;
+    double x[4] = {0, 0, 0, 0};                       // ECEF + clock bias (m)
+    for (int it = 0; it < 12; ++it) {
+        double HtH[16] = {0}, Htr[4] = {0};
+        for (int64_t i = 0; i < NS; ++i) {
+            double dx = x[0]-satECEF->data[i*3+0];
+            double dy = x[1]-satECEF->data[i*3+1];
+            double dz = x[2]-satECEF->data[i*3+2];
+            double rng = std::sqrt(dx*dx + dy*dy + dz*dz);
+            if (rng < 1e-6) rng = 1e-6;
+            double Hr[4] = { dx/rng, dy/rng, dz/rng, 1.0 };
+            double res = pr->data[i] - (rng + x[3]);
+            for (int a = 0; a < 4; ++a) {
+                Htr[a] += Hr[a] * res;
+                for (int b = 0; b < 4; ++b) HtH[a*4+b] += Hr[a] * Hr[b];
+            }
+        }
+        for (int d = 0; d < 4; ++d) HtH[d*4+d] += 1e-6;
+        nav::solve(HtH, 4, Htr);
+        for (int d = 0; d < 4; ++d) x[d] += Htr[d];
+        double step = std::fabs(Htr[0]) + std::fabs(Htr[1]) + std::fabs(Htr[2]);
+        if (step < 1e-4) break;
+    }
+    double e[3] = { x[0], x[1], x[2] };
+    double lla[3]; nav::ecef_to_lla(e, lla);
+    out->data[0] = lla[0]; out->data[1] = lla[1]; out->data[2] = lla[2];
+    return out;
+}
+
+// ===========================================================================
+// Tier-6 — referencePathFrenet + trajectoryGeneratorFrenet
+// ===========================================================================
+// init stores Waypoints (N×2) + cumulative arc-length PathS (N×1) + segment
+// headings PathTheta (N×1).
+matlab_mat *matlab_nav_frenet_init(void *obj_v, matlab_mat *wp) {
+    if (!wp || wp->rows < 2) return mat_alloc(0, 0);
+    int64_t N = wp->rows;
+    matlab_mat *W = mat_alloc(N, 2), *S = mat_alloc(N, 1), *Th = mat_alloc(N, 1);
+    double s = 0;
+    for (int64_t i = 0; i < N; ++i) {
+        W->data[i*2+0] = wp->data[i*wp->cols+0];
+        W->data[i*2+1] = wp->data[i*wp->cols+1];
+        if (i > 0) {
+            double dx = W->data[i*2+0]-W->data[(i-1)*2+0];
+            double dy = W->data[i*2+1]-W->data[(i-1)*2+1];
+            s += std::hypot(dx, dy);
+            Th->data[i-1] = std::atan2(dy, dx);
+        }
+        S->data[i] = s;
+    }
+    Th->data[N-1] = Th->data[N-2];
+    nav::obj_set_mat(obj_v, "Waypoints", W);
+    nav::obj_set_mat(obj_v, "PathS", S);
+    nav::obj_set_mat(obj_v, "PathTheta", Th);
+    nav::obj_set_f64(obj_v, "PathLength", s);
+    return mat_alloc(0, 0);
+}
+
+// Project a global (x,y) onto the polyline -> [s d theta].  Internal helper.
+static void frenet_project(void *obj_v, double x, double y, double out[3]) {
+    matlab_mat *W = nav::obj_get_mat(obj_v, "Waypoints");
+    matlab_mat *S = nav::obj_get_mat(obj_v, "PathS");
+    matlab_mat *Th = nav::obj_get_mat(obj_v, "PathTheta");
+    out[0] = out[1] = out[2] = 0;
+    if (!W || W->rows < 2) return;
+    double best = 1e300;
+    for (int64_t i = 0; i + 1 < W->rows; ++i) {
+        double ax = W->data[i*2+0], ay = W->data[i*2+1];
+        double bx = W->data[(i+1)*2+0], by = W->data[(i+1)*2+1];
+        double dx = bx - ax, dy = by - ay;
+        double L2 = dx*dx + dy*dy; if (L2 < 1e-12) continue;
+        double t = ((x-ax)*dx + (y-ay)*dy) / L2;
+        if (t < 0) t = 0; if (t > 1) t = 1;
+        double projx = ax + t*dx, projy = ay + t*dy;
+        double d2 = (x-projx)*(x-projx) + (y-projy)*(y-projy);
+        if (d2 < best) {
+            best = d2;
+            double th = Th->data[i];
+            double cross = (bx-ax)*(y-ay) - (by-ay)*(x-ax);   // left = +
+            out[0] = S->data[i] + t * std::sqrt(L2);
+            out[1] = (cross >= 0 ? 1.0 : -1.0) * std::sqrt(d2);
+            out[2] = th;
+        }
+    }
+}
+
+// global2frenet(path, [x y ...]) -> [s d]  (1×2).
+matlab_mat *matlab_nav_frenet_g2f(void *obj_v, matlab_mat *g) {
+    matlab_mat *o = mat_alloc(1, 2);
+    if (!g || g->rows*g->cols < 2) return o;
+    double p[3]; frenet_project(obj_v, g->data[0], g->data[1], p);
+    o->data[0] = p[0]; o->data[1] = p[1];
+    return o;
+}
+
+// frenet2global(path, [s d]) -> [x y theta]  (1×3).
+matlab_mat *matlab_nav_frenet_f2g(void *obj_v, matlab_mat *f) {
+    matlab_mat *o = mat_alloc(1, 3);
+    matlab_mat *W = nav::obj_get_mat(obj_v, "Waypoints");
+    matlab_mat *S = nav::obj_get_mat(obj_v, "PathS");
+    matlab_mat *Th = nav::obj_get_mat(obj_v, "PathTheta");
+    if (!f || f->rows*f->cols < 2 || !W) return o;
+    double s = f->data[0], d = f->data[1];
+    int64_t seg = 0;
+    for (int64_t i = 0; i + 1 < W->rows; ++i) if (S->data[i] <= s) seg = i;
+    double segLen = S->data[seg+1] - S->data[seg];
+    double t = (segLen > 1e-9) ? (s - S->data[seg]) / segLen : 0.0;
+    if (t < 0) t = 0; if (t > 1) t = 1;
+    double th = Th->data[seg];
+    double bx = W->data[seg*2+0] + t*(W->data[(seg+1)*2+0]-W->data[seg*2+0]);
+    double by = W->data[seg*2+1] + t*(W->data[(seg+1)*2+1]-W->data[seg*2+1]);
+    o->data[0] = bx - d * std::sin(th);     // +d to the left of the path
+    o->data[1] = by + d * std::cos(th);
+    o->data[2] = th;
+    return o;
+}
+
+// trajectoryGeneratorFrenet(refPath): clone the reference-path fields so the
+// generator's connect() can map Frenet (s,d) back to global self-contained.
+matlab_mat *matlab_nav_trajgen_init(void *obj_v, void *ref_v) {
+    for (const char *fld : {"Waypoints", "PathS", "PathTheta"}) {
+        matlab_mat *m = nav::obj_get_mat(ref_v, fld);
+        if (m) {
+            matlab_mat *c = mat_alloc(m->rows, m->cols);
+            for (int64_t i = 0; i < m->rows * m->cols; ++i) c->data[i] = m->data[i];
+            nav::obj_set_mat(obj_v, fld, c);
+        }
+    }
+    return mat_alloc(0, 0);
+}
+
+// connect(trajgen, [s0 d0], [s1 d1], T) -> sampled trajectory.
+// Quintic blend in s and d (zero end vel+acc), converted back to global via
+// the reference path.  Returns M×5 [t s d x y].
+matlab_mat *matlab_nav_trajgen_connect(void *obj_v, matlab_mat *init, matlab_mat *term, double T) {
+    if (!init || !term || T <= 0) return mat_alloc(0, 5);
+    double s0 = init->data[0], d0 = init->data[1];
+    double s1 = term->data[0], d1 = term->data[1];
+    int M = 21;
+    matlab_mat *out = mat_alloc(M, 5);
+    for (int k = 0; k < M; ++k) {
+        double tau = static_cast<double>(k) / (M - 1);
+        double blend = 10*tau*tau*tau - 15*tau*tau*tau*tau + 6*tau*tau*tau*tau*tau;
+        double s = s0 + (s1 - s0) * blend;
+        double d = d0 + (d1 - d0) * blend;
+        out->data[k*5+0] = tau * T;
+        out->data[k*5+1] = s;
+        out->data[k*5+2] = d;
+        matlab_mat fr; double fd[2] = { s, d }; fr.data = fd; fr.rows = 1; fr.cols = 2;
+        matlab_mat *g = matlab_nav_frenet_f2g(obj_v, &fr);
+        out->data[k*5+3] = g->data[0];
+        out->data[k*5+4] = g->data[1];
+    }
+    return out;
+}
+
+}  // extern "C"

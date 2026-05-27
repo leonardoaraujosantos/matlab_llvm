@@ -1,0 +1,2 @@
+open-field steer = -0.02
+blocked-ahead steer = 0.68

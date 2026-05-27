@@ -227,3 +227,122 @@ classdef poseGraph
         end
     end
 end
+
+% Tier-5 — reactive control + localisation ---------------------------------
+classdef controllerVFH
+    properties
+        NumAngularSectors
+        DistanceLimits matrix
+        RobotRadius
+        SafetyDistance
+        HistogramThreshold
+        TargetDirectionWeight
+        MinTurningRadius
+    end
+    methods
+        function obj = controllerVFH()
+            obj.NumAngularSectors     = 180;
+            obj.DistanceLimits        = [0.05, 3.0];
+            obj.RobotRadius           = 0.1;
+            obj.SafetyDistance        = 0.1;
+            obj.HistogramThreshold    = 1.0;
+            obj.TargetDirectionWeight = 5.0;
+            obj.MinTurningRadius      = 0.1;
+        end
+    end
+end
+
+% monteCarloLocalization — particle filter on an occupancyMap.  Carries the
+% particle set, the occupied-cell list for the likelihood field, and the
+% previous odometry pose for the motion model.
+classdef monteCarloLocalization
+    properties
+        Particles matrix        % N×3
+        Weights matrix          % N×1
+        OccCells matrix         % K×2 occupied-cell world centres
+        Resolution
+        NumParticles
+        PrevOdom matrix         % 1×3
+        HasPrev
+        Pose matrix             % 1×3 running estimate
+    end
+    methods
+        function obj = monteCarloLocalization()
+            obj.Particles    = zeros(0, 3);
+            obj.Weights      = zeros(0, 1);
+            obj.OccCells     = zeros(0, 2);
+            obj.Resolution   = 1;
+            obj.NumParticles = 500;
+            obj.PrevOdom     = zeros(1, 3);
+            obj.HasPrev      = 0;
+            obj.Pose         = zeros(1, 3);
+        end
+    end
+end
+
+% stateEstimatorPF — generic linear-Gaussian particle filter (built-in motion
+% + linear-measurement model; arbitrary handle forms are carved).
+classdef stateEstimatorPF
+    properties
+        Particles matrix
+        Weights matrix
+        NumStateVariables
+    end
+    methods
+        function obj = stateEstimatorPF()
+            obj.Particles         = zeros(0, 1);
+            obj.Weights           = zeros(0, 1);
+            obj.NumStateVariables = 0;
+        end
+    end
+end
+
+% Tier-6 — GNSS + Frenet ---------------------------------------------------
+classdef gnssSensor
+    properties
+        HorizontalPositionAccuracy
+        VerticalPositionAccuracy
+    end
+    methods
+        function obj = gnssSensor()
+            obj.HorizontalPositionAccuracy = 1.6;
+            obj.VerticalPositionAccuracy   = 3.0;
+        end
+    end
+end
+
+% referencePathFrenet — polyline reference path with cumulative arc-length +
+% per-segment headings for global<->Frenet conversion.
+classdef referencePathFrenet
+    properties
+        Waypoints matrix        % N×2
+        PathS matrix            % N×1 cumulative arc length
+        PathTheta matrix        % N×1 segment headings
+        PathLength
+    end
+    methods
+        function obj = referencePathFrenet()
+            obj.Waypoints  = zeros(0, 2);
+            obj.PathS      = zeros(0, 1);
+            obj.PathTheta  = zeros(0, 1);
+            obj.PathLength = 0;
+        end
+    end
+end
+
+% trajectoryGeneratorFrenet — clones a referencePathFrenet so connect() can map
+% generated Frenet trajectories back to global coordinates.
+classdef trajectoryGeneratorFrenet
+    properties
+        Waypoints matrix
+        PathS matrix
+        PathTheta matrix
+    end
+    methods
+        function obj = trajectoryGeneratorFrenet()
+            obj.Waypoints = zeros(0, 2);
+            obj.PathS     = zeros(0, 1);
+            obj.PathTheta = zeros(0, 1);
+        end
+    end
+end
