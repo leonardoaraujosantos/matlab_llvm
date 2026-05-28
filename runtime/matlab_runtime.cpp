@@ -1728,6 +1728,50 @@ COLWISE_REDUCE(max, -INFINITY,  (x > acc ? x : acc),        acc)
     matlab_mat *matlab_##NAME##_dim(matlab_mat *A, double d) {            \
         if (!A) return mat_alloc(0, 0);                                    \
         int64_t dim = (int64_t)d;                                          \
+        if (mat_is_nd(A)) {                                                \
+            /* matN reduction: collapse `dim` to 1, keep all others.       \
+             * Output dims are the input dims with dims[dim-1] set to 1;   \
+             * trailing-singleton drop happens through matN_alloc.  Walks  \
+             * the input via index-vector arithmetic so the reduce axis    \
+             * is the inner loop (cache-friendly for the rightmost dim,    \
+             * portable for any other). */                                 \
+            matlab_matN *An = (matlab_matN *)A;                            \
+            int nd = (int)An->ndims;                                       \
+            if (dim < 1 || dim > nd) {                                     \
+                matlab_mat *R = mat_alloc(0, 0);                           \
+                return R;                                                  \
+            }                                                              \
+            int axis = (int)dim - 1;                                       \
+            int64_t outDims[16];                                           \
+            for (int k = 0; k < nd && k < 16; ++k)                         \
+                outDims[k] = (k == axis) ? 1 : An->dims[k];                \
+            void *Rv = matN_alloc(nd, outDims);                            \
+            double *Rd = mat_is_nd(Rv)      ? ((matlab_matN *)Rv)->data    \
+                       : mat_is_3d(Rv)      ? ((matlab_mat3 *)Rv)->data    \
+                                            : ((matlab_mat *)Rv)->data;    \
+            int64_t reduceLen = An->dims[axis];                            \
+            int64_t outerLen = 1;                                          \
+            for (int k = 0; k < nd; ++k) outerLen *= outDims[k];           \
+            int64_t idx[16] = {0};                                         \
+            for (int64_t oo = 0; oo < outerLen; ++oo) {                    \
+                double acc = INIT_EXPR;                                    \
+                int64_t total = reduceLen;                                 \
+                int64_t srcBase = 0;                                       \
+                for (int k = 0; k < nd; ++k)                               \
+                    srcBase += idx[k] * An->strides[k];                    \
+                for (int64_t r = 0; r < reduceLen; ++r) {                  \
+                    double x = An->data[srcBase + r * An->strides[axis]];  \
+                    acc = UPDATE_EXPR;                                     \
+                }                                                          \
+                Rd[oo] = total > 0 ? (FINALIZE_EXPR) : INIT_EXPR;          \
+                for (int k = nd - 1; k >= 0; --k) {                        \
+                    if (k == axis) continue;                               \
+                    if (++idx[k] < outDims[k]) break;                      \
+                    idx[k] = 0;                                            \
+                }                                                          \
+            }                                                              \
+            return (matlab_mat *)Rv;                                       \
+        }                                                                  \
         if (dim == 3 && mat_is_3d(A)) {  /* reduce across depth -> M×N */  \
             matlab_mat3 *A3 = (matlab_mat3 *)A;                            \
             int64_t mm = A3->rows, nn = A3->cols, pp = A3->depth;          \
@@ -8971,6 +9015,78 @@ void *matlab_squeezeN(void *A) {
     else                   dst = ((matlab_mat *)R)->data;
     if (dst && total > 0) memcpy(dst, In->data, (size_t)total * sizeof(double));
     return R;
+}
+
+/* convN_batch(X, W) — 2-D convolution forward for a CNN layer.
+ *
+ *   X : H x W x C x N        (matN, rank-4 batched image tensor)
+ *   W : kH x kW x C x K      (matN, rank-4 filter set: K filters of kH×kW×C)
+ *   Y : (H - kH + 1) x (W - kW + 1) x K x N
+ *
+ * Valid-padding only (no border).  Stride 1.  Output is matN (rank-4),
+ * or rank-3 if N==1 (trailing-singleton drop), or rank-3 if K==1, etc.
+ *
+ * The arithmetic is the textbook "for each (h, w, k, n), sum over
+ * (kh, kw, c) of X[h+kh, w+kw, c, n] * W[kh, kw, c, k]".  No im2col
+ * (that buys ~3-5x throughput at the cost of one big alloc); explicit
+ * O(H*W*K*N*kH*kW*C) loop suffices for the demo-scale shapes that
+ * Tier C targets.  Falls back to mat_alloc(0,0) on shape mismatch. */
+void *matlab_conv2d_batch(void *Xv, void *Wv) {
+    if (!mat_is_nd(Xv) || !mat_is_nd(Wv)) return mat_alloc(0, 0);
+    matlab_matN *X = (matlab_matN *)Xv;
+    matlab_matN *W = (matlab_matN *)Wv;
+    if (X->ndims != 4 || W->ndims != 4) return mat_alloc(0, 0);
+    int64_t H = X->dims[0], Wd = X->dims[1], C = X->dims[2], N = X->dims[3];
+    int64_t kH = W->dims[0], kW = W->dims[1], Cw = W->dims[2], K = W->dims[3];
+    if (Cw != C) return mat_alloc(0, 0);
+    if (kH > H || kW > Wd) return mat_alloc(0, 0);
+    int64_t Hout = H - kH + 1, Wout = Wd - kW + 1;
+    int64_t outDims[4] = {Hout, Wout, K, N};
+    void *Rv = matN_alloc(4, outDims);
+    double *Yd = mat_is_nd(Rv)      ? ((matlab_matN *)Rv)->data
+              : mat_is_3d(Rv)      ? ((matlab_mat3 *)Rv)->data
+                                   : ((matlab_mat *)Rv)->data;
+    int64_t Xs0 = X->strides[0], Xs1 = X->strides[1], Xs2 = X->strides[2], Xs3 = X->strides[3];
+    int64_t Ws0 = W->strides[0], Ws1 = W->strides[1], Ws2 = W->strides[2], Ws3 = W->strides[3];
+    /* Output strides come from matN_alloc OR from the descriptor matN_alloc
+     * returned: rank dropped if Hout/Wout/K/N has trailing 1s.  Re-derive
+     * from the actual descriptor. */
+    int64_t Ys[4] = {0, 0, 0, 0};
+    if (mat_is_nd(Rv)) {
+        matlab_matN *Rn = (matlab_matN *)Rv;
+        for (uint32_t k = 0; k < Rn->ndims; ++k) Ys[k] = Rn->strides[k];
+        /* implicit trailing dims have stride 0 (no advance needed). */
+    } else if (mat_is_3d(Rv)) {
+        matlab_mat3 *R3 = (matlab_mat3 *)Rv;
+        Ys[0] = R3->cols * R3->depth;
+        Ys[1] = R3->depth;
+        Ys[2] = 1;
+        Ys[3] = 0;  /* N == 1 was dropped */
+    } else {
+        matlab_mat *R2 = (matlab_mat *)Rv;
+        Ys[0] = R2->cols; Ys[1] = 1;
+        Ys[2] = 0; Ys[3] = 0;
+    }
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t k = 0; k < K; ++k) {
+            for (int64_t h = 0; h < Hout; ++h) {
+                for (int64_t w = 0; w < Wout; ++w) {
+                    double acc = 0.0;
+                    for (int64_t c = 0; c < C; ++c) {
+                        for (int64_t kh = 0; kh < kH; ++kh) {
+                            for (int64_t kw = 0; kw < kW; ++kw) {
+                                double xv = X->data[(h + kh)*Xs0 + (w + kw)*Xs1 + c*Xs2 + n*Xs3];
+                                double wv = W->data[kh*Ws0 + kw*Ws1 + c*Ws2 + k*Ws3];
+                                acc += xv * wv;
+                            }
+                        }
+                    }
+                    Yd[h*Ys[0] + w*Ys[1] + k*Ys[2] + n*Ys[3]] = acc;
+                }
+            }
+        }
+    }
+    return Rv;
 }
 
 static int64_t mat3_offset(matlab_mat3 *A, int64_t i, int64_t j, int64_t k) {

@@ -6750,6 +6750,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
       /* Convolution. Both operands are matrices (vector layout for conv). */
       {"conv",       "matlab_conv",       1, "pp"},
       {"conv2",      "matlab_conv2",      1, "pp"},
+      /* Tier-C rank-4 batched conv: X(H,W,C,N) * W(kH,kW,C,K) -> Y(H',W',K,N). */
+      {"conv2d_batch", "matlab_conv2d_batch", 1, "pp"},
       /* Tier-1 builtins added alongside conv. filter is the IIR/FIR
        * difference equation (3 ptr args). The fftshift pair is
        * polymorphic on real/complex via the matlab_mat_c magic. */

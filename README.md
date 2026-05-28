@@ -7,7 +7,7 @@
 &nbsp;
 [![Codegen targets](https://img.shields.io/badge/codegen-LLVM_%7C_C_%7C_C%2B%2B_%7C_Python_%7C_TypeScript_%7C_SystemVerilog-7C3AED.svg)](#code-generation)
 [![Toolboxes](https://img.shields.io/badge/toolboxes-25_shipped-2EA44F.svg)](#shipped-toolboxes-in-the-runtime)
-[![Run-tests](https://img.shields.io/badge/run--tests-626_%E2%9C%93-2EA44F.svg)](test/Run)
+[![Run-tests](https://img.shields.io/badge/run--tests-628_%E2%9C%93-2EA44F.svg)](test/Run)
 [![SV goldens](https://img.shields.io/badge/SV_goldens-79_%E2%9C%93-2EA44F.svg)](test/EmitSV)
 &nbsp;
 [![GitHub stars](https://img.shields.io/github/stars/leonardoaraujosantos/matlab_llvm?style=social)](https://github.com/leonardoaraujosantos/matlab_llvm/stargazers)

@@ -211,7 +211,18 @@ gated on `mat_is_3d`, so 2-D paths are byte-for-byte unchanged.
 
 ---
 
-## 5. Tier C — true N-D arrays (rank ≥ 4) 🔵 *(large, ~1–2 weeks, pervasive)*
+## 5. Tier C — true N-D arrays (rank ≥ 4) 🟡 *(C1–C4 + batched conv shipped 2026-05-28)*
+
+**Status:** the rank-N descriptor + constructors + element indexing +
+shape verbs (reshape / permute / squeeze) + elementwise arithmetic +
+dim reductions + a rank-4 batched 2-D convolution are live.  REPL/DAP
+rendering and the per-op audit (C5/C6) remain.  Run-tests 627→628.
+
+Shipped in commits `0967f01` (descriptor + alloc + indexing + shape verbs)
+and the next commit (reductions + `conv2d_batch` + `dl_cnn_forward.m`
+headline).  See `runtime/matlab_runtime.cpp` for the implementation
+and `test/Run/array_tierc.m` + `test/Run/dl_cnn_forward.m` for the
+gating fixtures.
 
 Goal: first-class rank-N arrays — `H×W×C×N` batches, RGB video, cubes.
 This is the only path to MATLAB-equivalent N-D. **High blast radius.**

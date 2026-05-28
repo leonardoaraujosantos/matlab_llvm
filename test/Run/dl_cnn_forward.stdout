@@ -1,0 +1,6 @@
+dl_cnn_forward: Y ndims=4 size=3 3 2 2
+dl_cnn_forward: score(bar.vert) =1.000 score(bar.diag) =0.000
+dl_cnn_forward: score(diag.vert)=0.000 score(diag.diag)=1.000
+dl_cnn_forward: bar  -> P(vert)=0.731 P(diag)=0.269
+dl_cnn_forward: diag -> P(vert)=0.269 P(diag)=0.731
+dl_cnn_forward: PASS (each input picks its matching filter)

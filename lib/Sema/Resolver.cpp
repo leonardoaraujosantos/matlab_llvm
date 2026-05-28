@@ -880,6 +880,8 @@ void Resolver::registerBuiltins() {
     "conj", "real", "imag", "angle", "complex",
     "fft", "ifft", "fft2", "ifft2",
     "conv", "conv2",
+    /* Tier C: rank-4 batched convolution forward. */
+    "conv2d_batch",
     "filter", "any", "all", "tril", "triu",
     "fftshift", "ifftshift",
     "std", "var", "median", "diff",

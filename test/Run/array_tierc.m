@@ -74,4 +74,15 @@ E3 = E2 + E1;                   % matN + matN, same shape
 fprintf('array_tierc: matN+matN E3(1,1,1,1)=%.0f E3(2,2,2,2)=%.0f\n', ...
         E3(1, 1, 1, 1), E3(2, 2, 2, 2));
 
+% sum reduction on a rank-4 array along each axis.  Source is a 2x2x2x2
+% of 1s; reducing along ANY axis gives a rank-4 result with that dim=1,
+% which collapses if trailing.  Total numel(reduced) = numel(original)/2.
+S4 = ones(2, 2, 2, 2);
+R1 = sum(S4, 1);                % 1x2x2x2 -> collapses trailing? dim1=1 not trailing
+R2 = sum(S4, 4);                % 2x2x2x1 -> trailing-singleton -> rank 3
+fprintf('array_tierc: sum(S4,1) ndims=%.0f numel=%.0f total=%.0f\n', ...
+        ndims(R1), numel(R1), sum(sum(sum(R1, 4), 3), 2));
+fprintf('array_tierc: sum(S4,4) ndims=%.0f numel=%.0f\n', ...
+        ndims(R2), numel(R2));
+
 fprintf('array_tierc: PASS\n');

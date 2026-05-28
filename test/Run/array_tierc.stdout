@@ -12,4 +12,6 @@ array_tierc: permute ndims=4 size = 3 2 5 4
 array_tierc: permute P(1,1,1,1)=42 P(3,2,5,4)=88
 array_tierc: 3*ones(2,2,2,2): E2(1,1,1,1)=3 E2(2,2,2,2)=3
 array_tierc: matN+matN E3(1,1,1,1)=4 E3(2,2,2,2)=4
+array_tierc: sum(S4,1) ndims=4 numel=8 total=16
+array_tierc: sum(S4,4) ndims=3 numel=8
 array_tierc: PASS
