@@ -357,7 +357,20 @@ LogicalResult rewriteFprintfCall(Operation *Call, OpBuilder &B,
    * matlab_string*.  Route to the file variant of the variadic core. */
   if (NOps >= 2 && Call->getOperand(0).getType() == F64) {
     Value FmtV = Call->getOperand(1);
-    if (FmtV.getType() != PtrTy) return failure();
+    /* A single-quote char-array format is a `matlab.const_char` (not a
+     * matlab_string*); materialize it the same way the stdout path does so
+     * `fprintf(fid, '%d ', v)` works like the double-quote form. */
+    if (FmtV.getType() != PtrTy) {
+      auto FP = materializeStringArg(FmtV, B, Strings);
+      if (!FP) return failure();
+      B.setInsertionPoint(Call);
+      auto SFn = getOrInsertRuntimeFunc(B, M, "matlab_string_from_literal",
+                                        PtrTy, {PtrTy, I64});
+      Value SlenV = LLVM::ConstantOp::create(B, Loc, I64,
+                                             B.getI64IntegerAttr(FP->second));
+      FmtV = LLVM::CallOp::create(B, Loc, SFn, ValueRange{FP->first, SlenV})
+                 .getResult();
+    }
     if (NOps == 2) {
       B.setInsertionPoint(Call);
       auto Fn = getOrInsertRuntimeFunc(B, M, "matlab_fprintf_file_str", VoidTy,

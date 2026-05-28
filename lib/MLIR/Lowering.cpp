@@ -11799,7 +11799,31 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           }
       }
       llvm::SmallVector<mlir::Value, 4> Args;
-      for (const Expr *A : C.Args) if (A) Args.push_back(lowerExpr(*A));
+      /* sprintf / fopen take string parameters; a single-quote char-array
+       * literal lowers to a `matlab.const_char` tensor (not a matlab_string*),
+       * which the sprintf/fopen lowering rejects.  Wrap CharLiteral args in
+       * matlab_string_from_literal — the same shape a double-quote "..."
+       * string produces — so `sprintf('%d', x)` / `fopen('p', 'w')` work like
+       * their double-quote equivalents.  (A char-array *variable* format is a
+       * separate, deeper gap and is not handled here.) */
+      bool WrapCharArgs = (N->Name == "sprintf" || N->Name == "fopen");
+      for (const Expr *A : C.Args) {
+        if (!A) continue;
+        if (WrapCharArgs && A->Kind == NodeKind::CharLiteral) {
+          auto &S = static_cast<const CharLiteral &>(*A);
+          auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+          mlir::NamedAttribute VA(mlir::StringAttr::get(&MCtx, "value"),
+                                  mlir::StringAttr::get(&MCtx, S.Value));
+          mlir::Value Ch = emitUnreg("matlab.const_char", {},
+                                     mlir::NoneType::get(&MCtx), L, {VA});
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_string_from_literal"));
+          Args.push_back(emitUnreg("matlab.call_builtin", {Ch}, PtrTy, L, {Cal}));
+        } else {
+          Args.push_back(lowerExpr(*A));
+        }
+      }
       /* Variadic callee: if the user function's last declared input is
        * named "varargin", pack trailing args into a matlab_cell and
        * pass it as the last argument. The leading declared-1 args are

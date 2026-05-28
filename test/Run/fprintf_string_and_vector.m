@@ -36,3 +36,13 @@ fclose(fid);
 rid = fopen("/tmp/matlab_fprintf_vec_test.txt", "r");
 disp(fgetl(rid));
 fclose(rid);
+
+% Single-quote char-array formats (not just double-quote strings) now work
+% for sprintf, fopen, and fprintf(fid, ...).
+disp(sprintf('cq=%d sq=%d', 7, 9));
+fid = fopen("/tmp/matlab_fprintf_charfmt_test.txt", 'w');
+fprintf(fid, '%d,', [4 5 6]);
+fclose(fid);
+rid = fopen("/tmp/matlab_fprintf_charfmt_test.txt", 'r');
+disp(fgetl(rid));
+fclose(rid);
