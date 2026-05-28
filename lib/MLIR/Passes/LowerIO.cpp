@@ -276,7 +276,7 @@ LogicalResult rewriteDispCall(Operation *Call, OpBuilder &B,
 LogicalResult rewriteFprintfCall(Operation *Call, OpBuilder &B,
                                  StringGlobals &Strings) {
   unsigned NOps = Call->getNumOperands();
-  if (NOps < 1 || NOps > 9) return failure();   /* fmt + up to 8 trailing values */
+  if (NOps < 1 || NOps > 64) return failure();   /* fmt (+ optional fid) + values */
 
   MLIRContext *Ctx = B.getContext();
   auto I64 = IntegerType::get(Ctx, 64);
@@ -284,93 +284,139 @@ LogicalResult rewriteFprintfCall(Operation *Call, OpBuilder &B,
   auto PtrTy = LLVM::LLVMPointerType::get(Ctx);
   auto VoidTy = LLVM::LLVMVoidType::get(Ctx);
 
-  /* `fprintf(fid, fmt, ...)` when the first arg is an f64 (the file id
-   * returned by fopen). The format flows through matlab_string_from_literal
-   * at the frontend, so the second operand here is a matlab_string*
-   * rather than a raw char array. Route to matlab_fprintf_file_{str,f64}
-   * which accept matlab_string* directly — only literal + single-f64
-   * forms are supported in v1. */
+  ModuleOp M = Call->getParentOfType<ModuleOp>();
+  auto Loc = Call->getLoc();
+  auto I8 = IntegerType::get(Ctx, 8);
+
+  /* The frontend tags fprintf/sprintf with a `str_mask` bitmask (bit i set =>
+   * operand i is a string) — LowerIO has no Sema types of its own. */
+  int64_t StrMask = 0;
+  if (auto MA = Call->getAttrOfType<IntegerAttr>("str_mask"))
+    StrMask = MA.getInt();
+
+  /* Build the (ptr[], kind[]) descriptor array for value operands [start..NOps)
+   * consumed by the variadic runtime core (which expands every matrix element,
+   * recycles the format, and handles %s).  kind 0 = numeric matlab_mat*, 1 =
+   * matlab_string*; scalar f64 args are boxed to 1x1, char-literal string args
+   * wrapped via matlab_string_from_literal. */
+  auto buildArgs = [&](unsigned start, Value &ValsBuf, Value &KindsBuf,
+                       unsigned &NVals) -> LogicalResult {
+    NVals = NOps - start;
+    B.setInsertionPoint(Call);
+    Value One = LLVM::ConstantOp::create(B, Loc, I64, B.getI64IntegerAttr(1));
+    ValsBuf = LLVM::AllocaOp::create(
+        B, Loc, PtrTy, LLVM::LLVMArrayType::get(PtrTy, NVals), One, 0);
+    KindsBuf = LLVM::AllocaOp::create(
+        B, Loc, PtrTy, LLVM::LLVMArrayType::get(I8, NVals), One, 0);
+    for (unsigned i = start; i < NOps; ++i) {
+      Value V = Call->getOperand(i);
+      bool IsStr = (StrMask >> i) & 1;
+      Value ValPtr;
+      int8_t Kind;
+      if (IsStr) {
+        Kind = 1;
+        if (auto Pair = materializeStringArg(V, B, Strings)) {  /* char literal */
+          auto [Sp, Sl] = *Pair;
+          auto Fn = getOrInsertRuntimeFunc(B, M, "matlab_string_from_literal",
+                                           PtrTy, {PtrTy, I64});
+          Value SlenV = LLVM::ConstantOp::create(B, Loc, I64,
+                                                 B.getI64IntegerAttr(Sl));
+          ValPtr = LLVM::CallOp::create(B, Loc, Fn, ValueRange{Sp, SlenV})
+                       .getResult();
+        } else if (V.getType() == PtrTy) {           /* string variable */
+          ValPtr = V;
+        } else {
+          return failure();
+        }
+      } else {
+        Kind = 0;
+        if (V.getType() == F64) {                     /* scalar -> 1x1 box */
+          auto Fn = getOrInsertRuntimeFunc(B, M, "matlab_mat_scalar", PtrTy, {F64});
+          ValPtr = LLVM::CallOp::create(B, Loc, Fn, ValueRange{V}).getResult();
+        } else if (V.getType() == PtrTy) {            /* matrix descriptor */
+          ValPtr = V;
+        } else {
+          return failure();
+        }
+      }
+      Value Idx = LLVM::ConstantOp::create(B, Loc, I64,
+                                           B.getI64IntegerAttr((int64_t)(i - start)));
+      Value VGep = LLVM::GEPOp::create(B, Loc, PtrTy, PtrTy, ValsBuf,
+                                       ValueRange{Idx});
+      LLVM::StoreOp::create(B, Loc, ValPtr, VGep);
+      Value KGep = LLVM::GEPOp::create(B, Loc, PtrTy, I8, KindsBuf,
+                                       ValueRange{Idx});
+      LLVM::StoreOp::create(
+          B, Loc, LLVM::ConstantOp::create(B, Loc, I8, B.getI8IntegerAttr(Kind)),
+          KGep);
+    }
+    return success();
+  };
+
+  /* `fprintf(fid, fmt, ...)` — fid is an f64 (the fopen id), fmt a
+   * matlab_string*.  Route to the file variant of the variadic core. */
   if (NOps >= 2 && Call->getOperand(0).getType() == F64) {
     Value FmtV = Call->getOperand(1);
-    if (FmtV.getType() != PtrTy) return failure();
-    B.setInsertionPoint(Call);
-    ModuleOp M = Call->getParentOfType<ModuleOp>();
+    /* A single-quote char-array format is a `matlab.const_char` (not a
+     * matlab_string*); materialize it the same way the stdout path does so
+     * `fprintf(fid, '%d ', v)` works like the double-quote form. */
+    if (FmtV.getType() != PtrTy) {
+      auto FP = materializeStringArg(FmtV, B, Strings);
+      if (!FP) return failure();
+      B.setInsertionPoint(Call);
+      auto SFn = getOrInsertRuntimeFunc(B, M, "matlab_string_from_literal",
+                                        PtrTy, {PtrTy, I64});
+      Value SlenV = LLVM::ConstantOp::create(B, Loc, I64,
+                                             B.getI64IntegerAttr(FP->second));
+      FmtV = LLVM::CallOp::create(B, Loc, SFn, ValueRange{FP->first, SlenV})
+                 .getResult();
+    }
     if (NOps == 2) {
-      auto Fn = getOrInsertRuntimeFunc(
-          B, M, "matlab_fprintf_file_str", VoidTy, {F64, PtrTy});
-      LLVM::CallOp::create(B, Call->getLoc(), Fn,
-                            ValueRange{Call->getOperand(0), FmtV});
+      B.setInsertionPoint(Call);
+      auto Fn = getOrInsertRuntimeFunc(B, M, "matlab_fprintf_file_str", VoidTy,
+                                       {F64, PtrTy});
+      LLVM::CallOp::create(B, Loc, Fn, ValueRange{Call->getOperand(0), FmtV});
       Call->erase();
       return success();
     }
-    if (NOps == 3 && Call->getOperand(2).getType() == F64) {
-      auto Fn = getOrInsertRuntimeFunc(
-          B, M, "matlab_fprintf_file_f64", VoidTy, {F64, PtrTy, F64});
-      LLVM::CallOp::create(
-          B, Call->getLoc(), Fn,
-          ValueRange{Call->getOperand(0), FmtV, Call->getOperand(2)});
-      Call->erase();
-      return success();
-    }
-    return failure();
+    Value ValsBuf, KindsBuf;
+    unsigned NVals;
+    if (failed(buildArgs(2, ValsBuf, KindsBuf, NVals))) return failure();
+    B.setInsertionPoint(Call);
+    Value NVc = LLVM::ConstantOp::create(B, Loc, I64,
+                                         B.getI64IntegerAttr((int64_t)NVals));
+    auto Fn = getOrInsertRuntimeFunc(B, M, "matlab_fprintf_file_vec", VoidTy,
+                                     {F64, PtrTy, PtrTy, PtrTy, I64});
+    LLVM::CallOp::create(B, Loc, Fn, ValueRange{Call->getOperand(0), FmtV,
+                                                ValsBuf, KindsBuf, NVc});
+    Call->erase();
+    return success();
   }
 
+  /* `fprintf(fmt, ...)` -> stdout. */
   auto FmtPair = materializeStringArg(Call->getOperand(0), B, Strings);
   if (!FmtPair) return failure();
   auto [FmtPtr, FmtLen] = *FmtPair;
-
-  /* Extra args go to the matlab_fprintf_f64_* runtime entries as f64.
-   * An f64 operand passes straight through; a ptr operand is a matrix
-   * descriptor — for the common case of a scalar-valued result that
-   * Sema couldn't pin to f64 (e.g. `max(v)` / `sum(v)`, typed `any` →
-   * a 1×1 matrix at runtime) we extract element 1 with
-   * matlab_subscript1_s.  Anything else (an unconverted tensor, a
-   * genuine multi-element matrix) still bails — printf-style format
-   * cycling over a matrix is a separate feature. */
   B.setInsertionPoint(Call);
-  ModuleOp M = Call->getParentOfType<ModuleOp>();
-  SmallVector<Value, 6> DataArgs;
-  for (unsigned i = 1; i < NOps; ++i) {
-    Value V = Call->getOperand(i);
-    Type T = V.getType();
-    if (T == F64) {
-      DataArgs.push_back(V);
-    } else if (T == PtrTy) {
-      auto Sub = getOrInsertRuntimeFunc(
-          B, M, "matlab_subscript1_s", F64, {PtrTy, F64});
-      Value One = LLVM::ConstantOp::create(
-          B, Call->getLoc(), F64, B.getF64FloatAttr(1.0));
-      auto Ext = LLVM::CallOp::create(B, Call->getLoc(), Sub,
-                                      ValueRange{V, One});
-      DataArgs.push_back(Ext.getResult());
-    } else {
-      return failure();
-    }
+  Value FmtLenV = LLVM::ConstantOp::create(B, Loc, I64,
+                                           B.getI64IntegerAttr(FmtLen));
+  if (NOps == 1) {
+    auto Fn = getOrInsertRuntimeFunc(B, M, "matlab_fprintf_str", VoidTy,
+                                     {PtrTy, I64});
+    LLVM::CallOp::create(B, Loc, Fn, ValueRange{FmtPtr, FmtLenV});
+    Call->erase();
+    return success();
   }
-
-  Value FmtLenV = LLVM::ConstantOp::create(
-      B, Call->getLoc(), I64, B.getI64IntegerAttr(FmtLen));
-
-  SmallVector<Value, 6> Args{FmtPtr, FmtLenV};
-  for (Value V : DataArgs) Args.push_back(V);
-
-  /* Pick the matching runtime symbol by arity. */
-  StringRef Name;
-  SmallVector<Type, 6> Sig{PtrTy, I64};
-  switch (NOps) {
-    case 1: Name = "matlab_fprintf_str";  break;
-    case 2: Name = "matlab_fprintf_f64";   Sig.push_back(F64); break;
-    case 3: Name = "matlab_fprintf_f64_2"; Sig.append({F64, F64}); break;
-    case 4: Name = "matlab_fprintf_f64_3"; Sig.append({F64, F64, F64}); break;
-    case 5: Name = "matlab_fprintf_f64_4"; Sig.append({F64, F64, F64, F64}); break;
-    case 6: Name = "matlab_fprintf_f64_5"; Sig.append({F64, F64, F64, F64, F64}); break;
-    case 7: Name = "matlab_fprintf_f64_6"; Sig.append({F64, F64, F64, F64, F64, F64}); break;
-    case 8: Name = "matlab_fprintf_f64_7"; Sig.append({F64, F64, F64, F64, F64, F64, F64}); break;
-    case 9: Name = "matlab_fprintf_f64_8"; Sig.append({F64, F64, F64, F64, F64, F64, F64, F64}); break;
-    default: return failure();
-  }
-  auto Fn = getOrInsertRuntimeFunc(B, M, Name, VoidTy, Sig);
-  LLVM::CallOp::create(B, Call->getLoc(), Fn, Args);
+  Value ValsBuf, KindsBuf;
+  unsigned NVals;
+  if (failed(buildArgs(1, ValsBuf, KindsBuf, NVals))) return failure();
+  B.setInsertionPoint(Call);
+  Value NV = LLVM::ConstantOp::create(B, Loc, I64,
+                                      B.getI64IntegerAttr((int64_t)NVals));
+  auto Fn = getOrInsertRuntimeFunc(B, M, "matlab_fprintf_vec", VoidTy,
+                                   {PtrTy, I64, PtrTy, PtrTy, I64});
+  LLVM::CallOp::create(B, Loc, Fn,
+                       ValueRange{FmtPtr, FmtLenV, ValsBuf, KindsBuf, NV});
   Call->erase();
   return success();
 }
