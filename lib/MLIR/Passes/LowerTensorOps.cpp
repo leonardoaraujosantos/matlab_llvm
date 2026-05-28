@@ -3047,6 +3047,33 @@ bool TensorLowering::rewriteBuiltinCalls() {
       continue;
     }
 
+    /* matlab_mat_clone_cow — copy-on-assign deep clone of a numeric matrix
+     * (ptr -> ptr), emitted for `B = A` so a later `B(i)=v` cannot mutate A's
+     * shared buffer.  Same ptr-settle wait as matlab_obj_clone. */
+    if (Name == "matlab_mat_clone_cow" && Call->getNumOperands() == 1 &&
+        Call->getNumResults() == 1) {
+      Value Arg = Call->getOperand(0);
+      /* Scalars flow as f64 and need no clone (value semantics already) —
+       * pass the operand through.  A real heap matrix is ptr-typed; wait for
+       * it to settle to ptr before emitting the deep clone. */
+      if (Arg.getType() != PtrTy) {
+        if (mlir::isa<mlir::Float64Type>(Arg.getType())) {
+          Call->getResult(0).replaceAllUsesWith(Arg);
+          Call->erase();
+          Changed = true;
+        }
+        continue;
+      }
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_mat_clone_cow", PtrTy, {PtrTy});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{Arg});
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+
     /* File I/O. fopen takes two matlab_string* pointers (the frontend
      * wraps raw char/string literals for us); fclose / feof take an f64
      * file id; fgetl returns a matlab_string*. Sema leaves these
