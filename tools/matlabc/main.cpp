@@ -1583,7 +1583,7 @@ static void printHelpOverview() {
 /* ---- `ver` — product version + shipped-toolbox inventory --------------- *
  * matlab_llvm's analogue of MATLAB's `ver`.  The version's minor number
  * tracks the shipped-toolbox count (bump alongside the README badge). */
-static const char *kProductVersion = "0.25.2";
+static const char *kProductVersion = "0.25.3";
 static const char *kProductTagline =
     "a MATLAB compiler + runtime on MLIR / LLVM";
 
@@ -1618,7 +1618,7 @@ static const ToolboxInfo kToolboxes[] = {
   {"Sensor Fusion and Tracking",        "Tier 1-6"},
   {"Robotics System",                   "Tier 1-6"},
   {"Navigation",                        "Tier 1-6"},
-  {"Deep Learning",                     "Tier 1-4 (dlarray + autodiff + training + LSTM/BPTT + attention + embedding)"},
+  {"Deep Learning",                     "Tier 1-4 complete (dlarray + autodiff + training + LSTM/GRU/bilstm/lstmp + attention + embedding)"},
 };
 
 static void printVersion(const std::string &filter) {
@@ -2561,6 +2561,9 @@ static std::string buildReplPrelude(const std::string &Src) {
     {false, "mse",                       "dlnet_classdefs.m"},
     {false, "lstm",                      "dlnet_classdefs.m"},
     {false, "embed",                     "dlnet_classdefs.m"},
+    {false, "gru",                       "dlnet_classdefs.m"},
+    {false, "bilstm",                    "dlnet_classdefs.m"},
+    {false, "lstmp",                     "dlnet_classdefs.m"},
     /* Global Optimization Toolbox Tier-2 — `gads_classdefs.m` holds the
      * MultiStart + GlobalSearch solver objects.  (`run` is too generic
      * to trigger on; the solver-object mentions pull the prelude.) */
@@ -11693,6 +11696,7 @@ int main(int Argc, char **Argv) {
       /* Deep Learning Toolbox — `dlnet_classdefs.m`. */
       "dlarray", "dlgradient", "extractdata", "relu", "sigmoid",
       "softmax", "crossentropy", "mse", "lstm", "embed",
+      "gru", "bilstm", "lstmp",
       /* GPU Coder T5 design-pattern helpers — runtime entries, no
        * prelude file needed.  Listed here only for the AOT-prelude
        * scanner's awareness (no leaf to map). */
@@ -11977,7 +11981,8 @@ int main(int Argc, char **Argv) {
         ClsName == "extractdata" || ClsName == "relu" ||
         ClsName == "sigmoid" || ClsName == "softmax" ||
         ClsName == "crossentropy" || ClsName == "mse" ||
-        ClsName == "lstm" || ClsName == "embed")
+        ClsName == "lstm" || ClsName == "embed" ||
+        ClsName == "gru" || ClsName == "bilstm" || ClsName == "lstmp")
       return "dlnet_classdefs.m";
     /* GPU Coder T5 design-pattern helpers are C runtime entries; no
      * classdef file to pull in. */

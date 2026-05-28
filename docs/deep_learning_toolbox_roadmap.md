@@ -113,20 +113,20 @@ kernel. (ONNX/PyTorch/TF *import* is carved — see §10.)
   manual update via `extractdata`/re-wrap — reaches 100% train accuracy, loss
   1.80→0.01); the built-in `trainnet`/`trainingOptions` driver + the functional
   solvers `adamupdate`/`sgdmupdate`/`rmspropupdate` are carved (they want the
-  object-array `dlnetwork` / multi-return state, both deferred).  **T4 partial 🟡**:
-  the **functional LSTM** (`lstm(X, H0, C0, W, R, b)`) is shipped as a single
-  multi-parent tape node carrying every per-timestep gate + state, so
-  `dlgradient` walks it backward in time for **BPTT for free**
-  (`dl_lstm_sequence.m`: first-bit-memory task → 100%, loss 6→0); **functional
-  scaled-dot-product attention** composes from existing matmul + softmax +
-  the newly-added `transpose` (`OP_TRANSPOSE`), no dedicated opcode
-  (`dl_attention.m`: associative-recall — softmax peaks on the matching key,
-  loss 1→0); **`embed(E, idx)` — wordEmbeddingLayer's functional core** —
-  `OP_EMBED` gather-forward + scatter-add-backward, repeated indices
-  correctly accumulate (`dl_embed_train.m`: learns a 3×5 embedding table to
-  per-element error < 0.01).  GRU / bilstm / `lstmProjectedLayer` follow the
-  same custom-op pattern (one extra opcode + pullback each) and are carved
-  as documented follow-ons.  **T5–T6 + the HDL track are 🔵 not started.**  The forward-pass substrate (matrix kernel),
+  object-array `dlnetwork` / multi-return state, both deferred).  **T4 ✅
+  complete** on the functional surface: **`lstm`** (one OP_LSTM tape node,
+  BPTT through every per-timestep gate, `dl_lstm_sequence.m` → 100%, loss
+  6→0); **`gru`** (same task → 100%, loss 6→0); **`bilstm`** (packed
+  forward/backward weights, both directions BPTT'd in one node);
+  **`lstmp`** (projected hidden, `dP` accumulated alongside `dW/dR/db`);
+  **functional scaled-dot-product attention** composes from existing matmul
+  + softmax + the added `transpose` — no dedicated opcode (`dl_attention.m`:
+  associative-recall, softmax peaks on the matching key, loss 1→0);
+  **`embed`** (gather-forward + scatter-add-backward, repeated indices
+  correctly accumulate — `dl_embed_train.m` → per-element error < 0.01).
+  The layer-object forms (`lstmLayer`/`gruLayer`/`bilstmLayer`/
+  `lstmProjectedLayer`/`selfAttentionLayer`/`wordEmbeddingLayer`) are carved
+  with the rest of `dlnetwork`.  **T5–T6 + the HDL track are 🔵 not started.**  The forward-pass substrate (matrix kernel),
   the fixed-point/SV/cocotb lane, `bayesopt`, `ode45`, and the classdef +
   handle ABI are all already in the runtime.
 - **No external dependencies** — matching project precedent.
@@ -204,19 +204,22 @@ test accuracy > 95%. This exercises T1 (forward) → T2 (autodiff) → T3
 
 ---
 
-## 6. Tier-4 — Sequence / recurrent / attention 🟡 (LSTM + attention + embedding shipped; layer-object form + GRU/bilstm carved)
+## 6. Tier-4 — Sequence / recurrent / attention ✅ (functional surface complete; layer-object forms carved with `dlnetwork`)
 
 | # | Surface | Notes |
 |---|---------|-------|
 | 4.1 | **`lstm(X, H0, C0, W, R, b)` ✅** | functional form — one custom `OP_LSTM` tape node, per-timestep gate/state buffer, BPTT in the existing `dlgradient`.  `lstmLayer` object form carved with the rest of `dlnetwork`. |
-| 4.2 | `gruLayer` / `bilstmLayer` / `lstmProjectedLayer` | each is one extra opcode + pullback in the same custom-op pattern; deferred until needed. |
+| 4.2a | **`gru(X, H0, W, R, b)` ✅** | reset/update/candidate gates; BPTT handles the `r.*h_prev` path in the candidate's recurrent contribution. 3H-stacked `[r; z; h]` weights. |
+| 4.2b | **`bilstm(X, H0f, C0f, H0b, C0b, W, R, b)` ✅** | bidirectional LSTM packed as `[forward; backward]` weights (8H × D / 8H × H / 8H × 1); output is `[Yf; Yb_aligned]` re-aligned to original time order; both directions BPTT'd in one tape node. |
+| 4.2c | **`lstmp(X, H0, C0, W, R, P, b)` ✅** | LSTM with a projection `P` (`Hp × H`) applied to the hidden state — the recurrence + output operate at `Hp`, but the cell stays at `H`; `dlgradient` accumulates `dP` alongside `dW/dR/db`. |
 | 4.3 | Sequence I/O | `sequenceInputLayer`, sequence padding/truncation, `sequenceFoldingLayer`/`sequenceUnfoldingLayer` — wait on `dlnetwork`. |
 | 4.4 | **`embed(E, idx)` ✅** | wordEmbeddingLayer's functional core.  `OP_EMBED` gather-forward + scatter-add-backward (repeated indices correctly accumulate gradient).  Indices are plain integers (not dlarrays). |
 | 4.5 | **functional attention ✅** | scaled-dot-product attention as `V * softmax(K' * Q)` — composes from existing matmul + softmax + the newly-added `transpose` (`OP_TRANSPOSE`), no dedicated attention opcode.  `selfAttentionLayer` object form carved with the rest of `dlnetwork`. |
 | 4.6 | 1-D conv sequence path | `convolution1dLayer` — needs rank-3 tensors (`any_shape_roadmap` Tier C). |
 
 **Headlines (shipped)**:
-- `examples/dlnet/dl_lstm_sequence.m` — 4-unit LSTM trained on a first-bit-memory task → 100% accuracy, loss 6→0.
+- `examples/dlnet/dl_lstm_sequence.m` — 4-unit LSTM trained on a first-bit-memory task → 100%, loss 6→0.
+- `examples/dlnet/dl_gru_sequence.m` — same task with a GRU cell → 100%, loss 6→0 (matches the LSTM headline with fewer parameters).
 - `examples/dlnet/dl_attention.m` — associative-recall task: learn `Wq`/`Wk`/`Wv` so attention focuses on the matching key (loss 1→0; softmax peaks on the correct key).
 - `examples/dlnet/dl_embed_train.m` — learn a 3×5 embedding table from a token sequence with repeats (per-element error < 0.01).
 

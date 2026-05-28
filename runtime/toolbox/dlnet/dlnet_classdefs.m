@@ -98,6 +98,18 @@ classdef dlarray
             r = dlarray();
             matlab_dlnet_lstm(r, x, h0, c0, W, R, b);
         end
+        function r = gru(x, h0, W, R, b)
+            r = dlarray();
+            matlab_dlnet_gru(r, x, h0, W, R, b);
+        end
+        function r = bilstm(x, h0f, c0f, h0b, c0b, W, R, b)
+            r = dlarray();
+            matlab_dlnet_bilstm(r, x, h0f, c0f, h0b, c0b, W, R, b);
+        end
+        function r = lstmp(x, h0, c0, W, R, P, b)
+            r = dlarray();
+            matlab_dlnet_lstmp(r, x, h0, c0, W, R, P, b);
+        end
     end
 end
 % `extractdata(x)` and `dlgradient(loss, v)` are intercepted in Lowering.cpp
