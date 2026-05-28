@@ -4075,6 +4075,77 @@ export function fprintf_file_f64(fp: any, fmt: string, ...rest: any[]): void {
   fs.writeSync(fp, Buffer.from(out, "utf8"));
 }
 
+// --- variadic fprintf/sprintf core (mirrors runtime matlab_fmt_vec_core) ----
+// `vals` is a TS array of NDArrays (kind 0, numeric — every element consumed
+// column-major) or strings (kind 1); the format is applied repeatedly, one
+// value per spec, recycling until all values are consumed (MATLAB semantics).
+export function mat_scalar(x: number): NDArray {
+  return new NDArray(new Float64Array([Number(x)]), [1, 1]);
+}
+
+function _fmtVec(fmt: string, vals: any[], kinds: any[], n: number): string {
+  const eb = expandEscapes(String(fmt));
+  const toks: Array<{ s: boolean; v: any }> = [];
+  const nn = n | 0;
+  for (let i = 0; i < nn; i++) {
+    const isStr = kinds && Number(kinds[i]) === 1;
+    const v = vals[i];
+    if (isStr) {
+      toks.push({ s: true, v: v == null ? "" : String(v) });
+    } else {
+      const a = asArray(v);
+      const data = (a as any).data;
+      const sh = (a as any).shape || [1, 1];
+      const rows = (sh[0] | 0) || 1, cols = (sh[1] | 0) || 1;
+      for (let c = 0; c < cols; c++)
+        for (let r = 0; r < rows; r++)
+          toks.push({ s: false, v: Number(data[r * cols + c]) });  // column-major
+    }
+  }
+  if (toks.length === 0) return eb;
+  const specRe = /^%([-+ #0]*)(\d+)?(?:\.(\d+))?([diouxXeEfFgGsc])/;
+  let out = ""; let ti = 0; let first = true;
+  while (ti < toks.length || first) {
+    first = false; let ranOut = false; let i = 0;
+    while (i < eb.length) {
+      const c = eb[i];
+      if (c !== "%") { out += c; i++; continue; }
+      if (i + 1 < eb.length && eb[i + 1] === "%") { out += "%"; i += 2; continue; }
+      const m = specRe.exec(eb.slice(i));
+      if (!m) { out += eb.slice(i); i = eb.length; break; }
+      if (ti >= toks.length) { ranOut = true; break; }
+      const conv = m[4]; const t = toks[ti++];
+      if (conv === "s" || conv === "c") {
+        out += t.s ? cPrintf(m[0], [t.v]) : cPrintf("%g", [t.v]);
+      } else if (conv === "d" || conv === "i") {  // integer-of-double -> %.0f
+        out += cPrintf("%" + (m[1] || "") + (m[2] || "") + ".0f",
+                       [t.s ? 0 : Number(t.v)]);
+      } else {
+        out += cPrintf(m[0], [t.s ? 0 : Number(t.v)]);
+      }
+      i += m[0].length;
+    }
+    if (ranOut || ti >= toks.length) break;
+  }
+  return out;
+}
+
+export function fprintf_vec(fmt: string, _fmtlen: number, vals: any[],
+                            kinds: any[], n: number): void {
+  process.stdout.write(_fmtVec(fmt, vals, kinds, n));
+}
+
+export function sprintf_vec(fmt: string, vals: any[], kinds: any[],
+                            n: number): string {
+  return _fmtVec(fmt, vals, kinds, n);
+}
+
+export function fprintf_file_vec(fp: any, fmt: string, vals: any[],
+                                 kinds: any[], n: number): void {
+  const fs = getFs(); if (!fs || fp == null) return;
+  fs.writeSync(fp, Buffer.from(_fmtVec(fmt, vals, kinds, n), "utf8"));
+}
+
 export function fwrite_mat(fp: any, A: any): number {
   const fs = getFs(); if (!fs || fp == null) return 0;
   const a = asArray(A);

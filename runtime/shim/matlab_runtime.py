@@ -250,6 +250,93 @@ def fprintf_file_f64(fp, fmt, n=None, v=None):
     _fp_write(fp, _c_printf(_expand_escapes(str(fmt)), v))
 
 
+# --- variadic fprintf/sprintf core (mirrors runtime matlab_fmt_vec_core) ----
+# Matches the `-emit-python` descriptor-array lowering: `vals` is a Python list
+# of numpy arrays (kind 0, numeric — every element consumed column-major) or
+# strings (kind 1); the format is applied repeatedly, one value per spec,
+# recycling until all values are consumed (MATLAB fprintf semantics).
+
+def mat_scalar(x):
+    return np.array([[float(x)]])
+
+
+def _fmt_vec(fmt, vals, kinds, n):
+    import re
+    ebuf = _expand_escapes(str(fmt))
+    toks = []  # (is_str, value)
+    nn = int(n)
+    i = 0
+    while i < nn:                              # `range` is shadowed in this shim
+        is_str = i < len(kinds) and int(kinds[i]) == 1
+        v = vals[i] if i < len(vals) else None
+        if is_str:
+            toks.append((True, "" if v is None else str(v)))
+        else:
+            arr = np.asarray(_m(v), dtype=float)
+            for e in arr.flatten(order='F'):   # column-major, MATLAB order
+                toks.append((False, float(e)))
+        i += 1
+    if not toks:
+        return ebuf
+    spec_re = re.compile(r'%([-+ #0]*)(\d+)?(?:\.(\d+))?([diouxXeEfFgGsc])')
+    out = []
+    ti = 0
+    first = True
+    while ti < len(toks) or first:
+        first = False
+        ran_out = False
+        i = 0
+        while i < len(ebuf):
+            c = ebuf[i]
+            if c != '%':
+                out.append(c); i += 1; continue
+            if i + 1 < len(ebuf) and ebuf[i + 1] == '%':
+                out.append('%'); i += 2; continue
+            m = spec_re.match(ebuf, i)
+            if not m:
+                out.append(ebuf[i:]); i = len(ebuf); break
+            if ti >= len(toks):
+                ran_out = True; break
+            flags, width, prec, conv = m.group(1, 2, 3, 4)
+            is_str, val = toks[ti]; ti += 1
+            try:
+                if conv in 'di':   # integer-of-double -> %.0f (rounds, as in C)
+                    spec = '%' + (flags or '') + (width or '') + '.0f'
+                    out.append(spec % (0.0 if is_str else float(val)))
+                elif conv in 'ouxX':
+                    spec = '%' + (flags or '') + (width or '') + conv
+                    out.append(spec % (int(0 if is_str else val) & 0xFFFFFFFFFFFFFFFF))
+                elif conv in 'eEfFgG':
+                    spec = '%' + (flags or '') + (width or '') + (('.' + prec) if prec else '') + conv
+                    out.append(spec % (0.0 if is_str else float(val)))
+                elif conv in 'sc':
+                    if is_str:
+                        spec = '%' + (flags or '') + (width or '') + (('.' + prec) if prec else '') + 's'
+                        out.append(spec % str(val))
+                    else:
+                        out.append('%g' % float(val))
+                else:
+                    out.append(str(val))
+            except (TypeError, ValueError):
+                out.append(str(val))
+            i = m.end()
+        if ran_out or ti >= len(toks):
+            break
+    return "".join(out)
+
+
+def fprintf_vec(fmt, fmtlen, vals, kinds, n):
+    sys.stdout.write(_fmt_vec(fmt, vals, kinds, n))
+
+
+def sprintf_vec(fmt, vals, kinds, n):
+    return _fmt_vec(fmt, vals, kinds, n)
+
+
+def fprintf_file_vec(fp, fmt, vals, kinds, n):
+    _fp_write(fp, _fmt_vec(fmt, vals, kinds, n))
+
+
 def input_num(prompt, plen=None):
     sys.stdout.write(prompt); sys.stdout.flush()
     try: return float(input())

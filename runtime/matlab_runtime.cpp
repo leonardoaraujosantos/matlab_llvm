@@ -23,6 +23,7 @@
 #include <unistd.h>  /* for write(2), used by matlab_err_emit_traceback_to_stderr */
 
 #include <vector>    /* Phase-4 RAII scratch buffers */
+#include <string>    /* std::string — fprintf/sprintf variadic format core */
 #include <algorithm> /* std::sort — used by §4.3 medfilt1 / hampel */
 
 #ifndef M_PI
@@ -252,6 +253,99 @@ void matlab_fprintf_str(const char *fmt, int64_t n) {
     buf[len] = '\0';
     pthread_mutex_lock(&matlab_io_mutex);
     fputs(buf, stdout);
+    pthread_mutex_unlock(&matlab_io_mutex);
+}
+
+/* Box a scalar double into a fresh 1x1 matrix — used by the fprintf lowering
+ * to pass scalar value-args uniformly through the descriptor-array path. */
+matlab_mat *matlab_mat_scalar(double v) {
+    matlab_mat *m = mat_alloc(1, 1);
+    m->data[0] = v;
+    return m;
+}
+
+/* Sink-agnostic variadic printf core.  Appends the formatted output to `out`.
+ * `vals[i]` is a matlab_mat* when kinds[i]==0 (numeric — every element is
+ * consumed, column-major) or a matlab_string* when kinds[i]==1.  The format is
+ * expanded (escapes + %d->%.0f) once, then applied repeatedly, consuming one
+ * value per conversion spec and recycling the format until all values are used
+ * — MATLAB's fprintf/sprintf semantics — so `fprintf('%.1f ', v)` prints every
+ * element and `fprintf('%d %d %d\n', v)` fills all three specifiers.  `%s`
+ * consumes one whole string token.  Shared by fprintf (stdout), fprintf(fid),
+ * and sprintf. */
+static void matlab_fmt_vec_core(std::string &out, const char *fmt, int64_t fmtn,
+                                void **vals, int8_t *kinds, int64_t nargs) {
+    struct ml_str_ { char *data; int64_t len; };
+    if (fmtn < 0) fmtn = 0;
+    if (fmtn > 4092) fmtn = 4092;
+    char ebuf[4096];
+    int64_t elen = expand_escapes(ebuf, fmt, fmtn);
+    ebuf[elen] = '\0';
+
+    /* Flatten every argument into a token stream. */
+    struct Tok { bool isStr; double num; const char *s; int64_t slen; };
+    std::vector<Tok> toks;
+    for (int64_t i = 0; i < nargs; ++i) {
+        if (kinds[i] == 1) {
+            auto *ms = reinterpret_cast<ml_str_ *>(vals[i]);
+            toks.push_back({true, 0.0, ms ? ms->data : "", ms ? ms->len : 0});
+        } else {
+            matlab_mat *m = reinterpret_cast<matlab_mat *>(vals[i]);
+            if (!m) continue;
+            for (int64_t c = 0; c < m->cols; ++c)        /* column-major */
+                for (int64_t r = 0; r < m->rows; ++r)
+                    toks.push_back({false, m->data[r * m->cols + c], nullptr, 0});
+        }
+    }
+
+    if (toks.empty()) { out.append(ebuf, (size_t)elen); return; }
+
+    size_t ti = 0;
+    bool firstPass = true;
+    while (ti < toks.size() || firstPass) {
+        firstPass = false;
+        bool ranOut = false;
+        for (int64_t k = 0; k < elen && !ranOut; ) {
+            char c = ebuf[k];
+            if (c != '%') { out.push_back(c); ++k; continue; }
+            if (k + 1 < elen && ebuf[k + 1] == '%') { out.push_back('%'); k += 2; continue; }
+            int64_t j = k + 1;
+            while (j < elen && !strchr("diouxXeEfFgGsc", ebuf[j])) ++j;
+            if (j >= elen) { out.append(ebuf + k, (size_t)(elen - k)); break; }
+            if (ti >= toks.size()) { ranOut = true; break; }  /* stop mid-format */
+            char conv = ebuf[j];
+            char spec[64];
+            int64_t sl = j - k + 1; if (sl > 63) sl = 63;
+            memcpy(spec, ebuf + k, (size_t)sl); spec[sl] = '\0';
+            const Tok &t = toks[ti++];
+            char tmp[1200];
+            if (conv == 's' || conv == 'c') {
+                if (t.isStr) out.append(t.s, (size_t)t.slen);
+                else { snprintf(tmp, sizeof tmp, "%g", t.num); out.append(tmp); }
+            } else if (conv == 'x' || conv == 'X' || conv == 'o') {
+                /* integer-base conversions survive escape-expansion; feed a
+                 * long long with an `ll` length modifier. */
+                char ispec[66]; memcpy(ispec, spec, (size_t)sl - 1);
+                ispec[sl - 1] = 'l'; ispec[sl] = 'l'; ispec[sl + 1] = conv; ispec[sl + 2] = '\0';
+                snprintf(tmp, sizeof tmp, ispec, (long long)t.num);
+                out.append(tmp);
+            } else {
+                snprintf(tmp, sizeof tmp, spec, t.isStr ? 0.0 : t.num);
+                out.append(tmp);
+            }
+            k = j + 1;
+        }
+        if (ranOut || ti >= toks.size()) break;
+    }
+}
+
+/* fprintf(fmt, ...) to stdout via the descriptor-array path. */
+void matlab_fprintf_vec(const char *fmt, int64_t fmtn,
+                        void **vals, int8_t *kinds, int64_t nargs) {
+    std::string out;
+    matlab_fmt_vec_core(out, fmt, fmtn, vals, kinds, nargs);
+    pthread_mutex_lock(&matlab_io_mutex);
+    fwrite(out.data(), 1, out.size(), stdout);
     pthread_mutex_unlock(&matlab_io_mutex);
 }
 
@@ -2308,6 +2402,38 @@ void matlab_slice_store2(matlab_mat *A, matlab_mat *rows, matlab_mat *cols,
             A->data[ri * A->cols + cj] = v;
         }
     }
+}
+
+/* Copy-on-assign deep clone.  Emitted by the lowering for `B = A` when the
+ * RHS is a plain numeric-matrix variable, so a later `B(i) = v` cannot mutate
+ * A's shared buffer (MATLAB value semantics; the runtime has no refcount/COW).
+ * Handles the three double-backed descriptors via their magic tags; anything
+ * else is returned unchanged (the lowering already gates on a real-matrix
+ * static type, so non-matrix pointers should not reach here). */
+void *matlab_mat_clone_cow(void *p) {
+    if (!p) return p;
+    if (mat_is_3d(p)) {
+        matlab_mat3 *s = reinterpret_cast<matlab_mat3 *>(p);
+        matlab_mat3 *o = mat3_alloc(s->rows, s->cols, s->depth);
+        int64_t n = s->rows * s->cols * s->depth;
+        if (n > 0) memcpy(o->data, s->data, (size_t)n * sizeof(double));
+        return o;
+    }
+    if (mat_is_complex(p)) {
+        matlab_mat_c *s = reinterpret_cast<matlab_mat_c *>(p);
+        matlab_mat_c *o = mat_c_alloc(s->rows, s->cols);
+        int64_t n = s->rows * s->cols;
+        if (n > 0) {
+            memcpy(o->re, s->re, (size_t)n * sizeof(double));
+            memcpy(o->im, s->im, (size_t)n * sizeof(double));
+        }
+        return o;
+    }
+    matlab_mat *s = reinterpret_cast<matlab_mat *>(p);
+    matlab_mat *o = mat_alloc(s->rows, s->cols);
+    int64_t n = s->rows * s->cols;
+    if (n > 0) memcpy(o->data, s->data, (size_t)n * sizeof(double));
+    return o;
 }
 
 void matlab_slice_store2_scalar(matlab_mat *A, matlab_mat *rows,
@@ -11497,6 +11623,16 @@ matlab_string *matlab_sprintf_f64(matlab_string *fmt, double v) {
     return matlab_string_from_literal(out, (int64_t)n);
 }
 
+/* sprintf(fmt, ...) -> matlab_string via the variadic descriptor-array core
+ * (handles %s + vector expansion + format recycling, same as fprintf). */
+matlab_string *matlab_sprintf_vec(matlab_string *fmt, void **vals,
+                                  int8_t *kinds, int64_t nargs) {
+    std::string out;
+    matlab_fmt_vec_core(out, fmt ? fmt->data : "", fmt ? fmt->len : 0,
+                        vals, kinds, nargs);
+    return matlab_string_from_literal(out.data(), (int64_t)out.size());
+}
+
 matlab_string *matlab_num2str(double v) {
     char buf[64];
     int n = snprintf(buf, sizeof buf, "%g", v);
@@ -15642,6 +15778,19 @@ void matlab_fprintf_file_f64(double fd, matlab_string *fmt, double v) {
     else buf[sizeof buf - 1] = '\0';
     pthread_mutex_lock(&matlab_io_mutex);
     fprintf(f, buf, v);
+    pthread_mutex_unlock(&matlab_io_mutex);
+}
+
+/* fprintf(fid, fmt, ...) via the variadic descriptor-array core (handles %s +
+ * vector expansion + format recycling, same as the stdout path). */
+void matlab_fprintf_file_vec(double fd, matlab_string *fmt, void **vals,
+                             int8_t *kinds, int64_t nargs) {
+    FILE *f = matlab_file_lookup(fd);
+    if (!f || !fmt) return;
+    std::string out;
+    matlab_fmt_vec_core(out, fmt->data, (int64_t)fmt->len, vals, kinds, nargs);
+    pthread_mutex_lock(&matlab_io_mutex);
+    fwrite(out.data(), 1, out.size(), f);
     pthread_mutex_unlock(&matlab_io_mutex);
 }
 

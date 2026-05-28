@@ -1131,6 +1131,70 @@ bool TensorLowering::rewriteBuiltinCalls() {
         Changed = true;
         continue;
       }
+      /* General path: %s + vector args + 2+ values via the variadic
+       * descriptor-array core (matlab_sprintf_vec).  Operand 0 is the format
+       * (matlab_string*); operands 1+ are values.  The frontend `str_mask`
+       * marks which are strings (kind 1 = matlab_string*, 0 = numeric mat).
+       * Wait for every value operand to settle to ptr/f64 first. */
+      {
+        unsigned NOps = Call->getNumOperands();
+        bool ready = true;
+        for (unsigned i = 1; i < NOps; ++i) {
+          Type T = Call->getOperand(i).getType();
+          if (T != PtrTy && T != F64) { ready = false; break; }
+        }
+        if (ready) {
+          auto Loc = Call->getLoc();
+          auto I64 = B.getI64Type();
+          auto I8 = B.getIntegerType(8);
+          int64_t StrMask = 0;
+          if (auto MA = Call->getAttrOfType<IntegerAttr>("str_mask"))
+            StrMask = MA.getInt();
+          B.setInsertionPoint(Call);
+          unsigned NVals = NOps - 1;
+          Value One = LLVM::ConstantOp::create(B, Loc, I64, B.getI64IntegerAttr(1));
+          Value ValsBuf = LLVM::AllocaOp::create(
+              B, Loc, PtrTy, LLVM::LLVMArrayType::get(PtrTy, NVals), One, 0);
+          Value KindsBuf = LLVM::AllocaOp::create(
+              B, Loc, PtrTy, LLVM::LLVMArrayType::get(I8, NVals), One, 0);
+          for (unsigned i = 1; i < NOps; ++i) {
+            Value V = Call->getOperand(i);
+            bool IsStr = (StrMask >> i) & 1;
+            Value ValPtr;
+            int8_t Kind;
+            if (IsStr && V.getType() == PtrTy) {
+              Kind = 1; ValPtr = V;
+            } else if (V.getType() == F64) {
+              Kind = 0;
+              auto Fn = rt("matlab_mat_scalar", PtrTy, {F64});
+              ValPtr = LLVM::CallOp::create(B, Loc, Fn, ValueRange{V}).getResult();
+            } else {
+              Kind = 0; ValPtr = V;   /* numeric matrix descriptor */
+            }
+            Value Idx = LLVM::ConstantOp::create(B, Loc, I64,
+                                                 B.getI64IntegerAttr((int64_t)(i - 1)));
+            Value VGep = LLVM::GEPOp::create(B, Loc, PtrTy, PtrTy, ValsBuf,
+                                             ValueRange{Idx});
+            LLVM::StoreOp::create(B, Loc, ValPtr, VGep);
+            Value KGep = LLVM::GEPOp::create(B, Loc, PtrTy, I8, KindsBuf,
+                                             ValueRange{Idx});
+            LLVM::StoreOp::create(B, Loc,
+                LLVM::ConstantOp::create(B, Loc, I8, B.getI8IntegerAttr(Kind)), KGep);
+          }
+          Value NV = LLVM::ConstantOp::create(B, Loc, I64,
+                                              B.getI64IntegerAttr((int64_t)NVals));
+          auto Fn = rt("matlab_sprintf_vec", PtrTy, {PtrTy, PtrTy, PtrTy, I64});
+          auto NC = LLVM::CallOp::create(
+              B, Loc, Fn, ValueRange{Call->getOperand(0), ValsBuf, KindsBuf, NV});
+          if (Call->getResult(0).getType() != PtrTy)
+            Call->getResult(0).setType(PtrTy);
+          carryName(Call, NC);
+          Call->getResult(0).replaceAllUsesWith(NC.getResult());
+          Call->erase();
+          Changed = true;
+          continue;
+        }
+      }
     }
 
     /* disp(ME.message) frontend-intercept routes here. */
@@ -2975,6 +3039,33 @@ bool TensorLowering::rewriteBuiltinCalls() {
       if (Arg.getType() != PtrTy) continue;
       B.setInsertionPoint(Call);
       auto Fn = rt("matlab_obj_clone", PtrTy, {PtrTy});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{Arg});
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+
+    /* matlab_mat_clone_cow — copy-on-assign deep clone of a numeric matrix
+     * (ptr -> ptr), emitted for `B = A` so a later `B(i)=v` cannot mutate A's
+     * shared buffer.  Same ptr-settle wait as matlab_obj_clone. */
+    if (Name == "matlab_mat_clone_cow" && Call->getNumOperands() == 1 &&
+        Call->getNumResults() == 1) {
+      Value Arg = Call->getOperand(0);
+      /* Scalars flow as f64 and need no clone (value semantics already) —
+       * pass the operand through.  A real heap matrix is ptr-typed; wait for
+       * it to settle to ptr before emitting the deep clone. */
+      if (Arg.getType() != PtrTy) {
+        if (mlir::isa<mlir::Float64Type>(Arg.getType())) {
+          Call->getResult(0).replaceAllUsesWith(Arg);
+          Call->erase();
+          Changed = true;
+        }
+        continue;
+      }
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_mat_clone_cow", PtrTy, {PtrTy});
       auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{Arg});
       carryName(Call, NC);
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
