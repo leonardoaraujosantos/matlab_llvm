@@ -1,0 +1,4 @@
+dl_mha_forward: Qh ndims=3 size=2 2 3
+dl_mha_forward: scores head1 = 1.099 1.099 1.099
+dl_mha_forward: scores head2 = 1.099 1.099 1.095
+dl_mha_forward: PASS (per-head softmax entropy in [0, log T])
