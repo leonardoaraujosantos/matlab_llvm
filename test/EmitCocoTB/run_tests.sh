@@ -135,6 +135,17 @@ declare -a CASES=(
   # `64'sd8192` (= 0.125 * 2^16) instead of the Q16.8 raw 32, matching
   # the Python ref's Q33.16 / Q34.16 internal precision.
   dlhdl_quant_mlp
+  # Tier-11 — DL HDL H4 LSTM-on-FPGA.  Two precise_fi fixtures that
+  # demonstrate the recurrent kernel compiles to bit-accurate fi SV:
+  #   dlhdl_rnn_cell  — simple recurrent cell `h_new = hardtanh(Wx*x + Wh*h + b)`.
+  #   dlhdl_lstm_cell — full LSTM cell with `hardsigmoid` (i/f/o gates) +
+  #                     `hardtanh` (g gate + final hidden activation) +
+  #                     cell-state update `c_new = f*c_prev + i*g`.
+  # Both DUTs are combinational (caller threads h_prev / c_prev across
+  # timesteps externally); the multi-timestep recurrence with persistent
+  # registers is a documented follow-on slice.
+  dlhdl_rnn_cell
+  dlhdl_lstm_cell
 )
 
 # Run each fixture in parallel via xargs -P. Default to up to 8
