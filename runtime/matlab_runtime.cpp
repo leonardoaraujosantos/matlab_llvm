@@ -2416,7 +2416,7 @@ void *matlab_mat_clone_cow(void *p) {
         matlab_mat3 *s = reinterpret_cast<matlab_mat3 *>(p);
         matlab_mat3 *o = mat3_alloc(s->rows, s->cols, s->depth);
         int64_t n = s->rows * s->cols * s->depth;
-        if (n > 0) std::memcpy(o->data, s->data, (size_t)n * sizeof(double));
+        if (n > 0) memcpy(o->data, s->data, (size_t)n * sizeof(double));
         return o;
     }
     if (mat_is_complex(p)) {
@@ -2424,15 +2424,15 @@ void *matlab_mat_clone_cow(void *p) {
         matlab_mat_c *o = mat_c_alloc(s->rows, s->cols);
         int64_t n = s->rows * s->cols;
         if (n > 0) {
-            std::memcpy(o->re, s->re, (size_t)n * sizeof(double));
-            std::memcpy(o->im, s->im, (size_t)n * sizeof(double));
+            memcpy(o->re, s->re, (size_t)n * sizeof(double));
+            memcpy(o->im, s->im, (size_t)n * sizeof(double));
         }
         return o;
     }
     matlab_mat *s = reinterpret_cast<matlab_mat *>(p);
     matlab_mat *o = mat_alloc(s->rows, s->cols);
     int64_t n = s->rows * s->cols;
-    if (n > 0) std::memcpy(o->data, s->data, (size_t)n * sizeof(double));
+    if (n > 0) memcpy(o->data, s->data, (size_t)n * sizeof(double));
     return o;
 }
 
