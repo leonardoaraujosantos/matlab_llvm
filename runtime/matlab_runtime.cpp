@@ -1697,6 +1697,34 @@ matlab_mat3 *matlab_repmat3(matlab_mat *A, double m, double n, double p) {
  * ops are passed as macros so the resulting code inlines cleanly. */
 #define COLWISE_REDUCE(NAME, INIT_EXPR, UPDATE_EXPR, FINALIZE_EXPR)       \
     matlab_mat *matlab_##NAME(matlab_mat *A) {                            \
+        /* matN / mat3 fast path: reduce the flat buffer to a scalar.     \
+         * Matches MATLAB on rank>=3 where vector-shape behaviour applies \
+         * uniformly (sum(zeros(2,3,4)) returns the column sum but the    \
+         * common case in user code is sum(matN-grad) for SGD aggregation \
+         * — match that). */                                              \
+        if (mat_is_nd(A) || mat_is_3d(A)) {                               \
+            int64_t total = 0;                                            \
+            const double *Ad = nullptr;                                   \
+            if (mat_is_nd(A)) {                                           \
+                matlab_matN *Mn = (matlab_matN *)A;                       \
+                total = 1;                                                \
+                for (uint32_t k = 0; k < Mn->ndims; ++k) total *= Mn->dims[k]; \
+                Ad = Mn->data;                                            \
+            } else {                                                      \
+                matlab_mat3 *M3 = (matlab_mat3 *)A;                       \
+                total = M3->rows * M3->cols * M3->depth;                  \
+                Ad = M3->data;                                            \
+            }                                                             \
+            double acc = INIT_EXPR;                                       \
+            for (int64_t k = 0; k < total; ++k) {                         \
+                double x = Ad[k];                                         \
+                acc = UPDATE_EXPR;                                        \
+            }                                                             \
+            double result = FINALIZE_EXPR;                                \
+            matlab_mat *R = mat_alloc(1, 1);                              \
+            R->data[0] = total > 0 ? result : 0.0;                        \
+            return R;                                                     \
+        }                                                                 \
         int64_t m = A->rows, n = A->cols;                                 \
         if (m <= 1 || n == 1) {                                           \
             int64_t total = m * n;                                        \
@@ -9113,6 +9141,136 @@ matlab_mat *matlab_im2col_2d(void *Xv, double kHd, double kWd) {
         }
     }
     return Y;
+}
+
+/* matlab_conv2d_batch_full(X, W, b, pad_h, pad_w, stride_h, stride_w) —
+ * 2-D convolution with optional bias, zero-padding, and stride.
+ *
+ *   X : H x W x C x N
+ *   W : kH x kW x C x K
+ *   b : K-vector (NULL-able through a 0-numel matrix to mean "no bias")
+ *   Y : Hout x Wout x K x N, Hout = (H + 2*pad_h - kH) / stride_h + 1
+ *
+ * Explicit O(N*K*Hout*Wout*C*kH*kW) loop (no im2col here; padding +
+ * stride don't compose with the contiguous im2col layout without a
+ * bigger refactor — and the demos for this entry are 1- to 3-channel
+ * MNIST-class kernels where the dense loop is fine). */
+void *matlab_conv2d_batch_full(void *Xv, void *Wv, void *bv,
+                                double pad_h_d, double pad_w_d,
+                                double stride_h_d, double stride_w_d) {
+    if (!Xv || !Wv) return mat_alloc(0, 0);
+    int64_t pad_h = (int64_t)pad_h_d, pad_w = (int64_t)pad_w_d;
+    int64_t stride_h = (int64_t)stride_h_d, stride_w = (int64_t)stride_w_d;
+    if (stride_h <= 0) stride_h = 1;
+    if (stride_w <= 0) stride_w = 1;
+
+    /* Reuse the rank-tolerant shape recovery from matlab_conv2d_batch. */
+    int64_t H, W, C, N, Xs0, Xs1, Xs2, Xs3;
+    const double *Xdata;
+    if (mat_is_nd(Xv)) {
+        matlab_matN *X = (matlab_matN *)Xv;
+        if (X->ndims < 2 || X->ndims > 4) return mat_alloc(0, 0);
+        H = X->dims[0]; W = X->dims[1];
+        C = X->ndims >= 3 ? X->dims[2] : 1;
+        N = X->ndims >= 4 ? X->dims[3] : 1;
+        Xs0 = X->strides[0]; Xs1 = X->strides[1];
+        Xs2 = X->ndims >= 3 ? X->strides[2] : 0;
+        Xs3 = X->ndims >= 4 ? X->strides[3] : 0;
+        Xdata = X->data;
+    } else if (mat_is_3d(Xv)) {
+        matlab_mat3 *X3 = (matlab_mat3 *)Xv;
+        H = X3->rows; W = X3->cols; C = X3->depth; N = 1;
+        Xs0 = X3->cols; Xs1 = 1; Xs2 = X3->rows * X3->cols; Xs3 = 0;
+        Xdata = X3->data;
+    } else {
+        matlab_mat *X2 = (matlab_mat *)Xv;
+        H = X2->rows; W = X2->cols; C = 1; N = 1;
+        Xs0 = X2->cols; Xs1 = 1; Xs2 = 0; Xs3 = 0;
+        Xdata = X2->data;
+    }
+    int64_t kH, kW, Cw, K, Ws0, Ws1, Ws2, Ws3;
+    const double *Wdata;
+    if (mat_is_nd(Wv)) {
+        matlab_matN *Ww = (matlab_matN *)Wv;
+        if (Ww->ndims < 2 || Ww->ndims > 4) return mat_alloc(0, 0);
+        kH = Ww->dims[0]; kW = Ww->dims[1];
+        Cw = Ww->ndims >= 3 ? Ww->dims[2] : 1;
+        K  = Ww->ndims >= 4 ? Ww->dims[3] : 1;
+        Ws0 = Ww->strides[0]; Ws1 = Ww->strides[1];
+        Ws2 = Ww->ndims >= 3 ? Ww->strides[2] : 0;
+        Ws3 = Ww->ndims >= 4 ? Ww->strides[3] : 0;
+        Wdata = Ww->data;
+    } else if (mat_is_3d(Wv)) {
+        matlab_mat3 *W3 = (matlab_mat3 *)Wv;
+        kH = W3->rows; kW = W3->cols; Cw = W3->depth; K = 1;
+        Ws0 = W3->cols; Ws1 = 1; Ws2 = W3->rows * W3->cols; Ws3 = 0;
+        Wdata = W3->data;
+    } else {
+        matlab_mat *W2m = (matlab_mat *)Wv;
+        kH = W2m->rows; kW = W2m->cols; Cw = 1; K = 1;
+        Ws0 = W2m->cols; Ws1 = 1; Ws2 = 0; Ws3 = 0;
+        Wdata = W2m->data;
+    }
+    if (Cw != C) return mat_alloc(0, 0);
+
+    int64_t Hout = (H + 2*pad_h - kH) / stride_h + 1;
+    int64_t Wout = (W + 2*pad_w - kW) / stride_w + 1;
+    if (Hout <= 0 || Wout <= 0) return mat_alloc(0, 0);
+    int64_t outDims[4] = {Hout, Wout, K, N};
+    void *Rv = matN_alloc(4, outDims);
+    if (!Rv) return mat_alloc(0, 0);
+    double *Yd = mat_is_nd(Rv) ? ((matlab_matN *)Rv)->data
+              : mat_is_3d(Rv) ? ((matlab_mat3 *)Rv)->data
+                              : ((matlab_mat *)Rv)->data;
+    int64_t Ys[4] = {0,0,0,0};
+    if (mat_is_nd(Rv)) {
+        matlab_matN *Rn = (matlab_matN *)Rv;
+        for (uint32_t k = 0; k < Rn->ndims; ++k) Ys[k] = Rn->strides[k];
+    } else if (mat_is_3d(Rv)) {
+        matlab_mat3 *R3 = (matlab_mat3 *)Rv;
+        Ys[0] = R3->cols * R3->depth; Ys[1] = R3->depth; Ys[2] = 1;
+    } else {
+        matlab_mat *R2 = (matlab_mat *)Rv;
+        Ys[0] = R2->cols; Ys[1] = 1;
+    }
+
+    /* Optional bias: bv may be NULL (skip) or a K-vector (any rank where
+     * total numel >= K). */
+    const double *bdata = nullptr;
+    if (bv) {
+        if (mat_is_nd(bv))      bdata = ((matlab_matN *)bv)->data;
+        else if (mat_is_3d(bv)) bdata = ((matlab_mat3 *)bv)->data;
+        else {
+            matlab_mat *bm = (matlab_mat *)bv;
+            if (bm->rows * bm->cols >= K) bdata = bm->data;
+        }
+    }
+
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t k = 0; k < K; ++k) {
+            double bias = bdata ? bdata[k] : 0.0;
+            for (int64_t hO = 0; hO < Hout; ++hO) {
+                for (int64_t wO = 0; wO < Wout; ++wO) {
+                    double acc = bias;
+                    for (int64_t c = 0; c < C; ++c) {
+                        for (int64_t kh = 0; kh < kH; ++kh) {
+                            int64_t hi = hO * stride_h - pad_h + kh;
+                            if (hi < 0 || hi >= H) continue;
+                            for (int64_t kw = 0; kw < kW; ++kw) {
+                                int64_t wi = wO * stride_w - pad_w + kw;
+                                if (wi < 0 || wi >= W) continue;
+                                double xv = Xdata[hi*Xs0 + wi*Xs1 + c*Xs2 + n*Xs3];
+                                double wv = Wdata[kh*Ws0 + kw*Ws1 + c*Ws2 + k*Ws3];
+                                acc += xv * wv;
+                            }
+                        }
+                    }
+                    Yd[hO*Ys[0] + wO*Ys[1] + k*Ys[2] + n*Ys[3]] = acc;
+                }
+            }
+        }
+    }
+    return Rv;
 }
 
 /* matlab_conv2d_batch(X, W) — 2-D convolution forward for a CNN layer.

@@ -4735,8 +4735,8 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
               "transpose", "ctranspose", "embed",
               "gru", "bilstm", "lstmp", "dlarray",
               "sqrt", "leakyrelu", "gelu", "swish",
-              "softplus", "elu", "conv2d_batch",
-              "reshape", "maxpool2d", "avgpool2d"};
+              "softplus", "elu", "conv2d_batch", "conv2d_full",
+              "reshape", "maxpool2d", "avgpool2d", "batchnorm"};
           if (DlRet2.contains(NX->Name) && this->CurTU) {
             bool argPinned = false;
             for (size_t i = 0; i < CX->Args.size(); ++i)
@@ -7165,8 +7165,9 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             "gru", "bilstm", "lstmp",
             /* Phase 1 small ops. */
             "sqrt", "leakyrelu", "gelu", "swish", "softplus", "elu",
-            /* Tier C: rank-4 batched conv + reshape + pooling. */
-            "conv2d_batch", "reshape", "maxpool2d", "avgpool2d"};
+            /* Tier C: rank-4 batched conv + reshape + pooling + BN. */
+            "conv2d_batch", "conv2d_full", "reshape",
+            "maxpool2d", "avgpool2d", "batchnorm"};
         if (DlFns.contains(N->Name)) {
           std::function<bool(const Expr *)> pinnedDl =
               [&pinnedDl](const Expr *X) -> bool {
@@ -7189,8 +7190,8 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                     "transpose", "ctranspose", "embed",
                     "gru", "bilstm", "lstmp", "dlarray",
                     "sqrt", "leakyrelu", "gelu", "swish",
-                    "softplus", "elu", "conv2d_batch",
-                    "reshape", "maxpool2d", "avgpool2d"};
+                    "softplus", "elu", "conv2d_batch", "conv2d_full",
+                    "reshape", "maxpool2d", "avgpool2d", "batchnorm"};
                 if (DlRet.contains(NX->Name))
                   for (size_t i = 0; i < CX->Args.size(); ++i)
                     if (pinnedDl(CX->Args[i])) return true;
@@ -7208,7 +7209,8 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
               Vs.push_back(lowerExpr(*C.Args[i]));
             /* Per-arity rename: `mean(X)` -> dlarray__mean (1-arg) but
              * `mean(X, dim)` -> dlarray__mean_dim (2-arg); same shape
-             * for `reshape(X, m, n)` vs `reshape(X, d1, d2, d3, d4)`. */
+             * for `reshape(X, m, n)` vs `reshape(X, d1, d2, d3, d4)`,
+             * `softmax(X)` vs `softmax(X, dim)`. */
             std::string MethodName(N->Name);
             if (MethodName == "mean" && C.Args.size() == 2)
               MethodName = "mean_dim";
@@ -7216,6 +7218,8 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
               MethodName = "reshape2";
             else if (MethodName == "reshape" && C.Args.size() == 5)
               MethodName = "reshape4";
+            else if (MethodName == "softmax" && C.Args.size() == 2)
+              MethodName = "softmax_dim";
             std::string Callee = std::string("dlarray__") + MethodName;
             mlir::NamedAttribute Cal(
                 mlir::StringAttr::get(&MCtx, "callee"),

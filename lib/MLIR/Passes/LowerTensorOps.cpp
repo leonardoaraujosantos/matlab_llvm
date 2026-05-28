@@ -6129,6 +6129,10 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"matlab_dlnet_reshape4",      "matlab_dlnet_reshape4",     PtrTy, {PtrTy, PtrTy, F64, F64, F64, F64}},
         {"matlab_dlnet_maxpool2d",     "matlab_dlnet_maxpool2d",    PtrTy, {PtrTy, PtrTy, F64, F64}},
         {"matlab_dlnet_avgpool2d",     "matlab_dlnet_avgpool2d",    PtrTy, {PtrTy, PtrTy, F64, F64}},
+        /* BatchNorm + conv-with-bias/pad/stride + axis-aware softmax. */
+        {"matlab_dlnet_batchnorm",     "matlab_dlnet_batchnorm",    PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy}},
+        {"matlab_dlnet_conv2d_full",   "matlab_dlnet_conv2d_full",  PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, F64, F64, F64, F64}},
+        {"matlab_dlnet_softmax_dim",   "matlab_dlnet_softmax_dim",  PtrTy, {PtrTy, PtrTy, F64}},
         /* Deep Learning Toolbox Phase 1 — small extra ops over dlarray. */
         {"matlab_dlnet_rdivide",        "matlab_dlnet_rdivide",        PtrTy, {PtrTy, PtrTy, PtrTy}},
         {"matlab_dlnet_sqrt",           "matlab_dlnet_sqrt",           PtrTy, {PtrTy, PtrTy}},
@@ -6761,6 +6765,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"conv2",      "matlab_conv2",      1, "pp"},
       /* Tier-C rank-4 batched conv: X(H,W,C,N) * W(kH,kW,C,K) -> Y(H',W',K,N). */
       {"conv2d_batch", "matlab_conv2d_batch", 1, "pp"},
+      /* Full conv: + bias (K-vec), pad_h, pad_w, stride_h, stride_w. */
+      {"conv2d_batch_full", "matlab_conv2d_batch_full", 1, "pppffff"},
       /* im2col helper exposed to user code so callers can write their
        * own GEMM-based conv (e.g. depthwise, dilation, stride>1). */
       {"im2col_2d",    "matlab_im2col_2d",    1, "pff"},

@@ -173,6 +173,26 @@ classdef dlarray
             r = dlarray();
             matlab_dlnet_avgpool2d(r, x, kH, kW);
         end
+
+        % BatchNorm: per-channel normalize over (H, W, N) of a 4-D X,
+        % scaled by γ (length C) + shifted by β (length C).
+        function r = batchnorm(x, gamma, beta)
+            r = dlarray();
+            matlab_dlnet_batchnorm(r, x, gamma, beta);
+        end
+
+        % Full conv: optional bias + zero-padding + stride.
+        %   conv2d_full(X, W, b, pad_h, pad_w, stride_h, stride_w)
+        function r = conv2d_full(x, w, b, pad_h, pad_w, stride_h, stride_w)
+            r = dlarray();
+            matlab_dlnet_conv2d_full(r, x, w, b, pad_h, pad_w, stride_h, stride_w);
+        end
+
+        % softmax(X, dim) — softmax along a specified axis (matN-aware).
+        function r = softmax_dim(x, dim)
+            r = dlarray();
+            matlab_dlnet_softmax_dim(r, x, dim);
+        end
     end
 end
 % `extractdata(x)` and `dlgradient(loss, v)` are intercepted in Lowering.cpp
