@@ -98,6 +98,54 @@ inline int64_t nelem(const matlab_mat *m) {
     return m->rows * m->cols;
 }
 
+/* Allocate a zero-initialised descriptor with the same shape as `m`
+ * (mat / mat3 / matN).  Cheaper than clone() — calloc skips the
+ * memcpy — and the right primitive when building a fresh adjoint /
+ * gradient buffer. */
+inline matlab_mat *zero_clone(const matlab_mat *m) {
+    if (!m) return mat_alloc(0, 0);
+    if (mat_is_nd(m)) {
+        const matlab_matN *Mn = reinterpret_cast<const matlab_matN *>(m);
+        int64_t dims[16]; uint32_t lim = Mn->ndims < 16 ? Mn->ndims : 16;
+        for (uint32_t k = 0; k < lim; ++k) dims[k] = Mn->dims[k];
+        return reinterpret_cast<matlab_mat *>(matN_alloc(static_cast<int>(lim), dims));
+    }
+    if (mat_is_3d(m)) {
+        const matlab_mat3 *M3 = reinterpret_cast<const matlab_mat3 *>(m);
+        return reinterpret_cast<matlab_mat *>(mat3_alloc(M3->rows, M3->cols, M3->depth));
+    }
+    return mat_alloc(m->rows, m->cols);
+}
+
+/* Recover the (H, W, C, N) shape + per-axis stride tuple for any rank
+ * (matN / mat3 / mat).  Used by every batched pool / conv forward to
+ * walk the rank-agnostic input via a single index expression. */
+struct Shape4 { int64_t H, W, C, N; int64_t s0, s1, s2, s3; const double *data; };
+inline Shape4 shape4(const matlab_mat *m) {
+    Shape4 s{};
+    if (!m) return s;
+    if (mat_is_nd(m)) {
+        const matlab_matN *Mn = reinterpret_cast<const matlab_matN *>(m);
+        s.H = Mn->dims[0]; s.W = Mn->dims[1];
+        s.C = Mn->ndims >= 3 ? Mn->dims[2] : 1;
+        s.N = Mn->ndims >= 4 ? Mn->dims[3] : 1;
+        s.s0 = Mn->strides[0]; s.s1 = Mn->strides[1];
+        s.s2 = Mn->ndims >= 3 ? Mn->strides[2] : 0;
+        s.s3 = Mn->ndims >= 4 ? Mn->strides[3] : 0;
+        s.data = Mn->data;
+    } else if (mat_is_3d(m)) {
+        const matlab_mat3 *M3 = reinterpret_cast<const matlab_mat3 *>(m);
+        s.H = M3->rows; s.W = M3->cols; s.C = M3->depth; s.N = 1;
+        s.s0 = M3->cols; s.s1 = 1; s.s2 = M3->rows * M3->cols; s.s3 = 0;
+        s.data = M3->data;
+    } else {
+        s.H = m->rows; s.W = m->cols; s.C = 1; s.N = 1;
+        s.s0 = m->cols; s.s1 = 1; s.s2 = 0; s.s3 = 0;
+        s.data = m->data;
+    }
+    return s;
+}
+
 /* Flat-buffer view: returns the data pointer regardless of descriptor rank.
  * Useful for elementwise tape ops that don't care about shape. */
 inline double *flatdata(matlab_mat *m) {
@@ -122,7 +170,9 @@ enum { OP_LEAF, OP_ADD, OP_SUB, OP_MTIMES, OP_TIMES, OP_RELU, OP_SIGMOID,
        OP_RDIV, OP_SQRT, OP_MEAN_DIM, OP_LEAKY_RELU, OP_GELU, OP_SWISH,
        OP_SOFTPLUS, OP_ELU,
        /* Tier C: rank-4 batched 2-D convolution (X*W with im2col+GEMM). */
-       OP_CONV2D_BATCH };
+       OP_CONV2D_BATCH,
+       /* Shape / pool ops over matN tensors. */
+       OP_RESHAPE, OP_MAXPOOL2D, OP_AVGPOOL2D };
 
 struct Node {
     int op;
@@ -278,11 +328,32 @@ matlab_mat *matlab_dlnet_times (void *r, void *a, void *b) { return bin_op(r, a,
 
 // ---- unary / activation ops -----------------------------------------------
 static matlab_mat *un_forward(int op, matlab_mat *X) {
-    int64_t m = X->rows, n = X->cols;
-    if (op == dlnet::OP_SUM)  { matlab_mat *o = mat_alloc(1,1); double s=0; for (int64_t i=0;i<m*n;++i) s+=X->data[i]; o->data[0]=s; return o; }
-    if (op == dlnet::OP_MEAN) { matlab_mat *o = mat_alloc(1,1); double s=0; for (int64_t i=0;i<m*n;++i) s+=X->data[i]; o->data[0]= (m*n? s/(m*n):0); return o; }
-    matlab_mat *Y = mat_alloc(m, n);
+    /* Rank-agnostic: walks via nelem/flatdata so matN-valued inputs
+     * (e.g. relu over a 4-D conv output) don't read the magic word as
+     * rows/cols.  Softmax stays 2-D since it's a per-column reduction;
+     * matN softmax-along-axis is carved as OP_SOFTMAX_DIM. */
+    using namespace dlnet;
+    int64_t ne = nelem(X);
+    const double *Xd = flatdata(X);
+    if (op == dlnet::OP_SUM)  {
+        matlab_mat *o = mat_alloc(1, 1);
+        double s = 0; for (int64_t i = 0; i < ne; ++i) s += Xd[i];
+        o->data[0] = s; return o;
+    }
+    if (op == dlnet::OP_MEAN) {
+        matlab_mat *o = mat_alloc(1, 1);
+        double s = 0; for (int64_t i = 0; i < ne; ++i) s += Xd[i];
+        o->data[0] = ne ? s / ne : 0; return o;
+    }
     if (op == dlnet::OP_SOFTMAX) {
+        /* Strictly 2-D: matN softmax requires an axis parameter (carved). */
+        int64_t m = X->rows, n = X->cols;
+        if (mat_is_nd(X) || mat_is_3d(X)) {
+            /* Defensive — softmax on rank>2 returns empty, caller should
+             * have reshape'd to 2-D first. */
+            return mat_alloc(0, 0);
+        }
+        matlab_mat *Y = mat_alloc(m, n);
         for (int64_t c = 0; c < n; ++c) {
             double mx = -1e300; for (int64_t r=0;r<m;++r) mx = std::max(mx, X->data[r*n+c]);
             double sm = 0; for (int64_t r=0;r<m;++r){ double e=std::exp(X->data[r*n+c]-mx); Y->data[r*n+c]=e; sm+=e; }
@@ -290,14 +361,17 @@ static matlab_mat *un_forward(int op, matlab_mat *X) {
         }
         return Y;
     }
-    for (int64_t i = 0; i < m*n; ++i) {
-        double x = X->data[i], y = x;
+    /* Elementwise unary: rank-preserving via zero_clone+overwrite. */
+    matlab_mat *Y = zero_clone(X);
+    double *Yd = flatdata(Y);
+    for (int64_t i = 0; i < ne; ++i) {
+        double x = Xd[i], y = x;
         if (op == dlnet::OP_RELU)    y = x > 0 ? x : 0;
         if (op == dlnet::OP_SIGMOID) y = 1.0/(1.0+std::exp(-x));
         if (op == dlnet::OP_TANH)    y = std::tanh(x);
         if (op == dlnet::OP_LOG)     y = std::log(x);
         if (op == dlnet::OP_EXP)     y = std::exp(x);
-        Y->data[i] = y;
+        Yd[i] = y;
     }
     return Y;
 }
@@ -915,6 +989,174 @@ matlab_mat *matlab_dlnet_conv2d_batch(void *r, void *x, void *w) {
     return mat_alloc(0, 0);
 }
 
+/* reshape(X, m, n) — rank-agnostic 2-D output.  Numel must match.
+ * Forward: copy the flat buffer into a fresh 2-D mat.
+ * Backward: copy the adjoint back into a buffer with X's original
+ * shape (matN / mat3 / mat preserved by clone). */
+matlab_mat *matlab_dlnet_reshape2(void *r, void *x, double m, double n) {
+    using namespace dlnet;
+    matlab_mat *X = get_data(x);
+    int64_t M = static_cast<int64_t>(m), N = static_cast<int64_t>(n);
+    int64_t total = nelem(X);
+    matlab_mat *Y;
+    if (M <= 0 || N <= 0 || M * N != total) {
+        Y = mat_alloc(0, 0);
+    } else {
+        Y = mat_alloc(M, N);
+        const double *Xd = flatdata(X);
+        if (total > 0)
+            memcpy(Y->data, Xd, static_cast<size_t>(total) * sizeof(double));
+    }
+    set_data(r, Y);
+    set_id(r, record(OP_RESHAPE, get_id(x), -1, Y));
+    return mat_alloc(0, 0);
+}
+
+/* reshape(X, d1, d2, d3, d4) — 4-D / matN output. */
+matlab_mat *matlab_dlnet_reshape4(void *r, void *x,
+                                  double d1, double d2, double d3, double d4) {
+    using namespace dlnet;
+    matlab_mat *X = get_data(x);
+    int64_t dims[4] = {static_cast<int64_t>(d1), static_cast<int64_t>(d2),
+                       static_cast<int64_t>(d3), static_cast<int64_t>(d4)};
+    int64_t total = nelem(X);
+    int64_t outTotal = dims[0] * dims[1] * dims[2] * dims[3];
+    matlab_mat *Y;
+    if (outTotal != total || outTotal <= 0) {
+        Y = mat_alloc(0, 0);
+    } else {
+        void *Rv = matN_alloc(4, dims);
+        double *Yd = mat_is_nd(Rv) ? reinterpret_cast<matlab_matN *>(Rv)->data
+                  : mat_is_3d(Rv) ? reinterpret_cast<matlab_mat3 *>(Rv)->data
+                                  : reinterpret_cast<matlab_mat *>(Rv)->data;
+        const double *Xd = flatdata(X);
+        memcpy(Yd, Xd, static_cast<size_t>(total) * sizeof(double));
+        Y = reinterpret_cast<matlab_mat *>(Rv);
+    }
+    set_data(r, Y);
+    set_id(r, record(OP_RESHAPE, get_id(x), -1, Y));
+    return mat_alloc(0, 0);
+}
+
+/* maxpool2d(X, kH, kW) — non-overlapping pool, stride = kernel.
+ *
+ *   X : H x W x C x N (or trailing-singleton-dropped variants)
+ *   Y : (H/kH) x (W/kW) x C x N
+ *
+ * Backward routes the upstream gradient back to the arg-max cell
+ * within each window.  argmax positions saved in auxData[1] as a
+ * flat int matrix; auxData[0] carries (kH, kW). */
+matlab_mat *matlab_dlnet_maxpool2d(void *r, void *x, double kHd, double kWd) {
+    using namespace dlnet;
+    matlab_mat *X = get_data(x);
+    int64_t kH = static_cast<int64_t>(kHd), kW = static_cast<int64_t>(kWd);
+    if (kH <= 0 || kW <= 0) { matlab_mat *Y = mat_alloc(0, 0);
+                              set_data(r, Y);
+                              set_id(r, record(OP_MAXPOOL2D, get_id(x), -1, Y));
+                              return mat_alloc(0, 0); }
+    Shape4 S = shape4(X);
+    int64_t Hout = S.H / kH, Wout = S.W / kW;
+    int64_t outDims[4] = {Hout, Wout, S.C, S.N};
+    void *Rv = matN_alloc(4, outDims);
+    double *Yd = mat_is_nd(Rv) ? reinterpret_cast<matlab_matN *>(Rv)->data
+              : mat_is_3d(Rv) ? reinterpret_cast<matlab_mat3 *>(Rv)->data
+                              : reinterpret_cast<matlab_mat *>(Rv)->data;
+    int64_t Ys[4] = {0,0,0,0};
+    if (mat_is_nd(Rv)) {
+        matlab_matN *Rn = reinterpret_cast<matlab_matN *>(Rv);
+        for (uint32_t k = 0; k < Rn->ndims; ++k) Ys[k] = Rn->strides[k];
+    } else if (mat_is_3d(Rv)) {
+        matlab_mat3 *R3 = reinterpret_cast<matlab_mat3 *>(Rv);
+        Ys[0] = R3->cols * R3->depth; Ys[1] = R3->depth; Ys[2] = 1;
+    } else {
+        matlab_mat *R2 = reinterpret_cast<matlab_mat *>(Rv);
+        Ys[0] = R2->cols; Ys[1] = 1;
+    }
+    /* argmax: flat row vector indexed by ((n*C + c)*Hout + hOut)*Wout + wOut.
+     * Value stored as the *encoded* (hi * S.W + wi) so backward can
+     * recover the (hi, wi) input position via div / mod. */
+    int64_t outN = Hout * Wout * S.C * S.N;
+    matlab_mat *argmax = mat_alloc(1, outN > 0 ? outN : 1);
+    for (int64_t n = 0; n < S.N; ++n)
+        for (int64_t c = 0; c < S.C; ++c)
+            for (int64_t hOut = 0; hOut < Hout; ++hOut)
+                for (int64_t wOut = 0; wOut < Wout; ++wOut) {
+                    double m_val = -1e300;
+                    int64_t m_hi = hOut * kH, m_wi = wOut * kW;
+                    for (int64_t kh = 0; kh < kH; ++kh)
+                        for (int64_t kw = 0; kw < kW; ++kw) {
+                            int64_t hi = hOut * kH + kh, wi = wOut * kW + kw;
+                            double v = S.data[hi*S.s0 + wi*S.s1 + c*S.s2 + n*S.s3];
+                            if (v > m_val) { m_val = v; m_hi = hi; m_wi = wi; }
+                        }
+                    Yd[hOut*Ys[0] + wOut*Ys[1] + c*Ys[2] + n*Ys[3]] = m_val;
+                    int64_t fl = ((n * S.C + c) * Hout + hOut) * Wout + wOut;
+                    argmax->data[fl] = static_cast<double>(m_hi * S.W + m_wi);
+                }
+    matlab_mat *Y = reinterpret_cast<matlab_mat *>(Rv);
+    set_data(r, Y);
+    int id = record(OP_MAXPOOL2D, get_id(x), -1, Y);
+    /* auxData: [0]=kHkW (1x2), [1]=argmax (1 x outN). */
+    matlab_mat *kK = mat_alloc(1, 2);
+    kK->data[0] = static_cast<double>(kH); kK->data[1] = static_cast<double>(kW);
+    g_tape[id].auxData.push_back(kK);
+    g_tape[id].auxData.push_back(argmax);
+    set_id(r, id);
+    return mat_alloc(0, 0);
+}
+
+/* avgpool2d(X, kH, kW) — non-overlapping pool, average instead of max.
+ * Backward spreads dY uniformly over each window cell, scaled by 1/(kH*kW). */
+matlab_mat *matlab_dlnet_avgpool2d(void *r, void *x, double kHd, double kWd) {
+    using namespace dlnet;
+    matlab_mat *X = get_data(x);
+    int64_t kH = static_cast<int64_t>(kHd), kW = static_cast<int64_t>(kWd);
+    if (kH <= 0 || kW <= 0) { matlab_mat *Y = mat_alloc(0, 0);
+                              set_data(r, Y);
+                              set_id(r, record(OP_AVGPOOL2D, get_id(x), -1, Y));
+                              return mat_alloc(0, 0); }
+    Shape4 S = shape4(X);
+    int64_t Hout = S.H / kH, Wout = S.W / kW;
+    int64_t outDims[4] = {Hout, Wout, S.C, S.N};
+    void *Rv = matN_alloc(4, outDims);
+    double *Yd = mat_is_nd(Rv) ? reinterpret_cast<matlab_matN *>(Rv)->data
+              : mat_is_3d(Rv) ? reinterpret_cast<matlab_mat3 *>(Rv)->data
+                              : reinterpret_cast<matlab_mat *>(Rv)->data;
+    int64_t Ys[4] = {0,0,0,0};
+    if (mat_is_nd(Rv)) {
+        matlab_matN *Rn = reinterpret_cast<matlab_matN *>(Rv);
+        for (uint32_t k = 0; k < Rn->ndims; ++k) Ys[k] = Rn->strides[k];
+    } else if (mat_is_3d(Rv)) {
+        matlab_mat3 *R3 = reinterpret_cast<matlab_mat3 *>(Rv);
+        Ys[0] = R3->cols * R3->depth; Ys[1] = R3->depth; Ys[2] = 1;
+    } else {
+        matlab_mat *R2 = reinterpret_cast<matlab_mat *>(Rv);
+        Ys[0] = R2->cols; Ys[1] = 1;
+    }
+    double inv = 1.0 / static_cast<double>(kH * kW);
+    for (int64_t n = 0; n < S.N; ++n)
+        for (int64_t c = 0; c < S.C; ++c)
+            for (int64_t hOut = 0; hOut < Hout; ++hOut)
+                for (int64_t wOut = 0; wOut < Wout; ++wOut) {
+                    double acc = 0;
+                    for (int64_t kh = 0; kh < kH; ++kh)
+                        for (int64_t kw = 0; kw < kW; ++kw) {
+                            int64_t hi = hOut * kH + kh, wi = wOut * kW + kw;
+                            acc += S.data[hi*S.s0 + wi*S.s1 + c*S.s2 + n*S.s3];
+                        }
+                    Yd[hOut*Ys[0] + wOut*Ys[1] + c*Ys[2] + n*Ys[3]] = acc * inv;
+                }
+    matlab_mat *Y = reinterpret_cast<matlab_mat *>(Rv);
+    set_data(r, Y);
+    int id = record(OP_AVGPOOL2D, get_id(x), -1, Y);
+    /* auxData: [0]=kHkW (1x2). */
+    matlab_mat *kK = mat_alloc(1, 2);
+    kK->data[0] = static_cast<double>(kH); kK->data[1] = static_cast<double>(kW);
+    g_tape[id].auxData.push_back(kK);
+    set_id(r, id);
+    return mat_alloc(0, 0);
+}
+
 // ---- dlgradient(loss, var): reverse sweep -> returns the var gradient -----
 // Returns the gradient as a plain matrix (MATLAB returns a dlarray; we return
 // the extracted value — a documented deviation that keeps the runtime from
@@ -972,11 +1214,11 @@ matlab_mat *matlab_dlnet_grad(void *lossv, void *varv) {
                 accum(n.p1, gB);
             }
         } break;
-        case OP_RELU:    { matlab_mat *g=mat_alloc(V->rows,V->cols); for(int64_t k=0;k<V->rows*V->cols;++k) g->data[k]= (V->data[k]>0)?A->data[k]:0; accum(n.p0,g);} break;
-        case OP_SIGMOID: { matlab_mat *g=mat_alloc(V->rows,V->cols); for(int64_t k=0;k<V->rows*V->cols;++k){double y=V->data[k]; g->data[k]=A->data[k]*y*(1-y);} accum(n.p0,g);} break;
-        case OP_TANH:    { matlab_mat *g=mat_alloc(V->rows,V->cols); for(int64_t k=0;k<V->rows*V->cols;++k){double y=V->data[k]; g->data[k]=A->data[k]*(1-y*y);} accum(n.p0,g);} break;
-        case OP_EXP:     { matlab_mat *g=mat_alloc(V->rows,V->cols); for(int64_t k=0;k<V->rows*V->cols;++k) g->data[k]=A->data[k]*V->data[k]; accum(n.p0,g);} break;
-        case OP_LOG:     { matlab_mat *g=mat_alloc(V->rows,V->cols); for(int64_t k=0;k<V->rows*V->cols;++k) g->data[k]=A->data[k]/P0->data[k]; accum(n.p0,g);} break;
+        case OP_RELU:    { matlab_mat *g=zero_clone(V); double *gd=flatdata(g); const double *Vd=flatdata(V), *Ad=flatdata(A); int64_t ne=nelem(V); for(int64_t k=0;k<ne;++k) gd[k]= (Vd[k]>0)?Ad[k]:0; accum(n.p0,g);} break;
+        case OP_SIGMOID: { matlab_mat *g=zero_clone(V); double *gd=flatdata(g); const double *Vd=flatdata(V), *Ad=flatdata(A); int64_t ne=nelem(V); for(int64_t k=0;k<ne;++k){double y=Vd[k]; gd[k]=Ad[k]*y*(1-y);} accum(n.p0,g);} break;
+        case OP_TANH:    { matlab_mat *g=zero_clone(V); double *gd=flatdata(g); const double *Vd=flatdata(V), *Ad=flatdata(A); int64_t ne=nelem(V); for(int64_t k=0;k<ne;++k){double y=Vd[k]; gd[k]=Ad[k]*(1-y*y);} accum(n.p0,g);} break;
+        case OP_EXP:     { matlab_mat *g=zero_clone(V); double *gd=flatdata(g); const double *Vd=flatdata(V), *Ad=flatdata(A); int64_t ne=nelem(V); for(int64_t k=0;k<ne;++k) gd[k]=Ad[k]*Vd[k]; accum(n.p0,g);} break;
+        case OP_LOG:     { matlab_mat *g=zero_clone(V); double *gd=flatdata(g); const double *Pd=flatdata(P0), *Ad=flatdata(A); int64_t ne=nelem(V); for(int64_t k=0;k<ne;++k) gd[k]=Ad[k]/Pd[k]; accum(n.p0,g);} break;
         case OP_SOFTMAX: {
             // gx = y .* (adj - sum(adj.*y, over rows)) per column
             matlab_mat *g=mat_alloc(V->rows,V->cols);
@@ -984,7 +1226,7 @@ matlab_mat *matlab_dlnet_grad(void *lossv, void *varv) {
                 for(int64_t r=0;r<V->rows;++r){ double y=V->data[r*V->cols+c]; g->data[r*g->cols+c]=y*(A->data[r*A->cols+c]-dot);} }
             accum(n.p0,g);
         } break;
-        case OP_SUM:  { matlab_mat *g=mat_alloc(P0->rows,P0->cols); for(int64_t k=0;k<P0->rows*P0->cols;++k) g->data[k]=A->data[0]; accum(n.p0,g);} break;
+        case OP_SUM:  { matlab_mat *g=zero_clone(P0); double *gd=flatdata(g); int64_t ne=nelem(P0); for(int64_t k=0;k<ne;++k) gd[k]=A->data[0]; accum(n.p0,g);} break;
         case OP_MEAN: { int64_t nel=P0->rows*P0->cols; matlab_mat *g=mat_alloc(P0->rows,P0->cols); for(int64_t k=0;k<nel;++k) g->data[k]=A->data[0]/(nel?nel:1); accum(n.p0,g);} break;
         case OP_CE: {
             // L = -sum(T.*log(Y))/N ; gY = -(T./Y)/N * adj
@@ -1719,6 +1961,123 @@ matlab_mat *matlab_dlnet_grad(void *lossv, void *varv) {
                 free(dX_full);
             } else {
                 free(dX_full->data); free(dX_full);
+            }
+        } break;
+        case OP_RESHAPE: {
+            /* Reshape is an identity on the flat buffer; the gradient
+             * just needs to flow back at P0's original rank. */
+            if (P0) {
+                matlab_mat *g = zero_clone(P0);
+                double *gd = flatdata(g);
+                const double *Ad = flatdata(A);
+                int64_t ne = nelem(g);
+                if (nelem(A) == ne && Ad && gd)
+                    memcpy(gd, Ad, static_cast<size_t>(ne) * sizeof(double));
+                accum(n.p0, g);
+            }
+        } break;
+        case OP_MAXPOOL2D: {
+            /* Route dY back to the arg-max input cell within each window.
+             * Shape recovery + stride lookup mirror the forward path. */
+            if (P0 && n.auxData.size() >= 2) {
+                matlab_mat *kK = n.auxData[0];
+                matlab_mat *argmax = n.auxData[1];
+                int64_t kH = static_cast<int64_t>(kK->data[0]);
+                int64_t kW = static_cast<int64_t>(kK->data[1]);
+                Shape4 SX = shape4(P0);
+                int64_t Hout = SX.H / kH, Wout = SX.W / kW;
+                /* dY (A) strides — same pattern as Y. */
+                int64_t As0, As1, As2, As3;
+                if (mat_is_nd(A)) {
+                    matlab_matN *Mn = reinterpret_cast<matlab_matN *>(A);
+                    As0 = Mn->strides[0]; As1 = Mn->strides[1];
+                    As2 = Mn->ndims >= 3 ? Mn->strides[2] : 0;
+                    As3 = Mn->ndims >= 4 ? Mn->strides[3] : 0;
+                } else if (mat_is_3d(A)) {
+                    matlab_mat3 *M3 = reinterpret_cast<matlab_mat3 *>(A);
+                    As0 = M3->cols; As1 = 1; As2 = M3->rows*M3->cols; As3 = 0;
+                } else {
+                    As0 = A->cols; As1 = 1; As2 = 0; As3 = 0;
+                }
+                const double *Ad = flatdata(A);
+                matlab_mat *g = zero_clone(P0);
+                double *gd = flatdata(g);
+                /* dX strides come from g (same shape as P0). */
+                int64_t gs0, gs1, gs2, gs3;
+                if (mat_is_nd(g)) {
+                    matlab_matN *Mn = reinterpret_cast<matlab_matN *>(g);
+                    gs0 = Mn->strides[0]; gs1 = Mn->strides[1];
+                    gs2 = Mn->ndims >= 3 ? Mn->strides[2] : 0;
+                    gs3 = Mn->ndims >= 4 ? Mn->strides[3] : 0;
+                } else if (mat_is_3d(g)) {
+                    matlab_mat3 *M3 = reinterpret_cast<matlab_mat3 *>(g);
+                    gs0 = M3->cols; gs1 = 1; gs2 = M3->rows*M3->cols; gs3 = 0;
+                } else {
+                    gs0 = g->cols; gs1 = 1; gs2 = 0; gs3 = 0;
+                }
+                for (int64_t nn = 0; nn < SX.N; ++nn)
+                    for (int64_t c = 0; c < SX.C; ++c)
+                        for (int64_t hO = 0; hO < Hout; ++hO)
+                            for (int64_t wO = 0; wO < Wout; ++wO) {
+                                int64_t fl = ((nn * SX.C + c) * Hout + hO) * Wout + wO;
+                                int64_t enc = static_cast<int64_t>(argmax->data[fl]);
+                                int64_t hi = enc / SX.W;
+                                int64_t wi = enc - hi * SX.W;
+                                double dY = Ad[hO*As0 + wO*As1 + c*As2 + nn*As3];
+                                gd[hi*gs0 + wi*gs1 + c*gs2 + nn*gs3] += dY;
+                            }
+                accum(n.p0, g);
+            }
+        } break;
+        case OP_AVGPOOL2D: {
+            /* Spread dY uniformly across each window cell. */
+            if (P0 && n.auxData.size() >= 1) {
+                matlab_mat *kK = n.auxData[0];
+                int64_t kH = static_cast<int64_t>(kK->data[0]);
+                int64_t kW = static_cast<int64_t>(kK->data[1]);
+                Shape4 SX = shape4(P0);
+                int64_t Hout = SX.H / kH, Wout = SX.W / kW;
+                int64_t As0, As1, As2, As3;
+                if (mat_is_nd(A)) {
+                    matlab_matN *Mn = reinterpret_cast<matlab_matN *>(A);
+                    As0 = Mn->strides[0]; As1 = Mn->strides[1];
+                    As2 = Mn->ndims >= 3 ? Mn->strides[2] : 0;
+                    As3 = Mn->ndims >= 4 ? Mn->strides[3] : 0;
+                } else if (mat_is_3d(A)) {
+                    matlab_mat3 *M3 = reinterpret_cast<matlab_mat3 *>(A);
+                    As0 = M3->cols; As1 = 1; As2 = M3->rows*M3->cols; As3 = 0;
+                } else {
+                    As0 = A->cols; As1 = 1; As2 = 0; As3 = 0;
+                }
+                const double *Ad = flatdata(A);
+                matlab_mat *g = zero_clone(P0);
+                double *gd = flatdata(g);
+                int64_t gs0, gs1, gs2, gs3;
+                if (mat_is_nd(g)) {
+                    matlab_matN *Mn = reinterpret_cast<matlab_matN *>(g);
+                    gs0 = Mn->strides[0]; gs1 = Mn->strides[1];
+                    gs2 = Mn->ndims >= 3 ? Mn->strides[2] : 0;
+                    gs3 = Mn->ndims >= 4 ? Mn->strides[3] : 0;
+                } else if (mat_is_3d(g)) {
+                    matlab_mat3 *M3 = reinterpret_cast<matlab_mat3 *>(g);
+                    gs0 = M3->cols; gs1 = 1; gs2 = M3->rows*M3->cols; gs3 = 0;
+                } else {
+                    gs0 = g->cols; gs1 = 1; gs2 = 0; gs3 = 0;
+                }
+                double inv = 1.0 / static_cast<double>(kH * kW);
+                for (int64_t nn = 0; nn < SX.N; ++nn)
+                    for (int64_t c = 0; c < SX.C; ++c)
+                        for (int64_t hO = 0; hO < Hout; ++hO)
+                            for (int64_t wO = 0; wO < Wout; ++wO) {
+                                double dY = Ad[hO*As0 + wO*As1 + c*As2 + nn*As3];
+                                double share = dY * inv;
+                                for (int64_t kh = 0; kh < kH; ++kh)
+                                    for (int64_t kw = 0; kw < kW; ++kw) {
+                                        int64_t hi = hO * kH + kh, wi = wO * kW + kw;
+                                        gd[hi*gs0 + wi*gs1 + c*gs2 + nn*gs3] += share;
+                                    }
+                            }
+                accum(n.p0, g);
             }
         } break;
         default: break;

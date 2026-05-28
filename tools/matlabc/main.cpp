@@ -2571,8 +2571,10 @@ static std::string buildReplPrelude(const std::string &Src) {
     {false, "swish",                     "dlnet_classdefs.m"},
     {false, "softplus",                  "dlnet_classdefs.m"},
     {false, "elu",                       "dlnet_classdefs.m"},
-    /* Tier C: rank-4 batched conv with autodiff. */
+    /* Tier C: rank-4 batched conv + reshape + pool, all autodiff-tracked. */
     {false, "conv2d_batch",              "dlnet_classdefs.m"},
+    {false, "maxpool2d",                 "dlnet_classdefs.m"},
+    {false, "avgpool2d",                 "dlnet_classdefs.m"},
     /* Global Optimization Toolbox Tier-2 — `gads_classdefs.m` holds the
      * MultiStart + GlobalSearch solver objects.  (`run` is too generic
      * to trigger on; the solver-object mentions pull the prelude.) */
@@ -11802,7 +11804,7 @@ int main(int Argc, char **Argv) {
       "softmax", "crossentropy", "mse", "lstm", "embed",
       "gru", "bilstm", "lstmp",
       "leakyrelu", "gelu", "swish", "softplus", "elu",
-      "conv2d_batch",
+      "conv2d_batch", "maxpool2d", "avgpool2d",
       /* GPU Coder T5 design-pattern helpers — runtime entries, no
        * prelude file needed.  Listed here only for the AOT-prelude
        * scanner's awareness (no leaf to map). */
@@ -12091,7 +12093,8 @@ int main(int Argc, char **Argv) {
         ClsName == "gru" || ClsName == "bilstm" || ClsName == "lstmp" ||
         ClsName == "leakyrelu" || ClsName == "gelu" || ClsName == "swish" ||
         ClsName == "softplus" || ClsName == "elu" ||
-        ClsName == "conv2d_batch")
+        ClsName == "conv2d_batch" || ClsName == "maxpool2d" ||
+        ClsName == "avgpool2d")
       return "dlnet_classdefs.m";
     /* GPU Coder T5 design-pattern helpers are C runtime entries; no
      * classdef file to pull in. */

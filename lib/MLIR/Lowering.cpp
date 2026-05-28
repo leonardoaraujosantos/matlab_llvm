@@ -4735,7 +4735,8 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
               "transpose", "ctranspose", "embed",
               "gru", "bilstm", "lstmp", "dlarray",
               "sqrt", "leakyrelu", "gelu", "swish",
-              "softplus", "elu", "conv2d_batch"};
+              "softplus", "elu", "conv2d_batch",
+              "reshape", "maxpool2d", "avgpool2d"};
           if (DlRet2.contains(NX->Name) && this->CurTU) {
             bool argPinned = false;
             for (size_t i = 0; i < CX->Args.size(); ++i)
@@ -7164,8 +7165,8 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             "gru", "bilstm", "lstmp",
             /* Phase 1 small ops. */
             "sqrt", "leakyrelu", "gelu", "swish", "softplus", "elu",
-            /* Tier C: rank-4 batched conv. */
-            "conv2d_batch"};
+            /* Tier C: rank-4 batched conv + reshape + pooling. */
+            "conv2d_batch", "reshape", "maxpool2d", "avgpool2d"};
         if (DlFns.contains(N->Name)) {
           std::function<bool(const Expr *)> pinnedDl =
               [&pinnedDl](const Expr *X) -> bool {
@@ -7188,7 +7189,8 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                     "transpose", "ctranspose", "embed",
                     "gru", "bilstm", "lstmp", "dlarray",
                     "sqrt", "leakyrelu", "gelu", "swish",
-                    "softplus", "elu", "conv2d_batch"};
+                    "softplus", "elu", "conv2d_batch",
+                    "reshape", "maxpool2d", "avgpool2d"};
                 if (DlRet.contains(NX->Name))
                   for (size_t i = 0; i < CX->Args.size(); ++i)
                     if (pinnedDl(CX->Args[i])) return true;
@@ -7205,12 +7207,15 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             for (size_t i = 0; i < C.Args.size(); ++i)
               Vs.push_back(lowerExpr(*C.Args[i]));
             /* Per-arity rename: `mean(X)` -> dlarray__mean (1-arg) but
-             * `mean(X, dim)` -> dlarray__mean_dim (2-arg).  Method-by-
-             * arity dispatch isn't a classdef feature, so we split the
-             * names at the lowering arm. */
+             * `mean(X, dim)` -> dlarray__mean_dim (2-arg); same shape
+             * for `reshape(X, m, n)` vs `reshape(X, d1, d2, d3, d4)`. */
             std::string MethodName(N->Name);
             if (MethodName == "mean" && C.Args.size() == 2)
               MethodName = "mean_dim";
+            else if (MethodName == "reshape" && C.Args.size() == 3)
+              MethodName = "reshape2";
+            else if (MethodName == "reshape" && C.Args.size() == 5)
+              MethodName = "reshape4";
             std::string Callee = std::string("dlarray__") + MethodName;
             mlir::NamedAttribute Cal(
                 mlir::StringAttr::get(&MCtx, "callee"),

@@ -152,6 +152,27 @@ classdef dlarray
             r = dlarray();
             matlab_dlnet_conv2d_batch(r, x, w);
         end
+
+        % reshape — method-by-arity split at the lowering arm picks
+        % reshape2 (1-arg target) vs reshape4 (3-arg target).
+        function r = reshape2(x, m, n)
+            r = dlarray();
+            matlab_dlnet_reshape2(r, x, m, n);
+        end
+        function r = reshape4(x, d1, d2, d3, d4)
+            r = dlarray();
+            matlab_dlnet_reshape4(r, x, d1, d2, d3, d4);
+        end
+
+        % Non-overlapping 2-D pooling (stride = kernel).
+        function r = maxpool2d(x, kH, kW)
+            r = dlarray();
+            matlab_dlnet_maxpool2d(r, x, kH, kW);
+        end
+        function r = avgpool2d(x, kH, kW)
+            r = dlarray();
+            matlab_dlnet_avgpool2d(r, x, kH, kW);
+        end
     end
 end
 % `extractdata(x)` and `dlgradient(loss, v)` are intercepted in Lowering.cpp

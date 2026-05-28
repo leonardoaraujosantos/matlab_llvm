@@ -634,6 +634,9 @@ void Resolver::registerBuiltins() {
      * remain ordinary builtins; only the strictly-DL-only names register
      * here. */
     "leakyrelu", "gelu", "swish", "softplus", "elu",
+    /* Tier C dlarray methods: pool / reshape go through method-by-arity
+     * split (reshape) or fixed-name (maxpool2d / avgpool2d). */
+    "maxpool2d", "avgpool2d",
     /* DL HDL Tier H1 — INT8 quantization (plain numeric in/out). */
     "dlquantize", "dlqscale",
     /* DL T6.5 — quantizer calibration + activation clipping. */
@@ -652,6 +655,8 @@ void Resolver::registerBuiltins() {
     "matlab_dlnet_leakyrelu", "matlab_dlnet_gelu", "matlab_dlnet_swish",
     "matlab_dlnet_softplus", "matlab_dlnet_elu",
     "matlab_dlnet_conv2d_batch",
+    "matlab_dlnet_reshape2", "matlab_dlnet_reshape4",
+    "matlab_dlnet_maxpool2d", "matlab_dlnet_avgpool2d",
     "matlab_dlnet_quantize", "matlab_dlnet_qscale",
     "matlab_dlnet_qclip", "matlab_dlnet_qcalibrate",
     "matlab_dlnet_grad", "matlab_dlnet_reset",

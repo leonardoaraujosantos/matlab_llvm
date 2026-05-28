@@ -3287,10 +3287,12 @@ bool TensorLowering::rewriteBuiltinCalls() {
       continue;
     }
     /* Rank-4 scalar store: A(i,j,k,l) = v on a matlab_matN binding.
-     * Routes to matlab_subscript4_pstore_s, which is N-D-aware. */
+     * Routes to matlab_subscript4_pstore_s, which is N-D-aware.  Accepts
+     * either PtrTy or tensor<*xf64> base (early-tracking lane). */
     if (Name == "matlab_subscript4_pstore_s" &&
         Call->getNumOperands() == 6 &&
-        Call->getOperand(0).getType() == PtrTy &&
+        (Call->getOperand(0).getType() == PtrTy ||
+         mlir::isa<mlir::TensorType>(Call->getOperand(0).getType())) &&
         Call->getOperand(1).getType() == F64 &&
         Call->getOperand(2).getType() == F64 &&
         Call->getOperand(3).getType() == F64 &&
@@ -6122,6 +6124,11 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"matlab_dlnet_lstmp",          "matlab_dlnet_lstmp",          PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy}},
         /* Tier C: rank-4 batched conv with autodiff support. */
         {"matlab_dlnet_conv2d_batch",  "matlab_dlnet_conv2d_batch", PtrTy, {PtrTy, PtrTy, PtrTy}},
+        /* Tier C: dlarray reshape (2-D / 4-D output) + pooling. */
+        {"matlab_dlnet_reshape2",      "matlab_dlnet_reshape2",     PtrTy, {PtrTy, PtrTy, F64, F64}},
+        {"matlab_dlnet_reshape4",      "matlab_dlnet_reshape4",     PtrTy, {PtrTy, PtrTy, F64, F64, F64, F64}},
+        {"matlab_dlnet_maxpool2d",     "matlab_dlnet_maxpool2d",    PtrTy, {PtrTy, PtrTy, F64, F64}},
+        {"matlab_dlnet_avgpool2d",     "matlab_dlnet_avgpool2d",    PtrTy, {PtrTy, PtrTy, F64, F64}},
         /* Deep Learning Toolbox Phase 1 — small extra ops over dlarray. */
         {"matlab_dlnet_rdivide",        "matlab_dlnet_rdivide",        PtrTy, {PtrTy, PtrTy, PtrTy}},
         {"matlab_dlnet_sqrt",           "matlab_dlnet_sqrt",           PtrTy, {PtrTy, PtrTy}},
