@@ -4685,7 +4685,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
      * still picks up the class. CallOrIndex on a class constructor
      * also returns a class instance. */
     std::function<const ClassDef *(const Expr *)> pinnedFromExpr =
-        [&pinnedFromExpr](const Expr *X) -> const ClassDef * {
+        [&pinnedFromExpr, this](const Expr *X) -> const ClassDef * {
       if (!X) return nullptr;
       if (auto *NE = dynamic_cast<const NameExpr *>(X))
         if (NE->Ref && NE->Ref->PinnedClass) return NE->Ref->PinnedClass;
@@ -4703,10 +4703,30 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
       if (auto *U2 = dynamic_cast<const UnaryOpExpr *>(X))
         return pinnedFromExpr(U2->Operand);
       if (auto *CX = dynamic_cast<const CallOrIndex *>(X)) {
-        if (auto *NX = dynamic_cast<const NameExpr *>(CX->Callee))
+        if (auto *NX = dynamic_cast<const NameExpr *>(CX->Callee)) {
           if (NX->Ref && NX->Ref->Kind == BindingKind::Class &&
               NX->Ref->ClassDef)
             return NX->Ref->ClassDef;
+          /* dlarray-returning function-style calls (`relu`/`sigmoid`/
+           * `mse`/...).  Without this branch, two dlarray-returning
+           * calls combined by `+` (`mse(Y1,T1) + mse(Y2,T2)`) miss the
+           * classdef-operator-overloading dispatch and crash through
+           * `matlab_add_mm` interpreting dlarray pointers as matrices. */
+          static const llvm::StringSet<> DlRet2 = {
+              "relu", "sigmoid", "tanh", "softmax", "sum", "mean",
+              "log", "exp", "crossentropy", "mse", "lstm",
+              "transpose", "ctranspose", "embed",
+              "gru", "bilstm", "lstmp", "dlarray"};
+          if (DlRet2.contains(NX->Name) && this->CurTU) {
+            bool argPinned = false;
+            for (size_t i = 0; i < CX->Args.size(); ++i)
+              if (pinnedFromExpr(CX->Args[i])) { argPinned = true; break; }
+            if (argPinned) {
+              for (const ClassDef *DC : this->CurTU->Classes)
+                if (DC && DC->Name == "dlarray") return DC;
+            }
+          }
+        }
       }
       return nullptr;
     };
