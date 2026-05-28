@@ -1,0 +1,4 @@
+dl_dropout: loss(train) = 0.6931
+dl_dropout: loss(eval)  = 0.6931
+dl_dropout: sum(|gW|)   = 1.2857
+dl_dropout: PASS

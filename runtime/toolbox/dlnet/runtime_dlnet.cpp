@@ -56,7 +56,10 @@ inline matlab_mat *clone(const matlab_mat *m) {
 // Opcodes.
 enum { OP_LEAF, OP_ADD, OP_SUB, OP_MTIMES, OP_TIMES, OP_RELU, OP_SIGMOID,
        OP_TANH, OP_SOFTMAX, OP_SUM, OP_MEAN, OP_LOG, OP_EXP, OP_CE, OP_MSE,
-       OP_LSTM, OP_TRANSPOSE, OP_EMBED, OP_GRU, OP_BILSTM, OP_LSTMP };
+       OP_LSTM, OP_TRANSPOSE, OP_EMBED, OP_GRU, OP_BILSTM, OP_LSTMP,
+       /* Phase 1 — small additional ops. */
+       OP_RDIV, OP_SQRT, OP_MEAN_DIM, OP_LEAKY_RELU, OP_GELU, OP_SWISH,
+       OP_SOFTPLUS, OP_ELU };
 
 struct Node {
     int op;
@@ -77,20 +80,48 @@ inline int record(int op, int p0, int p1, matlab_mat *val) {
 }
 
 // adj += contribution (allocating the accumulator on first touch).
+// Handles broadcasting axes by reducing the contribution to the accumulator's
+// shape: scalar / row / col / matrix.  When the accumulator is already
+// allocated and shorter than `contrib`, we sum-reduce over the broadcast axes.
 inline void accum(int id, const matlab_mat *contrib) {
     if (id < 0 || !contrib) return;
     Node &n = g_tape[id];
-    if (!n.adj) { n.adj = mat_alloc(contrib->rows, contrib->cols);
-                  for (int64_t i = 0; i < contrib->rows*contrib->cols; ++i) n.adj->data[i] = 0; }
-    int64_t na = n.adj->rows * n.adj->cols, nc = contrib->rows * contrib->cols;
-    if (na == nc) { for (int64_t i = 0; i < na; ++i) n.adj->data[i] += contrib->data[i]; }
-    else if (n.adj->cols == 1 && contrib->rows == n.adj->rows) {
-        // bias broadcast: sum the contribution across columns into the column adj.
-        for (int64_t r = 0; r < contrib->rows; ++r) {
-            double s = 0; for (int64_t c = 0; c < contrib->cols; ++c) s += contrib->data[r*contrib->cols+c];
+    if (!n.adj) {
+        // Allocate the adj at the parent value's shape (sized by the
+        // original leaf), not the contribution's — this ensures repeated
+        // accumulations from broadcast results reduce to the correct
+        // operand shape.
+        const matlab_mat *V = n.val ? n.val : contrib;
+        n.adj = mat_alloc(V->rows, V->cols);
+        for (int64_t i = 0; i < n.adj->rows*n.adj->cols; ++i) n.adj->data[i] = 0;
+    }
+    int64_t aM = n.adj->rows, aN = n.adj->cols;
+    int64_t cM = contrib->rows, cN = contrib->cols;
+    if (aM == cM && aN == cN) {
+        // Strict element-wise.
+        for (int64_t i = 0; i < aM*aN; ++i) n.adj->data[i] += contrib->data[i];
+    } else if (aM == 1 && aN == 1) {
+        // Scalar accumulator — sum the entire contribution.
+        double s = 0; for (int64_t i = 0; i < cM*cN; ++i) s += contrib->data[i];
+        n.adj->data[0] += s;
+    } else if (aM == cM && aN == 1) {
+        // Column accumulator — sum across cols.
+        for (int64_t r = 0; r < cM; ++r) {
+            double s = 0; for (int64_t c = 0; c < cN; ++c) s += contrib->data[r*cN + c];
             n.adj->data[r] += s;
         }
-    } else if (na == 1) { double s = 0; for (int64_t i = 0; i < nc; ++i) s += contrib->data[i]; n.adj->data[0] += s; }
+    } else if (aM == 1 && aN == cN) {
+        // Row accumulator — sum across rows.
+        for (int64_t c = 0; c < cN; ++c) {
+            double s = 0; for (int64_t r = 0; r < cM; ++r) s += contrib->data[r*cN + c];
+            n.adj->data[c] += s;
+        }
+    } else if (aM*aN == cM*cN) {
+        // Flat length matches — element-wise (shape transposed but same nel).
+        for (int64_t i = 0; i < aM*aN; ++i) n.adj->data[i] += contrib->data[i];
+    }
+    // Other mismatches: silently drop (defensive — backward of unsupported
+    // broadcast shape).
 }
 
 }  // namespace dlnet
@@ -112,6 +143,12 @@ matlab_mat *matlab_dlnet_extractdata(void *obj_v) {
 }
 
 // ---- binary ops: result obj r populated from operands a, b ----------------
+// Numpy-style broadcasting on rank-2 lanes:
+//   * scalar  (1x1)   — replicated everywhere
+//   * row     (1xN)   — replicated across rows
+//   * col     (Mx1)   — replicated across cols
+//   * matrix  (MxN)   — strict elementwise (must match)
+// The result keeps the larger shape (A's shape when broadcasting B).
 static matlab_mat *bin_forward(int op, matlab_mat *A, matlab_mat *B) {
     int64_t m = A->rows, n = A->cols;
     if (op == dlnet::OP_MTIMES) {
@@ -123,18 +160,27 @@ static matlab_mat *bin_forward(int op, matlab_mat *A, matlab_mat *B) {
             }
         return C;
     }
-    matlab_mat *C = mat_alloc(m, n);
-    bool bcol = (B->cols == 1 && B->rows == m && n > 1);   // bias-style broadcast
-    for (int64_t r = 0; r < m; ++r)
-        for (int64_t c = 0; c < n; ++c) {
-            double a = A->data[r*n+c];
-            double b = bcol ? B->data[r] : B->data[(B->rows==m&&B->cols==n)? r*n+c : (r* (B->cols) + (c % B->cols))];
+    // Decide result shape — A defines it when A is "bigger".  Pure scalar
+    // A is also handled (swap so the bigger side leads).
+    int64_t aM = A->rows, aN = A->cols, bM = B->rows, bN = B->cols;
+    int64_t oM = std::max(aM, bM), oN = std::max(aN, bN);
+    matlab_mat *C = mat_alloc(oM, oN);
+    for (int64_t r = 0; r < oM; ++r) {
+        for (int64_t c = 0; c < oN; ++c) {
+            int64_t ar = (aM == 1) ? 0 : r;
+            int64_t ac = (aN == 1) ? 0 : c;
+            int64_t br = (bM == 1) ? 0 : r;
+            int64_t bc = (bN == 1) ? 0 : c;
+            double a = A->data[ar*aN + ac];
+            double b = B->data[br*bN + bc];
             double v = 0;
             if (op == dlnet::OP_ADD)   v = a + b;
             if (op == dlnet::OP_SUB)   v = a - b;
             if (op == dlnet::OP_TIMES) v = a * b;
-            C->data[r*n+c] = v;
+            C->data[r*oN + c] = v;
         }
+    }
+    (void)m; (void)n;  // legacy guard names
     return C;
 }
 
@@ -613,6 +659,147 @@ matlab_mat *matlab_dlnet_lstmp(void *robj, void *xv, void *h0v, void *c0v,
     return mat_alloc(0, 0);
 }
 
+// ---- Phase 1 small ops: rdivide / sqrt / mean(dim) / extra activations ----
+
+// Element-wise A ./ B with numpy-style broadcasting (scalar / row / col / mat).
+matlab_mat *matlab_dlnet_rdivide(void *r, void *a, void *b) {
+    using namespace dlnet;
+    matlab_mat *A = get_data(a), *B = get_data(b);
+    int64_t aM = A->rows, aN = A->cols, bM = B->rows, bN = B->cols;
+    int64_t oM = std::max(aM, bM), oN = std::max(aN, bN);
+    matlab_mat *C = mat_alloc(oM, oN);
+    for (int64_t r2 = 0; r2 < oM; ++r2) {
+        for (int64_t c = 0; c < oN; ++c) {
+            int64_t ar = (aM == 1) ? 0 : r2;
+            int64_t ac = (aN == 1) ? 0 : c;
+            int64_t br = (bM == 1) ? 0 : r2;
+            int64_t bc = (bN == 1) ? 0 : c;
+            double av = A->data[ar*aN + ac];
+            double bv = B->data[br*bN + bc];
+            C->data[r2*oN + c] = (std::fabs(bv) > 1e-30) ? av / bv : 0.0;
+        }
+    }
+    set_data(r, C);
+    set_id(r, record(OP_RDIV, get_id(a), get_id(b), C));
+    return mat_alloc(0, 0);
+}
+
+// sqrt(X)
+matlab_mat *matlab_dlnet_sqrt(void *r, void *x) {
+    using namespace dlnet;
+    matlab_mat *X = get_data(x);
+    matlab_mat *Y = mat_alloc(X->rows, X->cols);
+    for (int64_t i = 0; i < X->rows*X->cols; ++i) {
+        double v = X->data[i];
+        Y->data[i] = (v > 0) ? std::sqrt(v) : 0.0;
+    }
+    set_data(r, Y);
+    set_id(r, record(OP_SQRT, get_id(x), -1, Y));
+    return mat_alloc(0, 0);
+}
+
+// mean(X, dim) — dim = 1 → row-vector (1 × cols); dim = 2 → col-vector (rows × 1).
+// Records the dim in the val matrix's leading byte position via aux data — but
+// since OP_MEAN_DIM's pullback can read dim from V's shape vs P0's shape, we
+// don't need an explicit attribute.
+matlab_mat *matlab_dlnet_mean_dim(void *r, void *x, double dimd) {
+    using namespace dlnet;
+    matlab_mat *X = get_data(x);
+    int dim = static_cast<int>(dimd);
+    int64_t M = X->rows, N = X->cols;
+    matlab_mat *Y;
+    if (dim == 1) {
+        Y = mat_alloc(1, N);
+        for (int64_t c = 0; c < N; ++c) {
+            double s = 0; for (int64_t rr = 0; rr < M; ++rr) s += X->data[rr*N + c];
+            Y->data[c] = (M > 0) ? s / M : 0;
+        }
+    } else {
+        // default dim = 2 (mean across columns -> column vector)
+        Y = mat_alloc(M, 1);
+        for (int64_t rr = 0; rr < M; ++rr) {
+            double s = 0; for (int64_t c = 0; c < N; ++c) s += X->data[rr*N + c];
+            Y->data[rr] = (N > 0) ? s / N : 0;
+        }
+    }
+    set_data(r, Y);
+    set_id(r, record(OP_MEAN_DIM, get_id(x), -1, Y));
+    return mat_alloc(0, 0);
+}
+
+// leakyrelu(X) — alpha = 0.01 (standard).
+matlab_mat *matlab_dlnet_leakyrelu(void *r, void *x) {
+    using namespace dlnet;
+    matlab_mat *X = get_data(x);
+    matlab_mat *Y = mat_alloc(X->rows, X->cols);
+    for (int64_t i = 0; i < X->rows*X->cols; ++i) {
+        double v = X->data[i];
+        Y->data[i] = (v > 0) ? v : 0.01 * v;
+    }
+    set_data(r, Y);
+    set_id(r, record(OP_LEAKY_RELU, get_id(x), -1, Y));
+    return mat_alloc(0, 0);
+}
+
+// gelu(X) — Hendrycks' fast approximation:  x * sigmoid(1.702*x).
+//  Pulls: d/dx [x·σ(αx)] = σ(αx) + α·x·σ(αx)·(1-σ(αx))  with α = 1.702.
+matlab_mat *matlab_dlnet_gelu(void *r, void *x) {
+    using namespace dlnet;
+    matlab_mat *X = get_data(x);
+    matlab_mat *Y = mat_alloc(X->rows, X->cols);
+    for (int64_t i = 0; i < X->rows*X->cols; ++i) {
+        double v = X->data[i];
+        double s = 1.0 / (1.0 + std::exp(-1.702 * v));
+        Y->data[i] = v * s;
+    }
+    set_data(r, Y);
+    set_id(r, record(OP_GELU, get_id(x), -1, Y));
+    return mat_alloc(0, 0);
+}
+
+// swish(X) = x * sigmoid(x).  Pullback: σ(x) + x·σ(x)·(1-σ(x)) = σ(x) + y·(1-σ(x)).
+matlab_mat *matlab_dlnet_swish(void *r, void *x) {
+    using namespace dlnet;
+    matlab_mat *X = get_data(x);
+    matlab_mat *Y = mat_alloc(X->rows, X->cols);
+    for (int64_t i = 0; i < X->rows*X->cols; ++i) {
+        double v = X->data[i];
+        double s = 1.0 / (1.0 + std::exp(-v));
+        Y->data[i] = v * s;
+    }
+    set_data(r, Y);
+    set_id(r, record(OP_SWISH, get_id(x), -1, Y));
+    return mat_alloc(0, 0);
+}
+
+// softplus(X) = log(1 + exp(X)).  Numerically stable for large |x|.
+matlab_mat *matlab_dlnet_softplus(void *r, void *x) {
+    using namespace dlnet;
+    matlab_mat *X = get_data(x);
+    matlab_mat *Y = mat_alloc(X->rows, X->cols);
+    for (int64_t i = 0; i < X->rows*X->cols; ++i) {
+        double v = X->data[i];
+        Y->data[i] = (v > 20.0) ? v : (v < -20.0 ? std::exp(v) : std::log1p(std::exp(v)));
+    }
+    set_data(r, Y);
+    set_id(r, record(OP_SOFTPLUS, get_id(x), -1, Y));
+    return mat_alloc(0, 0);
+}
+
+// elu(X) — alpha = 1.0.  y = x for x>0, y = α*(exp(x)-1) for x≤0.
+matlab_mat *matlab_dlnet_elu(void *r, void *x) {
+    using namespace dlnet;
+    matlab_mat *X = get_data(x);
+    matlab_mat *Y = mat_alloc(X->rows, X->cols);
+    for (int64_t i = 0; i < X->rows*X->cols; ++i) {
+        double v = X->data[i];
+        Y->data[i] = (v > 0) ? v : (std::exp(v) - 1.0);
+    }
+    set_data(r, Y);
+    set_id(r, record(OP_ELU, get_id(x), -1, Y));
+    return mat_alloc(0, 0);
+}
+
 // ---- dlgradient(loss, var): reverse sweep -> returns the var gradient -----
 // Returns the gradient as a plain matrix (MATLAB returns a dlarray; we return
 // the extracted value — a documented deviation that keeps the runtime from
@@ -636,8 +823,25 @@ matlab_mat *matlab_dlnet_grad(void *lossv, void *varv) {
         case OP_ADD:  accum(n.p0, A); accum(n.p1, A); break;
         case OP_SUB:  { accum(n.p0, A); matlab_mat *neg=clone(A); for(int64_t k=0;k<neg->rows*neg->cols;++k) neg->data[k]=-neg->data[k]; accum(n.p1, neg); } break;
         case OP_TIMES: {
-            if (P1) { matlab_mat *g=mat_alloc(A->rows,A->cols); for(int64_t k=0;k<A->rows*A->cols;++k) g->data[k]=A->data[k]*P1->data[k]; accum(n.p0,g);}
-            if (P0) { matlab_mat *g=mat_alloc(A->rows,A->cols); for(int64_t k=0;k<A->rows*A->cols;++k) g->data[k]=A->data[k]*P0->data[k]; accum(n.p1,g);}
+            // Broadcast-aware: walks A's shape, reads P0/P1 via the
+            // broadcasted address; accum then reduces to operand shape.
+            if (P0 && P1) {
+                int64_t oM = A->rows, oN = A->cols;
+                int64_t pM = P0->rows, pN = P0->cols, qM = P1->rows, qN = P1->cols;
+                matlab_mat *g0 = mat_alloc(oM, oN);
+                matlab_mat *g1 = mat_alloc(oM, oN);
+                for (int64_t r = 0; r < oM; ++r) {
+                    for (int64_t c = 0; c < oN; ++c) {
+                        int64_t pr = (pM == 1) ? 0 : r, pc = (pN == 1) ? 0 : c;
+                        int64_t qr = (qM == 1) ? 0 : r, qc = (qN == 1) ? 0 : c;
+                        double adv = A->data[r*oN + c];
+                        g0->data[r*oN + c] = adv * P1->data[qr*qN + qc];
+                        g1->data[r*oN + c] = adv * P0->data[pr*pN + pc];
+                    }
+                }
+                accum(n.p0, g0);
+                accum(n.p1, g1);
+            }
         } break;
         case OP_MTIMES: {
             // C = P0 * P1 ; gP0 = A * P1' ; gP1 = P0' * A
@@ -672,6 +876,119 @@ matlab_mat *matlab_dlnet_grad(void *lossv, void *varv) {
         case OP_MSE: {
             if (P0 && P1) { int64_t nel=P0->rows*P0->cols; matlab_mat *g=mat_alloc(P0->rows,P0->cols);
                 for(int64_t k=0;k<nel;++k) g->data[k]= A->data[0]*2.0*(P0->data[k]-P1->data[k])/(nel?nel:1); accum(n.p0,g); }
+        } break;
+        case OP_RDIV: {
+            // C = A ./ B ;  gA = adj / B ;  gB = -adj * A / B^2 ;
+            // walks the result shape (A's shape == adj shape) and indexes
+            // operands with broadcasted addresses so 1×N/M×1/1×1 operands
+            // produce the right per-cell gradient before accum reduces.
+            if (P0 && P1) {
+                int64_t oM = A->rows, oN = A->cols;
+                int64_t pM = P0->rows, pN = P0->cols;
+                int64_t qM = P1->rows, qN = P1->cols;
+                matlab_mat *gA = mat_alloc(oM, oN);
+                matlab_mat *gB = mat_alloc(oM, oN);
+                for (int64_t r = 0; r < oM; ++r) {
+                    for (int64_t c = 0; c < oN; ++c) {
+                        int64_t pr = (pM == 1) ? 0 : r, pc = (pN == 1) ? 0 : c;
+                        int64_t qr = (qM == 1) ? 0 : r, qc = (qN == 1) ? 0 : c;
+                        double a = P0->data[pr*pN + pc];
+                        double b = P1->data[qr*qN + qc];
+                        double bs = (std::fabs(b) > 1e-30) ? b : (b < 0 ? -1e-30 : 1e-30);
+                        double adv = A->data[r*oN + c];
+                        gA->data[r*oN + c] =  adv / bs;
+                        gB->data[r*oN + c] = -adv * a / (bs*bs);
+                    }
+                }
+                accum(n.p0, gA);
+                accum(n.p1, gB);
+            }
+        } break;
+        case OP_SQRT: {
+            // gx = adj / (2 * sqrt(x))  = adj / (2*V)
+            matlab_mat *g = mat_alloc(V->rows, V->cols);
+            for (int64_t k = 0; k < V->rows*V->cols; ++k) {
+                double y = V->data[k];
+                g->data[k] = (y > 1e-30) ? A->data[k] / (2.0*y) : 0.0;
+            }
+            accum(n.p0, g);
+        } break;
+        case OP_MEAN_DIM: {
+            // V is 1xN (dim=1) or Mx1 (dim=2); spread adj evenly over the
+            // reduced axis of P0.
+            if (P0) {
+                matlab_mat *g = mat_alloc(P0->rows, P0->cols);
+                int64_t M = P0->rows, N = P0->cols;
+                if (V->rows == 1) {
+                    // mean over rows -> each input col scaled by adj[c]/M.
+                    for (int64_t r = 0; r < M; ++r)
+                        for (int64_t c = 0; c < N; ++c)
+                            g->data[r*N + c] = A->data[c] / (M > 0 ? M : 1);
+                } else {
+                    // mean over cols -> each input row scaled by adj[r]/N.
+                    for (int64_t r = 0; r < M; ++r)
+                        for (int64_t c = 0; c < N; ++c)
+                            g->data[r*N + c] = A->data[r] / (N > 0 ? N : 1);
+                }
+                accum(n.p0, g);
+            }
+        } break;
+        case OP_LEAKY_RELU: {
+            matlab_mat *g = mat_alloc(V->rows, V->cols);
+            // y = x for x>0 else 0.01*x; dy/dx = 1 if x>0 else 0.01.
+            // V holds y; pre-relu sign = sign of y (positive y came from positive x).
+            for (int64_t k = 0; k < V->rows*V->cols; ++k)
+                g->data[k] = A->data[k] * ((V->data[k] > 0) ? 1.0 : 0.01);
+            accum(n.p0, g);
+        } break;
+        case OP_GELU: {
+            // y = x * sigmoid(1.702*x).  Need x (P0) to recompute σ.
+            matlab_mat *g = mat_alloc(V->rows, V->cols);
+            if (P0) {
+                for (int64_t k = 0; k < V->rows*V->cols; ++k) {
+                    double x = P0->data[k];
+                    double s = 1.0 / (1.0 + std::exp(-1.702 * x));
+                    double dydx = s + 1.702 * x * s * (1.0 - s);
+                    g->data[k] = A->data[k] * dydx;
+                }
+            }
+            accum(n.p0, g);
+        } break;
+        case OP_SWISH: {
+            // y = x * sigmoid(x); dy/dx = σ(x) + y * (1 - σ(x)).
+            matlab_mat *g = mat_alloc(V->rows, V->cols);
+            if (P0) {
+                for (int64_t k = 0; k < V->rows*V->cols; ++k) {
+                    double x = P0->data[k];
+                    double s = 1.0 / (1.0 + std::exp(-x));
+                    double dydx = s + V->data[k] * (1.0 - s);
+                    g->data[k] = A->data[k] * dydx;
+                }
+            }
+            accum(n.p0, g);
+        } break;
+        case OP_SOFTPLUS: {
+            // y = log(1+exp(x)) ; dy/dx = σ(x).
+            matlab_mat *g = mat_alloc(V->rows, V->cols);
+            if (P0) {
+                for (int64_t k = 0; k < V->rows*V->cols; ++k) {
+                    double x = P0->data[k];
+                    double s = 1.0 / (1.0 + std::exp(-x));
+                    g->data[k] = A->data[k] * s;
+                }
+            }
+            accum(n.p0, g);
+        } break;
+        case OP_ELU: {
+            // dy/dx = 1 if x>0 else α*exp(x) = y+α (with α=1).  Use P0 for branch.
+            matlab_mat *g = mat_alloc(V->rows, V->cols);
+            if (P0) {
+                for (int64_t k = 0; k < V->rows*V->cols; ++k) {
+                    double x = P0->data[k];
+                    g->data[k] = A->data[k] * ((x > 0) ? 1.0 : (V->data[k] + 1.0));
+                }
+            }
+            accum(n.p0, g);
         } break;
         case OP_EMBED: {
             // dE(:, idx(n)) += dY(:, n) — scatter-add of A into the embedding rows.

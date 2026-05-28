@@ -1,0 +1,2 @@
+dl_vae: loss(0)=0.3178 loss(30)=0.2953
+dl_vae: PASS (reconstruction loss decreased)

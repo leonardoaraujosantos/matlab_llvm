@@ -2564,6 +2564,13 @@ static std::string buildReplPrelude(const std::string &Src) {
     {false, "gru",                       "dlnet_classdefs.m"},
     {false, "bilstm",                    "dlnet_classdefs.m"},
     {false, "lstmp",                     "dlnet_classdefs.m"},
+    /* DL Phase 1 small ops.  `sqrt` is a generic builtin -- not a trigger.
+     * The DL-only activation names trigger the dlnet prelude. */
+    {false, "leakyrelu",                 "dlnet_classdefs.m"},
+    {false, "gelu",                      "dlnet_classdefs.m"},
+    {false, "swish",                     "dlnet_classdefs.m"},
+    {false, "softplus",                  "dlnet_classdefs.m"},
+    {false, "elu",                       "dlnet_classdefs.m"},
     /* Global Optimization Toolbox Tier-2 — `gads_classdefs.m` holds the
      * MultiStart + GlobalSearch solver objects.  (`run` is too generic
      * to trigger on; the solver-object mentions pull the prelude.) */
@@ -11730,6 +11737,7 @@ int main(int Argc, char **Argv) {
       "dlarray", "dlgradient", "extractdata", "relu", "sigmoid",
       "softmax", "crossentropy", "mse", "lstm", "embed",
       "gru", "bilstm", "lstmp",
+      "leakyrelu", "gelu", "swish", "softplus", "elu",
       /* GPU Coder T5 design-pattern helpers — runtime entries, no
        * prelude file needed.  Listed here only for the AOT-prelude
        * scanner's awareness (no leaf to map). */
@@ -12015,7 +12023,9 @@ int main(int Argc, char **Argv) {
         ClsName == "sigmoid" || ClsName == "softmax" ||
         ClsName == "crossentropy" || ClsName == "mse" ||
         ClsName == "lstm" || ClsName == "embed" ||
-        ClsName == "gru" || ClsName == "bilstm" || ClsName == "lstmp")
+        ClsName == "gru" || ClsName == "bilstm" || ClsName == "lstmp" ||
+        ClsName == "leakyrelu" || ClsName == "gelu" || ClsName == "swish" ||
+        ClsName == "softplus" || ClsName == "elu")
       return "dlnet_classdefs.m";
     /* GPU Coder T5 design-pattern helpers are C runtime entries; no
      * classdef file to pull in. */

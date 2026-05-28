@@ -262,6 +262,8 @@ void Resolver::registerBuiltins() {
     "matlab_stats_lm_predict", "matlab_stats_ridge", "matlab_stats_regress",
     /* Tier-4 — PCA + clustering. */
     "pca", "kmeans", "pdist2", "pdist", "squareform", "silhouette",
+    /* Tier-6.2 — t-SNE non-linear embedding. */
+    "tsne",
     /* Tier-5 — classification. */
     "fitcknn", "fitcnb", "fitcdiscr", "fitctree", "fitcsvm", "fitcecoc",
     "confusionmat",
@@ -628,6 +630,10 @@ void Resolver::registerBuiltins() {
      * reroutes them when the argument is a dlarray). */
     "relu", "sigmoid", "softmax", "crossentropy", "mse", "lstm", "embed",
     "gru", "bilstm", "lstmp",
+    /* DL Phase 1 — small dlarray-flavoured ops (`sqrt`, `mean`, `exp`, `log`
+     * remain ordinary builtins; only the strictly-DL-only names register
+     * here. */
+    "leakyrelu", "gelu", "swish", "softplus", "elu",
     /* DL HDL Tier H1 — INT8 quantization (plain numeric in/out). */
     "dlquantize", "dlqscale",
     /* DL T6.5 — quantizer calibration + activation clipping. */
@@ -642,6 +648,9 @@ void Resolver::registerBuiltins() {
     "matlab_dlnet_crossentropy", "matlab_dlnet_mse", "matlab_dlnet_lstm",
     "matlab_dlnet_transpose", "matlab_dlnet_embed",
     "matlab_dlnet_gru", "matlab_dlnet_bilstm", "matlab_dlnet_lstmp",
+    "matlab_dlnet_rdivide", "matlab_dlnet_sqrt", "matlab_dlnet_mean_dim",
+    "matlab_dlnet_leakyrelu", "matlab_dlnet_gelu", "matlab_dlnet_swish",
+    "matlab_dlnet_softplus", "matlab_dlnet_elu",
     "matlab_dlnet_quantize", "matlab_dlnet_qscale",
     "matlab_dlnet_qclip", "matlab_dlnet_qcalibrate",
     "matlab_dlnet_grad", "matlab_dlnet_reset",

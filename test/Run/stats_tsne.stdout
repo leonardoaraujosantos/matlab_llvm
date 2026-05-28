@@ -1,0 +1,2 @@
+stats_tsne: within=0.038 between=10.944 ratio=284.73
+stats_tsne: PASS (clusters separated)

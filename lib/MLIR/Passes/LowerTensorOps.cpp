@@ -5421,6 +5421,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"pdist",      "matlab_stats_pdist",      PtrTy, {PtrTy}},
         {"squareform", "matlab_stats_squareform", PtrTy, {PtrTy}},
         {"silhouette", "matlab_stats_silhouette", PtrTy, {PtrTy, PtrTy}},
+        /* Tier-6.2 — t-SNE non-linear embedding (closes carve-down). */
+        {"tsne",       "matlab_stats_tsne",       PtrTy, {PtrTy}},
         /* Tier-5 — classification (alloc-then-populate inits + predict + confusionmat). */
         {"matlab_stats_fitknn_init",  "matlab_stats_fitknn_init",  PtrTy, {PtrTy, PtrTy, PtrTy}},
         {"matlab_stats_fitnb_init",   "matlab_stats_fitnb_init",   PtrTy, {PtrTy, PtrTy, PtrTy}},
@@ -6100,6 +6102,15 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"matlab_dlnet_gru",            "matlab_dlnet_gru",            PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy}},
         {"matlab_dlnet_bilstm",         "matlab_dlnet_bilstm",         PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy}},
         {"matlab_dlnet_lstmp",          "matlab_dlnet_lstmp",          PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy}},
+        /* Deep Learning Toolbox Phase 1 — small extra ops over dlarray. */
+        {"matlab_dlnet_rdivide",        "matlab_dlnet_rdivide",        PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_dlnet_sqrt",           "matlab_dlnet_sqrt",           PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_mean_dim",       "matlab_dlnet_mean_dim",       PtrTy, {PtrTy, PtrTy, F64}},
+        {"matlab_dlnet_leakyrelu",      "matlab_dlnet_leakyrelu",      PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_gelu",           "matlab_dlnet_gelu",           PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_swish",          "matlab_dlnet_swish",          PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_softplus",       "matlab_dlnet_softplus",       PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_elu",            "matlab_dlnet_elu",            PtrTy, {PtrTy, PtrTy}},
         /* DL HDL Tier H1 — INT8 quantization (plain matrix in/out). */
         {"dlquantize",                  "matlab_dlnet_quantize",       PtrTy, {PtrTy}},
         {"matlab_dlnet_quantize",       "matlab_dlnet_quantize",       PtrTy, {PtrTy}},

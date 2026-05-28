@@ -4716,7 +4716,9 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
               "relu", "sigmoid", "tanh", "softmax", "sum", "mean",
               "log", "exp", "crossentropy", "mse", "lstm",
               "transpose", "ctranspose", "embed",
-              "gru", "bilstm", "lstmp", "dlarray"};
+              "gru", "bilstm", "lstmp", "dlarray",
+              "sqrt", "leakyrelu", "gelu", "swish",
+              "softplus", "elu"};
           if (DlRet2.contains(NX->Name) && this->CurTU) {
             bool argPinned = false;
             for (size_t i = 0; i < CX->Args.size(); ++i)
@@ -7142,7 +7144,9 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             "relu", "sigmoid", "tanh", "softmax", "sum", "mean",
             "log", "exp", "crossentropy", "mse", "lstm",
             "transpose", "ctranspose", "embed",
-            "gru", "bilstm", "lstmp"};
+            "gru", "bilstm", "lstmp",
+            /* Phase 1 small ops. */
+            "sqrt", "leakyrelu", "gelu", "swish", "softplus", "elu"};
         if (DlFns.contains(N->Name)) {
           std::function<bool(const Expr *)> pinnedDl =
               [&pinnedDl](const Expr *X) -> bool {
@@ -7163,7 +7167,9 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                     "relu", "sigmoid", "tanh", "softmax", "sum", "mean",
                     "log", "exp", "crossentropy", "mse", "lstm",
                     "transpose", "ctranspose", "embed",
-                    "gru", "bilstm", "lstmp", "dlarray"};
+                    "gru", "bilstm", "lstmp", "dlarray",
+                    "sqrt", "leakyrelu", "gelu", "swish",
+                    "softplus", "elu"};
                 if (DlRet.contains(NX->Name))
                   for (size_t i = 0; i < CX->Args.size(); ++i)
                     if (pinnedDl(CX->Args[i])) return true;
@@ -7179,7 +7185,14 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             std::vector<mlir::Value> Vs;
             for (size_t i = 0; i < C.Args.size(); ++i)
               Vs.push_back(lowerExpr(*C.Args[i]));
-            std::string Callee = std::string("dlarray__") + std::string(N->Name);
+            /* Per-arity rename: `mean(X)` -> dlarray__mean (1-arg) but
+             * `mean(X, dim)` -> dlarray__mean_dim (2-arg).  Method-by-
+             * arity dispatch isn't a classdef feature, so we split the
+             * names at the lowering arm. */
+            std::string MethodName(N->Name);
+            if (MethodName == "mean" && C.Args.size() == 2)
+              MethodName = "mean_dim";
+            std::string Callee = std::string("dlarray__") + MethodName;
             mlir::NamedAttribute Cal(
                 mlir::StringAttr::get(&MCtx, "callee"),
                 mlir::StringAttr::get(&MCtx, Callee));

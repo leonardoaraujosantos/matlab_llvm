@@ -110,6 +110,42 @@ classdef dlarray
             r = dlarray();
             matlab_dlnet_lstmp(r, x, h0, c0, W, R, P, b);
         end
+
+        % ---- Phase 1 small ops --------------------------------------------
+        % Element-wise divide, sqrt, dim-aware mean, plus several modern
+        % activation functions (leakyrelu / gelu / swish / softplus / elu).
+        function r = rdivide(a, b)
+            r = dlarray();
+            matlab_dlnet_rdivide(r, a, b);
+        end
+        function r = sqrt(x)
+            r = dlarray();
+            matlab_dlnet_sqrt(r, x);
+        end
+        function r = mean_dim(x, dim)
+            r = dlarray();
+            matlab_dlnet_mean_dim(r, x, dim);
+        end
+        function r = leakyrelu(x)
+            r = dlarray();
+            matlab_dlnet_leakyrelu(r, x);
+        end
+        function r = gelu(x)
+            r = dlarray();
+            matlab_dlnet_gelu(r, x);
+        end
+        function r = swish(x)
+            r = dlarray();
+            matlab_dlnet_swish(r, x);
+        end
+        function r = softplus(x)
+            r = dlarray();
+            matlab_dlnet_softplus(r, x);
+        end
+        function r = elu(x)
+            r = dlarray();
+            matlab_dlnet_elu(r, x);
+        end
     end
 end
 % `extractdata(x)` and `dlgradient(loss, v)` are intercepted in Lowering.cpp

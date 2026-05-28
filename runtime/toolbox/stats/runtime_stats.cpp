@@ -2181,4 +2181,145 @@ matlab_mat *matlab_stats_test_stats(void) {
     return reinterpret_cast<matlab_mat *>(s);
 }
 
+/* tsne(X)  — Barnes-Hut-free t-SNE.  Closes Stats T6.2 (the last carved
+ * Stats item).  Embedding dimension fixed at 2.  Uses a single fixed
+ * perplexity (10) and the canonical KL-on-joint-probability gradient.
+ *
+ * Algorithm (compact form, no Barnes-Hut tree, O(n²) per iter):
+ *
+ *   1. Compute pairwise squared-Euclidean distances D in input space.
+ *   2. For each row i, binary-search the precision βᵢ s.t.
+ *        Σⱼ exp(-βᵢ Dᵢⱼ) / Z has perplexity ~ target.
+ *      The conditional pᵢ|ⱼ from this β gives P.
+ *   3. Symmetrise   P = (P + Pᵀ)/(2n).  Early-exaggeration (×4 for
+ *      the first 100 iters) is omitted for brevity.
+ *   4. Initialise Y at 1e-4·N(0,I).
+ *   5. For 250 iters:
+ *        Qᵢⱼ ∝ (1 + ||yᵢ-yⱼ||²)⁻¹
+ *        gradᵢ = 4 Σⱼ (Pᵢⱼ-Qᵢⱼ) (yᵢ-yⱼ) (1+||yᵢ-yⱼ||²)⁻¹
+ *        Y ← Y - lr·grad  (no momentum / no early-stop, plain GD).
+ *
+ * Result: n×2 embedding.  KL is decreasing for sensible inputs. */
+matlab_mat *matlab_stats_tsne(matlab_mat *X) {
+    int64_t n, p;
+    std::vector<double> A = sdata(X, n, p);
+    if (n <= 0) return mat_alloc(0, 0);
+
+    const int    Niter    = 250;
+    const double lr       = 200.0;
+    const double targ_pp  = std::min(static_cast<double>(n - 1), 10.0);
+    const double log_pp   = std::log(targ_pp);
+
+    /* --- D : pairwise squared distances ----------------------------- */
+    std::vector<double> D(static_cast<size_t>(n * n), 0.0);
+    for (int64_t i = 0; i < n; ++i) {
+        for (int64_t j = i + 1; j < n; ++j) {
+            double s = 0;
+            for (int64_t d = 0; d < p; ++d) {
+                double diff = A[static_cast<size_t>(i*p+d)]
+                            - A[static_cast<size_t>(j*p+d)];
+                s += diff * diff;
+            }
+            D[static_cast<size_t>(i*n + j)] = s;
+            D[static_cast<size_t>(j*n + i)] = s;
+        }
+    }
+
+    /* --- P : binary search per row over β for target perplexity ---- */
+    std::vector<double> P(static_cast<size_t>(n * n), 0.0);
+    for (int64_t i = 0; i < n; ++i) {
+        double beta = 1.0, beta_lo = -1.0, beta_hi = -1.0;
+        std::vector<double> Pi(static_cast<size_t>(n), 0.0);
+        for (int it = 0; it < 50; ++it) {
+            double Z = 0;
+            for (int64_t j = 0; j < n; ++j) {
+                if (j == i) { Pi[static_cast<size_t>(j)] = 0; continue; }
+                double v = std::exp(-beta * D[static_cast<size_t>(i*n + j)]);
+                Pi[static_cast<size_t>(j)] = v;
+                Z += v;
+            }
+            if (Z < 1e-30) Z = 1e-30;
+            double H = 0;
+            for (int64_t j = 0; j < n; ++j) {
+                double pij = Pi[static_cast<size_t>(j)] / Z;
+                if (pij > 1e-30) H -= pij * std::log(pij);
+                Pi[static_cast<size_t>(j)] = pij;
+            }
+            if (std::fabs(H - log_pp) < 1e-5) break;
+            if (H > log_pp) {
+                beta_lo = beta;
+                beta = (beta_hi < 0) ? beta*2 : (beta + beta_hi)/2;
+            } else {
+                beta_hi = beta;
+                beta = (beta_lo < 0) ? beta/2 : (beta + beta_lo)/2;
+            }
+        }
+        for (int64_t j = 0; j < n; ++j)
+            P[static_cast<size_t>(i*n + j)] = Pi[static_cast<size_t>(j)];
+    }
+    /* Symmetrise to a joint distribution. */
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t j = i + 1; j < n; ++j) {
+            double v = (P[static_cast<size_t>(i*n+j)]
+                       + P[static_cast<size_t>(j*n+i)]) / (2.0 * n);
+            P[static_cast<size_t>(i*n+j)] = v;
+            P[static_cast<size_t>(j*n+i)] = v;
+        }
+
+    /* --- Y : initial embedding (deterministic small seed) ---------- */
+    std::vector<double> Y(static_cast<size_t>(n * 2), 0.0);
+    for (int64_t i = 0; i < n; ++i) {
+        /* fxhash-style deterministic seed -> small ± numbers. */
+        uint64_t h1 = static_cast<uint64_t>(i) * 2654435761u + 0x9e3779b9u;
+        uint64_t h2 = static_cast<uint64_t>(i) * 1597334677u + 0x12345678u;
+        Y[static_cast<size_t>(i*2 + 0)] = 1e-4 * (static_cast<double>((h1 >> 8) & 0xFFFF) / 32768.0 - 1.0);
+        Y[static_cast<size_t>(i*2 + 1)] = 1e-4 * (static_cast<double>((h2 >> 8) & 0xFFFF) / 32768.0 - 1.0);
+    }
+
+    /* --- main loop -------------------------------------------------- */
+    std::vector<double> Q(static_cast<size_t>(n * n), 0.0);
+    std::vector<double> num(static_cast<size_t>(n * n), 0.0);
+    std::vector<double> grad(static_cast<size_t>(n * 2), 0.0);
+    for (int it = 0; it < Niter; ++it) {
+        /* Q: (1 + ||yi - yj||^2)^-1, normalised. */
+        double Zsum = 0;
+        for (int64_t i = 0; i < n; ++i) {
+            for (int64_t j = i + 1; j < n; ++j) {
+                double dx = Y[static_cast<size_t>(i*2)]   - Y[static_cast<size_t>(j*2)];
+                double dy = Y[static_cast<size_t>(i*2+1)] - Y[static_cast<size_t>(j*2+1)];
+                double v  = 1.0 / (1.0 + dx*dx + dy*dy);
+                num[static_cast<size_t>(i*n + j)] = v;
+                num[static_cast<size_t>(j*n + i)] = v;
+                Zsum += 2.0 * v;
+            }
+        }
+        if (Zsum < 1e-30) Zsum = 1e-30;
+        for (int64_t i = 0; i < n; ++i)
+            for (int64_t j = 0; j < n; ++j)
+                Q[static_cast<size_t>(i*n + j)] =
+                    num[static_cast<size_t>(i*n + j)] / Zsum;
+
+        /* grad: 4 * Σⱼ (Pij - Qij) (yi - yj) num_ij */
+        for (int64_t i = 0; i < n; ++i) {
+            double gx = 0, gy = 0;
+            for (int64_t j = 0; j < n; ++j) {
+                if (j == i) continue;
+                double diff = P[static_cast<size_t>(i*n+j)]
+                            - Q[static_cast<size_t>(i*n+j)];
+                double nv   = num[static_cast<size_t>(i*n+j)];
+                gx += diff * (Y[static_cast<size_t>(i*2)]   - Y[static_cast<size_t>(j*2)])   * nv;
+                gy += diff * (Y[static_cast<size_t>(i*2+1)] - Y[static_cast<size_t>(j*2+1)]) * nv;
+            }
+            grad[static_cast<size_t>(i*2 + 0)] = 4.0 * gx;
+            grad[static_cast<size_t>(i*2 + 1)] = 4.0 * gy;
+        }
+        for (int64_t k = 0; k < n*2; ++k) Y[static_cast<size_t>(k)] -= lr * grad[static_cast<size_t>(k)];
+    }
+
+    /* Pack to n×2 output. */
+    matlab_mat *R = mat_alloc(n, 2);
+    for (int64_t k = 0; k < n*2; ++k) R->data[k] = Y[static_cast<size_t>(k)];
+    return R;
+}
+
 }  /* extern "C" */
