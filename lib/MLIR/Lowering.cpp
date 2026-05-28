@@ -4298,6 +4298,23 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
           }
         }
     }
+    /* Rank-4 scalar store: A(i,j,k,l) = v on any binding.  Routes through
+     * matlab_subscript4_pstore_s, which is N-D-aware (falls back to lower-
+     * rank descriptors via mat_is_3d / mat_is_nd). */
+    if (C.Args.size() == 4 && Rhs) {
+      bool anyColon = false;
+      for (size_t a = 0; a < 4; ++a)
+        if (dynamic_cast<const ColonExpr *>(C.Args[a])) { anyColon = true; break; }
+      if (!anyColon) {
+        mlir::NamedAttribute Cal4(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_subscript4_pstore_s"));
+        emitUnregOp("matlab.call_builtin",
+                    {Os[0], Os[1], Os[2], Os[3], Os[4], Os[5]},
+                    {mlir::NoneType::get(&MCtx)}, loc(C.Range), {Cal4});
+        return;
+      }
+    }
     mlir::NamedAttribute Cal(
         mlir::StringAttr::get(&MCtx, "callee"),
         mlir::StringAttr::get(&MCtx, "__subscript_store"));

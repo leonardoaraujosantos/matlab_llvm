@@ -3286,6 +3286,24 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Changed = true;
       continue;
     }
+    /* Rank-4 scalar store: A(i,j,k,l) = v on a matlab_matN binding.
+     * Routes to matlab_subscript4_pstore_s, which is N-D-aware. */
+    if (Name == "matlab_subscript4_pstore_s" &&
+        Call->getNumOperands() == 6 &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == F64 &&
+        Call->getOperand(2).getType() == F64 &&
+        Call->getOperand(3).getType() == F64 &&
+        Call->getOperand(4).getType() == F64 &&
+        Call->getOperand(5).getType() == F64) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_subscript4_pstore_s", VoidTy,
+                   {PtrTy, F64, F64, F64, F64, F64});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn, Call->getOperands());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
     /* A(:, :, k) = scalar  -> matlab_subscript3_pstore_s(A, k, v). */
     if (Name == "matlab_subscript3_pstore_s" &&
         Call->getNumOperands() == 3 &&
@@ -6402,8 +6420,14 @@ bool TensorLowering::rewriteBuiltinCalls() {
     static const Spec Table[] = {
       {"zeros",      "matlab_zeros",      1, "ff"},
       {"zeros",      "matlab_zeros3",     1, "fff"},
+      {"zeros",      "matlab_zeros4",     1, "ffff"},
+      {"zeros",      "matlab_zeros5",     1, "fffff"},
+      {"zeros",      "matlab_zeros6",     1, "ffffff"},
       {"ones",       "matlab_ones",       1, "ff"},
       {"ones",       "matlab_ones3",      1, "fff"},
+      {"ones",       "matlab_ones4",      1, "ffff"},
+      {"ones",       "matlab_ones5",      1, "fffff"},
+      {"ones",       "matlab_ones6",      1, "ffffff"},
       {"eye",        "matlab_eye",        1, "ff"},
       {"magic",      "matlab_magic",      1, "f"},
       {"rand",       "matlab_rand",       1, "ff"},
@@ -6471,6 +6495,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"diag",       "matlab_diag",       1, "p"},
       {"reshape",    "matlab_reshape",    1, "pff"},
       {"reshape",    "matlab_reshape3",   1, "pfff"},  /* reshape(A,m,n,p) */
+      {"reshape",    "matlab_reshape4",   1, "pffff"}, /* reshape(A,d1,d2,d3,d4) */
       {"repmat",     "matlab_repmat",     1, "pff"},
       {"repmat",     "matlab_repmat3",    1, "pfff"},  /* repmat(A,r,c,p) */
       {"exp",        "matlab_exp_m",      1, "p"},
@@ -8159,8 +8184,15 @@ bool TensorLowering::rewriteSubscript() {
   });
   for (Operation *Op : Subs) {
     unsigned N = Op->getNumOperands();
-    if (N < 2 || N > 3) continue;
-    if (Op->getOperand(0).getType() != PtrTy) continue;
+    /* Accept N=2 (one index), N=3 (two indices), N=5 (four indices — Tier C
+     * rank-4 fast path).  Higher arities still fall through. */
+    if (N != 2 && N != 3 && N != 5) continue;
+    /* Base may be PtrTy (matlab_mat / matlab_mat3 / matlab_matN pointer)
+     * or `tensor<*xf64>` from the early-tracking lane.  Both reach the
+     * runtime as a plain pointer. */
+    if (Op->getOperand(0).getType() != PtrTy &&
+        !mlir::isa<mlir::TensorType>(Op->getOperand(0).getType()))
+      continue;
 
     // Classify each index.
     bool AllScalar = true;
@@ -8175,7 +8207,19 @@ bool TensorLowering::rewriteSubscript() {
     // All scalar + scalar f64 result => fast path, per-element access.
     if (AllScalar && Op->getNumResults() == 1 &&
         Op->getResult(0).getType() == F64) {
-      if (N == 3) {
+      if (N == 5) {
+        /* A(i,j,k,l) on a rank-4 (or higher with implicit trailing dims)
+         * array.  Routes through matlab_subscript4_s, which is N-D-aware
+         * and falls back to 2-D / 3-D when the descriptor is narrower. */
+        auto Fn = rt("matlab_subscript4_s", F64,
+                     {PtrTy, F64, F64, F64, F64});
+        auto NC = LLVM::CallOp::create(B, Op->getLoc(), Fn,
+                                        ValueRange{Base, Op->getOperand(1),
+                                                   Op->getOperand(2),
+                                                   Op->getOperand(3),
+                                                   Op->getOperand(4)});
+        Op->getResult(0).replaceAllUsesWith(NC.getResult());
+      } else if (N == 3) {
         auto Fn = rt("matlab_subscript2_s", F64, {PtrTy, F64, F64});
         auto NC = LLVM::CallOp::create(B, Op->getLoc(), Fn,
                                         ValueRange{Base, Op->getOperand(1),

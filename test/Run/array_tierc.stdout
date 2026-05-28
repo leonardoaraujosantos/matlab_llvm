@@ -1,0 +1,15 @@
+array_tierc: ndims(A)=4 numel(A)=120
+array_tierc: size(A,1..4) = 2 3 4 5
+array_tierc: size(A,5)    = 1
+array_tierc: ndims(B)=5 numel(B)=32
+array_tierc: zeros(2,3,4,1) ndims=3 size3=4
+array_tierc: zeros(2,3,1,1) ndims=2 size2=3
+array_tierc: A2(1,1,1,1)=11 A2(2,3,4,5)=99 A2(1,2,3,4)=23
+array_tierc: reshape ndims=4 numel=24
+array_tierc: reshape size = 2 3 2 2
+array_tierc: squeeze ndims=2 size = 2 3
+array_tierc: permute ndims=4 size = 3 2 5 4
+array_tierc: permute P(1,1,1,1)=42 P(3,2,5,4)=88
+array_tierc: 3*ones(2,2,2,2): E2(1,1,1,1)=3 E2(2,2,2,2)=3
+array_tierc: matN+matN E3(1,1,1,1)=4 E3(2,2,2,2)=4
+array_tierc: PASS
