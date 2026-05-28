@@ -55,13 +55,17 @@ inline matlab_mat *clone(const matlab_mat *m) {
 // ---- reverse-mode tape ----------------------------------------------------
 // Opcodes.
 enum { OP_LEAF, OP_ADD, OP_SUB, OP_MTIMES, OP_TIMES, OP_RELU, OP_SIGMOID,
-       OP_TANH, OP_SOFTMAX, OP_SUM, OP_MEAN, OP_LOG, OP_EXP, OP_CE, OP_MSE };
+       OP_TANH, OP_SOFTMAX, OP_SUM, OP_MEAN, OP_LOG, OP_EXP, OP_CE, OP_MSE,
+       OP_LSTM };
 
 struct Node {
     int op;
     int p0, p1;            // parent node ids (-1 = none / not differentiable)
     matlab_mat *val;       // forward value (owned by the tape)
     matlab_mat *adj;       // adjoint accumulator (lazily allocated; nullptr = 0)
+    // Multi-parent / multi-state ops (e.g. OP_LSTM).  Empty for everything else.
+    std::vector<int>          auxParents;  // extra parent node ids beyond p0/p1
+    std::vector<matlab_mat *> auxData;     // saved per-timestep tensors for BPTT
 };
 
 static thread_local std::vector<Node> g_tape;
@@ -211,6 +215,87 @@ matlab_mat *matlab_dlnet_mse(void *r, void *yv, void *tv) {
     return mat_alloc(0, 0);
 }
 
+// ---- recurrent: functional LSTM (T4) --------------------------------------
+// MATLAB:  Y = lstm(X, H0, C0, W, R, b)
+//   X  D×T      input sequence (D-dim features, T timesteps)
+//   H0 H×1      initial hidden state
+//   C0 H×1      initial cell state
+//   W  4H×D     input weights, [i;f;g;o] stacked
+//   R  4H×H     recurrent weights, [i;f;g;o] stacked
+//   b  4H×1     biases, [i;f;g;o] stacked
+//   Y  H×T      hidden state at every timestep (final-only is carved)
+// One LSTM call is one tape node carrying every per-timestep gate + state;
+// the BPTT pullback (in dlgradient below) walks them backward in time.
+matlab_mat *matlab_dlnet_lstm(void *robj, void *xv, void *h0v, void *c0v,
+                              void *Wv, void *Rv, void *bv) {
+    using namespace dlnet;
+    matlab_mat *X  = get_data(xv);
+    matlab_mat *H0 = get_data(h0v);
+    matlab_mat *C0 = get_data(c0v);
+    matlab_mat *W  = get_data(Wv);
+    matlab_mat *R  = get_data(Rv);
+    matlab_mat *bm = get_data(bv);
+
+    int D = static_cast<int>(X->rows);
+    int T = static_cast<int>(X->cols);
+    int H = static_cast<int>(H0->rows);
+
+    matlab_mat *Y     = mat_alloc(H, T);
+    matlab_mat *Hfull = mat_alloc(H, T + 1);
+    matlab_mat *Cfull = mat_alloc(H, T + 1);
+    matlab_mat *Imat  = mat_alloc(H, T);
+    matlab_mat *Fmat  = mat_alloc(H, T);
+    matlab_mat *Gmat  = mat_alloc(H, T);
+    matlab_mat *Omat  = mat_alloc(H, T);
+
+    for (int k = 0; k < H; ++k) {
+        Hfull->data[k*(T+1) + 0] = H0->data[k];
+        Cfull->data[k*(T+1) + 0] = C0->data[k];
+    }
+
+    std::vector<double> z(4*H);
+    for (int t = 0; t < T; ++t) {
+        // pre-activations z = W*x_t + R*h_prev + b   (4H × 1)
+        for (int r = 0; r < 4*H; ++r) {
+            double s = bm->data[r];
+            for (int d = 0; d < D; ++d) s += W->data[r*D + d] * X->data[d*T + t];
+            for (int h = 0; h < H; ++h) s += R->data[r*H + h] * Hfull->data[h*(T+1) + t];
+            z[r] = s;
+        }
+        for (int k = 0; k < H; ++k) {
+            double ig = 1.0 / (1.0 + std::exp(-z[0*H + k]));
+            double fg = 1.0 / (1.0 + std::exp(-z[1*H + k]));
+            double gg = std::tanh(z[2*H + k]);
+            double og = 1.0 / (1.0 + std::exp(-z[3*H + k]));
+            double c_prev = Cfull->data[k*(T+1) + t];
+            double c_new  = fg * c_prev + ig * gg;
+            double h_new  = og * std::tanh(c_new);
+            Imat->data[k*T + t] = ig;
+            Fmat->data[k*T + t] = fg;
+            Gmat->data[k*T + t] = gg;
+            Omat->data[k*T + t] = og;
+            Cfull->data[k*(T+1) + t+1] = c_new;
+            Hfull->data[k*(T+1) + t+1] = h_new;
+            Y->data[k*T + t] = h_new;
+        }
+    }
+
+    Node n;
+    n.op = OP_LSTM;
+    n.p0 = get_id(xv);
+    n.p1 = get_id(h0v);
+    n.val = Y;
+    n.adj = nullptr;
+    n.auxParents = { get_id(c0v), get_id(Wv), get_id(Rv), get_id(bv) };
+    n.auxData    = { Hfull, Cfull, Imat, Fmat, Gmat, Omat };
+    g_tape.push_back(n);
+    int nid = static_cast<int>(g_tape.size()) - 1;
+
+    set_data(robj, Y);
+    set_id(robj, nid);
+    return mat_alloc(0, 0);
+}
+
 // ---- dlgradient(loss, var): reverse sweep -> returns the var gradient -----
 // Returns the gradient as a plain matrix (MATLAB returns a dlarray; we return
 // the extracted value — a documented deviation that keeps the runtime from
@@ -270,6 +355,91 @@ matlab_mat *matlab_dlnet_grad(void *lossv, void *varv) {
         case OP_MSE: {
             if (P0 && P1) { int64_t nel=P0->rows*P0->cols; matlab_mat *g=mat_alloc(P0->rows,P0->cols);
                 for(int64_t k=0;k<nel;++k) g->data[k]= A->data[0]*2.0*(P0->data[k]-P1->data[k])/(nel?nel:1); accum(n.p0,g); }
+        } break;
+        case OP_LSTM: {
+            // BPTT for Y = lstm(X, H0, C0, W, R, b).
+            //   p0 = X(D×T), p1 = H0(H×1)
+            //   auxParents = [c0id, Wid, Rid, bid]
+            //   auxData    = [Hfull(H×T+1), Cfull(H×T+1), I(H×T), F(H×T), G(H×T), O(H×T)]
+            //   V = Y (H×T), A = dY (H×T) accumulated from upstream.
+            if (n.auxParents.size() < 4 || n.auxData.size() < 6 || !P0) break;
+            matlab_mat *Xmat = P0;
+            matlab_mat *Wmat = g_tape[n.auxParents[1]].val;
+            matlab_mat *Rmat = g_tape[n.auxParents[2]].val;
+            matlab_mat *Hfull = n.auxData[0];
+            matlab_mat *Cfull = n.auxData[1];
+            matlab_mat *Imat = n.auxData[2];
+            matlab_mat *Fmat = n.auxData[3];
+            matlab_mat *Gmat = n.auxData[4];
+            matlab_mat *Omat = n.auxData[5];
+            int T = static_cast<int>(V->cols);
+            int H = static_cast<int>(V->rows);
+            int D = static_cast<int>(Xmat->rows);
+
+            matlab_mat *dX = mat_alloc(D, T);
+            matlab_mat *dW = mat_alloc(4*H, D);
+            matlab_mat *dR = mat_alloc(4*H, H);
+            matlab_mat *db = mat_alloc(4*H, 1);
+            matlab_mat *dH0 = mat_alloc(H, 1);
+            matlab_mat *dC0 = mat_alloc(H, 1);
+
+            std::vector<double> dh_next(H, 0.0), dc_next(H, 0.0);
+            std::vector<double> dpre(4*H, 0.0);
+
+            for (int t = T - 1; t >= 0; --t) {
+                std::vector<double> dh(H), dc(H);
+                for (int k = 0; k < H; ++k) dh[k] = A->data[k*T + t] + dh_next[k];
+                for (int k = 0; k < H; ++k) {
+                    double ig = Imat->data[k*T + t];
+                    double fg = Fmat->data[k*T + t];
+                    double gg = Gmat->data[k*T + t];
+                    double og = Omat->data[k*T + t];
+                    double c_new  = Cfull->data[k*(T+1) + t+1];
+                    double c_prev = Cfull->data[k*(T+1) + t];
+                    double tc = std::tanh(c_new);
+
+                    double do_k    = dh[k] * tc;
+                    double dtanh_c = dh[k] * og;
+                    dc[k] = dtanh_c * (1.0 - tc*tc) + dc_next[k];
+
+                    double df = dc[k] * c_prev;
+                    double dc_prev_k = dc[k] * fg;
+                    double di = dc[k] * gg;
+                    double dg = dc[k] * ig;
+
+                    dpre[0*H + k] = di    * ig * (1.0 - ig);   // d/d pre_i
+                    dpre[1*H + k] = df    * fg * (1.0 - fg);   // d/d pre_f
+                    dpre[2*H + k] = dg    *      (1.0 - gg*gg);// d/d pre_g
+                    dpre[3*H + k] = do_k  * og * (1.0 - og);   // d/d pre_o
+
+                    dc_next[k] = dc_prev_k;
+                }
+                // dW += dpre * x_t' ; dR += dpre * h_prev'
+                for (int r = 0; r < 4*H; ++r) {
+                    double dp = dpre[r];
+                    for (int d = 0; d < D; ++d) dW->data[r*D + d] += dp * Xmat->data[d*T + t];
+                    for (int h = 0; h < H; ++h) dR->data[r*H + h] += dp * Hfull->data[h*(T+1) + t];
+                    db->data[r] += dp;
+                }
+                // dX[:,t] = W' * dpre ; dh_next = R' * dpre
+                for (int d = 0; d < D; ++d) {
+                    double s = 0; for (int r = 0; r < 4*H; ++r) s += Wmat->data[r*D + d] * dpre[r];
+                    dX->data[d*T + t] = s;
+                }
+                for (int h = 0; h < H; ++h) {
+                    double s = 0; for (int r = 0; r < 4*H; ++r) s += Rmat->data[r*H + h] * dpre[r];
+                    dh_next[h] = s;
+                }
+            }
+            // after the t=0 step, dh_next / dc_next are the gradients w.r.t. H0 / C0
+            for (int k = 0; k < H; ++k) { dH0->data[k] = dh_next[k]; dC0->data[k] = dc_next[k]; }
+
+            accum(n.p0, dX);
+            accum(n.p1, dH0);
+            accum(n.auxParents[0], dC0);
+            accum(n.auxParents[1], dW);
+            accum(n.auxParents[2], dR);
+            accum(n.auxParents[3], db);
         } break;
         default: break;
         }

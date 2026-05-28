@@ -113,8 +113,15 @@ kernel. (ONNX/PyTorch/TF *import* is carved — see §10.)
   manual update via `extractdata`/re-wrap — reaches 100% train accuracy, loss
   1.80→0.01); the built-in `trainnet`/`trainingOptions` driver + the functional
   solvers `adamupdate`/`sgdmupdate`/`rmspropupdate` are carved (they want the
-  object-array `dlnetwork` / multi-return state, both deferred).  **T4–T6 + the
-  HDL track are 🔵 not started.**  The forward-pass substrate (matrix kernel),
+  object-array `dlnetwork` / multi-return state, both deferred).  **T4 (recurrent)
+  partial 🟡** — the **functional LSTM** (`lstm(X, H0, C0, W, R, b)`) is shipped
+  as a single multi-parent tape node carrying every per-timestep gate + state,
+  so the existing `dlgradient` walks it backward in time for **BPTT for free**;
+  `dl_lstm_sequence.m` trains an LSTM cell end-to-end on a first-bit-memory
+  task (six binary timesteps, label = the first bit) → 100% accuracy with
+  loss 6→0.  GRU / bilstm / `selfAttentionLayer` follow the same custom-op
+  pattern (one extra opcode + pullback each) and are carved as documented
+  follow-ons.  **T5–T6 + the HDL track are 🔵 not started.**  The forward-pass substrate (matrix kernel),
   the fixed-point/SV/cocotb lane, `bayesopt`, `ode45`, and the classdef +
   handle ABI are all already in the runtime.
 - **No external dependencies** — matching project precedent.
@@ -192,20 +199,21 @@ test accuracy > 95%. This exercises T1 (forward) → T2 (autodiff) → T3
 
 ---
 
-## 6. Tier-4 — Sequence / recurrent / attention 🔵
+## 6. Tier-4 — Sequence / recurrent / attention 🟡 (functional LSTM shipped; layer-object form + GRU/attention carved)
 
 | # | Surface | Notes |
 |---|---------|-------|
-| 4.1 | `lstmLayer` / `gruLayer` / `bilstmLayer` | forward recurrence + backprop-through-time pullbacks; `OutputMode` `'sequence'`/`'last'` |
-| 4.2 | `lstmProjectedLayer` | low-rank projected LSTM (the UG "Train Network with LSTM Projected Layer") |
-| 4.3 | Sequence I/O | `sequenceInputLayer`, sequence padding/truncation, `sequenceFoldingLayer`/`sequenceUnfoldingLayer` |
-| 4.4 | `wordEmbeddingLayer` | lookup-table embedding + its gradient |
-| 4.5 | `selfAttentionLayer` / functional `attention` | scaled-dot-product attention (the transformer/temporal-fusion-transformer examples) |
-| 4.6 | 1-D conv sequence path | `convolution1dLayer` sequence classification (the CNN-LSTM + 1-D-conv examples) |
+| 4.1 | **`lstm(X, H0, C0, W, R, b)` ✅** | shipped functional form — one custom `OP_LSTM` tape node, per-timestep gate/state buffer, BPTT in the existing `dlgradient`.  `lstmLayer` object form carved with the rest of `dlnetwork`. |
+| 4.2 | `gruLayer` / `bilstmLayer` / `lstmProjectedLayer` | each is one extra opcode + pullback in the same custom-op pattern; deferred until needed. |
+| 4.3 | Sequence I/O | `sequenceInputLayer`, sequence padding/truncation, `sequenceFoldingLayer`/`sequenceUnfoldingLayer` — wait on `dlnetwork`. |
+| 4.4 | `wordEmbeddingLayer` | lookup-table embedding + its gradient (`OP_EMBED` custom op, trivial pullback = scatter-add). |
+| 4.5 | `selfAttentionLayer` / functional `attention` | scaled-dot-product attention — composes from existing matmul + softmax tape ops, no new opcode needed. |
+| 4.6 | 1-D conv sequence path | `convolution1dLayer` — needs rank-3 tensors (`any_shape_roadmap` Tier C). |
 
-**Headline-within-tier**: `dl_seq_classify.m` — an `lstmLayer` sequence
-classifier trained on a small synthetic time-series set (the UG "Sequence
-Classification Using Deep Learning").
+**Headline (shipped)**: `examples/dlnet/dl_lstm_sequence.m` — a 4-unit LSTM
+cell trained end-to-end (custom training loop + BPTT) on a first-bit-memory
+task; learns to remember the first input across six timesteps and reaches
+100% accuracy, loss 6→0.
 
 ---
 

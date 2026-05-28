@@ -7120,7 +7120,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           C.Args.size() >= 1) {
         static const llvm::StringSet<> DlFns = {
             "relu", "sigmoid", "tanh", "softmax", "sum", "mean",
-            "log", "exp", "crossentropy", "mse"};
+            "log", "exp", "crossentropy", "mse", "lstm"};
         if (DlFns.contains(N->Name)) {
           std::function<bool(const Expr *)> pinnedDl =
               [&pinnedDl](const Expr *X) -> bool {
@@ -7139,7 +7139,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                   return true;
                 static const llvm::StringSet<> DlRet = {
                     "relu", "sigmoid", "tanh", "softmax", "sum", "mean",
-                    "log", "exp", "crossentropy", "mse", "dlarray"};
+                    "log", "exp", "crossentropy", "mse", "lstm", "dlarray"};
                 if (DlRet.contains(NX->Name))
                   for (size_t i = 0; i < CX->Args.size(); ++i)
                     if (pinnedDl(CX->Args[i])) return true;

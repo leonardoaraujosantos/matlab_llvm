@@ -80,6 +80,12 @@ classdef dlarray
             r = dlarray();
             matlab_dlnet_mse(r, y, t);
         end
+
+        % ---- recurrent (functional LSTM, T4) ------------------------------
+        function r = lstm(x, h0, c0, W, R, b)
+            r = dlarray();
+            matlab_dlnet_lstm(r, x, h0, c0, W, R, b);
+        end
     end
 end
 % `extractdata(x)` and `dlgradient(loss, v)` are intercepted in Lowering.cpp
