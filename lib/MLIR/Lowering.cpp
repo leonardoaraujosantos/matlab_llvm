@@ -11839,7 +11839,31 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           }
       }
       llvm::SmallVector<mlir::Value, 4> Args;
-      for (const Expr *A : C.Args) if (A) Args.push_back(lowerExpr(*A));
+      /* sprintf / fopen take string parameters; a single-quote char-array
+       * literal lowers to a `matlab.const_char` tensor (not a matlab_string*),
+       * which the sprintf/fopen lowering rejects.  Wrap CharLiteral args in
+       * matlab_string_from_literal — the same shape a double-quote "..."
+       * string produces — so `sprintf('%d', x)` / `fopen('p', 'w')` work like
+       * their double-quote equivalents.  (A char-array *variable* format is a
+       * separate, deeper gap and is not handled here.) */
+      bool WrapCharArgs = (N->Name == "sprintf" || N->Name == "fopen");
+      for (const Expr *A : C.Args) {
+        if (!A) continue;
+        if (WrapCharArgs && A->Kind == NodeKind::CharLiteral) {
+          auto &S = static_cast<const CharLiteral &>(*A);
+          auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+          mlir::NamedAttribute VA(mlir::StringAttr::get(&MCtx, "value"),
+                                  mlir::StringAttr::get(&MCtx, S.Value));
+          mlir::Value Ch = emitUnreg("matlab.const_char", {},
+                                     mlir::NoneType::get(&MCtx), L, {VA});
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_string_from_literal"));
+          Args.push_back(emitUnreg("matlab.call_builtin", {Ch}, PtrTy, L, {Cal}));
+        } else {
+          Args.push_back(lowerExpr(*A));
+        }
+      }
       /* Variadic callee: if the user function's last declared input is
        * named "varargin", pack trailing args into a matlab_cell and
        * pass it as the last argument. The leading declared-1 args are
@@ -11889,6 +11913,33 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             mlir::StringAttr::get(&MCtx, "callee"),
             mlir::StringAttr::get(&MCtx, std::string(N->Name)));
         llvm::SmallVector<mlir::NamedAttribute, 2> AllAttrs = {Cal};
+        /* For fprintf/sprintf, tag which arguments are string-typed (a
+         * bitmask, operand-index keyed) so LowerIO — which runs after the
+         * Sema types are gone — can route `%s` operands as strings and box
+         * everything else as numeric matrices.  Without this a string arg is
+         * forced through the numeric path and SIGSEGVs. */
+        if (N->Name == "fprintf" || N->Name == "sprintf") {
+          int64_t StrMask = 0;
+          for (size_t i = 0; i < C.Args.size() && i < 63; ++i) {
+            const Expr *E = C.Args[i];
+            if (!E) continue;
+            bool isStr = false;
+            if (auto *AN = dynamic_cast<const NameExpr *>(E))
+              if (AN->Ref && StringBindings.count(AN->Ref)) isStr = true;
+            if (const Type *T = E->Ty) {
+              if (T->K == Type::Kind::StringArray) isStr = true;
+              else if (T->K == Type::Kind::Array &&
+                       static_cast<const ArrayType *>(T)->Elt == Dtype::Char)
+                isStr = true;
+            }
+            if (isStr) StrMask |= (int64_t(1) << i);
+          }
+          if (StrMask)
+            AllAttrs.push_back(mlir::NamedAttribute(
+                mlir::StringAttr::get(&MCtx, "str_mask"),
+                mlir::IntegerAttr::get(mlir::IntegerType::get(&MCtx, 64),
+                                       StrMask)));
+        }
         /* Record the original (pre-packing) call-site arity so the
          * monomorphiser can bucket by user-visible arity for
          * varargin-packed callees; otherwise nargin inside the body
