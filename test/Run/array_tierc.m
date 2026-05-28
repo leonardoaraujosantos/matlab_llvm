@@ -85,4 +85,10 @@ fprintf('array_tierc: sum(S4,1) ndims=%.0f numel=%.0f total=%.0f\n', ...
 fprintf('array_tierc: sum(S4,4) ndims=%.0f numel=%.0f\n', ...
         ndims(R2), numel(R2));
 
+% disp(matN) — page-by-page render with the new C5 path.  Build a tiny
+% (2,2,2,2) tensor with a single non-zero cell so the output is bounded.
+D0 = zeros(2, 2, 2, 2);
+D0(2, 2, 2, 2) = 42;
+disp(D0);
+
 fprintf('array_tierc: PASS\n');

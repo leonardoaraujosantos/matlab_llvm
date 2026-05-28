@@ -1543,6 +1543,18 @@ double matlab_det(matlab_mat *A) {
 /* Phase-5: shape-op template — see runtime_internal.h. */
 
 matlab_mat *matlab_transpose(matlab_mat *A) {
+    if (!A) return mat_alloc(0, 0);
+    /* Tier-C guard: transpose is a 2-D op.  A matN value reaching this
+     * path would read garbage from offset 0; bail with an error rather
+     * than segfault.  Use permute(A, [2 1 ...]) for higher ranks. */
+    if (mat_is_nd(A)) {
+        const char m[] = "transpose: not supported for rank>3 — use permute()";
+        return matlab::runtime::fail_with_msg(m, sizeof(m) - 1);
+    }
+    if (mat_is_3d(A)) {
+        const char m[] = "transpose: not supported for 3-D — use permute(A,[2 1 3])";
+        return matlab::runtime::fail_with_msg(m, sizeof(m) - 1);
+    }
     int64_t m = A->rows, n = A->cols;
     return matlab::runtime::shape_op(n, m, [&](int64_t i, int64_t j) {
         return A->data[j * n + i];
@@ -2104,6 +2116,12 @@ matlab_mat *matlab_sortrows(matlab_mat *A) {
 matlab_mat *matlab_horzcat(matlab_mat *A, matlab_mat *B) {
     if (!A) return B;
     if (!B) return A;
+    /* Tier-C guard: rank-4+ horzcat would need a per-axis cat with a dim
+     * argument.  Bail cleanly rather than misinterpret the matN header. */
+    if (mat_is_nd(A) || mat_is_nd(B)) {
+        const char m[] = "horzcat: not supported for rank>3 — use cat(2,A,B)";
+        return matlab::runtime::fail_with_msg(m, sizeof(m) - 1);
+    }
     if (mat_is_3d(A) && mat_is_3d(B)) {            /* cat(2, …) of 3-D blocks */
         matlab_mat3 *A3 = (matlab_mat3 *)A, *B3 = (matlab_mat3 *)B;
         if (A3->rows != B3->rows || A3->depth != B3->depth) return (matlab_mat *)mat3_alloc(0, 0, 0);
@@ -2129,6 +2147,11 @@ matlab_mat *matlab_horzcat(matlab_mat *A, matlab_mat *B) {
 matlab_mat *matlab_vertcat(matlab_mat *A, matlab_mat *B) {
     if (!A) return B;
     if (!B) return A;
+    /* Tier-C guard: rank-4+ vertcat needs a dim-aware variant. */
+    if (mat_is_nd(A) || mat_is_nd(B)) {
+        const char m[] = "vertcat: not supported for rank>3 — use cat(1,A,B)";
+        return matlab::runtime::fail_with_msg(m, sizeof(m) - 1);
+    }
     if (mat_is_3d(A) && mat_is_3d(B)) {            /* cat(1, …) of 3-D blocks */
         matlab_mat3 *A3 = (matlab_mat3 *)A, *B3 = (matlab_mat3 *)B;
         if (A3->cols != B3->cols || A3->depth != B3->depth) return (matlab_mat *)mat3_alloc(0, 0, 0);
@@ -16232,6 +16255,79 @@ void matlab_disp_mat(void *Aptr) {
     }
     if (mat_is_complex(Aptr)) {
         matlab_disp_mat_c((matlab_mat_c *)Aptr);
+        return;
+    }
+    if (mat_is_3d(Aptr)) {
+        /* 3-D disp: page-by-page, mirroring MATLAB's "(:,:,k) =" layout.
+         * matlab_disp_mat_f64 takes the io mutex itself; we keep page
+         * boundaries grouped via interleaved (header / mat) calls but
+         * the lock is only held inside disp_mat_f64. */
+        matlab_mat3 *A3 = (matlab_mat3 *)Aptr;
+        if (A3->rows == 0 || A3->cols == 0 || A3->depth == 0) return;
+        for (int64_t k = 0; k < A3->depth; ++k) {
+            pthread_mutex_lock(&matlab_io_mutex);
+            printf("(:,:,%lld) =\n", (long long)(k + 1));
+            pthread_mutex_unlock(&matlab_io_mutex);
+            matlab_disp_mat_f64(A3->data + k * A3->rows * A3->cols,
+                                A3->rows, A3->cols);
+        }
+        return;
+    }
+    if (mat_is_nd(Aptr)) {
+        /* matN disp: print the shape line, then a 2-D page per (i3, i4, ...)
+         * combination so users get visual feedback without a giant dump.
+         * The 2-D pages are NOT necessarily contiguous in memory (matN's
+         * row-major-extended strides put the leftmost dim outermost), so
+         * we materialise each page into a small stack buffer of size
+         * rows*cols before handing it to disp_mat_f64. */
+        matlab_matN *An = (matlab_matN *)Aptr;
+        if (An->ndims < 2) return;
+        int64_t H = An->dims[0], W = An->dims[1];
+        if (H == 0 || W == 0) return;
+        int64_t pages = 1;
+        for (uint32_t k = 2; k < An->ndims; ++k) pages *= An->dims[k];
+        pthread_mutex_lock(&matlab_io_mutex);
+        printf("matlab_matN, ndims=%u, size=", (unsigned)An->ndims);
+        for (uint32_t k = 0; k < An->ndims; ++k)
+            printf(k == 0 ? "%lld" : "x%lld", (long long)An->dims[k]);
+        printf("\n");
+        pthread_mutex_unlock(&matlab_io_mutex);
+        const int64_t MaxPages = 8;
+        int64_t printed = 0;
+        int64_t idx[16] = {0};   /* trailing-dim cursor (k>=2) */
+        std::vector<double> page((size_t)(H * W), 0.0);
+        for (int64_t p = 0; p < pages && printed < MaxPages; ++p, ++printed) {
+            /* Page header. */
+            pthread_mutex_lock(&matlab_io_mutex);
+            printf("(:,:");
+            for (uint32_t k = 2; k < An->ndims; ++k)
+                printf(",%lld", (long long)(idx[k] + 1));
+            printf(") =\n");
+            pthread_mutex_unlock(&matlab_io_mutex);
+            /* Slice offset into the flat buffer (sum over trailing dims). */
+            int64_t base = 0;
+            for (uint32_t k = 2; k < An->ndims; ++k)
+                base += idx[k] * An->strides[k];
+            /* Gather the page into a contiguous row-major buffer.  Use
+             * the H/W strides instead of assuming the page is already
+             * contiguous — for ndims > 2 it won't be. */
+            for (int64_t i = 0; i < H; ++i)
+                for (int64_t j = 0; j < W; ++j)
+                    page[(size_t)(i * W + j)] =
+                        An->data[base + i * An->strides[0] + j * An->strides[1]];
+            matlab_disp_mat_f64(page.data(), H, W);
+            /* Advance the trailing-dim cursor (k>=2). */
+            for (int k = (int)An->ndims - 1; k >= 2; --k) {
+                if (++idx[k] < An->dims[k]) break;
+                idx[k] = 0;
+            }
+        }
+        if (printed < pages) {
+            pthread_mutex_lock(&matlab_io_mutex);
+            printf("... (%lld more pages truncated)\n",
+                   (long long)(pages - printed));
+            pthread_mutex_unlock(&matlab_io_mutex);
+        }
         return;
     }
     matlab_mat *A = (matlab_mat *)Aptr;

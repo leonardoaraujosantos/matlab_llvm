@@ -211,18 +211,40 @@ gated on `mat_is_3d`, so 2-D paths are byte-for-byte unchanged.
 
 ---
 
-## 5. Tier C — true N-D arrays (rank ≥ 4) 🟡 *(C1–C4 + batched conv shipped 2026-05-28)*
+## 5. Tier C — true N-D arrays (rank ≥ 4) ✅ *(C1–C6 shipped 2026-05-28)*
 
-**Status:** the rank-N descriptor + constructors + element indexing +
-shape verbs (reshape / permute / squeeze) + elementwise arithmetic +
-dim reductions + a rank-4 batched 2-D convolution are live.  REPL/DAP
-rendering and the per-op audit (C5/C6) remain.  Run-tests 627→628.
+**Status:** rank-N descriptor + constructors + element indexing + shape
+verbs (reshape / permute / squeeze) + elementwise arithmetic + dim
+reductions + a rank-4 batched 2-D convolution + REPL `whos` rendering
++ `disp(matN)` page-by-page output + DAP shape-line / drill-into-cells
++ defensive guards on 2-D-only ops (transpose / horzcat / vertcat).
+Run-tests 627→629.
 
-Shipped in commits `0967f01` (descriptor + alloc + indexing + shape verbs)
-and the next commit (reductions + `conv2d_batch` + `dl_cnn_forward.m`
-headline).  See `runtime/matlab_runtime.cpp` for the implementation
-and `test/Run/array_tierc.m` + `test/Run/dl_cnn_forward.m` for the
-gating fixtures.
+Shipped commits (`feat/deep-learning-t1-t2`):
+- `0967f01` — C1-C3 descriptor + alloc + indexing + shape verbs
+- `e36a129` — C4 dim reductions + `conv2d_batch` + CNN headline
+- `3cdc5c9` — multi-head attention headline
+- C5/C6 sweep — REPL `whos` matN shape line, `disp(matN)` page output,
+  workspace mirror's `matlab_dbg_matN_{ndims,dim,numel,get_lin}` accessors,
+  matN drill-into-cells in DAP variable explorer, defensive guards on
+  `matlab_transpose` / `horzcat` / `vertcat` (return empty + error
+  rather than segfault on matN input).
+
+Implementation: `runtime/matlab_runtime.cpp` + `runtime/runtime_debug.cpp`
++ `runtime/runtime_internal.h` + `lib/MLIR/Lowering.cpp` +
+`lib/MLIR/Passes/LowerTensorOps.cpp` + `tools/matlabc/main.cpp`.
+
+Gating fixtures: `test/Run/array_tierc.m`, `test/Run/dl_cnn_forward.m`,
+`test/Run/dl_mha_forward.m`.
+
+Carve-downs remaining (separate work, not part of Tier C proper):
+- im2col + GEMM-based conv for ~3-5× throughput
+- dlarray over matN (autodiff tape is still 2-D-only, so CNN/MHA
+  *training* is blocked — `dl_cnn_forward.m` is forward-only)
+- rank ≥ 5 element store via a variadic Lowering arm
+- per-toolbox audit of every `mat_is_3d` site — only the high-risk
+  ones (transpose / cat) got defensive guards; toolboxes that produce
+  mat / mat3 only (images, signal) are safe-by-construction
 
 Goal: first-class rank-N arrays — `H×W×C×N` batches, RGB video, cubes.
 This is the only path to MATLAB-equivalent N-D. **High blast radius.**

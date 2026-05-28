@@ -14,4 +14,17 @@ array_tierc: 3*ones(2,2,2,2): E2(1,1,1,1)=3 E2(2,2,2,2)=3
 array_tierc: matN+matN E3(1,1,1,1)=4 E3(2,2,2,2)=4
 array_tierc: sum(S4,1) ndims=4 numel=8 total=16
 array_tierc: sum(S4,4) ndims=3 numel=8
+matlab_matN, ndims=4, size=2x2x2x2
+(:,:,1,1) =
+         0         0
+         0         0
+(:,:,1,2) =
+         0         0
+         0         0
+(:,:,2,1) =
+         0         0
+         0         0
+(:,:,2,2) =
+         0         0
+         0        42
 array_tierc: PASS

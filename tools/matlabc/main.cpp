@@ -3078,6 +3078,11 @@ extern "C" int64_t matlab_dbg_mat3_cols(const struct matlab_mat3 *m);
 extern "C" int64_t matlab_dbg_mat3_depth(const struct matlab_mat3 *m);
 extern "C" double matlab_dbg_mat3_get(const struct matlab_mat3 *m,
                                        int64_t i, int64_t j, int64_t k);
+/* Tier C — matN (rank >= 4) reflection. */
+extern "C" int32_t matlab_dbg_matN_ndims(const void *p);
+extern "C" int64_t matlab_dbg_matN_dim(const void *p, int32_t k_1based);
+extern "C" int64_t matlab_dbg_matN_numel(const void *p);
+extern "C" double  matlab_dbg_matN_get_lin(const void *p, int64_t lin_zero_based);
 
 /* Phase 5 heterogeneous types — workspace rows for kind 6 (table) /
  * 9 (categorical) / 10 (datetime) / 11 (duration) need their own
@@ -4577,6 +4582,7 @@ int64_t matIndexedCount(struct matlab_mat *Mraw) {
     return matlab_dbg_mat3_rows(M) * matlab_dbg_mat3_cols(M)
          * matlab_dbg_mat3_depth(M);
   }
+  if (Kind == 4) return matlab_dbg_matN_numel(Mraw);
   int64_t r = matlab_dbg_mat_rows(Mraw);
   int64_t c = matlab_dbg_mat_cols(Mraw);
   if (r <= 0 || c <= 0) return 0;
@@ -4597,6 +4603,7 @@ bool matIsMultiCell(struct matlab_mat *Mraw) {
     return matlab_dbg_mat_c_rows(M) != 1 || matlab_dbg_mat_c_cols(M) != 1;
   }
   if (Kind == 3) return true;
+  if (Kind == 4) return matlab_dbg_matN_numel(Mraw) > 1;
   return matlab_dbg_mat_rows(Mraw) != 1 || matlab_dbg_mat_cols(Mraw) != 1;
 }
 
@@ -4901,6 +4908,23 @@ std::string formatMatShape(struct matlab_mat *Mraw) {
              (long long)matlab_dbg_mat3_depth(M));
     return Buf;
   }
+  if (Kind == 4) {
+    /* Tier C: render the dims tuple as "AxBxCx... double".  Most matN
+     * values stay within 4-6 axes; cap at 8 to bound the buffer. */
+    int32_t nd = matlab_dbg_matN_ndims(Mraw);
+    if (nd <= 0) return "[]";
+    if (nd > 8) nd = 8;
+    char Buf[128];
+    int n = 0;
+    for (int32_t k = 1; k <= nd; ++k) {
+      int64_t d = matlab_dbg_matN_dim(Mraw, k);
+      n += snprintf(Buf + n, sizeof(Buf) - (size_t)n,
+                    k == 1 ? "%lld" : "x%lld", (long long)d);
+      if (n >= (int)sizeof(Buf) - 12) break;
+    }
+    snprintf(Buf + n, sizeof(Buf) - (size_t)n, " double");
+    return Buf;
+  }
   int64_t R = matlab_dbg_mat_rows(Mraw);
   int64_t C = matlab_dbg_mat_cols(Mraw);
   if (R == 1 && C == 1) {
@@ -4997,6 +5021,44 @@ void appendMatChildren(Array &Vs, struct matlab_mat *Mraw) {
                    matlab_dbg_mat3_get(M, i, j, k));
           emit(LabelBuf, ValBuf, "double");
         }
+      }
+    }
+    return;
+  }
+
+  if (Kind == 4) {
+    /* matN drill: walk the flat buffer in row-major-extended order,
+     * de-linearising each linear index back into the (i1, i2, ..., in)
+     * tuple via the dims tuple read off via matlab_dbg_matN_dim. */
+    int32_t nd = matlab_dbg_matN_ndims(Mraw);
+    if (nd <= 0) return;
+    if (nd > 8) nd = 8;
+    int64_t dims[8] = {0};
+    int64_t total = 1;
+    for (int32_t k = 0; k < nd; ++k) {
+      dims[k] = matlab_dbg_matN_dim(Mraw, k + 1);
+      total *= dims[k];
+    }
+    int64_t idx[8] = {0};
+    for (int64_t lin = 0; lin < total; ++lin) {
+      if (emitted >= MatExpandCap) { emitTruncated(); return; }
+      char LabelBuf[96];
+      int n = 0;
+      n += snprintf(LabelBuf + n, sizeof(LabelBuf) - (size_t)n, "(");
+      for (int32_t k = 0; k < nd; ++k) {
+        n += snprintf(LabelBuf + n, sizeof(LabelBuf) - (size_t)n,
+                      k == 0 ? "%lld" : ",%lld",
+                      (long long)(idx[k] + 1));
+      }
+      n += snprintf(LabelBuf + n, sizeof(LabelBuf) - (size_t)n, ")");
+      char ValBuf[64];
+      snprintf(ValBuf, sizeof ValBuf, "%g",
+               matlab_dbg_matN_get_lin(Mraw, lin));
+      emit(LabelBuf, ValBuf, "double");
+      /* Advance idx — rightmost varies fastest, mirroring storage order. */
+      for (int32_t k = nd - 1; k >= 0; --k) {
+        if (++idx[k] < dims[k]) break;
+        idx[k] = 0;
       }
     }
     return;
