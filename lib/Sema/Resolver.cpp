@@ -622,7 +622,7 @@ void Resolver::registerBuiltins() {
      * activation/loss free-function names + extractdata + dlgradient register
      * here; tanh/sum/mean/log/exp are already builtins (the Lowering arm only
      * reroutes them when the argument is a dlarray). */
-    "relu", "sigmoid", "softmax", "crossentropy", "mse", "lstm",
+    "relu", "sigmoid", "softmax", "crossentropy", "mse", "lstm", "embed",
     "extractdata", "dlgradient",
     "matlab_dlnet_dlarray_init", "matlab_dlnet_extractdata",
     "matlab_dlnet_plus", "matlab_dlnet_minus", "matlab_dlnet_mtimes",
@@ -631,6 +631,7 @@ void Resolver::registerBuiltins() {
     "matlab_dlnet_softmax", "matlab_dlnet_sum", "matlab_dlnet_mean",
     "matlab_dlnet_log", "matlab_dlnet_exp",
     "matlab_dlnet_crossentropy", "matlab_dlnet_mse", "matlab_dlnet_lstm",
+    "matlab_dlnet_transpose", "matlab_dlnet_embed",
     "matlab_dlnet_grad", "matlab_dlnet_reset",
     /* Inverse Tustin: discrete-to-continuous. */
     "d2c_tustin",

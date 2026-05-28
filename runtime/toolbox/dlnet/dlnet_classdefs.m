@@ -72,6 +72,18 @@ classdef dlarray
             r = dlarray();
             matlab_dlnet_exp(r, x);
         end
+        function r = transpose(x)
+            r = dlarray();
+            matlab_dlnet_transpose(r, x);
+        end
+        function r = embed(E, idx)
+            r = dlarray();
+            matlab_dlnet_embed(r, E, idx);
+        end
+        function r = ctranspose(x)
+            r = dlarray();
+            matlab_dlnet_transpose(r, x);
+        end
         function r = crossentropy(y, t)
             r = dlarray();
             matlab_dlnet_crossentropy(r, y, t);

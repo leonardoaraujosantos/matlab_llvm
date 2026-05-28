@@ -56,7 +56,7 @@ inline matlab_mat *clone(const matlab_mat *m) {
 // Opcodes.
 enum { OP_LEAF, OP_ADD, OP_SUB, OP_MTIMES, OP_TIMES, OP_RELU, OP_SIGMOID,
        OP_TANH, OP_SOFTMAX, OP_SUM, OP_MEAN, OP_LOG, OP_EXP, OP_CE, OP_MSE,
-       OP_LSTM };
+       OP_LSTM, OP_TRANSPOSE, OP_EMBED };
 
 struct Node {
     int op;
@@ -182,6 +182,53 @@ static matlab_mat *un_op(void *r, void *x, int op) {
     dlnet::set_id(r, dlnet::record(op, dlnet::get_id(x), -1, Y));
     return mat_alloc(0, 0);
 }
+// embed(E, idx) -- wordEmbeddingLayer's lookup.
+//   E    D × V       embedding matrix (D-dim per token, V vocab)
+//   idx  1 × N       integer token ids (MATLAB 1-based; expected to be a
+//                    plain numeric matrix, NOT a dlarray)
+//   Y    D × N       Y(:,n) = E(:, idx(n))
+// Forward = gather columns; backward = scatter-add into dE(:, idx(n)).
+matlab_mat *matlab_dlnet_embed(void *robj, void *Ev, matlab_mat *idx) {
+    using namespace dlnet;
+    matlab_mat *E = get_data(Ev);
+    int D = static_cast<int>(E->rows);
+    int N = static_cast<int>(idx->rows * idx->cols);
+    matlab_mat *Y = mat_alloc(D, N);
+    for (int n = 0; n < N; ++n) {
+        int j = static_cast<int>(idx->data[n]) - 1;  // 1-based -> 0-based
+        if (j < 0 || j >= E->cols) j = 0;
+        for (int d = 0; d < D; ++d) Y->data[d*N + n] = E->data[d*E->cols + j];
+    }
+    Node n;
+    n.op = OP_EMBED;
+    n.p0 = get_id(Ev);
+    n.p1 = -1;
+    n.val = Y;
+    n.adj = nullptr;
+    // Save the index vector so the pullback can scatter-add into dE.
+    matlab_mat *idxSaved = mat_alloc(idx->rows, idx->cols);
+    for (int64_t i = 0; i < idx->rows * idx->cols; ++i) idxSaved->data[i] = idx->data[i];
+    n.auxData = { idxSaved };
+    g_tape.push_back(n);
+    int nid = static_cast<int>(g_tape.size()) - 1;
+    set_data(robj, Y);
+    set_id(robj, nid);
+    return mat_alloc(0, 0);
+}
+
+// transpose(X) -- needed for attention (Q*K').  Forward = transpose of X.
+matlab_mat *matlab_dlnet_transpose(void *r, void *xv) {
+    using namespace dlnet;
+    matlab_mat *X = get_data(xv);
+    matlab_mat *Y = mat_alloc(X->cols, X->rows);
+    for (int64_t i = 0; i < X->rows; ++i)
+        for (int64_t j = 0; j < X->cols; ++j)
+            Y->data[j*Y->cols + i] = X->data[i*X->cols + j];
+    set_data(r, Y);
+    set_id(r, record(OP_TRANSPOSE, get_id(xv), -1, Y));
+    return mat_alloc(0, 0);
+}
+
 matlab_mat *matlab_dlnet_relu   (void *r, void *x) { return un_op(r, x, dlnet::OP_RELU); }
 matlab_mat *matlab_dlnet_sigmoid(void *r, void *x) { return un_op(r, x, dlnet::OP_SIGMOID); }
 matlab_mat *matlab_dlnet_tanh   (void *r, void *x) { return un_op(r, x, dlnet::OP_TANH); }
@@ -355,6 +402,32 @@ matlab_mat *matlab_dlnet_grad(void *lossv, void *varv) {
         case OP_MSE: {
             if (P0 && P1) { int64_t nel=P0->rows*P0->cols; matlab_mat *g=mat_alloc(P0->rows,P0->cols);
                 for(int64_t k=0;k<nel;++k) g->data[k]= A->data[0]*2.0*(P0->data[k]-P1->data[k])/(nel?nel:1); accum(n.p0,g); }
+        } break;
+        case OP_EMBED: {
+            // dE(:, idx(n)) += dY(:, n) — scatter-add of A into the embedding rows.
+            if (P0 && n.auxData.size() >= 1) {
+                matlab_mat *idx = n.auxData[0];
+                matlab_mat *g = mat_alloc(P0->rows, P0->cols);
+                int64_t Nidx = idx->rows * idx->cols;
+                int D = static_cast<int>(P0->rows);
+                int Vv = static_cast<int>(P0->cols);
+                for (int64_t nn = 0; nn < Nidx; ++nn) {
+                    int j = static_cast<int>(idx->data[nn]) - 1;
+                    if (j < 0 || j >= Vv) continue;
+                    for (int d = 0; d < D; ++d) g->data[d*Vv + j] += A->data[d*A->cols + nn];
+                }
+                accum(n.p0, g);
+            }
+        } break;
+        case OP_TRANSPOSE: {
+            // Y = X' ; dY contribution to dX is dY' (transpose of the adjoint).
+            if (P0) {
+                matlab_mat *g = mat_alloc(P0->rows, P0->cols);
+                for (int64_t i = 0; i < A->rows; ++i)
+                    for (int64_t j = 0; j < A->cols; ++j)
+                        g->data[j*g->cols + i] = A->data[i*A->cols + j];
+                accum(n.p0, g);
+            }
         } break;
         case OP_LSTM: {
             // BPTT for Y = lstm(X, H0, C0, W, R, b).

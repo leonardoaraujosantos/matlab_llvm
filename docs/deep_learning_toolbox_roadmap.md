@@ -113,15 +113,20 @@ kernel. (ONNX/PyTorch/TF *import* is carved — see §10.)
   manual update via `extractdata`/re-wrap — reaches 100% train accuracy, loss
   1.80→0.01); the built-in `trainnet`/`trainingOptions` driver + the functional
   solvers `adamupdate`/`sgdmupdate`/`rmspropupdate` are carved (they want the
-  object-array `dlnetwork` / multi-return state, both deferred).  **T4 (recurrent)
-  partial 🟡** — the **functional LSTM** (`lstm(X, H0, C0, W, R, b)`) is shipped
-  as a single multi-parent tape node carrying every per-timestep gate + state,
-  so the existing `dlgradient` walks it backward in time for **BPTT for free**;
-  `dl_lstm_sequence.m` trains an LSTM cell end-to-end on a first-bit-memory
-  task (six binary timesteps, label = the first bit) → 100% accuracy with
-  loss 6→0.  GRU / bilstm / `selfAttentionLayer` follow the same custom-op
-  pattern (one extra opcode + pullback each) and are carved as documented
-  follow-ons.  **T5–T6 + the HDL track are 🔵 not started.**  The forward-pass substrate (matrix kernel),
+  object-array `dlnetwork` / multi-return state, both deferred).  **T4 partial 🟡**:
+  the **functional LSTM** (`lstm(X, H0, C0, W, R, b)`) is shipped as a single
+  multi-parent tape node carrying every per-timestep gate + state, so
+  `dlgradient` walks it backward in time for **BPTT for free**
+  (`dl_lstm_sequence.m`: first-bit-memory task → 100%, loss 6→0); **functional
+  scaled-dot-product attention** composes from existing matmul + softmax +
+  the newly-added `transpose` (`OP_TRANSPOSE`), no dedicated opcode
+  (`dl_attention.m`: associative-recall — softmax peaks on the matching key,
+  loss 1→0); **`embed(E, idx)` — wordEmbeddingLayer's functional core** —
+  `OP_EMBED` gather-forward + scatter-add-backward, repeated indices
+  correctly accumulate (`dl_embed_train.m`: learns a 3×5 embedding table to
+  per-element error < 0.01).  GRU / bilstm / `lstmProjectedLayer` follow the
+  same custom-op pattern (one extra opcode + pullback each) and are carved
+  as documented follow-ons.  **T5–T6 + the HDL track are 🔵 not started.**  The forward-pass substrate (matrix kernel),
   the fixed-point/SV/cocotb lane, `bayesopt`, `ode45`, and the classdef +
   handle ABI are all already in the runtime.
 - **No external dependencies** — matching project precedent.
@@ -199,21 +204,21 @@ test accuracy > 95%. This exercises T1 (forward) → T2 (autodiff) → T3
 
 ---
 
-## 6. Tier-4 — Sequence / recurrent / attention 🟡 (functional LSTM shipped; layer-object form + GRU/attention carved)
+## 6. Tier-4 — Sequence / recurrent / attention 🟡 (LSTM + attention + embedding shipped; layer-object form + GRU/bilstm carved)
 
 | # | Surface | Notes |
 |---|---------|-------|
-| 4.1 | **`lstm(X, H0, C0, W, R, b)` ✅** | shipped functional form — one custom `OP_LSTM` tape node, per-timestep gate/state buffer, BPTT in the existing `dlgradient`.  `lstmLayer` object form carved with the rest of `dlnetwork`. |
+| 4.1 | **`lstm(X, H0, C0, W, R, b)` ✅** | functional form — one custom `OP_LSTM` tape node, per-timestep gate/state buffer, BPTT in the existing `dlgradient`.  `lstmLayer` object form carved with the rest of `dlnetwork`. |
 | 4.2 | `gruLayer` / `bilstmLayer` / `lstmProjectedLayer` | each is one extra opcode + pullback in the same custom-op pattern; deferred until needed. |
 | 4.3 | Sequence I/O | `sequenceInputLayer`, sequence padding/truncation, `sequenceFoldingLayer`/`sequenceUnfoldingLayer` — wait on `dlnetwork`. |
-| 4.4 | `wordEmbeddingLayer` | lookup-table embedding + its gradient (`OP_EMBED` custom op, trivial pullback = scatter-add). |
-| 4.5 | `selfAttentionLayer` / functional `attention` | scaled-dot-product attention — composes from existing matmul + softmax tape ops, no new opcode needed. |
+| 4.4 | **`embed(E, idx)` ✅** | wordEmbeddingLayer's functional core.  `OP_EMBED` gather-forward + scatter-add-backward (repeated indices correctly accumulate gradient).  Indices are plain integers (not dlarrays). |
+| 4.5 | **functional attention ✅** | scaled-dot-product attention as `V * softmax(K' * Q)` — composes from existing matmul + softmax + the newly-added `transpose` (`OP_TRANSPOSE`), no dedicated attention opcode.  `selfAttentionLayer` object form carved with the rest of `dlnetwork`. |
 | 4.6 | 1-D conv sequence path | `convolution1dLayer` — needs rank-3 tensors (`any_shape_roadmap` Tier C). |
 
-**Headline (shipped)**: `examples/dlnet/dl_lstm_sequence.m` — a 4-unit LSTM
-cell trained end-to-end (custom training loop + BPTT) on a first-bit-memory
-task; learns to remember the first input across six timesteps and reaches
-100% accuracy, loss 6→0.
+**Headlines (shipped)**:
+- `examples/dlnet/dl_lstm_sequence.m` — 4-unit LSTM trained on a first-bit-memory task → 100% accuracy, loss 6→0.
+- `examples/dlnet/dl_attention.m` — associative-recall task: learn `Wq`/`Wk`/`Wv` so attention focuses on the matching key (loss 1→0; softmax peaks on the correct key).
+- `examples/dlnet/dl_embed_train.m` — learn a 3×5 embedding table from a token sequence with repeats (per-element error < 0.01).
 
 ---
 

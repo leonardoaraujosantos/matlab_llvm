@@ -6082,6 +6082,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"matlab_dlnet_crossentropy",   "matlab_dlnet_crossentropy",   PtrTy, {PtrTy, PtrTy, PtrTy}},
         {"matlab_dlnet_mse",            "matlab_dlnet_mse",            PtrTy, {PtrTy, PtrTy, PtrTy}},
         {"matlab_dlnet_lstm",           "matlab_dlnet_lstm",           PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy}},
+        {"matlab_dlnet_transpose",      "matlab_dlnet_transpose",      PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_embed",          "matlab_dlnet_embed",          PtrTy, {PtrTy, PtrTy, PtrTy}},
         {"matlab_dlnet_grad",           "matlab_dlnet_grad",           PtrTy, {PtrTy, PtrTy}},
         {"matlab_dlnet_reset",          "matlab_dlnet_reset",          PtrTy, {F64}},
       };
