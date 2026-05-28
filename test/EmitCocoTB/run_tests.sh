@@ -146,6 +146,15 @@ declare -a CASES=(
   # registers is a documented follow-on slice.
   dlhdl_rnn_cell
   dlhdl_lstm_cell
+  # Tier-12 — multi-timestep LSTM with persistent register state.
+  # Same gate machinery as dlhdl_lstm_cell, but holds h_state /
+  # c_state across cycles via MATLAB `persistent` -- lowers to the
+  # SV always_comb (next-state expr) + always_ff (register sample
+  # on posedge clk with async-low reset) pattern.  cocotb's
+  # `% cocotb: stimulus(reset, impulse, 1)` fires reset at cycle 0
+  # to match the SV's rst_n preamble; subsequent cycles use random
+  # x within [-1, 1] and stream through the recurrent loop.
+  dlhdl_lstm_step
 )
 
 # Run each fixture in parallel via xargs -P. Default to up to 8
