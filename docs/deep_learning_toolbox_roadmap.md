@@ -107,16 +107,21 @@ kernel. (ONNX/PyTorch/TF *import* is carved — see §10.)
   rank-N type; see [`any_shape_roadmap.md`](any_shape_roadmap.md) Tier C), and
   the object-array `dlnetwork`/layer-object container is carved (no classdef
   array literals) — the *functional* "custom training loop" form is the shipped
-  surface.  **T3–T6 + the HDL track are 🔵 not started** — but T3 (training)
-  now rests on a working autodiff keystone, so the solvers are incremental.
-  The forward-pass substrate (matrix kernel), the fixed-point/SV/cocotb lane,
-  `bayesopt`, `ode45`, and the classdef + handle ABI are all already in the
-  runtime.
+  surface.  **T3 (training) partial 🟡** — the **custom training loop** is
+  proven end-to-end (`dl_mlp_train.m`: an MLP trained from scratch by SGD over
+  the autodiff — forward via dlarray operators → `dlgradient` per parameter →
+  manual update via `extractdata`/re-wrap — reaches 100% train accuracy, loss
+  1.80→0.01); the built-in `trainnet`/`trainingOptions` driver + the functional
+  solvers `adamupdate`/`sgdmupdate`/`rmspropupdate` are carved (they want the
+  object-array `dlnetwork` / multi-return state, both deferred).  **T4–T6 + the
+  HDL track are 🔵 not started.**  The forward-pass substrate (matrix kernel),
+  the fixed-point/SV/cocotb lane, `bayesopt`, `ode45`, and the classdef +
+  handle ABI are all already in the runtime.
 - **No external dependencies** — matching project precedent.
-- **Discovered en route** (pre-existing, out of scope here): plain-matrix
-  copy-on-write is broken — `B = A; B(i) = v` mutates `A` (verified on a
-  dlnet-free script).  The shipped autodiff is unaffected; the gradient-check
-  example perturbs via matrix addition (fresh allocation) to sidestep it.
+- **Discovered en route + since fixed**: a pre-existing plain-matrix
+  copy-on-write bug (`B = A; B(i) = v` mutated `A`) surfaced while building the
+  gradient-check example; fixed separately (matrix clone-on-assign) and merged
+  to main.
 
 ---
 
@@ -165,7 +170,7 @@ rides on it.
 
 ---
 
-## 5. Tier-3 — Built-in training (`trainnet` / `trainingOptions`) 🔵
+## 5. Tier-3 — Training 🟡 (custom loop shipped; trainnet carved)
 
 *Stochastic optimisation of a `dlnetwork` over the autodiff engine — closes
 the headline "train a classifier from scratch" workflow.*
