@@ -1086,4 +1086,42 @@ matlab_mat *matlab_dlnet_grad(void *lossv, void *varv) {
 // Reset the tape (dlfeval entry / start of a fresh forward pass).
 matlab_mat *matlab_dlnet_reset(double dummy) { (void)dummy; dlnet::g_tape.clear(); return mat_alloc(0,0); }
 
+// ---- HDL Tier H1 — symmetric INT8 quantization ----------------------------
+// dlquantize(W)   -> the dequantized weight matrix (Q * scale), bit-accurate
+//                    to the int8 storage that would land on the device.
+// dlqscale(W)     -> the scalar scale factor for W (the LSB of the int8 grid).
+// Symmetric per-tensor quantization:
+//   scale = max(abs(W)) / 127
+//   Q     = round(W / scale)              (clipped to [-127, 127])
+//   W'    = Q * scale
+// Outputs are plain numeric matrices — quantization is a post-training step
+// outside the autodiff (no tape node is recorded).
+matlab_mat *matlab_dlnet_quantize(matlab_mat *W) {
+    if (!W || W->rows*W->cols == 0) return mat_alloc(0, 0);
+    double m = 0;
+    int64_t nel = W->rows * W->cols;
+    for (int64_t i = 0; i < nel; ++i) {
+        double a = std::fabs(W->data[i]);
+        if (a > m) m = a;
+    }
+    double scale = (m > 0) ? (m / 127.0) : 1.0;
+    matlab_mat *Wq = mat_alloc(W->rows, W->cols);
+    for (int64_t i = 0; i < nel; ++i) {
+        double q = std::round(W->data[i] / scale);
+        if (q >  127.0) q =  127.0;
+        if (q < -127.0) q = -127.0;
+        Wq->data[i] = q * scale;
+    }
+    return Wq;
+}
+matlab_mat *matlab_dlnet_qscale(matlab_mat *W) {
+    if (!W || W->rows*W->cols == 0) { matlab_mat *o = mat_alloc(1,1); o->data[0] = 1.0; return o; }
+    double m = 0;
+    int64_t nel = W->rows * W->cols;
+    for (int64_t i = 0; i < nel; ++i) { double a = std::fabs(W->data[i]); if (a > m) m = a; }
+    matlab_mat *o = mat_alloc(1, 1);
+    o->data[0] = (m > 0) ? (m / 127.0) : 1.0;
+    return o;
+}
+
 }  // extern "C"

@@ -624,6 +624,8 @@ void Resolver::registerBuiltins() {
      * reroutes them when the argument is a dlarray). */
     "relu", "sigmoid", "softmax", "crossentropy", "mse", "lstm", "embed",
     "gru", "bilstm", "lstmp",
+    /* DL HDL Tier H1 — INT8 quantization (plain numeric in/out). */
+    "dlquantize", "dlqscale",
     "extractdata", "dlgradient",
     "matlab_dlnet_dlarray_init", "matlab_dlnet_extractdata",
     "matlab_dlnet_plus", "matlab_dlnet_minus", "matlab_dlnet_mtimes",
@@ -634,6 +636,7 @@ void Resolver::registerBuiltins() {
     "matlab_dlnet_crossentropy", "matlab_dlnet_mse", "matlab_dlnet_lstm",
     "matlab_dlnet_transpose", "matlab_dlnet_embed",
     "matlab_dlnet_gru", "matlab_dlnet_bilstm", "matlab_dlnet_lstmp",
+    "matlab_dlnet_quantize", "matlab_dlnet_qscale",
     "matlab_dlnet_grad", "matlab_dlnet_reset",
     /* Inverse Tustin: discrete-to-continuous. */
     "d2c_tustin",

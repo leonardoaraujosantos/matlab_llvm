@@ -133,7 +133,11 @@ kernel. (ONNX/PyTorch/TF *import* is carved — see §10.)
   encoder as plain numeric matrices outside the autodiff and trains only
   the head as a dlarray (`dl_transfer_learn.m`: frozen 4→6 encoder + 3-class
   head → 96% accuracy).  `replaceLayer`/`freezeLayers` object-array APIs
-  carved with `dlnetwork`.  **T6 + the HDL track are 🔵 not started.**  The forward-pass substrate (matrix kernel),
+  carved with `dlnetwork`.  **HDL Tier-H1 partial 🟡**: `dlquantize(W)` + `dlqscale(W)`
+  ship the software side of symmetric INT8 weight quantization — `dl_quantize_check.m`
+  proves that quantizing the T3 MLP to INT8 preserves classification (100%
+  accuracy in both double and INT8) with max logit drift ≈ 0.1.  **T6 + HDL H2/H3
+  (SV emission + cocotb bit-accuracy) are 🔵 not started.**  The forward-pass substrate (matrix kernel),
   the fixed-point/SV/cocotb lane, `bayesopt`, `ode45`, and the classdef +
   handle ABI are all already in the runtime.
 - **No external dependencies** — matching project precedent.
@@ -266,7 +270,7 @@ test accuracy > 95%. This exercises T1 (forward) → T2 (autodiff) → T3
 
 ---
 
-## H. Deep Learning HDL track (H1–H3) 🔵 — the project's strongest fit
+## H. Deep Learning HDL track 🟡 — H1 INT8 quantization SHIPPED; H2 (fi-SV) + H3 (cocotb) next
 
 The DL HDL UG is, for this project, **"compile a quantized inference network
 to a fixed-point SystemVerilog datapath and verify it bit-accurately in
@@ -276,12 +280,10 @@ Embedded Coder cocotb SIL. It depends on **T1 (inference) + T6.5
 
 | # | Surface | Notes | Rides |
 |---|---------|-------|-------|
-| H1.1 | `dlhdl.ProcessorConfig` | a configurable processor description (conv kernel + FC kernel + activation + pooling module toggles) | classdef carrier |
-| H1.2 | `dlhdl.Workflow(net, target)` | bind a quantized `dlnetwork` to a target; `compile` → per-layer instruction/weight schedule + estimated resource/latency | T1 + T6.5 |
-| H1.3 | `estimatePerformance` / `estimateResources` | analytic per-layer cycle + DSP/BRAM/LUT estimates (the Chapter-8 custom-processor-config tables) | static analysis |
-| H2.1 | **SV emission** | lower the compiled fixed-point datapath (conv/FC/activation/pool as `fi`-typed SV modules) through the existing `EmitSV` lane | `fi` + EmitSV |
-| H2.2 | **cocotb SIL** | drive the emitted DUT with calibration inputs and assert bit-accuracy vs the double-precision T1 inference (the DSP-HDL T8 pattern) | cocotb harness |
-| H3.1 | LSTM-on-FPGA compile | the Chapter-13 LSTM/GRU layer compilation to the fixed-point recurrent datapath | H2 + T4 |
+| H1 | **`dlquantize(W)` + `dlqscale(W)` ✅** | symmetric per-tensor INT8 quantization — `scale = max(abs(W))/127`, `Q = round(W/scale)` clipped to `[-127, 127]`, output is `Q*scale` rounded onto the int8 lattice.  Plain matrix in/out, no autodiff (post-training step).  `examples/dlnet/dl_quantize_check.m`: trains the T3 MLP, INT8-quantizes every weight, re-runs inference — both double and INT8 hit 100% accuracy, max logit drift ≈ 0.1.  The `dlhdl.ProcessorConfig`/`dlhdl.Workflow`/`estimatePerformance` object-array APIs are carved with `dlnetwork`. | T3 |
+| H2.1 | **SV emission** 🔵 | lower the quantized FC + ReLU forward (`Q*scale` matrices) to a fi-typed SV module through the existing `EmitSV` lane | `fi` + EmitSV |
+| H2.2 | **cocotb SIL** 🔵 | drive the emitted DUT with calibration inputs and assert bit-accuracy vs the dequantized double inference (the DSP-HDL T8 pattern) | cocotb harness |
+| H3.1 | LSTM-on-FPGA compile 🔵 | the Chapter-13 LSTM/GRU layer compilation to the fixed-point recurrent datapath | H2 + T4 |
 
 **Headline-within-tier (HDL tracer)**: `dlhdl_cnn_sil.mflow` /
 `dlhdl_cnn_sil.m` — quantize the §1 LeNet with `dlquantizer`, `compile` it,

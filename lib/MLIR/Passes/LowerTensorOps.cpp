@@ -6087,6 +6087,11 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"matlab_dlnet_gru",            "matlab_dlnet_gru",            PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy}},
         {"matlab_dlnet_bilstm",         "matlab_dlnet_bilstm",         PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy}},
         {"matlab_dlnet_lstmp",          "matlab_dlnet_lstmp",          PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy}},
+        /* DL HDL Tier H1 — INT8 quantization (plain matrix in/out). */
+        {"dlquantize",                  "matlab_dlnet_quantize",       PtrTy, {PtrTy}},
+        {"matlab_dlnet_quantize",       "matlab_dlnet_quantize",       PtrTy, {PtrTy}},
+        {"dlqscale",                    "matlab_dlnet_qscale",         PtrTy, {PtrTy}},
+        {"matlab_dlnet_qscale",         "matlab_dlnet_qscale",         PtrTy, {PtrTy}},
         {"matlab_dlnet_grad",           "matlab_dlnet_grad",           PtrTy, {PtrTy, PtrTy}},
         {"matlab_dlnet_reset",          "matlab_dlnet_reset",          PtrTy, {F64}},
       };
