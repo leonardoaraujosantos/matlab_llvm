@@ -126,7 +126,14 @@ kernel. (ONNX/PyTorch/TF *import* is carved — see §10.)
   correctly accumulate — `dl_embed_train.m` → per-element error < 0.01).
   The layer-object forms (`lstmLayer`/`gruLayer`/`bilstmLayer`/
   `lstmProjectedLayer`/`selfAttentionLayer`/`wordEmbeddingLayer`) are carved
-  with the rest of `dlnetwork`.  **T5–T6 + the HDL track are 🔵 not started.**  The forward-pass substrate (matrix kernel),
+  with the rest of `dlnetwork`.  **T5 partial 🟡** — the functional
+  architectures + transfer-learning patterns ship: residual blocks compose
+  from the existing overloaded `plus` (`dl_residual_train.m` trains a
+  4-layer skip-connection MLP); transfer learning keeps the pretrained
+  encoder as plain numeric matrices outside the autodiff and trains only
+  the head as a dlarray (`dl_transfer_learn.m`: frozen 4→6 encoder + 3-class
+  head → 96% accuracy).  `replaceLayer`/`freezeLayers` object-array APIs
+  carved with `dlnetwork`.  **T6 + the HDL track are 🔵 not started.**  The forward-pass substrate (matrix kernel),
   the fixed-point/SV/cocotb lane, `bayesopt`, `ode45`, and the classdef +
   handle ABI are all already in the runtime.
 - **No external dependencies** — matching project precedent.
@@ -225,20 +232,21 @@ test accuracy > 95%. This exercises T1 (forward) → T2 (autodiff) → T3
 
 ---
 
-## 7. Tier-5 — Architectures + transfer learning 🔵
+## 7. Tier-5 — Architectures + transfer learning 🟡 (functional patterns shipped; object-array surface carved with `dlnetwork`)
 
 | # | Surface | Notes |
 |---|---------|-------|
-| 5.1 | Transfer learning | `replaceLayer`/`addLayers`/`removeLayers`/`connectLayers` + `freezeLayers` learn-rate-factor zeroing |
-| 5.2 | `imagePretrainedNetwork` | **one small built-in pretrained net** (a compact digit/CIFAR CNN with baked weights); real AlexNet/ResNet/GoogLeNet/BERT weight blobs are carved (100s of MB) |
-| 5.3 | GAN / WGAN-GP | generator+discriminator custom loop (the UG "Train Generative Adversarial Network") |
-| 5.4 | VAE / autoencoder | encoder/decoder + reparameterisation + KL loss |
-| 5.5 | Twin/Siamese network | shared-weight comparison + contrastive loss |
-| 5.6 | Neural ODE layer | `dlode45` — forward integration via the shipped `ode45` + adjoint backward |
+| 5.1 | **Transfer learning ✅ (functional)** | Keep the pretrained feature extractor as plain numeric matrices (no dlarray → no gradient flow); train only the head as a dlarray with a custom training loop.  `replaceLayer`/`addLayers`/`connectLayers`/`freezeLayers` object-array APIs are carved with `dlnetwork`, but the *patterns* they encapsulate (frozen encoder + new head) work today. |
+| 5.2 | **Residual / skip-connection nets ✅ (functional)** | A residual block is just `relu(W2 * relu(W1*x + b1) + b2) + x` — `plus` is already overloaded on dlarrays so the skip-add records on the tape and `dlgradient` flows gradient through both branches.  ResNet-style architectures of arbitrary depth compose from this primitive. |
+| 5.3 | `imagePretrainedNetwork` | a compact baked-weight model — carved alongside real AlexNet/ResNet/BERT (the wrapper API needs `dlnetwork`; the *pattern* of "load + run pretrained weights" ships today as `dl_transfer_learn.m`'s encoder block). |
+| 5.4 | GAN / WGAN-GP | generator+discriminator alternating updates — composes from the shipped autodiff + custom loop; carved as a follow-on example. |
+| 5.5 | VAE / autoencoder | encoder/decoder + reparameterisation + KL — composes from existing ops + `randn` outside the autodiff; carved as a follow-on example. |
+| 5.6 | Twin/Siamese network | shared-weight comparison + contrastive loss — composes from existing ops; the carved piece is two-output dlnetwork (functional form is shippable). |
+| 5.7 | Neural ODE layer | `dlode45` — forward integration via the shipped `ode45` + adjoint backward (needs the adjoint-ODE solver). |
 
-**Headline-within-tier**: `dl_transfer_learn.m` — take the §5.2 built-in
-pretrained CNN, `replaceLayer` the classification head, freeze the backbone,
-and fine-tune on a new small dataset.
+**Headlines (shipped)**:
+- `examples/dlnet/dl_residual_train.m` — train a 4-layer residual MLP; the skip connections are *just* `y + x` and gradient flows through both paths automatically.
+- `examples/dlnet/dl_transfer_learn.m` — adapt a frozen 4→6 pretrained encoder to a new 3-class downstream task with only a fresh classifier head trained over the autodiff — **96% accuracy** with the encoder mathematically guaranteed unchanged.
 
 ---
 
