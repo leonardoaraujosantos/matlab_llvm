@@ -265,6 +265,8 @@ void Resolver::registerBuiltins() {
     /* Tier-5 — classification. */
     "fitcknn", "fitcnb", "fitcdiscr", "fitctree", "fitcsvm", "fitcecoc",
     "confusionmat",
+    /* DL T6.3 — classification metrics. */
+    "accuracy", "precision", "recall", "fScore", "rocmetrics", "aucroc",
     /* Tier-6 — ensembles. */
     "fitcensemble", "TreeBagger", "matlab_stats_fitensemble_init",
     /* Tier-6 — Hidden Markov Models. */
@@ -301,6 +303,8 @@ void Resolver::registerBuiltins() {
     "matlab_stats_fitknn_init", "matlab_stats_fitnb_init", "matlab_stats_fitlda_init",
     "matlab_stats_fittree_init", "matlab_stats_fitsvm_init", "matlab_stats_fitecoc_init",
     "matlab_stats_clf_predict", "matlab_stats_confusionmat",
+    "matlab_stats_accuracy", "matlab_stats_precision", "matlab_stats_recall",
+    "matlab_stats_fscore", "matlab_stats_rocmetrics", "matlab_stats_aucroc",
     /* ===== Curve Fitting Toolbox Tier-1 + Tier-2 + Tier-3 ===== */
     "fit", "feval", "coeffvalues",
     "differentiate", "integrate", "confint", "formula", "numcoeffs",
@@ -626,6 +630,8 @@ void Resolver::registerBuiltins() {
     "gru", "bilstm", "lstmp",
     /* DL HDL Tier H1 — INT8 quantization (plain numeric in/out). */
     "dlquantize", "dlqscale",
+    /* DL T6.5 — quantizer calibration + activation clipping. */
+    "dlqclip", "dlqcalibrate",
     "extractdata", "dlgradient",
     "matlab_dlnet_dlarray_init", "matlab_dlnet_extractdata",
     "matlab_dlnet_plus", "matlab_dlnet_minus", "matlab_dlnet_mtimes",
@@ -637,6 +643,7 @@ void Resolver::registerBuiltins() {
     "matlab_dlnet_transpose", "matlab_dlnet_embed",
     "matlab_dlnet_gru", "matlab_dlnet_bilstm", "matlab_dlnet_lstmp",
     "matlab_dlnet_quantize", "matlab_dlnet_qscale",
+    "matlab_dlnet_qclip", "matlab_dlnet_qcalibrate",
     "matlab_dlnet_grad", "matlab_dlnet_reset",
     /* Inverse Tustin: discrete-to-continuous. */
     "d2c_tustin",

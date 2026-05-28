@@ -5430,6 +5430,19 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"matlab_stats_fitecoc_init", "matlab_stats_fitecoc_init", PtrTy, {PtrTy, PtrTy, PtrTy}},
         {"matlab_stats_clf_predict",  "matlab_stats_clf_predict",  PtrTy, {PtrTy, PtrTy}},
         {"confusionmat", "matlab_stats_confusionmat", PtrTy, {PtrTy, PtrTy}},
+        {"matlab_stats_accuracy",   "matlab_stats_accuracy",   PtrTy, {PtrTy, PtrTy}},
+        {"matlab_stats_precision",  "matlab_stats_precision",  PtrTy, {PtrTy, PtrTy}},
+        {"matlab_stats_recall",     "matlab_stats_recall",     PtrTy, {PtrTy, PtrTy}},
+        {"matlab_stats_fscore",     "matlab_stats_fscore",     PtrTy, {PtrTy, PtrTy}},
+        {"matlab_stats_rocmetrics", "matlab_stats_rocmetrics", PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_stats_aucroc",     "matlab_stats_aucroc",     PtrTy, {PtrTy, PtrTy, PtrTy}},
+        /* DL T6.3 user-facing names. */
+        {"accuracy",   "matlab_stats_accuracy",   PtrTy, {PtrTy, PtrTy}},
+        {"precision",  "matlab_stats_precision",  PtrTy, {PtrTy, PtrTy}},
+        {"recall",     "matlab_stats_recall",     PtrTy, {PtrTy, PtrTy}},
+        {"fScore",     "matlab_stats_fscore",     PtrTy, {PtrTy, PtrTy}},
+        {"rocmetrics", "matlab_stats_rocmetrics", PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"aucroc",     "matlab_stats_aucroc",     PtrTy, {PtrTy, PtrTy, PtrTy}},
         /* Tier-6 — ensembles. */
         {"matlab_stats_fitensemble_init", "matlab_stats_fitensemble_init", PtrTy, {PtrTy, PtrTy, PtrTy, F64, F64}},
         /* Tier-6 — HMM (1-output forms; multi-output via splitter). */
@@ -6092,6 +6105,10 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"matlab_dlnet_quantize",       "matlab_dlnet_quantize",       PtrTy, {PtrTy}},
         {"dlqscale",                    "matlab_dlnet_qscale",         PtrTy, {PtrTy}},
         {"matlab_dlnet_qscale",         "matlab_dlnet_qscale",         PtrTy, {PtrTy}},
+        {"dlqclip",                     "matlab_dlnet_qclip",          PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_qclip",          "matlab_dlnet_qclip",          PtrTy, {PtrTy, PtrTy}},
+        {"dlqcalibrate",                "matlab_dlnet_qcalibrate",     PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_qcalibrate",     "matlab_dlnet_qcalibrate",     PtrTy, {PtrTy, PtrTy}},
         {"matlab_dlnet_grad",           "matlab_dlnet_grad",           PtrTy, {PtrTy, PtrTy}},
         {"matlab_dlnet_reset",          "matlab_dlnet_reset",          PtrTy, {F64}},
       };

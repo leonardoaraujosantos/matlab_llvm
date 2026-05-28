@@ -1124,4 +1124,44 @@ matlab_mat *matlab_dlnet_qscale(matlab_mat *W) {
     return o;
 }
 
+/* ---- DL HDL Tier H1/T6.5 — quantize to an externally-provided scale ----
+ * dlqclip(X, scale) projects every element of X onto the int8 lattice
+ * { -127*scale, ..., 0, ..., 127*scale } using round-to-nearest with
+ * symmetric clipping.  Companion to `dlquantize` (which uses the
+ * tensor's own max-abs); used when calibration data picks the scale
+ * separately (e.g. activations whose run-time range is wider than any
+ * single batch). */
+matlab_mat *matlab_dlnet_qclip(matlab_mat *X, matlab_mat *Sm) {
+    if (!X || X->rows*X->cols == 0) return mat_alloc(0, 0);
+    double scale = (Sm && Sm->rows*Sm->cols > 0) ? Sm->data[0] : 1.0;
+    if (scale <= 0) scale = 1.0;
+    matlab_mat *Y = mat_alloc(X->rows, X->cols);
+    int64_t nel = X->rows * X->cols;
+    for (int64_t i = 0; i < nel; ++i) {
+        double q = std::round(X->data[i] / scale);
+        if (q >  127.0) q =  127.0;
+        if (q < -127.0) q = -127.0;
+        Y->data[i] = q * scale;
+    }
+    return Y;
+}
+
+/* dlqcalibrate(X, runningMaxAbs) -> max(runningMaxAbs, max(abs(X))).
+ * Drives the calibration pass: invoked once per calibration batch, the
+ * caller threads the running maximum through and divides by 127 once at
+ * the end to get the int8 scale.  Both args are scalars except for X
+ * which can be any-shape matrix. */
+matlab_mat *matlab_dlnet_qcalibrate(matlab_mat *X, matlab_mat *Rm) {
+    double running = (Rm && Rm->rows*Rm->cols > 0) ? Rm->data[0] : 0.0;
+    if (!X || X->rows*X->cols == 0) { matlab_mat *o = mat_alloc(1,1); o->data[0] = running; return o; }
+    int64_t nel = X->rows * X->cols;
+    for (int64_t i = 0; i < nel; ++i) {
+        double a = std::fabs(X->data[i]);
+        if (a > running) running = a;
+    }
+    matlab_mat *o = mat_alloc(1, 1);
+    o->data[0] = running;
+    return o;
+}
+
 }  // extern "C"

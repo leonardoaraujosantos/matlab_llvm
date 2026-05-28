@@ -1,0 +1,4 @@
+predicted class = 1
+linf bound at small eps < margin (certified) = 1
+bound is monotone in eps = 1
+large-eps bound > margin = 1

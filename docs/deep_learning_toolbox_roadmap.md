@@ -133,7 +133,17 @@ kernel. (ONNX/PyTorch/TF *import* is carved — see §10.)
   encoder as plain numeric matrices outside the autodiff and trains only
   the head as a dlarray (`dl_transfer_learn.m`: frozen 4→6 encoder + 3-class
   head → 96% accuracy).  `replaceLayer`/`freezeLayers` object-array APIs
-  carved with `dlnetwork`.  **HDL Tier-H1 + H2 ✅, H3 partial 🟡**: H1 ships `dlquantize`/`dlqscale`
+  carved with `dlnetwork`.  **T6 functional surface ✅** — `dlgradient`-driven
+  Grad-CAM-style attribution (`dl_gradcam.m` picks the discriminating input
+  dimension per class); classification metrics (`accuracy`/`precision`/
+  `recall`/`fScore`/`rocmetrics`/`aucroc`) over the Stats `confusionmat`
+  kernel; `dlqcalibrate(X, runMaxAbs)` + `dlqclip(X, scale)` for the
+  activation-quantization calibration pass on top of H1's weight quantizer;
+  Bayesian HP search by wrapping shipped `bayesopt`; dual-norm `l∞`
+  robustness check via gradient norm (`dl_robust_linf.m` certifies the
+  safe ε regime).  Image-domain attribution (`occlusionSensitivity` /
+  `imageLIME`) + `tsne` carved with the 4-D `SSCB` requirement.
+  **HDL Tier-H1 + H2 ✅, H3 partial 🟡**: H1 ships `dlquantize`/`dlqscale`
   (symmetric per-tensor INT8) — `dl_quantize_check.m` proves quantization
   preserves the T3 MLP's accuracy (100% in both double and INT8, max logit
   drift ≈ 0.1).  H2 ships **fi-typed SystemVerilog emission of a quantized
@@ -267,19 +277,23 @@ test accuracy > 95%. This exercises T1 (forward) → T2 (autodiff) → T3
 
 ---
 
-## 8. Tier-6 — Tuning, visualization, metrics, quantization 🔵
+## 8. Tier-6 — Tuning, visualization, metrics, quantization 🟡 (functional surface shipped)
 
 | # | Surface | Notes |
 |---|---------|-------|
-| 6.1 | Interpretability | `gradCAM`/`occlusionSensitivity`/`imageLIME` (ride the T2 gradient engine + occlusion forward sweeps) |
-| 6.2 | `tsne` | t-SNE embedding for activation visualisation (reuses the Stats distance kernel) |
-| 6.3 | Metrics | `rocmetrics`/`confusionchart`/`accuracy`/`precision`/`recall`/`fScore` (reuse the Stats classification-metrics surface) |
-| 6.4 | Bayesian hyperparameter search | `bayesopt`-driven sweep over `trainingOptions` (reuse the shipped `bayesopt`) — the Experiment-Manager *engine* minus the app |
-| 6.5 | `dlquantizer` | INT8 calibration (`calibrate`) + `validate` accuracy drop + `quantizationDetails` — the on-ramp to the HDL track |
-| 6.6 | Verification (subset) | `dlnetwork` robustness/`l-inf` bound check + out-of-distribution score (a small slice of Chapter 5's verification surface) |
+| 6.1 | **Grad-CAM-style attribution ✅** | Gradient of the picked-class logit w.r.t. the inputs via `dlgradient` — produces the per-input saliency map that's the MLP analogue of Grad-CAM's conv-feature weighting (also the technique under Integrated Gradients / saliency maps).  `dl_gradcam.m` trains a 2-D 3-class MLP and recovers the discriminating input dimension per class.  Image-domain `gradCAM`/`occlusionSensitivity`/`imageLIME` carved with the 4-D `SSCB` tensor (`any_shape_roadmap` Tier C). |
+| 6.2 | `tsne` | t-SNE embedding for activation visualisation — composes from the shipped Stats distance kernel + a KL-gradient inner loop; carved as a follow-on. |
+| 6.3 | **Classification metrics ✅** | `accuracy(yt, yp)` (scalar) + `precision`/`recall`/`fScore` (K × 1 per-class column vectors) + **`rocmetrics(scores, yt, posClass)`** (N+1 × 3 [threshold, FPR, TPR] sweep) + `aucroc` (scalar trapezoidal AUC).  All in the Stats runtime using `confusionmat` as the kernel. |
+| 6.4 | **Bayesian hyperparameter search ✅** | `bayesopt(@(p) loss_for_hp(p), lb, ub)` — the shipped GP + EI solver applied to the HP-tuning use case. `dl_bayesopt_hp.m` finds the global minimum of a synthetic loss-vs-learning-rate surface (bowl + sinusoidal trough) within 0.05 of the analytic optimum. Closure captures into the objective handle aren't supported yet (Stats T6 trap), so the example uses an inline-constant surrogate — the same scaffold works once that lands. |
+| 6.5 | **`dlquantizer` calibrate/validate ✅** | `dlqcalibrate(X, runningMaxAbs)` threads a running max-abs through a calibration batch; divide by 127 to get the int8 scale.  `dlqclip(X, scale)` projects test-time activations onto that grid (companion to H1's `dlquantize`/`dlqscale` that handle *weights*).  Verified end-to-end against the H1 MLP. |
+| 6.6 | **`l-inf` robustness check ✅** | Sound (gradient-based, not complete) certification: `bound(x; ε) := ε * ‖∇_x logit_picked(x)‖₁` is a dual-norm upper bound on the worst-case score perturbation any l∞-ball of radius ε around x can produce.  If `bound < margin` then the network is certified robust at x for that ε.  `dl_robust_linf.m` exercises both regimes: certified-safe at small ε, bound-grows-beyond-margin at large ε. |
 
-**Headline-within-tier**: `dl_gradcam_explain.m` — Grad-CAM heatmap over the
-§1 CNN's prediction, written as a PNG via Cairo.
+**Headlines (shipped)**:
+- `examples/dlnet/dl_gradcam.m` — Grad-CAM-style attribution on a 2-D 3-class MLP; each class's saliency points at its discriminating input dimension.
+- `test/Run/dl_metrics.m` — full classification-metric round-trip on a hand-crafted 3-class confusion (accuracy 75%, all per-class P/R/F + AUC).
+- `test/Run/dl_calibrate.m` — calibration max-abs sweep across three batches + int8-grid clipping with assertion that clipped values lie exactly on the lattice.
+- `test/Run/dl_bayesopt_hp.m` — Bayesian-opt HP search finding the global min of a sinusoidal-trough loss surface.
+- `test/Run/dl_robust_linf.m` — dual-norm l∞ certification with both safe (certified) and beyond-margin (uncertifiable) ε regimes.
 
 ---
 

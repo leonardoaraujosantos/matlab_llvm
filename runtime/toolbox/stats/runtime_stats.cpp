@@ -1809,6 +1809,127 @@ matlab_mat *matlab_stats_confusionmat(matlab_mat *yt, matlab_mat *yp) {
     return M;
 }
 
+/* ===== Tier-6 — Classification metrics ================================== *
+ * All take (ytrue, ypred) of integer-coded labels and reuse the
+ * confusionmat kernel.  accuracy is a scalar; precision / recall / fScore
+ * are K × 1 column vectors (one entry per class, NaN where the
+ * denominator is zero). */
+
+static matlab_mat *sstat_confmat_helper(matlab_mat *yt, matlab_mat *yp,
+                                        int &Kout) {
+    matlab_mat *C = matlab_stats_confusionmat(yt, yp);
+    Kout = static_cast<int>(C->rows);
+    return C;
+}
+
+/* accuracy(ytrue, ypred) -> scalar fraction of correctly predicted samples. */
+matlab_mat *matlab_stats_accuracy(matlab_mat *yt, matlab_mat *yp) {
+    int K = 0;
+    matlab_mat *C = sstat_confmat_helper(yt, yp, K);
+    double tp = 0, total = 0;
+    for (int i = 0; i < K; ++i) {
+        tp += C->data[i*K + i];
+        for (int j = 0; j < K; ++j) total += C->data[i*K + j];
+    }
+    matlab_mat *r = mat_alloc(1, 1);
+    r->data[0] = (total > 0) ? (tp / total) : 0.0;
+    return r;
+}
+
+/* precision(ytrue, ypred) -> K×1 per-class TP/(TP+FP). */
+matlab_mat *matlab_stats_precision(matlab_mat *yt, matlab_mat *yp) {
+    int K = 0;
+    matlab_mat *C = sstat_confmat_helper(yt, yp, K);
+    matlab_mat *r = mat_alloc(K, 1);
+    for (int c = 0; c < K; ++c) {
+        double tp = C->data[c*K + c];
+        double col = 0; for (int i = 0; i < K; ++i) col += C->data[i*K + c];
+        r->data[c] = (col > 0) ? (tp / col) : 0.0;
+    }
+    return r;
+}
+
+/* recall(ytrue, ypred) -> K×1 per-class TP/(TP+FN). */
+matlab_mat *matlab_stats_recall(matlab_mat *yt, matlab_mat *yp) {
+    int K = 0;
+    matlab_mat *C = sstat_confmat_helper(yt, yp, K);
+    matlab_mat *r = mat_alloc(K, 1);
+    for (int c = 0; c < K; ++c) {
+        double tp = C->data[c*K + c];
+        double row = 0; for (int j = 0; j < K; ++j) row += C->data[c*K + j];
+        r->data[c] = (row > 0) ? (tp / row) : 0.0;
+    }
+    return r;
+}
+
+/* fScore(ytrue, ypred) -> K×1 per-class harmonic mean of P and R. */
+matlab_mat *matlab_stats_fscore(matlab_mat *yt, matlab_mat *yp) {
+    int K = 0;
+    matlab_mat *C = sstat_confmat_helper(yt, yp, K);
+    matlab_mat *r = mat_alloc(K, 1);
+    for (int c = 0; c < K; ++c) {
+        double tp = C->data[c*K + c];
+        double col = 0; for (int i = 0; i < K; ++i) col += C->data[i*K + c];
+        double row = 0; for (int j = 0; j < K; ++j) row += C->data[c*K + j];
+        double p = (col > 0) ? (tp / col) : 0.0;
+        double rc = (row > 0) ? (tp / row) : 0.0;
+        r->data[c] = (p + rc > 0) ? (2.0 * p * rc / (p + rc)) : 0.0;
+    }
+    return r;
+}
+
+/* rocmetrics(scores, ytrue, positiveClass) -> ROC point sweep.
+ * scores : N×1 continuous scores for the positive class.
+ * ytrue  : N×1 ground-truth labels.
+ * positiveClass : scalar — the label that counts as positive.
+ * Returns an (N+1) × 3 matrix: [threshold, FPR, TPR] sorted by descending
+ * threshold so AUC = trapezoidal integration over column 2 against
+ * column 3 follows the convention. */
+matlab_mat *matlab_stats_rocmetrics(matlab_mat *scoresm, matlab_mat *ytm,
+                                    matlab_mat *posm) {
+    std::vector<double> sc = sstat_col(scoresm, 0);
+    std::vector<double> yt = sstat_col(ytm,    0);
+    double pos = sstat_sc(posm, 0.0);
+    int N = static_cast<int>(std::min(sc.size(), yt.size()));
+    if (N == 0) return mat_alloc(0, 0);
+    std::vector<std::pair<double, double>> pairs(N);
+    for (int i = 0; i < N; ++i)
+        pairs[i] = { sc[i], (yt[i] == pos) ? 1.0 : 0.0 };
+    std::sort(pairs.begin(), pairs.end(),
+              [](const auto &a, const auto &b) { return a.first > b.first; });
+    double P = 0, Nn = 0;
+    for (auto &p : pairs) { if (p.second > 0.5) ++P; else ++Nn; }
+    matlab_mat *out = mat_alloc(N + 1, 3);
+    double tp = 0, fp = 0;
+    out->data[0*3 + 0] = pairs[0].first + 1.0;   // threshold above max score
+    out->data[0*3 + 1] = 0.0;
+    out->data[0*3 + 2] = 0.0;
+    for (int i = 0; i < N; ++i) {
+        if (pairs[i].second > 0.5) ++tp; else ++fp;
+        out->data[(i+1)*3 + 0] = pairs[i].first;
+        out->data[(i+1)*3 + 1] = (Nn > 0) ? (fp / Nn) : 0.0;
+        out->data[(i+1)*3 + 2] = (P  > 0) ? (tp / P ) : 0.0;
+    }
+    return out;
+}
+
+/* aucroc(scores, ytrue, positiveClass) -> scalar AUC via the trapezoidal
+ * rule over the ROC curve.  Convenient companion to rocmetrics. */
+matlab_mat *matlab_stats_aucroc(matlab_mat *scoresm, matlab_mat *ytm,
+                                matlab_mat *posm) {
+    matlab_mat *R = matlab_stats_rocmetrics(scoresm, ytm, posm);
+    int N = static_cast<int>(R->rows);
+    double auc = 0.0;
+    for (int i = 1; i < N; ++i) {
+        double dx = R->data[i*3 + 1] - R->data[(i-1)*3 + 1];
+        double y  = 0.5 * (R->data[i*3 + 2] + R->data[(i-1)*3 + 2]);
+        auc += dx * y;
+    }
+    matlab_mat *r = mat_alloc(1, 1);
+    r->data[0] = auc;
+    return r;
+}
+
 /* ===== Tier-6 — Hidden Markov Models ==================================== *
  * MATLAB convention: states 1..N, symbols 1..M, the model begins in
  * state 1 (the first emission follows a transition out of state 1).  TRANS
