@@ -9040,75 +9040,220 @@ void *matlab_squeezeN(void *A) {
     return R;
 }
 
-/* convN_batch(X, W) — 2-D convolution forward for a CNN layer.
+/* im2col_2d(X, kH, kW) — Tier-C helper used by GEMM-based conv.
+ *
+ *   X     : H x W x C x N rank-4 matN (image batch).
+ *   out   : (kH*kW*C) x (Hout*Wout*N) row-major matlab_mat.
+ *
+ * Layout convention so the downstream matmul gives the right Y[h,w,k,n]
+ * directly:
+ *   out[c*kH*kW + kh*kW + kw,  n*Hout*Wout + h*Wout + w]
+ *     = X[h + kh, w + kw, c, n]
+ *
+ * Then Y_2d = W_2d * out where W_2d[k, c*kH*kW+kh*kW+kw] = W[kh,kw,c,k]
+ * gives Y_2d[k, n*Hout*Wout+h*Wout+w] = sum_inner W_2d[k,inner]*out[inner,…].
+ * That collapses to Y[h, w, k, n] after a transpose+reshape. */
+matlab_mat *matlab_im2col_2d(void *Xv, double kHd, double kWd) {
+    if (!Xv) return mat_alloc(0, 0);
+    /* Accept any rank ≥ 2: trailing-singleton drop in matN_alloc means
+     * `zeros(H, W, C, 1)` arrives as mat3 (depth=C) and `zeros(H, W, 1, 1)`
+     * as a plain matlab_mat.  Synthesize the implicit-1 dims + strides. */
+    int64_t H, W, C, N;
+    int64_t Xs0, Xs1, Xs2, Xs3;
+    const double *Xdata;
+    if (mat_is_nd(Xv)) {
+        matlab_matN *X = (matlab_matN *)Xv;
+        if (X->ndims < 2 || X->ndims > 4) return mat_alloc(0, 0);
+        H = X->dims[0]; W = X->dims[1];
+        C = X->ndims >= 3 ? X->dims[2] : 1;
+        N = X->ndims >= 4 ? X->dims[3] : 1;
+        Xs0 = X->strides[0]; Xs1 = X->strides[1];
+        Xs2 = X->ndims >= 3 ? X->strides[2] : 0;
+        Xs3 = X->ndims >= 4 ? X->strides[3] : 0;
+        Xdata = X->data;
+    } else if (mat_is_3d(Xv)) {
+        matlab_mat3 *X3 = (matlab_mat3 *)Xv;
+        H = X3->rows; W = X3->cols; C = X3->depth; N = 1;
+        /* mat3 is slice-major: data[k*rows*cols + i*cols + j].  Stride
+         * for axis-0 (rows) is cols, axis-1 (cols) is 1, axis-2 (depth)
+         * is rows*cols.  Axis-3 (N) doesn't exist; stride 0. */
+        Xs0 = X3->cols; Xs1 = 1; Xs2 = X3->rows * X3->cols; Xs3 = 0;
+        Xdata = X3->data;
+    } else {
+        matlab_mat *X2 = (matlab_mat *)Xv;
+        H = X2->rows; W = X2->cols; C = 1; N = 1;
+        Xs0 = X2->cols; Xs1 = 1; Xs2 = 0; Xs3 = 0;
+        Xdata = X2->data;
+    }
+    int64_t kH = (int64_t)kHd, kW = (int64_t)kWd;
+    if (kH <= 0 || kW <= 0 || kH > H || kW > W) return mat_alloc(0, 0);
+    int64_t Hout = H - kH + 1, Wout = W - kW + 1;
+    int64_t rows = kH * kW * C;
+    int64_t cols = Hout * Wout * N;
+    matlab_mat *Y = mat_alloc(rows, cols);
+    if (!Y || !Y->data) return Y;
+    double * __restrict__ Yd = Y->data;
+    /* Innermost over (kh, kw) so the per-patch fills walk X contiguously
+     * along W (Xs1 = 1 in the canonical row-major-extended matN). */
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t h = 0; h < Hout; ++h) {
+            for (int64_t w = 0; w < Wout; ++w) {
+                int64_t col = n * Hout * Wout + h * Wout + w;
+                for (int64_t c = 0; c < C; ++c) {
+                    for (int64_t kh = 0; kh < kH; ++kh) {
+                        for (int64_t kw = 0; kw < kW; ++kw) {
+                            int64_t row = c * kH * kW + kh * kW + kw;
+                            Yd[row * cols + col] =
+                                Xdata[(h + kh)*Xs0 + (w + kw)*Xs1
+                                     + c*Xs2 + n*Xs3];
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return Y;
+}
+
+/* matlab_conv2d_batch(X, W) — 2-D convolution forward for a CNN layer.
  *
  *   X : H x W x C x N        (matN, rank-4 batched image tensor)
  *   W : kH x kW x C x K      (matN, rank-4 filter set: K filters of kH×kW×C)
  *   Y : (H - kH + 1) x (W - kW + 1) x K x N
  *
- * Valid-padding only (no border).  Stride 1.  Output is matN (rank-4),
- * or rank-3 if N==1 (trailing-singleton drop), or rank-3 if K==1, etc.
+ * Valid-padding only.  Stride 1.  Output is matN (rank-4) or drops to
+ * mat3 / mat when trailing dims collapse to 1.
  *
- * The arithmetic is the textbook "for each (h, w, k, n), sum over
- * (kh, kw, c) of X[h+kh, w+kw, c, n] * W[kh, kw, c, k]".  No im2col
- * (that buys ~3-5x throughput at the cost of one big alloc); explicit
- * O(H*W*K*N*kH*kW*C) loop suffices for the demo-scale shapes that
- * Tier C targets.  Falls back to mat_alloc(0,0) on shape mismatch. */
+ * Implementation: im2col + GEMM.
+ *   X_col   : (kH*kW*C) x (Hout*Wout*N)     via matlab_im2col_2d
+ *   W_2d    : K x (kH*kW*C)                 (filter set reshaped)
+ *   Y_2d    : K x (Hout*Wout*N)             = W_2d * X_col   (matmul)
+ *   Y       : reshape Y_2d -> (Hout, Wout, K, N)
+ *
+ * Routes the inner reduction through matlab_matmul_mm, which uses BLAS
+ * dgemm above the 64^3 threshold (or a vectorised naive triple loop).
+ * For realistic CNN shapes (Hout*Wout*N >= 64²) this is the ~3-5x
+ * throughput win over the explicit 7-deep loop.  Smaller demo shapes
+ * still benefit from the matmul-kernel's cache blocking + autovec. */
 void *matlab_conv2d_batch(void *Xv, void *Wv) {
-    if (!mat_is_nd(Xv) || !mat_is_nd(Wv)) return mat_alloc(0, 0);
-    matlab_matN *X = (matlab_matN *)Xv;
-    matlab_matN *W = (matlab_matN *)Wv;
-    if (X->ndims != 4 || W->ndims != 4) return mat_alloc(0, 0);
-    int64_t H = X->dims[0], Wd = X->dims[1], C = X->dims[2], N = X->dims[3];
-    int64_t kH = W->dims[0], kW = W->dims[1], Cw = W->dims[2], K = W->dims[3];
+    if (!Xv || !Wv) return mat_alloc(0, 0);
+    /* Accept either matN (rank 4) or trailing-singleton-dropped variants:
+     * mat3 means N=1, matlab_mat means C=N=1.  Reconstruct (H, W, C, N)
+     * + (kH, kW, C, K) + stride tuples in both cases. */
+    int64_t H, Wd, C, N;
+    int64_t Xs0, Xs1, Xs2, Xs3;
+    const double *Xdata;
+    if (mat_is_nd(Xv)) {
+        matlab_matN *X = (matlab_matN *)Xv;
+        if (X->ndims < 2 || X->ndims > 4) return mat_alloc(0, 0);
+        H = X->dims[0]; Wd = X->dims[1];
+        C = X->ndims >= 3 ? X->dims[2] : 1;
+        N = X->ndims >= 4 ? X->dims[3] : 1;
+        Xs0 = X->strides[0]; Xs1 = X->strides[1];
+        Xs2 = X->ndims >= 3 ? X->strides[2] : 0;
+        Xs3 = X->ndims >= 4 ? X->strides[3] : 0;
+        Xdata = X->data;
+    } else if (mat_is_3d(Xv)) {
+        matlab_mat3 *X3 = (matlab_mat3 *)Xv;
+        H = X3->rows; Wd = X3->cols; C = X3->depth; N = 1;
+        Xs0 = X3->cols; Xs1 = 1; Xs2 = X3->rows * X3->cols; Xs3 = 0;
+        Xdata = X3->data;
+    } else {
+        matlab_mat *X2 = (matlab_mat *)Xv;
+        H = X2->rows; Wd = X2->cols; C = 1; N = 1;
+        Xs0 = X2->cols; Xs1 = 1; Xs2 = 0; Xs3 = 0;
+        Xdata = X2->data;
+    }
+    (void)Xdata; (void)Xs0; (void)Xs1; (void)Xs2; (void)Xs3;
+    int64_t kH, kW, Cw, K;
+    int64_t Ws0, Ws1, Ws2, Ws3;
+    const double *Wdata;
+    if (mat_is_nd(Wv)) {
+        matlab_matN *Ww = (matlab_matN *)Wv;
+        if (Ww->ndims < 2 || Ww->ndims > 4) return mat_alloc(0, 0);
+        kH = Ww->dims[0]; kW = Ww->dims[1];
+        Cw = Ww->ndims >= 3 ? Ww->dims[2] : 1;
+        K  = Ww->ndims >= 4 ? Ww->dims[3] : 1;
+        Ws0 = Ww->strides[0]; Ws1 = Ww->strides[1];
+        Ws2 = Ww->ndims >= 3 ? Ww->strides[2] : 0;
+        Ws3 = Ww->ndims >= 4 ? Ww->strides[3] : 0;
+        Wdata = Ww->data;
+    } else if (mat_is_3d(Wv)) {
+        matlab_mat3 *W3 = (matlab_mat3 *)Wv;
+        kH = W3->rows; kW = W3->cols; Cw = W3->depth; K = 1;
+        Ws0 = W3->cols; Ws1 = 1; Ws2 = W3->rows * W3->cols; Ws3 = 0;
+        Wdata = W3->data;
+    } else {
+        matlab_mat *W2 = (matlab_mat *)Wv;
+        kH = W2->rows; kW = W2->cols; Cw = 1; K = 1;
+        Ws0 = W2->cols; Ws1 = 1; Ws2 = 0; Ws3 = 0;
+        Wdata = W2->data;
+    }
     if (Cw != C) return mat_alloc(0, 0);
     if (kH > H || kW > Wd) return mat_alloc(0, 0);
     int64_t Hout = H - kH + 1, Wout = Wd - kW + 1;
+    int64_t inner = kH * kW * C;
+
+    /* Step 1: im2col on X (also rank-tolerant). */
+    matlab_mat *Xcol = matlab_im2col_2d(Xv, (double)kH, (double)kW);
+    if (!Xcol || !Xcol->data) {
+        if (Xcol) free(Xcol->data), free(Xcol);
+        return mat_alloc(0, 0);
+    }
+
+    /* Step 2: lay out the filter bank as W_2d (K x inner). */
+    matlab_mat *W2d = mat_alloc(K, inner);
+    if (!W2d || !W2d->data) {
+        free(Xcol->data); free(Xcol);
+        return mat_alloc(0, 0);
+    }
+    for (int64_t k = 0; k < K; ++k)
+        for (int64_t c = 0; c < C; ++c)
+            for (int64_t kh = 0; kh < kH; ++kh)
+                for (int64_t kw = 0; kw < kW; ++kw) {
+                    int64_t col = c * kH * kW + kh * kW + kw;
+                    W2d->data[k * inner + col] =
+                        Wdata[kh*Ws0 + kw*Ws1 + c*Ws2 + k*Ws3];
+                }
+
+    /* Step 3: GEMM.  Y_2d (K x Hout*Wout*N) = W_2d * X_col. */
+    matlab_mat *Y2d = matlab_matmul_mm(W2d, Xcol);
+    free(Xcol->data); free(Xcol);
+    free(W2d->data);  free(W2d);
+
+    /* Step 4: scatter Y_2d into (Hout, Wout, K, N) matN.  Y_2d laid out
+     * row-major: Y_2d[k, n*Hout*Wout + h*Wout + w] = Y[h, w, k, n]. */
     int64_t outDims[4] = {Hout, Wout, K, N};
     void *Rv = matN_alloc(4, outDims);
+    if (!Rv) { free(Y2d->data); free(Y2d); return mat_alloc(0, 0); }
     double *Yd = mat_is_nd(Rv)      ? ((matlab_matN *)Rv)->data
               : mat_is_3d(Rv)      ? ((matlab_mat3 *)Rv)->data
                                    : ((matlab_mat *)Rv)->data;
-    int64_t Xs0 = X->strides[0], Xs1 = X->strides[1], Xs2 = X->strides[2], Xs3 = X->strides[3];
-    int64_t Ws0 = W->strides[0], Ws1 = W->strides[1], Ws2 = W->strides[2], Ws3 = W->strides[3];
-    /* Output strides come from matN_alloc OR from the descriptor matN_alloc
-     * returned: rank dropped if Hout/Wout/K/N has trailing 1s.  Re-derive
-     * from the actual descriptor. */
     int64_t Ys[4] = {0, 0, 0, 0};
     if (mat_is_nd(Rv)) {
         matlab_matN *Rn = (matlab_matN *)Rv;
         for (uint32_t k = 0; k < Rn->ndims; ++k) Ys[k] = Rn->strides[k];
-        /* implicit trailing dims have stride 0 (no advance needed). */
     } else if (mat_is_3d(Rv)) {
         matlab_mat3 *R3 = (matlab_mat3 *)Rv;
         Ys[0] = R3->cols * R3->depth;
         Ys[1] = R3->depth;
         Ys[2] = 1;
-        Ys[3] = 0;  /* N == 1 was dropped */
+        Ys[3] = 0;
     } else {
         matlab_mat *R2 = (matlab_mat *)Rv;
         Ys[0] = R2->cols; Ys[1] = 1;
         Ys[2] = 0; Ys[3] = 0;
     }
-    for (int64_t n = 0; n < N; ++n) {
-        for (int64_t k = 0; k < K; ++k) {
-            for (int64_t h = 0; h < Hout; ++h) {
+    int64_t hwn = Hout * Wout * N;
+    for (int64_t k = 0; k < K; ++k)
+        for (int64_t n = 0; n < N; ++n)
+            for (int64_t h = 0; h < Hout; ++h)
                 for (int64_t w = 0; w < Wout; ++w) {
-                    double acc = 0.0;
-                    for (int64_t c = 0; c < C; ++c) {
-                        for (int64_t kh = 0; kh < kH; ++kh) {
-                            for (int64_t kw = 0; kw < kW; ++kw) {
-                                double xv = X->data[(h + kh)*Xs0 + (w + kw)*Xs1 + c*Xs2 + n*Xs3];
-                                double wv = W->data[kh*Ws0 + kw*Ws1 + c*Ws2 + k*Ws3];
-                                acc += xv * wv;
-                            }
-                        }
-                    }
-                    Yd[h*Ys[0] + w*Ys[1] + k*Ys[2] + n*Ys[3]] = acc;
+                    int64_t col2d = n * Hout * Wout + h * Wout + w;
+                    Yd[h*Ys[0] + w*Ys[1] + k*Ys[2] + n*Ys[3]] =
+                        Y2d->data[k * hwn + col2d];
                 }
-            }
-        }
-    }
+    free(Y2d->data); free(Y2d);
     return Rv;
 }
 

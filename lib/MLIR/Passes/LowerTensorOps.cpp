@@ -6120,6 +6120,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"matlab_dlnet_gru",            "matlab_dlnet_gru",            PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy}},
         {"matlab_dlnet_bilstm",         "matlab_dlnet_bilstm",         PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy}},
         {"matlab_dlnet_lstmp",          "matlab_dlnet_lstmp",          PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy}},
+        /* Tier C: rank-4 batched conv with autodiff support. */
+        {"matlab_dlnet_conv2d_batch",  "matlab_dlnet_conv2d_batch", PtrTy, {PtrTy, PtrTy, PtrTy}},
         /* Deep Learning Toolbox Phase 1 — small extra ops over dlarray. */
         {"matlab_dlnet_rdivide",        "matlab_dlnet_rdivide",        PtrTy, {PtrTy, PtrTy, PtrTy}},
         {"matlab_dlnet_sqrt",           "matlab_dlnet_sqrt",           PtrTy, {PtrTy, PtrTy}},
@@ -6752,6 +6754,9 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"conv2",      "matlab_conv2",      1, "pp"},
       /* Tier-C rank-4 batched conv: X(H,W,C,N) * W(kH,kW,C,K) -> Y(H',W',K,N). */
       {"conv2d_batch", "matlab_conv2d_batch", 1, "pp"},
+      /* im2col helper exposed to user code so callers can write their
+       * own GEMM-based conv (e.g. depthwise, dilation, stride>1). */
+      {"im2col_2d",    "matlab_im2col_2d",    1, "pff"},
       /* Tier-1 builtins added alongside conv. filter is the IIR/FIR
        * difference equation (3 ptr args). The fftshift pair is
        * polymorphic on real/complex via the matlab_mat_c magic. */

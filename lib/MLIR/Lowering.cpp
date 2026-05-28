@@ -4735,7 +4735,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
               "transpose", "ctranspose", "embed",
               "gru", "bilstm", "lstmp", "dlarray",
               "sqrt", "leakyrelu", "gelu", "swish",
-              "softplus", "elu"};
+              "softplus", "elu", "conv2d_batch"};
           if (DlRet2.contains(NX->Name) && this->CurTU) {
             bool argPinned = false;
             for (size_t i = 0; i < CX->Args.size(); ++i)
@@ -7163,7 +7163,9 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             "transpose", "ctranspose", "embed",
             "gru", "bilstm", "lstmp",
             /* Phase 1 small ops. */
-            "sqrt", "leakyrelu", "gelu", "swish", "softplus", "elu"};
+            "sqrt", "leakyrelu", "gelu", "swish", "softplus", "elu",
+            /* Tier C: rank-4 batched conv. */
+            "conv2d_batch"};
         if (DlFns.contains(N->Name)) {
           std::function<bool(const Expr *)> pinnedDl =
               [&pinnedDl](const Expr *X) -> bool {
@@ -7186,7 +7188,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                     "transpose", "ctranspose", "embed",
                     "gru", "bilstm", "lstmp", "dlarray",
                     "sqrt", "leakyrelu", "gelu", "swish",
-                    "softplus", "elu"};
+                    "softplus", "elu", "conv2d_batch"};
                 if (DlRet.contains(NX->Name))
                   for (size_t i = 0; i < CX->Args.size(); ++i)
                     if (pinnedDl(CX->Args[i])) return true;

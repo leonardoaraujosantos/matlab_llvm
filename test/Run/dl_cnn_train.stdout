@@ -1,0 +1,2 @@
+dl_cnn_train: loss(0)=0.3144 loss(30)=0.2183
+dl_cnn_train: PASS (loss dropped through conv backprop)

@@ -651,6 +651,7 @@ void Resolver::registerBuiltins() {
     "matlab_dlnet_rdivide", "matlab_dlnet_sqrt", "matlab_dlnet_mean_dim",
     "matlab_dlnet_leakyrelu", "matlab_dlnet_gelu", "matlab_dlnet_swish",
     "matlab_dlnet_softplus", "matlab_dlnet_elu",
+    "matlab_dlnet_conv2d_batch",
     "matlab_dlnet_quantize", "matlab_dlnet_qscale",
     "matlab_dlnet_qclip", "matlab_dlnet_qcalibrate",
     "matlab_dlnet_grad", "matlab_dlnet_reset",
@@ -880,8 +881,8 @@ void Resolver::registerBuiltins() {
     "conj", "real", "imag", "angle", "complex",
     "fft", "ifft", "fft2", "ifft2",
     "conv", "conv2",
-    /* Tier C: rank-4 batched convolution forward. */
-    "conv2d_batch",
+    /* Tier C: rank-4 batched convolution forward + im2col helper. */
+    "conv2d_batch", "im2col_2d",
     "filter", "any", "all", "tril", "triu",
     "fftshift", "ifftshift",
     "std", "var", "median", "diff",

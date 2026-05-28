@@ -146,6 +146,12 @@ classdef dlarray
             r = dlarray();
             matlab_dlnet_elu(r, x);
         end
+
+        % ---- Tier C: rank-4 batched convolution (autodiff-tracked) ---------
+        function r = conv2d_batch(x, w)
+            r = dlarray();
+            matlab_dlnet_conv2d_batch(r, x, w);
+        end
     end
 end
 % `extractdata(x)` and `dlgradient(loss, v)` are intercepted in Lowering.cpp

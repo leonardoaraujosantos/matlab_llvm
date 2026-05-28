@@ -1,0 +1,9 @@
+array_im2col: Xc size = 8 4
+array_im2col: Xc(1,1)=1  Xc(8,1)=14
+array_im2col: Xc(1,4)=5  Xc(8,4)=18
+array_im2col: Y2 size = 3 3 3 2
+array_im2col: Y2(1,1,1,1) =560
+array_im2col: Y2(3,3,2,1) =2296
+array_im2col: Y2(2,2,3,2) =8100
+array_im2col: Y3 ndims=2 size = 2 2
+array_im2col: PASS
