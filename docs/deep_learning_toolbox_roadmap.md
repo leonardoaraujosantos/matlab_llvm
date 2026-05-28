@@ -140,12 +140,17 @@ kernel. (ONNX/PyTorch/TF *import* is carved — see §10.)
   MLP forward**: `examples/hdl/dlhdl_quant_mlp.m` (a Q16.8 2-2-1 net,
   hand-unrolled) lowers through the existing `EmitSV` lane to ~15 lines of
   synthesizable SV (Verilator + Yosys clean), joining the EmitSV regression
-  sweep.  H3 generates the cocotb harness but currently fails its 100-vector
-  compare because of the documented **SV-vs-Python fi saturation divergence**
-  (the SV truncates each 16-bit op while the Python ref saturates at the
-  natural-growth width) — same class of gap that previously blocked Tier-3
-  cocotb cases before the per-op-wrap pass fixed them.  **T6 + HDL H3
-  bit-accuracy + H4 LSTM-on-FPGA are 🔵 not started.**  The forward-pass substrate (matrix kernel),
+  sweep.  H3 ships the **`% cocotb: range(<port>, <lo>, <hi>)` pragma** (cocotb
+  sweep 40/40 with the new fixture) that bounds the random stimulus to a
+  real-value window — closes the *overflow* divergence class.  The
+  dlhdl-MLP case stays blocked on a **deeper FL-growth divergence**: SV
+  declares every local at the port's Q16.8 storage and lowers the bias as
+  `16'sd32` (= 0.125·2⁸); the Python ref grows FL to 16 on the
+  intermediate and lowers the same bias as 8192 (= 0.125·2¹⁶) — even with
+  zero-input stimulus the two disagree on the bias-only result.  The fix
+  is in `EmitSystemVerilog` (declare fi-typed intermediates at their IR
+  growth width + rescale constants to match the FL).  **T6 + the deeper
+  H3 fix + H4 LSTM-on-FPGA are 🔵 not started.**  The forward-pass substrate (matrix kernel),
   the fixed-point/SV/cocotb lane, `bayesopt`, `ode45`, and the classdef +
   handle ABI are all already in the runtime.
 - **No external dependencies** — matching project precedent.
@@ -290,7 +295,7 @@ Embedded Coder cocotb SIL. It depends on **T1 (inference) + T6.5
 |---|---------|-------|-------|
 | H1 | **`dlquantize(W)` + `dlqscale(W)` ✅** | symmetric per-tensor INT8 quantization — `scale = max(abs(W))/127`, `Q = round(W/scale)` clipped to `[-127, 127]`, output is `Q*scale` rounded onto the int8 lattice.  Plain matrix in/out, no autodiff (post-training step).  `examples/dlnet/dl_quantize_check.m`: trains the T3 MLP, INT8-quantizes every weight, re-runs inference — both double and INT8 hit 100% accuracy, max logit drift ≈ 0.1.  The `dlhdl.ProcessorConfig`/`dlhdl.Workflow`/`estimatePerformance` object-array APIs are carved with `dlnetwork`. | T3 |
 | H2 | **fi-typed SV emission ✅** | a hand-unrolled quantized MLP forward (Q16.8 weights baked as `fi` constants, `relu` as `z<0?0:z`, multi-layer linear) lowers cleanly through the existing `EmitSV` lane.  `examples/hdl/dlhdl_quant_mlp.m` + `test/EmitSV/dlhdl_quant_mlp.sv.expected`: a 2-2-1 MLP emits ~15 lines of synthesizable SV (powers-of-2 weights fold to bit-shifts; non-trivial weights to `*` with sign extension), passes Verilator lint + Yosys synth, joins the EmitSV regression sweep (80/80 green). | `fi` + EmitSV |
-| H3 | **cocotb bit-accuracy** 🟡 (harness generates; bit-accuracy blocked) | `-emit-cocotb` generates the full harness (`test_<n>.py`, `<n>_ref.py`, `cocotb_fi.py`, `Makefile`).  Currently fails the 100-vector compare because of the documented **SV-vs-Python fi saturation divergence** — the SV truncates each 16-bit op while the Python reference saturates at the natural growth width (33/34/64 bits between ops); the harness drives full-range int16 stimulus so the divergence is visible immediately.  Same class of gap that previously blocked Tier-3 cocotb cases (`aes_round`, `barrel_shifter`, `crc32`, …) before the per-op-wrap pass fixed them — would need an equivalent pass for the dlhdl path. | H2 + per-op wrap |
+| H3 | **cocotb bit-accuracy** 🟡 (stimulus-range pragma shipped; FL-growth divergence remains) | `-emit-cocotb` generates the full harness.  A **new `% cocotb: range(<port>, <lo>, <hi>)` pragma** (test/EmitSV/cocotb_range_pragma + EmitCocoTB sweep, 40/40 green) bounds the random stimulus to a real-value window — closes the *overflow* class of SV-vs-Python divergence.  But the H3 dlhdl-MLP case stays blocked on a **deeper FL-growth divergence**: SV declares every local at the port's storage width (e.g. Q16.8 → `logic signed [15:0]`) and lowers the bias as `16'sd32` (= 0.125·2⁸); the Python ref keeps FL = 16 on the intermediate (saturated to i34) and lowers the same bias as 8192 (= 0.125·2¹⁶).  Even with zero-input stimulus the two disagree on the bias-only result.  The fix is in **EmitSystemVerilog** — declare fi-typed intermediates at their IR-given growth width (i34 / i64) and emit constants rescaled to match the FL — *not* a Python emit change.  Documented for the next slice. | H2 + EmitSV intermediate widths |
 | H4 | LSTM-on-FPGA compile 🔵 | the Chapter-13 LSTM/GRU layer compilation to the fixed-point recurrent datapath | H2 + T4 |
 
 **Headline-within-tier (HDL tracer)**: `dlhdl_cnn_sil.mflow` /

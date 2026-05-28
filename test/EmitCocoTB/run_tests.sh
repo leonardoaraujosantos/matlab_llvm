@@ -119,6 +119,14 @@ declare -a CASES=(
   # Closes the integrator-chain divergence that previously kept
   # cic_decimator out of the sweep.
   cic_decimator
+  # Tier-9 — added with the `% cocotb: range(<port>, <lo>, <hi>)` pragma
+  # that bounds the random stimulus to a real-value window.  Useful when
+  # the natural fi_range would let stimulus exercise overflow regions
+  # that SV's mid-computation truncation and the Python reference's
+  # saturate-and-grow disagree on.  The fixture itself is a trivial
+  # Q16.0 adder, so the cocotb compare is at the same FL on both sides
+  # -- what gets exercised here is the new pragma + harness emit.
+  cocotb_range_pragma
 )
 
 # Run each fixture in parallel via xargs -P. Default to up to 8

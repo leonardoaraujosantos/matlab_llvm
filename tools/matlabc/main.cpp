@@ -8843,10 +8843,10 @@ struct CocotbPortSpec {
    * pipelined DUTs whose per-call reference can't keep up with
    * random per-cycle inputs (the multi-stage cascade in
    * sequential_processor / fir_asic_pipelined). */
-  enum class StimKind { Random, Impulse, Constant, Ramp };
+  enum class StimKind { Random, Impulse, Constant, Ramp, Range };
   StimKind Stim = StimKind::Random;
-  double StimArg1 = 0.0;   // impulse: value@0 / constant: value / ramp: start
-  double StimArg2 = 0.0;   // ramp: stride
+  double StimArg1 = 0.0;   // impulse: value@0 / constant: value / ramp: start / range: lo
+  double StimArg2 = 0.0;   // ramp: stride / range: hi
 };
 
 struct CocotbFuncSpec {
@@ -8984,7 +8984,27 @@ scanCocotbPragmas(const std::string &SrcPath) {
         S.Kind = CocotbPortSpec::StimKind::Ramp;
         S.Arg1 = std::strtod(Args[2].c_str(), nullptr);
         S.Arg2 = std::strtod(Args[3].c_str(), nullptr);
+      } else if (Kind == "range" && Args.size() >= 4) {
+        S.Kind = CocotbPortSpec::StimKind::Range;
+        S.Arg1 = std::strtod(Args[2].c_str(), nullptr);
+        S.Arg2 = std::strtod(Args[3].c_str(), nullptr);
       } else continue;
+      if (!Args[0].empty()) Out.Stim[Args[0]] = S;
+      continue;
+    }
+    /* `% cocotb: range(<name>, <lo>, <hi>)` shorthand — equivalent to
+     * `stimulus(<name>, range, <lo>, <hi>)`. Lets a DUT whose port pragma
+     * declares `fi, signed, WL, FL` with FL > 0 constrain the random
+     * stimulus to the natural real-value range; the SV erases FL from the
+     * port list, so the harness would otherwise draw values up to ±2^(WL-1)
+     * which overflow the SV's mid-computation truncation differently from
+     * the Python reference's saturate-and-grow.  See the DL HDL H3 note in
+     * docs/deep_learning_toolbox_roadmap.md.  */
+    if (Head == "range" && Args.size() >= 3) {
+      CocotbStim S;
+      S.Kind = CocotbPortSpec::StimKind::Range;
+      S.Arg1 = std::strtod(Args[1].c_str(), nullptr);
+      S.Arg2 = std::strtod(Args[2].c_str(), nullptr);
       if (!Args[0].empty()) Out.Stim[Args[0]] = S;
       continue;
     }
@@ -9879,6 +9899,7 @@ renderCocotbHarness(const CocotbFuncSpec &S, const std::string &Stem,
         case CocotbPortSpec::StimKind::Impulse:  K = "impulse"; break;
         case CocotbPortSpec::StimKind::Constant: K = "constant"; break;
         case CocotbPortSpec::StimKind::Ramp:     K = "ramp"; break;
+        case CocotbPortSpec::StimKind::Range:    K = "range"; break;
       }
       char Buf[128];
       snprintf(Buf, sizeof Buf,
@@ -9911,6 +9932,18 @@ renderCocotbHarness(const CocotbFuncSpec &S, const std::string &Stem,
     append("                p = pack_fi(v, signed, wl, fl)\n");
     append("                return p, unpack_fi(p, signed, wl, fl)\n");
     append("            packed = [pack_fi(v + j * a2, signed, wl, fl) for j in range(alen)]\n");
+    append("            return packed, [unpack_fi(p, signed, wl, fl) for p in packed]\n");
+    append("        if kind == 'range':\n");
+    /* `range` constrains the random stimulus to a real-value window
+     * (a1=lo, a2=hi).  Used when SV erases the fi FL on the port list
+     * and the natural fi_range would let stimulus overflow the SV's
+     * mid-computation truncation.  See DL HDL H3. */
+    append("            lo, hi = a1, a2\n");
+    append("            if alen == 0:\n");
+    append("                v = random.uniform(lo, hi)\n");
+    append("                p = pack_fi(v, signed, wl, fl)\n");
+    append("                return p, unpack_fi(p, signed, wl, fl)\n");
+    append("            packed = [pack_fi(random.uniform(lo, hi), signed, wl, fl) for _ in range(alen)]\n");
     append("            return packed, [unpack_fi(p, signed, wl, fl) for p in packed]\n");
     append("        # default: random\n");
     append("        return _gen_random(signed, wl, fl, alen)\n");
