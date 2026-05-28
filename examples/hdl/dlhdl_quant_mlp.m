@@ -13,6 +13,7 @@ function y = dlhdl_quant_mlp(x0, x1)
     %#codegen
     % hdl: port(x0, fi, signed, 16, 8)
     % hdl: port(x1, fi, signed, 16, 8)
+    % hdl: precise_fi
     % cocotb: latency(0)
     % Layer-1 weights (2 -> 2) — quantized to Q16.8.
     w1_00 = fi( 0.500, 1, 16, 8);

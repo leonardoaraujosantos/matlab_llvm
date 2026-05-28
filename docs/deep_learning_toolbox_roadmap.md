@@ -150,17 +150,15 @@ kernel. (ONNX/PyTorch/TF *import* is carved — see §10.)
   MLP forward**: `examples/hdl/dlhdl_quant_mlp.m` (a Q16.8 2-2-1 net,
   hand-unrolled) lowers through the existing `EmitSV` lane to ~15 lines of
   synthesizable SV (Verilator + Yosys clean), joining the EmitSV regression
-  sweep.  H3 ships the **`% cocotb: range(<port>, <lo>, <hi>)` pragma** (cocotb
-  sweep 40/40 with the new fixture) that bounds the random stimulus to a
-  real-value window — closes the *overflow* divergence class.  The
-  dlhdl-MLP case stays blocked on a **deeper FL-growth divergence**: SV
-  declares every local at the port's Q16.8 storage and lowers the bias as
-  `16'sd32` (= 0.125·2⁸); the Python ref grows FL to 16 on the
-  intermediate and lowers the same bias as 8192 (= 0.125·2¹⁶) — even with
-  zero-input stimulus the two disagree on the bias-only result.  The fix
-  is in `EmitSystemVerilog` (declare fi-typed intermediates at their IR
-  growth width + rescale constants to match the FL).  **T6 + the deeper
-  H3 fix + H4 LSTM-on-FPGA are 🔵 not started.**  The forward-pass substrate (matrix kernel),
+  sweep.  H3 ships **`% cocotb: range(<port>, <lo>, <hi>)`** (40/40 with the
+  range fixture) for the overflow-class divergence, AND **`% hdl: precise_fi`**
+  for the deeper FL-growth divergence — the dlhdl-MLP cocotb compare
+  now passes **41/41 with bit-accuracy**, including a Q16.8 2-2-1 quantized
+  MLP whose Python ref and emitted SystemVerilog agree on every random
+  stimulus vector.  The precise_fi pragma is strict opt-in (the 79 legacy
+  EmitSV goldens, authored against Q16.8-throughout truncation, stay
+  green).  Issue #75 closed.  **H4 LSTM-on-FPGA + T5.7 Neural ODE + T6.2
+  tsne remain 🔵.**  The forward-pass substrate (matrix kernel),
   the fixed-point/SV/cocotb lane, `bayesopt`, `ode45`, and the classdef +
   handle ABI are all already in the runtime.
 - **No external dependencies** — matching project precedent.
@@ -183,9 +181,10 @@ and predict" lane and the foundation the HDL track also builds on.
 | 1.2 | `dlnetwork` carrier | layer array + connections + `Learnables`/`State` tables; `initialize` | classdef carrier |
 | 1.3 | Core layers (forward) | `featureInputLayer`/`imageInputLayer`/`sequenceInputLayer`, `fullyConnectedLayer`, `convolution2dLayer`/`convolution1dLayer`, `batchNormalizationLayer`/`layerNormalizationLayer`, `maxPooling2dLayer`/`averagePooling2dLayer`/`globalAveragePooling2dLayer`, `dropoutLayer` (identity at inference), `softmaxLayer`, `flattenLayer`, `additionLayer`/`concatenationLayer` | `mtimes` + `conv2` |
 | 1.4 | Activations | `reluLayer`/`leakyReluLayer`/`clippedReluLayer`/`tanhLayer`/`sigmoidLayer`/`geluLayer`/`eluLayer`/`swishLayer` + functional `relu`/`sigmoid`/`softmax`/`gelu` | elementwise kernel |
-| 1.5 | `predict` / `classify` / `minibatchpredict` | forward pass over the layer DAG (topological order); `classify` = argmax + class labels; multi-input/output | DAG eval |
+| 1.5 | `predict` / `classify` / `minibatchpredict` | forward pass over the layer DAG (topological order); `classify` = argmax + class labels; `scores2label(scores, classNames)` softmax→label-string convenience; multi-input/output | DAG eval |
 | 1.6 | Weight load | populate `Learnables` from a user matrix/`.mat` (hand-built architecture); `setLearnableValue`/`getLearnableValue` | matlab_mat |
 | 1.7 | `analyzeNetwork` (headless) | layer table + activation sizes + learnable counts (the Deep Network Designer "Check Network" minus the GUI) | introspection |
+| 1.8 | Image-data plumbing | `imageDatastore('path','IncludeSubfolders',true,'LabelSource','foldernames')` for label-from-folder enumeration + `countEachLabel(imds)` per-class count table + `splitEachLabel(imds, p, 'randomize')` train/val/test split | matlab_mat |
 
 **Headline-within-tier**: `dl_lenet_infer.m` — build a small LeNet-style CNN
 (`imageInputLayer`→`convolution2dLayer`→`reluLayer`→`maxPooling2dLayer`→…→
@@ -227,9 +226,11 @@ the headline "train a classifier from scratch" workflow.*
 | 3.2 | Solvers | SGD-with-momentum, Adam, RMSProp parameter-update rules over the `Learnables` table |
 | 3.3 | `trainnet(data, net, lossFcn, opts)` | mini-batch loop: forward → `dlgradient` → solver step → epoch/validation logging; returns the trained `dlnetwork` |
 | 3.4 | `minibatchqueue` + `arrayDatastore` | batching/shuffling over in-memory arrays (datastores for big data carved) |
+| 3.4b | `augmentedImageDatastore(sz, imds, …)` | on-the-fly **data augmentation at training time** — random rotation/scale/translation/reflection (`imageDataAugmenter`) + `ColorPreprocessing='gray2rgb'` channel-fill + per-batch resize to layer-1 `InputSize`; closes the universal "I have 67 images per class, augment-train" pattern used in every CNN tutorial |
 | 3.5 | Custom training loop | `dlfeval`+`dlgradient`+`adamupdate`/`sgdmupdate`/`rmspropupdate` functional solvers — the full custom-loop API |
 | 3.6 | `trainNetwork` (legacy) | thin shim over `trainnet` for the layer-array + `trainingOptions` classic call |
 | 3.7 | Headless training monitor | per-epoch loss/accuracy table to stdout (the `trainingProgress` plot is a Cairo stretch) |
+| 3.8 | Single-device GPU training dispatch | forward + backward + solver-step on the existing GPU dispatcher (the `gpu_coder_roadmap` lane) — currently the dispatcher ships only the forward pass; validating training end-to-end on GPU is a focused follow-on |
 
 **Headline-within-tier (the roadmap headline)**: `dl_digits_train.m` — train
 the LeNet CNN from §3 **from scratch** on a built-in digit dataset and report
@@ -287,6 +288,8 @@ test accuracy > 95%. This exercises T1 (forward) → T2 (autodiff) → T3
 | 6.4 | **Bayesian hyperparameter search ✅** | `bayesopt(@(p) loss_for_hp(p), lb, ub)` — the shipped GP + EI solver applied to the HP-tuning use case. `dl_bayesopt_hp.m` finds the global minimum of a synthetic loss-vs-learning-rate surface (bowl + sinusoidal trough) within 0.05 of the analytic optimum. Closure captures into the objective handle aren't supported yet (Stats T6 trap), so the example uses an inline-constant surrogate — the same scaffold works once that lands. |
 | 6.5 | **`dlquantizer` calibrate/validate ✅** | `dlqcalibrate(X, runningMaxAbs)` threads a running max-abs through a calibration batch; divide by 127 to get the int8 scale.  `dlqclip(X, scale)` projects test-time activations onto that grid (companion to H1's `dlquantize`/`dlqscale` that handle *weights*).  Verified end-to-end against the H1 MLP. |
 | 6.6 | **`l-inf` robustness check ✅** | Sound (gradient-based, not complete) certification: `bound(x; ε) := ε * ‖∇_x logit_picked(x)‖₁` is a dual-norm upper bound on the worst-case score perturbation any l∞-ball of radius ε around x can produce.  If `bound < margin` then the network is certified robust at x for that ε.  `dl_robust_linf.m` exercises both regimes: certified-safe at small ε, bound-grows-beyond-margin at large ε. |
+| 6.7 | **Network pruning (magnitude-based) 🔵** | Peer compression knob to H1's INT8 quantization — `taylorPrunableNetwork`/iterative magnitude pruning removes the lowest-impact weights so the remaining sparse tensor still fits the H2 SV/FPGA datapath.  Implementation: rank `Learnables` by `|w|` (or `|w·∂L/∂w|` Taylor score), zero the bottom-k% per layer, re-fine-tune over the existing custom-loop, repeat.  Composes from T2 (`dlgradient`) + T3 (`adamupdate`) + a sparse-mask runtime tensor — *no* new compiler infrastructure beyond a mask-aware multiply.  Pairs with H1 to get the "75% size reduction + INT8 quant → embedded deployment" workflow shown in the DL-for-Engineers p5 video. |
+| 6.8 | **Programmatic experiment-sweep harness 🔵** | The *headless* engine under the Experiment Manager GUI (carved in §10) — a `runExperiment(@trialFn, gridSpec, opts)` that enumerates a Cartesian or Bayesian sweep over (solver × LearnRate × MiniBatchSize × Epochs × architecture × dataset), runs `trainnet` per trial, and emits a result table with per-trial loss/accuracy/confusion-matrix + the trained `dlnetwork`.  Composes from `bayesopt` (T6.4 ✅) + `trainnet` + the headless training monitor (T3.7) + a CSV/`.mat` result-table writer.  *No GUI* — matches the project's "engine ships, app carves" precedent. |
 
 **Headlines (shipped)**:
 - `examples/dlnet/dl_gradcam.m` — Grad-CAM-style attribution on a 2-D 3-class MLP; each class's saliency points at its discriminating input dimension.
@@ -309,8 +312,9 @@ Embedded Coder cocotb SIL. It depends on **T1 (inference) + T6.5
 |---|---------|-------|-------|
 | H1 | **`dlquantize(W)` + `dlqscale(W)` ✅** | symmetric per-tensor INT8 quantization — `scale = max(abs(W))/127`, `Q = round(W/scale)` clipped to `[-127, 127]`, output is `Q*scale` rounded onto the int8 lattice.  Plain matrix in/out, no autodiff (post-training step).  `examples/dlnet/dl_quantize_check.m`: trains the T3 MLP, INT8-quantizes every weight, re-runs inference — both double and INT8 hit 100% accuracy, max logit drift ≈ 0.1.  The `dlhdl.ProcessorConfig`/`dlhdl.Workflow`/`estimatePerformance` object-array APIs are carved with `dlnetwork`. | T3 |
 | H2 | **fi-typed SV emission ✅** | a hand-unrolled quantized MLP forward (Q16.8 weights baked as `fi` constants, `relu` as `z<0?0:z`, multi-layer linear) lowers cleanly through the existing `EmitSV` lane.  `examples/hdl/dlhdl_quant_mlp.m` + `test/EmitSV/dlhdl_quant_mlp.sv.expected`: a 2-2-1 MLP emits ~15 lines of synthesizable SV (powers-of-2 weights fold to bit-shifts; non-trivial weights to `*` with sign extension), passes Verilator lint + Yosys synth, joins the EmitSV regression sweep (80/80 green). | `fi` + EmitSV |
-| H3 | **cocotb bit-accuracy** 🟡 (stimulus-range pragma shipped; FL-growth divergence remains) | `-emit-cocotb` generates the full harness.  A **new `% cocotb: range(<port>, <lo>, <hi>)` pragma** (test/EmitSV/cocotb_range_pragma + EmitCocoTB sweep, 40/40 green) bounds the random stimulus to a real-value window — closes the *overflow* class of SV-vs-Python divergence.  But the H3 dlhdl-MLP case stays blocked on a **deeper FL-growth divergence**: SV declares every local at the port's storage width (e.g. Q16.8 → `logic signed [15:0]`) and lowers the bias as `16'sd32` (= 0.125·2⁸); the Python ref keeps FL = 16 on the intermediate (saturated to i34) and lowers the same bias as 8192 (= 0.125·2¹⁶).  Even with zero-input stimulus the two disagree on the bias-only result.  The fix is in **EmitSystemVerilog** — declare fi-typed intermediates at their IR-given growth width (i34 / i64) and emit constants rescaled to match the FL — *not* a Python emit change.  Documented for the next slice. | H2 + EmitSV intermediate widths |
+| H3 | **cocotb bit-accuracy ✅** | The dlhdl-MLP cocotb compare now passes 100/100 vectors.  Opt in via the new **`% hdl: precise_fi`** pragma — enables Sema-mono on the HW lane so fi-grown widths (i16 → i32 → i33 → i34) thread through the matlab.matmul / matlab.add result types.  EmitSV then emits 64-bit intermediates + the correctly-FL-rescaled bias (`64'sd8192` for 0.125 in Q34.16), matching the Python reference bit-for-bit.  Existing 79 EmitSV fixtures (which authored against the legacy Q16.8-throughout behaviour) keep their goldens — the pragma is strict opt-in.  Verilator's WIDTH warnings at the narrow output port are suppressed per-fixture via `.lint-extra`. New cocotb fixture `dlhdl_quant_mlp` runs in the EmitCocoTB sweep at 41/41 green. Closes issue #75. | H2 + Sema-mono opt-in |
 | H4 | LSTM-on-FPGA compile 🔵 | the Chapter-13 LSTM/GRU layer compilation to the fixed-point recurrent datapath | H2 + T4 |
+| H5 | **Minimal ONNX inference-graph importer 🔵** | The narrowest viable importer for an external pretrained net — parse an ONNX Protobuf file into the T1 layer DAG (Conv2D/Linear/ReLU/MaxPool/BatchNorm/Add/Concat/Softmax/Sigmoid/Tanh/Reshape/Transpose op set; initializers → `Learnables`).  ONNX is **one** well-defined open spec (vs the full PyTorch/TF format-parser surface carved in §10), so a small hand-coded reader unlocks all three "import-and-run" user stories — PyTorch users `torch.onnx.export` first, TF users `tf2onnx`, and ONNX-native nets load directly.  No autodiff dependency (inference-only).  Composes from T1 (layer DAG) + a Protobuf-message reader (the carved-out heavy lifting is *training-graph* import + custom ops; the inference-only graph is a bounded surface). | T1 |
 
 **Headline-within-tier (HDL tracer)**: `dlhdl_cnn_sil.mflow` /
 `dlhdl_cnn_sil.m` — quantize the §1 LeNet with `dlquantizer`, `compile` it,
@@ -391,12 +395,22 @@ stays green; badge bumps to **25 toolboxes**.
 | T5 | architectures + transfer learning | ~3 wk | GAN/VAE/Siamese loops, `dlode45` |
 | T6 | tuning / viz / metrics / quantize | ~3 wk | Grad-CAM/LIME/tsne, `dlquantizer` |
 | H1–H3 | DL HDL → SV + cocotb | ~5 wk | fixed-point DL compiler → EmitSV |
+| T1.8 | image-data plumbing (`countEachLabel`/`scores2label`) | ~0.5 sess | datastore convenience |
+| T3.4b | `augmentedImageDatastore` random rotate/scale/translate | ~1 sess | augmenter + per-batch transform |
+| T3.8 | GPU dispatch for training (backward + solver step) | ~3 sess | GPU autodiff path |
+| T6.7 | network pruning | ~2 sess | mask-aware multiply + iterative magnitude prune |
+| T6.8 | programmatic experiment-sweep harness | ~2 sess | sweep enumerator + result-table writer |
+| H4 | LSTM-on-FPGA compile | ~1 wk | recurrent fixed-point datapath |
+| H5 | minimal ONNX inference-graph importer | ~1 wk | Protobuf reader + op-set→layer-DAG translator |
 
-**Total ~24 wk (DL) + ~5 wk (HDL)** — the catalogue's largest. **T1 + T2
-(~7 wk) is the recommended first cut** (inference + the autodiff keystone);
-**T1 + H1–H3 (~8 wk) is the alternative HDL-first cut** that delivers
-"deep-learning-on-FPGA simulation" without ever needing the training tiers —
-and plays directly to the project's SystemVerilog/cocotb/fixed-point strengths.
+**Total ~24 wk (DL core) + ~5 wk (HDL) + ~3 wk (video-discovered follow-ons)** —
+the catalogue's largest. **T1 + T2 (~7 wk) is the recommended first cut**
+(inference + the autodiff keystone); **T1 + H1–H3 (~8 wk) is the alternative
+HDL-first cut** that delivers "deep-learning-on-FPGA simulation" without ever
+needing the training tiers — and plays directly to the project's
+SystemVerilog/cocotb/fixed-point strengths.  **H5 (~1 wk) is the smallest
+single-tier interop win** — one Protobuf parser unlocks the PyTorch / TF /
+ONNX user-stories that three of the source MathWorks videos lean on.
 
 ---
 
@@ -411,11 +425,13 @@ external frameworks, and physical hardware. Carved:
 - **All Simulink Deep-Learning blocks** (Predict / Stateful Classify / the
   Simulink GAN/lane-detection/ECG models) — the `mflowLink` lane is the
   project's block-diagram answer.
-- **External-framework import/export** — `importNetworkFromONNX` /
-  `importNetworkFromPyTorch` / `importNetworkFromTensorFlow` /
-  `exportNetworkToONNX` / `exportNetworkToTensorFlow`. These are large
-  format-parser efforts with no numeric value to the kernel; a *minimal* ONNX
-  inference-graph importer is a documented stretch, not a tier.
+- **Full external-framework import/export** — `importNetworkFromPyTorch` /
+  `importNetworkFromTensorFlow` / `exportNetworkToONNX` /
+  `exportNetworkToTensorFlow`.  These are large format-parser efforts (training
+  graphs, custom ops, two-way translation) with no numeric value to the kernel.
+  **Exception**: the *minimal inference-graph* ONNX importer is now a real tier
+  row (H5) — ONNX is one well-defined Protobuf schema, and `torch.onnx.export`
+  / `tf2onnx` reduce the PyTorch and TF user-stories to that single import path.
 - **Real pretrained network weights** — AlexNet / ResNet / GoogLeNet /
   SqueezeNet / YOLO / BERT / YAMNet weight blobs (100s of MB). One *small*
   built-in pretrained CNN ships (T5.2); the named large nets are carved.
@@ -434,6 +450,25 @@ external frameworks, and physical hardware. Carved:
 - **`dlquantizer` GPU/CPU `'lib'` targets** (TensorRT/MKL-DNN codegen) — the
   fixed-point/FPGA calibration path ships (T6.5 → H), the vendor-library
   targets do not.
+- **Legacy "Neural Network Toolbox" shallow-net surface** —
+  `patternnet`/`feedforwardnet`/`fitnet` + `train(net, X, Y)` + `net.LW`/`net.b`
+  inspection + `genFunction(net, 'fn.m')` to a standalone MATLAB function.
+  This is the pre-2018 NNT API still used in the official "Getting Started with
+  Neural Networks Using MATLAB" tutorial; the `dlnetwork`/`trainnet` lane (T1–T3)
+  is the project's answer for current-era nets.  A thin `patternnet`→`dlnetwork`
+  shim is a documented stretch, not a tier.
+- **MLOps observability** — drift detection, production model monitoring,
+  retraining-on-drift pipelines, explainable-AI report generation, bias-mitigation
+  algorithms.  These belong to the deployed-system lifecycle, not the
+  compile/execute kernel.  The `compiler_sdk` / `mflowLink` deployment paths
+  (Embedded Coder roadmap) cover the *handoff* surface; the runtime observability
+  loop does not ship.
+- **Predictive Maintenance Toolbox** carved from this roadmap proper —
+  it's a *peer toolbox* with its own dedicated plan
+  ([`predictive_maintenance_roadmap.md`](predictive_maintenance_roadmap.md)),
+  not a DL sub-tier.  The DL-side hook is **LSTM-for-RUL** (functional `lstm`
+  T4.1 ✅ composes cleanly with PdM's similarity/survival/degradation
+  estimators) — see that doc's Tier-6 headline.
 
 Companion docs:
 [`global_optim_and_stats_ml_plans.md`](global_optim_and_stats_ml_plans.md)
@@ -444,4 +479,7 @@ cocotb precedent the DL HDL track follows),
 [`image_toolbox_roadmap.md`](image_toolbox_roadmap.md) (image preprocessing +
 `conv2`), [`ode.md`](ode.md) (neural-ODE integration),
 [`embedded_coder_roadmap.md`](embedded_coder_roadmap.md) (the `mflowLink`
-answer for Simulink DL blocks), [`feature_status.md`](feature_status.md).
+answer for Simulink DL blocks),
+[`predictive_maintenance_roadmap.md`](predictive_maintenance_roadmap.md) (the
+peer-toolbox roadmap whose Tier-6 LSTM-for-RUL headline composes on DL T4 ✅),
+[`feature_status.md`](feature_status.md).

@@ -127,6 +127,14 @@ declare -a CASES=(
   # Q16.0 adder, so the cocotb compare is at the same FL on both sides
   # -- what gets exercised here is the new pragma + harness emit.
   cocotb_range_pragma
+  # Tier-10 — DL HDL H3 bit-accuracy.  A Q16.8 quantized 2-2-1 MLP
+  # forward using the `% hdl: precise_fi` pragma to enable Sema-mono
+  # on the HW lane, so the FL-grown intermediates flow through both
+  # the SV emit and the Python reference identically.  Closes the
+  # documented bias-FL divergence (issue #75): SV bias now lowers as
+  # `64'sd8192` (= 0.125 * 2^16) instead of the Q16.8 raw 32, matching
+  # the Python ref's Q33.16 / Q34.16 internal precision.
+  dlhdl_quant_mlp
 )
 
 # Run each fixture in parallel via xargs -P. Default to up to 8

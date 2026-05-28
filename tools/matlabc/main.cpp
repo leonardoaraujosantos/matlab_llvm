@@ -12575,6 +12575,31 @@ int main(int Argc, char **Argv) {
     bool MonoEnabled = !IsHwEmit;
     if (const char *Env = std::getenv("MATLAB_LLVM_SEMA_MONO"))
       MonoEnabled = !(*Env == '\0' || std::string_view(Env) == "0");
+    /* Issue #75 — per-source opt-in for HW emit.  The pragma
+     *   `% hdl: precise_fi`
+     * (anywhere in the source) enables Sema-mono on the HW lane for
+     * that file, which threads natural fi-growth widths through the
+     * matlab.matmul / matlab.add result types so EmitSystemVerilog +
+     * EmitPython produce mathematically equivalent fixed-point
+     * arithmetic.  Without the pragma the HW lane stays on its
+     * legacy lossy-truncation path (preserves the 79 existing EmitSV
+     * goldens whose hand-rolled fi expressions were authored against
+     * that behaviour).  Detected by a simple text scan over the
+     * source file -- the canonical pragma scan in ScanHWPragmas runs
+     * later in the pipeline. */
+    if (!MonoEnabled && IsHwEmit && !Opts.InputPath.empty()) {
+      std::ifstream PF(Opts.InputPath);
+      if (PF) {
+        std::string Src((std::istreambuf_iterator<char>(PF)),
+                         std::istreambuf_iterator<char>());
+        // Match `% hdl: precise_fi` with optional surrounding whitespace
+        // and optional trailing arguments / comments.  Conservative
+        // substring search keeps the check O(n) and tolerant of
+        // line-wrapping artefacts.
+        if (Src.find("hdl: precise_fi") != std::string::npos)
+          MonoEnabled = true;
+      }
+    }
     if (MonoEnabled) {
       auto runSemaPass = [&]() {
         Resolver R2(Sema, TC, Diag);

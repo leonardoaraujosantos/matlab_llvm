@@ -8,13 +8,50 @@ module dlhdl_quant_mlp (
     output logic signed [15:0] y
 );
 
-    logic signed [15:0] z1_0;
-    logic signed [15:0] z1_1;
+    logic signed [63:0] h0;
+    logic signed [63:0] h1;
+    logic signed [63:0] h0_pre;
+    logic signed [63:0] h0_pre_1;
+    logic signed [63:0] h0_sat;
+    logic signed [63:0] h1_pre;
+    logic signed [63:0] h1_pre_1;
+    logic signed [63:0] h1_sat;
+
+
+    function automatic logic signed [63:0] sat_s64_b33(input logic signed [63:0] arg);
+        if (arg > 64'sd4294967295) sat_s64_b33 = 64'sd4294967295;
+        else if (arg < -64'sd4294967296) sat_s64_b33 = -64'sd4294967296;
+        else sat_s64_b33 = arg;
+    endfunction
+
+    function automatic logic signed [63:0] sat_s64_b34(input logic signed [63:0] arg);
+        if (arg > 64'sd8589934591) sat_s64_b34 = 64'sd8589934591;
+        else if (arg < -64'sd8589934592) sat_s64_b34 = -64'sd8589934592;
+        else sat_s64_b34 = arg;
+    endfunction
 
     always_comb begin
-        z1_0 = ((x0 << 16'sd7) + (16'sd0 - (x1 << 16'sd6))) + 16'sd32;
-        z1_1 = ((x0 * -16'sd96) + (x1 * 16'sd160)) + -16'sd32;
-        y = (((z1_0 < 16'sd0) ? 16'sd0 : z1_0) * 16'sd192) + (16'sd0 - (((z1_1 < 16'sd0) ? 16'sd0 : z1_1) << 16'sd7)) + 16'sd64;
+        h0 = '0;
+        h1 = '0;
+        h0_pre = 64'($signed(32'($signed(x0)) << 32'sd7)) + 64'($signed(32'sd0 - (32'($signed(x1)) << 32'sd6)));
+        h0_pre_1 = sat_s64_b33(h0_pre) + 64'sd8192;
+        // Layer-1 forward + ReLU (hand-unrolled).
+        h0_sat = sat_s64_b34(h0_pre_1);
+        h1_pre = 64'($signed(32'($signed(x0)) * -32'sd96)) + 64'($signed(32'($signed(x1)) * 32'sd160));
+        h1_pre_1 = sat_s64_b33(h1_pre) + -64'sd8192;
+        h1_sat = sat_s64_b34(h1_pre_1);
+        if (h0_sat < 64'($signed(16'sd0))) begin
+            h0 = 64'($signed(16'sd0));
+        end else begin
+            h0 = h0_sat;
+        end
+        if (h1_sat < 64'($signed(16'sd0))) begin
+            h1 = 64'($signed(16'sd0));
+        end else begin
+            h1 = h1_sat;
+        end
+        // Layer-2 forward (linear output).
+        y = (64'sd192 * h0) + (-64'sd128 * h1) + 16'sd64;
     end
 
 endmodule
