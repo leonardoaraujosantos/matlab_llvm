@@ -2142,6 +2142,18 @@ bool Emitter::tryRewriteObjGet(mlir::LLVM::CallOp C, std::string &Out) {
   auto Lit = getStringGlobalLit(C.getOperand(1), M);
   if (!Lit || !isValidCppIdentifier(*Lit)) return false;
   mlir::Value Recv = C.getOperand(0);
+  /* Handle classdef: receiver is a `void *` handle, not a struct value.
+   * Skip the struct-field rewrite so the call falls through to the
+   * normal C-call emit (declared extern with the runtime ABI). */
+  if (!Cpp) {
+    auto RecvClsName = classTypeOf(Recv);
+    if (RecvClsName.empty() && InClassMethodBody && Recv == ClassMethodSelf)
+      RecvClsName = ClassMethodClassName;
+    if (!RecvClsName.empty()) {
+      auto It = Classes.find(RecvClsName);
+      if (It != Classes.end() && It->second.IsHandleClass) return false;
+    }
+  }
   // Inside a class method, the receiver is the method's `this` (C++) or
   // `self` (C). C++ emits the bare `Field` (implicit this); C emits
   // `self->Field` for non-ctor methods or `self.Field` for ctors (where
@@ -2173,6 +2185,16 @@ bool Emitter::tryRewriteObjSet(mlir::LLVM::CallOp C, std::string &Out) {
   auto Lit = getStringGlobalLit(C.getOperand(1), M);
   if (!Lit || !isValidCppIdentifier(*Lit)) return false;
   mlir::Value Recv = C.getOperand(0);
+  /* Handle classdef: skip struct-field rewrite (see tryRewriteObjGet). */
+  if (!Cpp) {
+    auto RecvClsName = classTypeOf(Recv);
+    if (RecvClsName.empty() && InClassMethodBody && Recv == ClassMethodSelf)
+      RecvClsName = ClassMethodClassName;
+    if (!RecvClsName.empty()) {
+      auto It = Classes.find(RecvClsName);
+      if (It != Classes.end() && It->second.IsHandleClass) return false;
+    }
+  }
   std::string Lhs;
   if (InClassMethodBody && Recv == ClassMethodSelf) {
     if (Cpp) {
@@ -2249,14 +2271,22 @@ bool Emitter::tryRewriteAsClassCall(llvm::StringRef Callee,
     if (RecvIsSelf)
       if (auto *Def = Operands[0].getDefiningOp())
         if (mlir::isa<mlir::LLVM::CallOp>(Def)) RecvIsCtorValue = true;
+    /* Handle classes typedef to `void *`, so methods take the receiver
+     * by value (`ClsName self`) rather than by pointer (`ClsName *self`).
+     * Drop the leading `&` for those call sites. */
+    bool IsHandle = false;
+    {
+      auto It = Classes.find(ActualCls);
+      if (It != Classes.end() && It->second.IsHandleClass) IsHandle = true;
+    }
     std::string Recv;
     if (RecvIsSelf && !RecvIsCtorValue) {
       // self is already a Class* — pass it through as-is.
       Recv = "self";
     } else if (RecvIsSelf && RecvIsCtorValue) {
-      Recv = "&self";
+      Recv = IsHandle ? "self" : "&self";
     } else {
-      Recv = "&" + stmtExpr(Operands[0]);
+      Recv = (IsHandle ? "" : "&") + stmtExpr(Operands[0]);
     }
     /* Inheritance cast: when the receiver is a subclass and the
      * method lives on the parent (e.g. `s.describe()` on Shape
@@ -2265,7 +2295,7 @@ bool Emitter::tryRewriteAsClassCall(llvm::StringRef Callee,
      * out by emitCStructTypedef folds parent fields into the child
      * struct in super-to-sub order, so the cast is layout-safe. */
     if (ActualCls != Cls)
-      Recv = "(" + Cls + " *)" + Recv;
+      Recv = "(" + Cls + (IsHandle ? "" : " *") + ")" + Recv;
     std::string E = Callee.str() + "(" + Recv;
     for (unsigned i = 1; i < Operands.size(); ++i) {
       E += ", ";
@@ -2339,13 +2369,14 @@ void Emitter::emitCStructTypedef(llvm::StringRef ClassName,
       if (Seen.insert(P).second) AllProps.push_back(P);
     }
   }
-  /* Handle classdef detection (`CD.IsHandleClass`) is laid down by
-   * collectClassdefs as foundation for a future `typedef void*` /
-   * method-body rewrite — see G follow-up.  Today still emit the
-   * value-struct since the full handle-mode body emission (matlab_obj_new
-   * ctor, void* method-args, runtime obj_set_f64 calls, LiveGlobals
-   * adjustments) is multi-day work.  Skip-emit-* markers cover the
-   * affected dlarray-using tests until that lands. */
+  if (CD.IsHandleClass) {
+    /* Handle classdef — stores matrix properties on the runtime heap.
+     * Emit as a `void *` alias so the C variable holds the obj pointer
+     * directly and matlab_*_init / property-set / property-get calls
+     * are linkable with their `void *` runtime ABI. */
+    OS << "typedef void* " << ClassName.str() << ";\n\n";
+    return;
+  }
   OS << "typedef struct " << ClassName.str() << " {\n";
   for (auto &P : AllProps) OS << "  double " << P.str() << ";\n";
   if (AllProps.empty()) OS << "  char _unused;\n";  // empty-struct guard
@@ -3071,15 +3102,39 @@ void Emitter::precomputeModuleProperties(mlir::ModuleOp M) {
         return P && ClassMethodFuncs.count(P.getSymName());
       };
       bool ClassesActive = Cpp || !Classes.empty();
+      /* Handle classdef in C mode: matlab_obj_set/get_f64 and
+       * matlab_obj_new survive to the runtime (no struct-field
+       * rewrite), so they must NOT be marked Substituted — that would
+       * drop the extern decls AND their operand globals (property-name
+       * strings) from LiveGlobals. */
+      auto callerClass = [&]() -> llvm::StringRef {
+        auto P = C->getParentOfType<mlir::func::FuncOp>();
+        if (!P) return {};
+        auto CN = P->getAttrOfType<mlir::StringAttr>("matlab.class_name");
+        return CN ? CN.getValue() : llvm::StringRef();
+      };
+      auto isHandleCaller = [&]() -> bool {
+        if (Cpp) return false;
+        auto Cls = callerClass();
+        if (Cls.empty()) return false;
+        auto It = Classes.find(Cls);
+        return It != Classes.end() && It->second.IsHandleClass;
+      };
       if (ClassesActive) {
-        if (Name == "matlab_obj_new" && inClassMethod())
+        if (Name == "matlab_obj_new" && inClassMethod() && !isHandleCaller())
           Substituted = true;
         if ((Name == "matlab_obj_get_f64" || Name == "matlab_obj_set_f64") &&
             C.getNumOperands() >= 2) {
-          if (inClassMethod()) {
+          if (inClassMethod() && !isHandleCaller()) {
             Substituted = true;
           } else if (!classTypeOf(C.getOperand(0)).empty()) {
-            Substituted = true;
+            /* Non-method-context: receiver could still be a handle
+             * instance.  Don't substitute when the receiver's class is
+             * handle-style. */
+            auto Cls = classTypeOf(C.getOperand(0));
+            auto It = Classes.find(Cls);
+            bool RecvHandle = It != Classes.end() && It->second.IsHandleClass;
+            if (!RecvHandle) Substituted = true;
           }
         }
       }
@@ -3145,6 +3200,16 @@ void Emitter::precomputeModuleProperties(mlir::ModuleOp M) {
         if (auto A = Opnd.getDefiningOp<mlir::LLVM::AddressOfOp>())
           LiveGlobals.insert(A.getGlobalName());
       }
+    }
+  });
+  /* Globals consumed by unrewritten matlab.call_builtin survivors
+   * (handle-classdef property strings, etc.) must stay live so the
+   * C output's identifier references are defined. */
+  M.walk([&](mlir::Operation *Op) {
+    if (Op->getName().getStringRef() != "matlab.call_builtin") return;
+    for (mlir::Value Opnd : Op->getOperands()) {
+      if (auto A = Opnd.getDefiningOp<mlir::LLVM::AddressOfOp>())
+        LiveGlobals.insert(A.getGlobalName());
     }
   });
   // addressof uses outside `llvm.call` (indirect dispatch, parfor bodies
@@ -3554,6 +3619,55 @@ bool Emitter::run(mlir::ModuleOp M) {
       if (FT.getNumParams() == 0) Buf << "void";
       Buf << ");\n";
     }
+    /* Extern decls for any matlab.call_builtin survivors that emit-c
+     * routes through the generic call-fallback.  We collect unique
+     * callees and derive C signatures from the op's operand + result
+     * types; the runtime is C-ABI so void* / double / int64_t cover
+     * every shape we see. */
+    {
+      llvm::StringMap<std::string> CallBuiltinExterns;
+      auto cTypeForVal = [&](mlir::Type T) -> std::string {
+        if (mlir::isa<mlir::Float64Type>(T)) return "double";
+        if (mlir::isa<mlir::Float32Type>(T)) return "float";
+        if (auto I = mlir::dyn_cast<mlir::IntegerType>(T)) {
+          if (I.getWidth() == 1)  return "bool";
+          if (I.getWidth() == 8)  return "int8_t";
+          if (I.getWidth() == 16) return "int16_t";
+          if (I.getWidth() == 32) return "int32_t";
+          if (I.getWidth() == 64) return "int64_t";
+          return "int64_t";
+        }
+        return "void*";   /* tensor / none / ptr / unknown — all runtime ptr */
+      };
+      M.walk([&](mlir::Operation *Op) {
+        if (Op->getName().getStringRef() != "matlab.call_builtin") return;
+        auto CA = Op->getAttrOfType<mlir::StringAttr>("callee");
+        if (!CA) return;
+        std::string callee = CA.getValue().str();
+        if (CallBuiltinExterns.count(callee)) return;
+        /* Skip user-facing names that LowerTensorOps SHOULD have
+         * rewritten — surfacing them here would generate an undefined
+         * runtime reference. */
+        static const llvm::StringSet<> userFacing = {
+            "zeros", "ones", "size", "ndims", "numel", "length",
+            "fprintf", "disp", "printf", "sprintf", "fopen", "fclose",
+            "sum", "mean", "max", "min", "abs", "sqrt", "exp", "log",
+            "rand", "randn", "transpose", "ctranspose", "cat",
+        };
+        if (userFacing.count(callee)) return;
+        std::string ret = Op->getNumResults() == 0 ? "void"
+                                                   : cTypeForVal(Op->getResult(0).getType());
+        std::string proto = "extern " + ret + " " + callee + "(";
+        for (unsigned i = 0; i < Op->getNumOperands(); ++i) {
+          if (i) proto += ", ";
+          proto += cTypeForVal(Op->getOperand(i).getType());
+        }
+        if (Op->getNumOperands() == 0) proto += "void";
+        proto += ");\n";
+        CallBuiltinExterns[callee] = proto;
+      });
+      for (auto &KV : CallBuiltinExterns) Buf << KV.second;
+    }
     if (!Buf.str().empty()) {
       OS << "// Runtime prototypes (linked against runtime/matlab_runtime.c).\n";
       if (Cpp) OS << "extern \"C\" {\n";
@@ -3689,7 +3803,9 @@ bool Emitter::run(mlir::ModuleOp M) {
         auto &Entry = F.getBody().front();
         unsigned StartArg = 0;
         if (IsCClassMethod && !IsCtor && !IsStatic && FT.getNumInputs() >= 1) {
-          Buf << ClsName << " *";
+          auto It = Classes.find(ClsName);
+          bool IsHandle = (It != Classes.end()) && It->second.IsHandleClass;
+          Buf << ClsName << (IsHandle ? "" : " *");
           StartArg = 1;
         }
         for (unsigned i = StartArg; i < FT.getNumInputs(); ++i) {
@@ -3905,7 +4021,12 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
   auto &Entry = F.getBody().front();
   unsigned StartArg = 0;
   if (IsCClassMethod && !IsCtor && !IsStatic && FT.getNumInputs() >= 1) {
-    OS << ClsName << " *self";
+    /* Handle classes carry the runtime obj pointer in their typedef
+     * (`typedef void* ClsName`), so the parameter is `ClsName self`
+     * (already-pointer).  Value classes use `ClsName *self`. */
+    auto It = Classes.find(ClsName);
+    bool IsHandle = (It != Classes.end()) && It->second.IsHandleClass;
+    OS << ClsName << (IsHandle ? " self" : " *self");
     StartArg = 1;
     Names[Entry.getArgument(0)] = "self";
     InClassMethodBody = true;
@@ -3994,7 +4115,17 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
       InClassMethodBody = true;
       ClassMethodSelf = CtorObjNew->getResult(0);
       ClassMethodClassName = ClsName;
-      OS << "  " << ClsName << " self = {0};\n";
+      /* Handle classes: emit `Class self = matlab_obj_new(class_id);`
+       * since the typedef is `void*` and a struct-initialiser is
+       * invalid. */
+      auto It = Classes.find(ClsName);
+      bool IsHandle = (It != Classes.end()) && It->second.IsHandleClass;
+      if (IsHandle && CtorObjNew->getNumOperands() >= 1) {
+        std::string ClassIdExpr = stmtExpr(CtorObjNew->getOperand(0));
+        OS << "  " << ClsName << " self = matlab_obj_new(" << ClassIdExpr << ");\n";
+      } else {
+        OS << "  " << ClsName << " self = {0};\n";
+      }
     }
   }
   /* Stamp `static double <name> = 0.0;` for every persistent variable
