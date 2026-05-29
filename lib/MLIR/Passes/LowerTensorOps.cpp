@@ -6149,6 +6149,9 @@ bool TensorLowering::rewriteBuiltinCalls() {
         /* LayerNorm + BN inference (frozen-stats). */
         {"matlab_dlnet_layernorm",     "matlab_dlnet_layernorm",    PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, F64}},
         {"matlab_dlnet_batchnorm_eval","matlab_dlnet_batchnorm_eval",PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy}},
+        /* GroupNorm + EMA-tracked BN training. */
+        {"matlab_dlnet_groupnorm",     "matlab_dlnet_groupnorm",    PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, F64}},
+        {"matlab_dlnet_batchnorm_train","matlab_dlnet_batchnorm_train",PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, F64}},
         /* Deep Learning Toolbox Phase 1 — small extra ops over dlarray. */
         {"matlab_dlnet_rdivide",        "matlab_dlnet_rdivide",        PtrTy, {PtrTy, PtrTy, PtrTy}},
         {"matlab_dlnet_sqrt",           "matlab_dlnet_sqrt",           PtrTy, {PtrTy, PtrTy}},

@@ -4739,7 +4739,8 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
               "sqrt", "leakyrelu", "gelu", "swish",
               "softplus", "elu", "conv2d_batch", "conv2d_full",
               "reshape", "maxpool2d", "avgpool2d", "batchnorm",
-              "layernorm", "batchnorm_eval"};
+              "layernorm", "batchnorm_eval",
+              "groupnorm", "batchnorm_train"};
           if (DlRet2.contains(NX->Name) && this->CurTU) {
             bool argPinned = false;
             for (size_t i = 0; i < CX->Args.size(); ++i)
@@ -7168,10 +7169,11 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             "gru", "bilstm", "lstmp",
             /* Phase 1 small ops. */
             "sqrt", "leakyrelu", "gelu", "swish", "softplus", "elu",
-            /* Tier C: rank-4 batched conv + reshape + pooling + BN + LN. */
+            /* Tier C: rank-4 batched conv + reshape + pooling + BN + LN + GN. */
             "conv2d_batch", "conv2d_full", "reshape",
             "maxpool2d", "avgpool2d", "batchnorm",
-            "layernorm", "batchnorm_eval"};
+            "layernorm", "batchnorm_eval",
+            "groupnorm", "batchnorm_train"};
         if (DlFns.contains(N->Name)) {
           std::function<bool(const Expr *)> pinnedDl =
               [&pinnedDl](const Expr *X) -> bool {
@@ -7196,7 +7198,8 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                     "sqrt", "leakyrelu", "gelu", "swish",
                     "softplus", "elu", "conv2d_batch", "conv2d_full",
                     "reshape", "maxpool2d", "avgpool2d", "batchnorm",
-                    "layernorm", "batchnorm_eval"};
+                    "layernorm", "batchnorm_eval",
+                    "groupnorm", "batchnorm_train"};
                 if (DlRet.contains(NX->Name))
                   for (size_t i = 0; i < CX->Args.size(); ++i)
                     if (pinnedDl(CX->Args[i])) return true;

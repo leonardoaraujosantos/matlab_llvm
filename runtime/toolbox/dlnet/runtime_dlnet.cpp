@@ -175,8 +175,8 @@ enum { OP_LEAF, OP_ADD, OP_SUB, OP_MTIMES, OP_TIMES, OP_RELU, OP_SIGMOID,
        OP_RESHAPE, OP_MAXPOOL2D, OP_AVGPOOL2D,
        /* BatchNorm + conv-with-bias-pad-stride + axis-aware reductions. */
        OP_BATCHNORM, OP_CONV2D_FULL, OP_SOFTMAX_DIM, OP_MEAN_DIM_ND,
-       /* LayerNorm (axis-aware) + GroupNorm + BN inference (no backward). */
-       OP_LAYERNORM };
+       /* LayerNorm (axis-aware) + GroupNorm + EMA-tracked BN training. */
+       OP_LAYERNORM, OP_GROUPNORM, OP_BATCHNORM_TRAIN };
 
 struct Node {
     int op;
@@ -1610,6 +1610,231 @@ matlab_mat *matlab_dlnet_batchnorm_eval(void *r, void *x, void *gv, void *bv,
     return mat_alloc(0, 0);
 }
 
+/* groupnorm(X, gamma, beta, G) — split the channel axis into G groups,
+ * compute (μ, σ²) per (group, sample) over (H, W, C/G), apply γ_c, β_c.
+ *
+ *   X : H × W × C × N  (C must be divisible by G)
+ *   γ, β : length-C vectors
+ *
+ *   For each (g, n) with M = H*W*(C/G):
+ *     μ_{g,n} = (1/M) Σ_{h,w,c∈group g} x[h,w,c,n]
+ *     σ²_{g,n} = (1/M) Σ_{h,w,c∈group g} (x - μ)²
+ *     xhat[h,w,c,n] = (x[h,w,c,n] - μ_{g,n}) / √(σ² + ε)
+ *     y[h,w,c,n] = γ_c · xhat[h,w,c,n] + β_c
+ *
+ * Backward (per group, sample) is the standard 3-term form:
+ *   dxhat[h,w,c,n] = dy[h,w,c,n] · γ_c
+ *   dx = (1/(M·σ)) · (M·dxhat − Σdxhat − xhat·Σ(dxhat·xhat))
+ *   dγ_c += Σ_{h,w,n} dy[h,w,c,n] · xhat[h,w,c,n]
+ *   dβ_c += Σ_{h,w,n} dy[h,w,c,n]
+ *
+ * Saves xhat (full flat) + σ_per_(group,sample) (1 × G·N) + G in
+ * auxData for the backward pass. */
+matlab_mat *matlab_dlnet_groupnorm(void *r, void *x, void *gv, void *bv,
+                                   double G_d) {
+    using namespace dlnet;
+    matlab_mat *X = get_data(x);
+    matlab_mat *G = get_data(gv);
+    matlab_mat *B = get_data(bv);
+    int64_t Gn = static_cast<int64_t>(G_d);
+    Shape4 S = shape4(X);
+    if (S.C <= 0 || Gn <= 0 || (S.C % Gn) != 0) {
+        matlab_mat *Y = mat_alloc(0, 0);
+        set_data(r, Y);
+        set_id(r, record(OP_GROUPNORM, get_id(x), get_id(gv), Y));
+        return mat_alloc(0, 0);
+    }
+    int64_t Cpg = S.C / Gn;      /* channels per group */
+    int64_t M = S.H * S.W * Cpg; /* reduction count per (group, sample) */
+    const double eps = 1e-5;
+
+    int64_t outDims[4] = {S.H, S.W, S.C, S.N};
+    void *Rv = matN_alloc(4, outDims);
+    double *Yd = mat_is_nd(Rv) ? reinterpret_cast<matlab_matN *>(Rv)->data
+              : mat_is_3d(Rv) ? reinterpret_cast<matlab_mat3 *>(Rv)->data
+                              : reinterpret_cast<matlab_mat *>(Rv)->data;
+    int64_t Ys[4] = {0,0,0,0};
+    if (mat_is_nd(Rv)) {
+        matlab_matN *Rn = reinterpret_cast<matlab_matN *>(Rv);
+        for (uint32_t k = 0; k < Rn->ndims; ++k) Ys[k] = Rn->strides[k];
+    } else if (mat_is_3d(Rv)) {
+        matlab_mat3 *R3 = reinterpret_cast<matlab_mat3 *>(Rv);
+        Ys[0] = R3->cols; Ys[1] = 1; Ys[2] = R3->rows * R3->cols;
+    } else {
+        matlab_mat *R2 = reinterpret_cast<matlab_mat *>(Rv);
+        Ys[0] = R2->cols; Ys[1] = 1;
+    }
+    const double *Gd = flatdata(G);
+    const double *Bd = flatdata(B);
+
+    /* xhat: flat 1 × (H·W·C·N).  Indexed by ((n·C + c)·H + h)·W + w
+     * to match the BN convention.  σ_per_gn: 1 × (G·N). */
+    int64_t xhatN = S.H * S.W * S.C * S.N;
+    matlab_mat *xhat = mat_alloc(1, xhatN > 0 ? xhatN : 1);
+    matlab_mat *sigvec = mat_alloc(1, Gn * S.N > 0 ? Gn * S.N : 1);
+
+    for (int64_t n = 0; n < S.N; ++n) {
+        for (int64_t g = 0; g < Gn; ++g) {
+            int64_t c_start = g * Cpg, c_end = c_start + Cpg;
+            /* μ_{g,n} */
+            double s = 0;
+            for (int64_t c = c_start; c < c_end; ++c)
+                for (int64_t h = 0; h < S.H; ++h)
+                    for (int64_t ww = 0; ww < S.W; ++ww)
+                        s += S.data[h*S.s0 + ww*S.s1 + c*S.s2 + n*S.s3];
+            double mu = s / static_cast<double>(M);
+            /* σ²_{g,n} */
+            double vs = 0;
+            for (int64_t c = c_start; c < c_end; ++c)
+                for (int64_t h = 0; h < S.H; ++h)
+                    for (int64_t ww = 0; ww < S.W; ++ww) {
+                        double d = S.data[h*S.s0 + ww*S.s1 + c*S.s2 + n*S.s3] - mu;
+                        vs += d * d;
+                    }
+            double sig = std::sqrt(vs / static_cast<double>(M) + eps);
+            sigvec->data[n * Gn + g] = sig;
+            double inv_sig = 1.0 / sig;
+            for (int64_t c = c_start; c < c_end; ++c) {
+                double gc = Gd[c], bc = Bd[c];
+                for (int64_t h = 0; h < S.H; ++h)
+                    for (int64_t ww = 0; ww < S.W; ++ww) {
+                        int64_t fl = ((n * S.C + c) * S.H + h) * S.W + ww;
+                        double xh = (S.data[h*S.s0 + ww*S.s1 + c*S.s2 + n*S.s3] - mu) * inv_sig;
+                        xhat->data[fl] = xh;
+                        Yd[h*Ys[0] + ww*Ys[1] + c*Ys[2] + n*Ys[3]] = gc * xh + bc;
+                    }
+            }
+        }
+    }
+    matlab_mat *Y = reinterpret_cast<matlab_mat *>(Rv);
+    set_data(r, Y);
+    int id = record(OP_GROUPNORM, get_id(x), get_id(gv), Y);
+    g_tape[id].auxParents.push_back(get_id(bv));
+    g_tape[id].auxData.push_back(xhat);
+    g_tape[id].auxData.push_back(sigvec);
+    matlab_mat *gG = mat_alloc(1, 1); gG->data[0] = static_cast<double>(Gn);
+    g_tape[id].auxData.push_back(gG);
+    set_id(r, id);
+    return mat_alloc(0, 0);
+}
+
+/* batchnorm_train(X, gamma, beta, run_mean, run_var, momentum) —
+ * training-mode BN that ALSO updates the supplied running-stat buffers
+ * in place via an exponential moving average:
+ *
+ *   run_mean = (1 - α) · run_mean + α · batch_mean
+ *   run_var  = (1 - α) · run_var  + α · batch_var
+ *
+ * The forward output uses the BATCH statistics (so the backward is the
+ * standard 3-term BN form); the running stats are a side effect for
+ * later inference-mode use via batchnorm_eval.
+ *
+ * Records under OP_BATCHNORM (the backward case handles either training
+ * variant — same saved xhat + σ).  Caller maintains run_mean / run_var
+ * as plain matlab_mat buffers (or as dlarrays whose extractdata they
+ * thread back through the loop). */
+matlab_mat *matlab_dlnet_batchnorm_train(void *r, void *x, void *gv, void *bv,
+                                         void *muv, void *varv, double mom_d) {
+    using namespace dlnet;
+    matlab_mat *X = get_data(x);
+    matlab_mat *G = get_data(gv);
+    matlab_mat *B = get_data(bv);
+    matlab_mat *MU = get_data(muv);
+    matlab_mat *VR = get_data(varv);
+    double mom = mom_d;
+    if (mom < 0.0 || mom > 1.0) mom = 0.1;
+    Shape4 S = shape4(X);
+    int64_t M = S.H * S.W * S.N;
+    if (M <= 0 || S.C <= 0) {
+        matlab_mat *Y = mat_alloc(0, 0);
+        set_data(r, Y);
+        set_id(r, record(OP_BATCHNORM_TRAIN, get_id(x), get_id(gv), Y));
+        return mat_alloc(0, 0);
+    }
+    const double eps = 1e-5;
+    std::vector<double> mu(static_cast<size_t>(S.C), 0.0);
+    std::vector<double> sig(static_cast<size_t>(S.C), 0.0);
+    for (int64_t c = 0; c < S.C; ++c) {
+        double s = 0;
+        for (int64_t n = 0; n < S.N; ++n)
+            for (int64_t h = 0; h < S.H; ++h)
+                for (int64_t ww = 0; ww < S.W; ++ww)
+                    s += S.data[h*S.s0 + ww*S.s1 + c*S.s2 + n*S.s3];
+        mu[static_cast<size_t>(c)] = s / static_cast<double>(M);
+    }
+    for (int64_t c = 0; c < S.C; ++c) {
+        double v = 0;
+        for (int64_t n = 0; n < S.N; ++n)
+            for (int64_t h = 0; h < S.H; ++h)
+                for (int64_t ww = 0; ww < S.W; ++ww) {
+                    double d = S.data[h*S.s0 + ww*S.s1 + c*S.s2 + n*S.s3]
+                             - mu[static_cast<size_t>(c)];
+                    v += d * d;
+                }
+        sig[static_cast<size_t>(c)] = std::sqrt(v / static_cast<double>(M) + eps);
+    }
+    /* EMA update of running stats — IN PLACE writes to MU, VR. */
+    if (MU && MU->data) {
+        int64_t lim = std::min<int64_t>(MU->rows * MU->cols, S.C);
+        for (int64_t c = 0; c < lim; ++c) {
+            double bm = mu[static_cast<size_t>(c)];
+            MU->data[c] = (1.0 - mom) * MU->data[c] + mom * bm;
+        }
+    }
+    if (VR && VR->data) {
+        int64_t lim = std::min<int64_t>(VR->rows * VR->cols, S.C);
+        for (int64_t c = 0; c < lim; ++c) {
+            double s = sig[static_cast<size_t>(c)];
+            double bv = s * s - eps;          /* recover batch var */
+            VR->data[c] = (1.0 - mom) * VR->data[c] + mom * bv;
+        }
+    }
+    /* Forward output uses BATCH stats (so backward is correct). */
+    const double *Gd = flatdata(G);
+    const double *Bd = flatdata(B);
+    int64_t outDims[4] = {S.H, S.W, S.C, S.N};
+    void *Rv = matN_alloc(4, outDims);
+    double *Yd = mat_is_nd(Rv) ? reinterpret_cast<matlab_matN *>(Rv)->data
+              : mat_is_3d(Rv) ? reinterpret_cast<matlab_mat3 *>(Rv)->data
+                              : reinterpret_cast<matlab_mat *>(Rv)->data;
+    int64_t Ys[4] = {0,0,0,0};
+    if (mat_is_nd(Rv)) {
+        matlab_matN *Rn = reinterpret_cast<matlab_matN *>(Rv);
+        for (uint32_t k = 0; k < Rn->ndims; ++k) Ys[k] = Rn->strides[k];
+    } else if (mat_is_3d(Rv)) {
+        matlab_mat3 *R3 = reinterpret_cast<matlab_mat3 *>(Rv);
+        Ys[0] = R3->cols; Ys[1] = 1; Ys[2] = R3->rows * R3->cols;
+    } else {
+        matlab_mat *R2 = reinterpret_cast<matlab_mat *>(Rv);
+        Ys[0] = R2->cols; Ys[1] = 1;
+    }
+    int64_t xhatN = M * S.C;
+    matlab_mat *xhat = mat_alloc(1, xhatN > 0 ? xhatN : 1);
+    for (int64_t n = 0; n < S.N; ++n)
+        for (int64_t c = 0; c < S.C; ++c) {
+            double inv = 1.0 / sig[static_cast<size_t>(c)];
+            for (int64_t h = 0; h < S.H; ++h)
+                for (int64_t ww = 0; ww < S.W; ++ww) {
+                    int64_t fl = ((n * S.C + c) * S.H + h) * S.W + ww;
+                    double xh = (S.data[h*S.s0 + ww*S.s1 + c*S.s2 + n*S.s3]
+                                 - mu[static_cast<size_t>(c)]) * inv;
+                    xhat->data[fl] = xh;
+                    Yd[h*Ys[0] + ww*Ys[1] + c*Ys[2] + n*Ys[3]] = Gd[c] * xh + Bd[c];
+                }
+        }
+    matlab_mat *Y = reinterpret_cast<matlab_mat *>(Rv);
+    set_data(r, Y);
+    /* Reuse OP_BATCHNORM's backward — same xhat / σ contract. */
+    int id = record(OP_BATCHNORM, get_id(x), get_id(gv), Y);
+    g_tape[id].auxParents.push_back(get_id(bv));
+    g_tape[id].auxData.push_back(xhat);
+    matlab_mat *sigvec = mat_alloc(1, S.C);
+    for (int64_t c = 0; c < S.C; ++c) sigvec->data[c] = sig[static_cast<size_t>(c)];
+    g_tape[id].auxData.push_back(sigvec);
+    set_id(r, id);
+    return mat_alloc(0, 0);
+}
+
 // ---- dlgradient(loss, var): reverse sweep -> returns the var gradient -----
 // Returns the gradient as a plain matrix (MATLAB returns a dlarray; we return
 // the extracted value — a documented deviation that keeps the runtime from
@@ -2924,6 +3149,106 @@ matlab_mat *matlab_dlnet_grad(void *lossv, void *varv) {
                 }
                 accum(n.p1, dG);
                 accum(n.auxParents[0], dB);
+                accum(n.p0, dX);
+            }
+        } break;
+        case OP_GROUPNORM: {
+            /* P0 = X, P1 = γ, auxParents[0] = β.
+             * auxData[0] = xhat (1 × H·W·C·N), [1] = σ (1 × G·N), [2] = G.
+             * Per (group, sample): M = H*W*(C/G).
+             *   dxhat[h,w,c,n] = dy · γ_c
+             *   dx = (1/(M·σ_{g,n})) · (M·dxhat − ΣdxhatGroup − xhat·Σ(dxhat·xhat)Group)
+             *   dγ_c += Σ dy · xhat (over h,w,n)
+             *   dβ_c += Σ dy        (over h,w,n)
+             */
+            if (P0 && P1 && n.auxParents.size() >= 1 && n.auxData.size() >= 3) {
+                matlab_mat *xhat = n.auxData[0];
+                matlab_mat *sigvec = n.auxData[1];
+                int64_t Gn = static_cast<int64_t>(n.auxData[2]->data[0]);
+                Shape4 SX = shape4(P0);
+                if (Gn <= 0 || (SX.C % Gn) != 0) break;
+                int64_t Cpg = SX.C / Gn;
+                int64_t M = SX.H * SX.W * Cpg;
+                if (M <= 0) break;
+                int64_t As0, As1, As2, As3;
+                if (mat_is_nd(A)) {
+                    matlab_matN *Mn = reinterpret_cast<matlab_matN *>(A);
+                    As0 = Mn->strides[0]; As1 = Mn->strides[1];
+                    As2 = Mn->ndims >= 3 ? Mn->strides[2] : 0;
+                    As3 = Mn->ndims >= 4 ? Mn->strides[3] : 0;
+                } else if (mat_is_3d(A)) {
+                    matlab_mat3 *M3 = reinterpret_cast<matlab_mat3 *>(A);
+                    As0 = M3->cols; As1 = 1; As2 = M3->rows * M3->cols; As3 = 0;
+                } else {
+                    As0 = A->cols; As1 = 1; As2 = 0; As3 = 0;
+                }
+                const double *Ad = flatdata(A);
+                const double *Gd = flatdata(P1);
+                /* dγ_c, dβ_c — per-channel sums over (h, w, n). */
+                matlab_mat *dG = zero_clone(P1);
+                matlab_mat *dB = zero_clone(g_tape[n.auxParents[0]].val);
+                double *dGd = flatdata(dG);
+                double *dBd = flatdata(dB);
+                /* Per-(group, sample): cache Σdxhat and Σ(dxhat·xhat). */
+                std::vector<double> sumDxh(static_cast<size_t>(Gn * SX.N), 0.0);
+                std::vector<double> sumDxhXh(static_cast<size_t>(Gn * SX.N), 0.0);
+                for (int64_t nn = 0; nn < SX.N; ++nn) {
+                    for (int64_t g = 0; g < Gn; ++g) {
+                        double s_dxh = 0, s_dxh_xh = 0;
+                        int64_t c_start = g * Cpg, c_end = c_start + Cpg;
+                        for (int64_t c = c_start; c < c_end; ++c)
+                            for (int64_t h = 0; h < SX.H; ++h)
+                                for (int64_t ww = 0; ww < SX.W; ++ww) {
+                                    int64_t fl = ((nn * SX.C + c) * SX.H + h) * SX.W + ww;
+                                    double dy = Ad[h*As0 + ww*As1 + c*As2 + nn*As3];
+                                    double xh = xhat->data[fl];
+                                    double dxh = dy * Gd[c];
+                                    s_dxh    += dxh;
+                                    s_dxh_xh += dxh * xh;
+                                    dGd[c] += dy * xh;
+                                    dBd[c] += dy;
+                                }
+                        sumDxh   [static_cast<size_t>(nn * Gn + g)] = s_dxh;
+                        sumDxhXh [static_cast<size_t>(nn * Gn + g)] = s_dxh_xh;
+                    }
+                }
+                accum(n.p1, dG);
+                accum(n.auxParents[0], dB);
+                /* dX */
+                matlab_mat *dX = zero_clone(P0);
+                double *dXd = flatdata(dX);
+                int64_t Xs0, Xs1, Xs2, Xs3;
+                if (mat_is_nd(dX)) {
+                    matlab_matN *Mn = reinterpret_cast<matlab_matN *>(dX);
+                    Xs0 = Mn->strides[0]; Xs1 = Mn->strides[1];
+                    Xs2 = Mn->ndims >= 3 ? Mn->strides[2] : 0;
+                    Xs3 = Mn->ndims >= 4 ? Mn->strides[3] : 0;
+                } else if (mat_is_3d(dX)) {
+                    matlab_mat3 *M3 = reinterpret_cast<matlab_mat3 *>(dX);
+                    Xs0 = M3->cols; Xs1 = 1; Xs2 = M3->rows * M3->cols; Xs3 = 0;
+                } else {
+                    Xs0 = dX->cols; Xs1 = 1; Xs2 = 0; Xs3 = 0;
+                }
+                for (int64_t nn = 0; nn < SX.N; ++nn) {
+                    for (int64_t g = 0; g < Gn; ++g) {
+                        double sig = sigvec->data[nn * Gn + g];
+                        double inv_M_sig = 1.0 / (static_cast<double>(M) * sig);
+                        double s_dxh = sumDxh   [static_cast<size_t>(nn * Gn + g)];
+                        double s_dxh_xh = sumDxhXh[static_cast<size_t>(nn * Gn + g)];
+                        int64_t c_start = g * Cpg, c_end = c_start + Cpg;
+                        for (int64_t c = c_start; c < c_end; ++c)
+                            for (int64_t h = 0; h < SX.H; ++h)
+                                for (int64_t ww = 0; ww < SX.W; ++ww) {
+                                    int64_t fl = ((nn * SX.C + c) * SX.H + h) * SX.W + ww;
+                                    double dy = Ad[h*As0 + ww*As1 + c*As2 + nn*As3];
+                                    double xh = xhat->data[fl];
+                                    double dxh = dy * Gd[c];
+                                    double dx = inv_M_sig * (static_cast<double>(M) * dxh
+                                                             - s_dxh - xh * s_dxh_xh);
+                                    dXd[h*Xs0 + ww*Xs1 + c*Xs2 + nn*Xs3] = dx;
+                                }
+                    }
+                }
                 accum(n.p0, dX);
             }
         } break;

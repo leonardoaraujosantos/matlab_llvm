@@ -2579,6 +2579,8 @@ static std::string buildReplPrelude(const std::string &Src) {
     {false, "batchnorm",                 "dlnet_classdefs.m"},
     {false, "layernorm",                 "dlnet_classdefs.m"},
     {false, "batchnorm_eval",            "dlnet_classdefs.m"},
+    {false, "groupnorm",                 "dlnet_classdefs.m"},
+    {false, "batchnorm_train",           "dlnet_classdefs.m"},
     /* Global Optimization Toolbox Tier-2 — `gads_classdefs.m` holds the
      * MultiStart + GlobalSearch solver objects.  (`run` is too generic
      * to trigger on; the solver-object mentions pull the prelude.) */
@@ -11809,7 +11811,7 @@ int main(int Argc, char **Argv) {
       "gru", "bilstm", "lstmp",
       "leakyrelu", "gelu", "swish", "softplus", "elu",
       "conv2d_batch", "conv2d_full", "maxpool2d", "avgpool2d", "batchnorm",
-      "layernorm", "batchnorm_eval",
+      "layernorm", "batchnorm_eval", "groupnorm", "batchnorm_train",
       /* GPU Coder T5 design-pattern helpers — runtime entries, no
        * prelude file needed.  Listed here only for the AOT-prelude
        * scanner's awareness (no leaf to map). */
@@ -12101,7 +12103,8 @@ int main(int Argc, char **Argv) {
         ClsName == "conv2d_batch" || ClsName == "conv2d_full" ||
         ClsName == "maxpool2d" || ClsName == "avgpool2d" ||
         ClsName == "batchnorm" || ClsName == "layernorm" ||
-        ClsName == "batchnorm_eval")
+        ClsName == "batchnorm_eval" || ClsName == "groupnorm" ||
+        ClsName == "batchnorm_train")
       return "dlnet_classdefs.m";
     /* GPU Coder T5 design-pattern helpers are C runtime entries; no
      * classdef file to pull in. */

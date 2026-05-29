@@ -208,6 +208,24 @@ classdef dlarray
             r = dlarray();
             matlab_dlnet_batchnorm_eval(r, x, gamma, beta, run_mean, run_var);
         end
+
+        % GroupNorm: split C into G groups; (μ, σ) per (group, sample).
+        % γ, β are length-C vectors.
+        function r = groupnorm(x, gamma, beta, num_groups)
+            r = dlarray();
+            matlab_dlnet_groupnorm(r, x, gamma, beta, num_groups);
+        end
+
+        % batchnorm_train: training-mode BN with running-stat EMA.
+        % run_mean and run_var are mutable buffers updated in place:
+        %   run = (1-mom) * run + mom * batch.
+        % The forward output uses BATCH stats so the backward stays
+        % the standard 3-term BN form.
+        function r = batchnorm_train(x, gamma, beta, run_mean, run_var, momentum)
+            r = dlarray();
+            matlab_dlnet_batchnorm_train(r, x, gamma, beta, ...
+                                          run_mean, run_var, momentum);
+        end
     end
 end
 % `extractdata(x)` and `dlgradient(loss, v)` are intercepted in Lowering.cpp
