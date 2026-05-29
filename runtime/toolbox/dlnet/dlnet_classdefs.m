@@ -226,6 +226,21 @@ classdef dlarray
             matlab_dlnet_batchnorm_train(r, x, gamma, beta, ...
                                           run_mean, run_var, momentum);
         end
+
+        % InstanceNorm: per-(channel, sample) normalization over (H, W).
+        % Equivalent to GroupNorm with G = C.  γ, β are length-C vectors.
+        function r = instancenorm(x, gamma, beta)
+            r = dlarray();
+            matlab_dlnet_instancenorm(r, x, gamma, beta);
+        end
+
+        % RMSNorm: simplified LN without mean subtraction.  Normalizes
+        % each slice along `dim` by its root-mean-square; γ is the
+        % length-K scale (β omitted by convention).
+        function r = rmsnorm(x, gamma, dim)
+            r = dlarray();
+            matlab_dlnet_rmsnorm(r, x, gamma, dim);
+        end
     end
 end
 % `extractdata(x)` and `dlgradient(loss, v)` are intercepted in Lowering.cpp

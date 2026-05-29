@@ -33,6 +33,9 @@ extern "C" void        matlab_obj_set_f64(matlab_obj *o, const char *name, int64
  * runtime's GEMM-based implementation + helpers. */
 extern "C" void       *matlab_conv2d_batch(void *X, void *W);
 extern "C" matlab_mat *matlab_im2col_2d(void *X, double kH, double kW);
+extern "C" matlab_mat *matlab_im2col_2d_pad(void *X, double kH, double kW,
+                                            double pad_h, double pad_w,
+                                            double stride_h, double stride_w);
 extern "C" matlab_mat *matlab_matmul_mm(matlab_mat *A, matlab_mat *B);
 
 namespace dlnet {
@@ -175,8 +178,10 @@ enum { OP_LEAF, OP_ADD, OP_SUB, OP_MTIMES, OP_TIMES, OP_RELU, OP_SIGMOID,
        OP_RESHAPE, OP_MAXPOOL2D, OP_AVGPOOL2D,
        /* BatchNorm + conv-with-bias-pad-stride + axis-aware reductions. */
        OP_BATCHNORM, OP_CONV2D_FULL, OP_SOFTMAX_DIM, OP_MEAN_DIM_ND,
-       /* LayerNorm (axis-aware) + GroupNorm + EMA-tracked BN training. */
-       OP_LAYERNORM, OP_GROUPNORM, OP_BATCHNORM_TRAIN };
+       /* LayerNorm (axis-aware) + GroupNorm + EMA-tracked BN training +
+        * InstanceNorm + RMSNorm. */
+       OP_LAYERNORM, OP_GROUPNORM, OP_BATCHNORM_TRAIN,
+       OP_INSTANCENORM, OP_RMSNORM };
 
 struct Node {
     int op;
@@ -1835,6 +1840,186 @@ matlab_mat *matlab_dlnet_batchnorm_train(void *r, void *x, void *gv, void *bv,
     return mat_alloc(0, 0);
 }
 
+/* instancenorm(X, gamma, beta) — per-(channel, sample) normalization
+ * over (H, W).  Equivalent to GroupNorm with G = C (each channel is its
+ * own group).  Standard formulation:
+ *   M       = H * W
+ *   μ_{c,n} = (1/M) Σ_{h,w} x[h,w,c,n]
+ *   σ²      = (1/M) Σ (x - μ)²
+ *   xhat    = (x - μ) / √(σ² + ε)
+ *   y       = γ_c · xhat + β_c
+ *
+ * Saves xhat + σ_per_(c,n) (1 × C·N) in auxData. */
+matlab_mat *matlab_dlnet_instancenorm(void *r, void *x, void *gv, void *bv) {
+    using namespace dlnet;
+    matlab_mat *X = get_data(x);
+    matlab_mat *G = get_data(gv);
+    matlab_mat *B = get_data(bv);
+    Shape4 S = shape4(X);
+    int64_t M = S.H * S.W;
+    if (M <= 0 || S.C <= 0) {
+        matlab_mat *Y = mat_alloc(0, 0);
+        set_data(r, Y);
+        set_id(r, record(OP_INSTANCENORM, get_id(x), get_id(gv), Y));
+        return mat_alloc(0, 0);
+    }
+    const double eps = 1e-5;
+    int64_t outDims[4] = {S.H, S.W, S.C, S.N};
+    void *Rv = matN_alloc(4, outDims);
+    double *Yd = mat_is_nd(Rv) ? reinterpret_cast<matlab_matN *>(Rv)->data
+              : mat_is_3d(Rv) ? reinterpret_cast<matlab_mat3 *>(Rv)->data
+                              : reinterpret_cast<matlab_mat *>(Rv)->data;
+    int64_t Ys[4] = {0,0,0,0};
+    if (mat_is_nd(Rv)) {
+        matlab_matN *Rn = reinterpret_cast<matlab_matN *>(Rv);
+        for (uint32_t k = 0; k < Rn->ndims; ++k) Ys[k] = Rn->strides[k];
+    } else if (mat_is_3d(Rv)) {
+        matlab_mat3 *R3 = reinterpret_cast<matlab_mat3 *>(Rv);
+        Ys[0] = R3->cols; Ys[1] = 1; Ys[2] = R3->rows * R3->cols;
+    } else {
+        matlab_mat *R2 = reinterpret_cast<matlab_mat *>(Rv);
+        Ys[0] = R2->cols; Ys[1] = 1;
+    }
+    const double *Gd = flatdata(G);
+    const double *Bd = flatdata(B);
+    int64_t xhatN = S.H * S.W * S.C * S.N;
+    matlab_mat *xhat = mat_alloc(1, xhatN > 0 ? xhatN : 1);
+    matlab_mat *sigvec = mat_alloc(1, S.C * S.N > 0 ? S.C * S.N : 1);
+    for (int64_t n = 0; n < S.N; ++n) {
+        for (int64_t c = 0; c < S.C; ++c) {
+            /* μ over (H, W) for this (c, n). */
+            double s = 0;
+            for (int64_t h = 0; h < S.H; ++h)
+                for (int64_t ww = 0; ww < S.W; ++ww)
+                    s += S.data[h*S.s0 + ww*S.s1 + c*S.s2 + n*S.s3];
+            double mu = s / static_cast<double>(M);
+            double vs = 0;
+            for (int64_t h = 0; h < S.H; ++h)
+                for (int64_t ww = 0; ww < S.W; ++ww) {
+                    double d = S.data[h*S.s0 + ww*S.s1 + c*S.s2 + n*S.s3] - mu;
+                    vs += d * d;
+                }
+            double sig = std::sqrt(vs / static_cast<double>(M) + eps);
+            sigvec->data[n * S.C + c] = sig;
+            double inv = 1.0 / sig;
+            for (int64_t h = 0; h < S.H; ++h)
+                for (int64_t ww = 0; ww < S.W; ++ww) {
+                    int64_t fl = ((n * S.C + c) * S.H + h) * S.W + ww;
+                    double xh = (S.data[h*S.s0 + ww*S.s1 + c*S.s2 + n*S.s3]
+                                 - mu) * inv;
+                    xhat->data[fl] = xh;
+                    Yd[h*Ys[0] + ww*Ys[1] + c*Ys[2] + n*Ys[3]] = Gd[c] * xh + Bd[c];
+                }
+        }
+    }
+    matlab_mat *Y = reinterpret_cast<matlab_mat *>(Rv);
+    set_data(r, Y);
+    int id = record(OP_INSTANCENORM, get_id(x), get_id(gv), Y);
+    g_tape[id].auxParents.push_back(get_id(bv));
+    g_tape[id].auxData.push_back(xhat);
+    g_tape[id].auxData.push_back(sigvec);
+    set_id(r, id);
+    return mat_alloc(0, 0);
+}
+
+/* rmsnorm(X, gamma, dim) — simplified LayerNorm without mean subtraction.
+ *   K       = size(X, dim)
+ *   rms_i   = √( (1/K) Σ_{j∈axis} x_j² + ε )
+ *   xhat    = x_i / rms_i
+ *   y       = γ_i · xhat       (no β by convention)
+ *
+ * Saves xhat + rms_per_slice (1 × outerN) + dim in auxData. */
+matlab_mat *matlab_dlnet_rmsnorm(void *r, void *x, void *gv, double dim_d) {
+    using namespace dlnet;
+    matlab_mat *X = get_data(x);
+    matlab_mat *G = get_data(gv);
+    int dim = static_cast<int>(dim_d);
+    int nd; int64_t dims[16], strides[16];
+    const double *Xd;
+    if (mat_is_nd(X)) {
+        matlab_matN *Mn = reinterpret_cast<matlab_matN *>(X);
+        nd = static_cast<int>(Mn->ndims); if (nd > 16) nd = 16;
+        for (int k = 0; k < nd; ++k) { dims[k] = Mn->dims[k]; strides[k] = Mn->strides[k]; }
+        Xd = Mn->data;
+    } else if (mat_is_3d(X)) {
+        matlab_mat3 *M3 = reinterpret_cast<matlab_mat3 *>(X);
+        nd = 3; dims[0] = M3->rows; dims[1] = M3->cols; dims[2] = M3->depth;
+        strides[0] = M3->cols; strides[1] = 1; strides[2] = M3->rows * M3->cols;
+        Xd = M3->data;
+    } else {
+        nd = 2; dims[0] = X->rows; dims[1] = X->cols;
+        strides[0] = X->cols; strides[1] = 1;
+        Xd = X->data;
+    }
+    if (dim < 1 || dim > nd) {
+        matlab_mat *Y = mat_alloc(0, 0);
+        set_data(r, Y);
+        set_id(r, record(OP_RMSNORM, get_id(x), get_id(gv), Y));
+        return mat_alloc(0, 0);
+    }
+    int axis = dim - 1;
+    int64_t K = dims[axis];
+    int64_t outerN = 1;
+    for (int k = 0; k < nd; ++k) if (k != axis) outerN *= dims[k];
+    const double eps = 1e-5;
+    int64_t outDims[16]; for (int k = 0; k < nd; ++k) outDims[k] = dims[k];
+    void *Rv = matN_alloc(nd, outDims);
+    double *Yd = mat_is_nd(Rv) ? reinterpret_cast<matlab_matN *>(Rv)->data
+              : mat_is_3d(Rv) ? reinterpret_cast<matlab_mat3 *>(Rv)->data
+                              : reinterpret_cast<matlab_mat *>(Rv)->data;
+    int64_t Ys[16];
+    if (mat_is_nd(Rv)) {
+        matlab_matN *Rn = reinterpret_cast<matlab_matN *>(Rv);
+        for (uint32_t k = 0; k < Rn->ndims; ++k) Ys[k] = Rn->strides[k];
+    } else if (mat_is_3d(Rv)) {
+        matlab_mat3 *R3 = reinterpret_cast<matlab_mat3 *>(Rv);
+        Ys[0] = R3->cols; Ys[1] = 1; Ys[2] = R3->rows * R3->cols;
+    } else {
+        matlab_mat *R2 = reinterpret_cast<matlab_mat *>(Rv);
+        Ys[0] = R2->cols; Ys[1] = 1;
+    }
+    const double *Gd = flatdata(G);
+    matlab_mat *xhat = mat_alloc(1, outerN * K);
+    matlab_mat *rmsvec = mat_alloc(1, outerN);
+    int64_t idx[16] = {0};
+    for (int64_t oo = 0; oo < outerN; ++oo) {
+        int64_t baseSrc = 0, baseDst = 0;
+        for (int k = 0; k < nd; ++k) {
+            if (k == axis) continue;
+            baseSrc += idx[k] * strides[k];
+            baseDst += idx[k] * Ys[k];
+        }
+        double ss = 0;
+        for (int64_t a = 0; a < K; ++a) {
+            double v = Xd[baseSrc + a * strides[axis]];
+            ss += v * v;
+        }
+        double rms = std::sqrt(ss / static_cast<double>(K > 0 ? K : 1) + eps);
+        rmsvec->data[oo] = rms;
+        double inv = 1.0 / rms;
+        for (int64_t a = 0; a < K; ++a) {
+            double v = Xd[baseSrc + a * strides[axis]];
+            double xh = v * inv;
+            xhat->data[oo * K + a] = xh;
+            Yd[baseDst + a * Ys[axis]] = Gd[a] * xh;
+        }
+        for (int k = nd - 1; k >= 0; --k) {
+            if (k == axis) continue;
+            if (++idx[k] < dims[k]) break;
+            idx[k] = 0;
+        }
+    }
+    matlab_mat *Y = reinterpret_cast<matlab_mat *>(Rv);
+    set_data(r, Y);
+    int id = record(OP_RMSNORM, get_id(x), get_id(gv), Y);
+    g_tape[id].auxData.push_back(xhat);
+    g_tape[id].auxData.push_back(rmsvec);
+    matlab_mat *dm = mat_alloc(1, 1); dm->data[0] = static_cast<double>(dim);
+    g_tape[id].auxData.push_back(dm);
+    set_id(r, id);
+    return mat_alloc(0, 0);
+}
+
 // ---- dlgradient(loss, var): reverse sweep -> returns the var gradient -----
 // Returns the gradient as a plain matrix (MATLAB returns a dlarray; we return
 // the extracted value — a documented deviation that keeps the runtime from
@@ -2836,7 +3021,16 @@ matlab_mat *matlab_dlnet_grad(void *lossv, void *varv) {
         } break;
         case OP_CONV2D_FULL: {
             /* P0 = X, P1 = W, auxParents[0] = b.
-             * auxData[0] = (pad_h, pad_w, stride_h, stride_w). */
+             * auxData[0] = (pad_h, pad_w, stride_h, stride_w).
+             *
+             * im2col + GEMM backward (matches the forward path):
+             *   X_col   : (kH·kW·C) x (Hout·Wout·N)   via matlab_im2col_2d_pad
+             *   dY_2d   : K x (Hout·Wout·N)
+             *   dW_2d   : K x (kH·kW·C)               = dY_2d · X_col^T
+             *   col_grad: (kH·kW·C) x (Hout·Wout·N)   = W_2d^T · dY_2d
+             *   dX      : col2im_pad(col_grad)        scatter back with overlap
+             *   db_k    : Σ_{n,h,w} dy[h,w,k,n]
+             */
             if (P0 && P1 && n.auxData.size() >= 1) {
                 matlab_mat *cfg = n.auxData[0];
                 int64_t pad_h = static_cast<int64_t>(cfg->data[0]);
@@ -2850,6 +3044,11 @@ matlab_mat *matlab_dlnet_grad(void *lossv, void *varv) {
                 int64_t kH = SW.H, kW = SW.W, K = SW.N;
                 int64_t Hout = (SX.H + 2*pad_h - kH) / stride_h + 1;
                 int64_t Wout = (SX.W + 2*pad_w - kW) / stride_w + 1;
+                int64_t inner = kH * kW * SX.C;
+                int64_t hwn = Hout * Wout * SX.N;
+                if (Hout <= 0 || Wout <= 0 || inner <= 0 || hwn <= 0) break;
+
+                /* dY_2d (K x hwn): repack A using its own strides. */
                 int64_t As0, As1, As2, As3;
                 if (mat_is_nd(A)) {
                     matlab_matN *Mn = reinterpret_cast<matlab_matN *>(A);
@@ -2863,31 +3062,99 @@ matlab_mat *matlab_dlnet_grad(void *lossv, void *varv) {
                     As0 = A->cols; As1 = 1; As2 = 0; As3 = 0;
                 }
                 const double *Ad = flatdata(A);
-                matlab_mat *dX = zero_clone(P0);
-                matlab_mat *dW = zero_clone(P1);
-                double *dXd = flatdata(dX), *dWd = flatdata(dW);
-                int64_t Xs0 = SX.s0, Xs1 = SX.s1, Xs2 = SX.s2, Xs3 = SX.s3;
-                int64_t Ws0 = SW.s0, Ws1 = SW.s1, Ws2 = SW.s2, Ws3 = SW.s3;
-                /* db_k = Σ_{h,w,n} dy[h,w,k,n]. */
+                matlab_mat *dY_2d = mat_alloc(K, hwn);
+                for (int64_t k = 0; k < K; ++k)
+                    for (int64_t nn = 0; nn < SX.N; ++nn)
+                        for (int64_t hO = 0; hO < Hout; ++hO)
+                            for (int64_t wO = 0; wO < Wout; ++wO) {
+                                int64_t col = nn * Hout * Wout + hO * Wout + wO;
+                                dY_2d->data[k * hwn + col] =
+                                    Ad[hO*As0 + wO*As1 + k*As2 + nn*As3];
+                            }
+
+                /* db_k = sum across columns. */
                 matlab_mat *db = zero_clone(g_tape[n.auxParents[0]].val);
                 double *dbd = flatdata(db);
                 int64_t dbN = nelem(db);
-                for (int64_t nn = 0; nn < SX.N; ++nn)
-                    for (int64_t k = 0; k < K; ++k) {
-                        double s = 0;
-                        for (int64_t hO = 0; hO < Hout; ++hO)
-                            for (int64_t wO = 0; wO < Wout; ++wO)
-                                s += Ad[hO*As0 + wO*As1 + k*As2 + nn*As3];
-                        if (k < dbN) dbd[k] += s;
-                    }
+                for (int64_t k = 0; k < K; ++k) {
+                    double s = 0;
+                    for (int64_t col = 0; col < hwn; ++col)
+                        s += dY_2d->data[k * hwn + col];
+                    if (k < dbN) dbd[k] += s;
+                }
                 accum(n.auxParents[0], db);
-                /* dX[hi, wi, c, n] += Σ_{kh, kw, k} dy[hO, wO, k, n] * W[kh, kw, c, k]
-                 *   where hO = (hi + pad_h - kh) / stride_h, etc. */
-                for (int64_t nn = 0; nn < SX.N; ++nn)
+
+                /* X_col via im2col_2d_pad. */
+                matlab_mat *X_col = matlab_im2col_2d_pad(P0,
+                    static_cast<double>(kH), static_cast<double>(kW),
+                    static_cast<double>(pad_h), static_cast<double>(pad_w),
+                    static_cast<double>(stride_h), static_cast<double>(stride_w));
+                /* X_col^T (hwn x inner). */
+                matlab_mat *XcolT = mat_alloc(hwn, inner);
+                for (int64_t r2 = 0; r2 < inner; ++r2)
+                    for (int64_t c2 = 0; c2 < hwn; ++c2)
+                        XcolT->data[c2 * inner + r2] = X_col->data[r2 * hwn + c2];
+                /* dW_2d (K x inner) = dY_2d * X_col^T. */
+                matlab_mat *dW_2d = matlab_matmul_mm(dY_2d, XcolT);
+                free(XcolT->data); free(XcolT);
+
+                /* Scatter dW_2d into W-shaped dW (matN / mat3 / mat). */
+                matlab_mat *dW = zero_clone(P1);
+                {
+                    double *dWd = flatdata(dW);
+                    int64_t Ws0, Ws1, Ws2, Ws3;
+                    if (mat_is_nd(dW)) {
+                        matlab_matN *Mn = reinterpret_cast<matlab_matN *>(dW);
+                        Ws0 = Mn->strides[0]; Ws1 = Mn->strides[1];
+                        Ws2 = Mn->ndims >= 3 ? Mn->strides[2] : 0;
+                        Ws3 = Mn->ndims >= 4 ? Mn->strides[3] : 0;
+                    } else if (mat_is_3d(dW)) {
+                        matlab_mat3 *M3 = reinterpret_cast<matlab_mat3 *>(dW);
+                        Ws0 = M3->cols; Ws1 = 1; Ws2 = M3->rows * M3->cols; Ws3 = 0;
+                    } else {
+                        Ws0 = dW->cols; Ws1 = 1; Ws2 = 0; Ws3 = 0;
+                    }
                     for (int64_t k = 0; k < K; ++k)
+                        for (int64_t c = 0; c < SX.C; ++c)
+                            for (int64_t kh = 0; kh < kH; ++kh)
+                                for (int64_t kw = 0; kw < kW; ++kw) {
+                                    int64_t col = c * kH * kW + kh * kW + kw;
+                                    dWd[kh*Ws0 + kw*Ws1 + c*Ws2 + k*Ws3] =
+                                        dW_2d->data[k * inner + col];
+                                }
+                }
+                free(dW_2d->data); free(dW_2d);
+
+                /* W_2d^T (inner x K). */
+                matlab_mat *W2d_T = mat_alloc(inner, K);
+                {
+                    int64_t Ws0 = SW.s0, Ws1 = SW.s1, Ws2 = SW.s2, Ws3 = SW.s3;
+                    const double *Wd_ = flatdata(P1);
+                    for (int64_t k = 0; k < K; ++k)
+                        for (int64_t c = 0; c < SX.C; ++c)
+                            for (int64_t kh = 0; kh < kH; ++kh)
+                                for (int64_t kw = 0; kw < kW; ++kw) {
+                                    int64_t row = c * kH * kW + kh * kW + kw;
+                                    W2d_T->data[row * K + k] =
+                                        Wd_[kh*Ws0 + kw*Ws1 + c*Ws2 + k*Ws3];
+                                }
+                }
+                /* col_grad (inner x hwn) = W_2d^T * dY_2d. */
+                matlab_mat *col_grad = matlab_matmul_mm(W2d_T, dY_2d);
+                free(W2d_T->data); free(W2d_T);
+                free(dY_2d->data); free(dY_2d);
+                free(X_col->data); free(X_col);
+
+                /* col2im-pad: scatter col_grad back to dX with stride+padding,
+                 * accumulating overlapping patches. */
+                matlab_mat *dX = zero_clone(P0);
+                {
+                    double *dXd = flatdata(dX);
+                    int64_t Xs0 = SX.s0, Xs1 = SX.s1, Xs2 = SX.s2, Xs3 = SX.s3;
+                    for (int64_t nn = 0; nn < SX.N; ++nn)
                         for (int64_t hO = 0; hO < Hout; ++hO)
                             for (int64_t wO = 0; wO < Wout; ++wO) {
-                                double dy = Ad[hO*As0 + wO*As1 + k*As2 + nn*As3];
+                                int64_t col = nn * Hout * Wout + hO * Wout + wO;
                                 for (int64_t c = 0; c < SX.C; ++c)
                                     for (int64_t kh = 0; kh < kH; ++kh) {
                                         int64_t hi = hO * stride_h - pad_h + kh;
@@ -2895,16 +3162,14 @@ matlab_mat *matlab_dlnet_grad(void *lossv, void *varv) {
                                         for (int64_t kw = 0; kw < kW; ++kw) {
                                             int64_t wi = wO * stride_w - pad_w + kw;
                                             if (wi < 0 || wi >= SX.W) continue;
-                                            double wv = SW.data[kh*Ws0 + kw*Ws1
-                                                              + c*Ws2 + k*Ws3];
+                                            int64_t row = c * kH * kW + kh * kW + kw;
                                             dXd[hi*Xs0 + wi*Xs1 + c*Xs2 + nn*Xs3]
-                                                += dy * wv;
-                                            dWd[kh*Ws0 + kw*Ws1 + c*Ws2 + k*Ws3]
-                                                += dy * SX.data[hi*Xs0 + wi*Xs1
-                                                              + c*Xs2 + nn*Xs3];
+                                                += col_grad->data[row * hwn + col];
                                         }
                                     }
                             }
+                }
+                free(col_grad->data); free(col_grad);
                 accum(n.p0, dX);
                 accum(n.p1, dW);
             }
@@ -3249,6 +3514,177 @@ matlab_mat *matlab_dlnet_grad(void *lossv, void *varv) {
                                 }
                     }
                 }
+                accum(n.p0, dX);
+            }
+        } break;
+        case OP_INSTANCENORM: {
+            /* P0 = X, P1 = γ, auxParents[0] = β.
+             * auxData[0] = xhat (1 × H·W·C·N), [1] = σ (1 × C·N).
+             * Per (c, n): M = H*W, 3-term BN-style backward. */
+            if (P0 && P1 && n.auxParents.size() >= 1 && n.auxData.size() >= 2) {
+                matlab_mat *xhat = n.auxData[0];
+                matlab_mat *sigvec = n.auxData[1];
+                Shape4 SX = shape4(P0);
+                int64_t M = SX.H * SX.W;
+                if (M <= 0 || SX.C <= 0) break;
+                int64_t As0, As1, As2, As3;
+                if (mat_is_nd(A)) {
+                    matlab_matN *Mn = reinterpret_cast<matlab_matN *>(A);
+                    As0 = Mn->strides[0]; As1 = Mn->strides[1];
+                    As2 = Mn->ndims >= 3 ? Mn->strides[2] : 0;
+                    As3 = Mn->ndims >= 4 ? Mn->strides[3] : 0;
+                } else if (mat_is_3d(A)) {
+                    matlab_mat3 *M3 = reinterpret_cast<matlab_mat3 *>(A);
+                    As0 = M3->cols; As1 = 1; As2 = M3->rows * M3->cols; As3 = 0;
+                } else {
+                    As0 = A->cols; As1 = 1; As2 = 0; As3 = 0;
+                }
+                const double *Ad = flatdata(A);
+                const double *Gd = flatdata(P1);
+                matlab_mat *dG = zero_clone(P1);
+                matlab_mat *dB = zero_clone(g_tape[n.auxParents[0]].val);
+                double *dGd = flatdata(dG);
+                double *dBd = flatdata(dB);
+                /* Cache Σdxhat, Σ(dxhat·xhat) per (c, n). */
+                std::vector<double> sDxh(static_cast<size_t>(SX.C * SX.N), 0.0);
+                std::vector<double> sDxhXh(static_cast<size_t>(SX.C * SX.N), 0.0);
+                for (int64_t nn = 0; nn < SX.N; ++nn)
+                    for (int64_t c = 0; c < SX.C; ++c) {
+                        double s_dxh = 0, s_dxh_xh = 0;
+                        for (int64_t h = 0; h < SX.H; ++h)
+                            for (int64_t ww = 0; ww < SX.W; ++ww) {
+                                int64_t fl = ((nn * SX.C + c) * SX.H + h) * SX.W + ww;
+                                double dy = Ad[h*As0 + ww*As1 + c*As2 + nn*As3];
+                                double xh = xhat->data[fl];
+                                double dxh = dy * Gd[c];
+                                s_dxh    += dxh;
+                                s_dxh_xh += dxh * xh;
+                                dGd[c] += dy * xh;
+                                dBd[c] += dy;
+                            }
+                        sDxh   [static_cast<size_t>(nn * SX.C + c)] = s_dxh;
+                        sDxhXh [static_cast<size_t>(nn * SX.C + c)] = s_dxh_xh;
+                    }
+                accum(n.p1, dG);
+                accum(n.auxParents[0], dB);
+                matlab_mat *dX = zero_clone(P0);
+                double *dXd = flatdata(dX);
+                int64_t Xs0, Xs1, Xs2, Xs3;
+                if (mat_is_nd(dX)) {
+                    matlab_matN *Mn = reinterpret_cast<matlab_matN *>(dX);
+                    Xs0 = Mn->strides[0]; Xs1 = Mn->strides[1];
+                    Xs2 = Mn->ndims >= 3 ? Mn->strides[2] : 0;
+                    Xs3 = Mn->ndims >= 4 ? Mn->strides[3] : 0;
+                } else if (mat_is_3d(dX)) {
+                    matlab_mat3 *M3 = reinterpret_cast<matlab_mat3 *>(dX);
+                    Xs0 = M3->cols; Xs1 = 1; Xs2 = M3->rows * M3->cols; Xs3 = 0;
+                } else {
+                    Xs0 = dX->cols; Xs1 = 1; Xs2 = 0; Xs3 = 0;
+                }
+                for (int64_t nn = 0; nn < SX.N; ++nn)
+                    for (int64_t c = 0; c < SX.C; ++c) {
+                        double sig = sigvec->data[nn * SX.C + c];
+                        double inv_M_sig = 1.0 / (static_cast<double>(M) * sig);
+                        double s_dxh   = sDxh   [static_cast<size_t>(nn * SX.C + c)];
+                        double s_dxh_xh = sDxhXh[static_cast<size_t>(nn * SX.C + c)];
+                        for (int64_t h = 0; h < SX.H; ++h)
+                            for (int64_t ww = 0; ww < SX.W; ++ww) {
+                                int64_t fl = ((nn * SX.C + c) * SX.H + h) * SX.W + ww;
+                                double dy = Ad[h*As0 + ww*As1 + c*As2 + nn*As3];
+                                double xh = xhat->data[fl];
+                                double dxh = dy * Gd[c];
+                                double dx = inv_M_sig * (static_cast<double>(M) * dxh
+                                                         - s_dxh - xh * s_dxh_xh);
+                                dXd[h*Xs0 + ww*Xs1 + c*Xs2 + nn*Xs3] = dx;
+                            }
+                    }
+                accum(n.p0, dX);
+            }
+        } break;
+        case OP_RMSNORM: {
+            /* P0 = X, P1 = γ.  auxData[0] = xhat (1 × outerN·K),
+             *                  auxData[1] = rms_per_slice (1 × outerN),
+             *                  auxData[2] = dim.
+             * Per-slice (length K):
+             *   dxhat_i = dy_i · γ_i
+             *   dx_i = (1/rms) · (dxhat_i − xhat_i · mean(dxhat · xhat))
+             *   dγ_i += Σ_outer dy_i · xhat_i
+             */
+            if (P0 && P1 && n.auxData.size() >= 3) {
+                matlab_mat *xhat = n.auxData[0];
+                matlab_mat *rmsvec = n.auxData[1];
+                int dim = static_cast<int>(n.auxData[2]->data[0]);
+                int nd; int64_t dims[16], Xstr[16];
+                if (mat_is_nd(P0)) {
+                    matlab_matN *Mn = reinterpret_cast<matlab_matN *>(P0);
+                    nd = static_cast<int>(Mn->ndims); if (nd > 16) nd = 16;
+                    for (int k = 0; k < nd; ++k) {
+                        dims[k] = Mn->dims[k]; Xstr[k] = Mn->strides[k];
+                    }
+                } else if (mat_is_3d(P0)) {
+                    matlab_mat3 *M3 = reinterpret_cast<matlab_mat3 *>(P0);
+                    nd = 3; dims[0] = M3->rows; dims[1] = M3->cols; dims[2] = M3->depth;
+                    Xstr[0] = M3->cols; Xstr[1] = 1; Xstr[2] = M3->rows * M3->cols;
+                } else {
+                    nd = 2; dims[0] = P0->rows; dims[1] = P0->cols;
+                    Xstr[0] = P0->cols; Xstr[1] = 1;
+                }
+                int axis = dim - 1;
+                if (axis < 0 || axis >= nd) break;
+                int64_t K = dims[axis];
+                int64_t outerN = 1;
+                for (int k = 0; k < nd; ++k) if (k != axis) outerN *= dims[k];
+                int64_t As0_[16];
+                if (mat_is_nd(A)) {
+                    matlab_matN *Mn = reinterpret_cast<matlab_matN *>(A);
+                    for (uint32_t k = 0; k < Mn->ndims && static_cast<int>(k) < 16; ++k) As0_[k] = Mn->strides[k];
+                } else if (mat_is_3d(A)) {
+                    matlab_mat3 *M3 = reinterpret_cast<matlab_mat3 *>(A);
+                    As0_[0] = M3->cols; As0_[1] = 1; As0_[2] = M3->rows*M3->cols;
+                } else {
+                    As0_[0] = A->cols; As0_[1] = 1;
+                }
+                const double *Ad = flatdata(A);
+                const double *Gd = flatdata(P1);
+                matlab_mat *dG = zero_clone(P1);
+                double *dGd = flatdata(dG);
+                matlab_mat *dX = zero_clone(P0);
+                double *dXd = flatdata(dX);
+                int64_t idx[16] = {0};
+                for (int64_t oo = 0; oo < outerN; ++oo) {
+                    int64_t baseA = 0, baseX = 0;
+                    for (int k = 0; k < nd; ++k) {
+                        if (k == axis) continue;
+                        baseA += idx[k] * As0_[k];
+                        baseX += idx[k] * Xstr[k];
+                    }
+                    double rms = rmsvec->data[oo];
+                    /* First pass: dγ, mean(dxhat · xhat). */
+                    double sum_dxh_xh = 0;
+                    for (int64_t a = 0; a < K; ++a) {
+                        double dy = Ad[baseA + a * As0_[axis]];
+                        double xh = xhat->data[oo * K + a];
+                        double dxh = dy * Gd[a];
+                        sum_dxh_xh += dxh * xh;
+                        dGd[a] += dy * xh;
+                    }
+                    double mean_dxh_xh = sum_dxh_xh / static_cast<double>(K);
+                    /* Second pass: dx_i. */
+                    double inv_rms = 1.0 / rms;
+                    for (int64_t a = 0; a < K; ++a) {
+                        double dy = Ad[baseA + a * As0_[axis]];
+                        double xh = xhat->data[oo * K + a];
+                        double dxh = dy * Gd[a];
+                        double dx = inv_rms * (dxh - xh * mean_dxh_xh);
+                        dXd[baseX + a * Xstr[axis]] = dx;
+                    }
+                    for (int k = nd - 1; k >= 0; --k) {
+                        if (k == axis) continue;
+                        if (++idx[k] < dims[k]) break;
+                        idx[k] = 0;
+                    }
+                }
+                accum(n.p1, dG);
                 accum(n.p0, dX);
             }
         } break;

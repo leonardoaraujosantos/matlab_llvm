@@ -6152,6 +6152,9 @@ bool TensorLowering::rewriteBuiltinCalls() {
         /* GroupNorm + EMA-tracked BN training. */
         {"matlab_dlnet_groupnorm",     "matlab_dlnet_groupnorm",    PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, F64}},
         {"matlab_dlnet_batchnorm_train","matlab_dlnet_batchnorm_train",PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, F64}},
+        /* InstanceNorm + RMSNorm. */
+        {"matlab_dlnet_instancenorm",  "matlab_dlnet_instancenorm", PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy}},
+        {"matlab_dlnet_rmsnorm",       "matlab_dlnet_rmsnorm",      PtrTy, {PtrTy, PtrTy, PtrTy, F64}},
         /* Deep Learning Toolbox Phase 1 — small extra ops over dlarray. */
         {"matlab_dlnet_rdivide",        "matlab_dlnet_rdivide",        PtrTy, {PtrTy, PtrTy, PtrTy}},
         {"matlab_dlnet_sqrt",           "matlab_dlnet_sqrt",           PtrTy, {PtrTy, PtrTy}},
@@ -6474,10 +6477,13 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"gpuArray_linspace", "matlab_gpuArray_linspace2",1, "ff"},
       {"sum",        "matlab_sum",        1, "p"},
       {"sum",        "matlab_sum_dim",    1, "pf"},
+      {"sum",        "matlab_sum_dims",   1, "pp"},
       {"prod",       "matlab_prod",       1, "p"},
       {"prod",       "matlab_prod_dim",   1, "pf"},
+      {"prod",       "matlab_prod_dims",  1, "pp"},
       {"mean",       "matlab_mean",       1, "p"},
       {"mean",       "matlab_mean_dim",   1, "pf"},
+      {"mean",       "matlab_mean_dims",  1, "pp"},
       {"min",        "matlab_min",        1, "p"},
       {"min",        "matlab_min_mm",     1, "pp"},  /* min(A, B) elementwise */
       {"min",        "matlab_min_dim3",   1, "ppf"}, /* min(A, [], dim) */

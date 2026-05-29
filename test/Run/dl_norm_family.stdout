@@ -1,0 +1,14 @@
+dl_norm_family: IN n=1 c=1 mean=0.0000 var=1.0000
+dl_norm_family: IN n=1 c=2 mean=-0.0000 var=1.0000
+dl_norm_family: IN n=1 c=3 mean=0.0000 var=1.0000
+dl_norm_family: IN n=2 c=1 mean=-0.0000 var=1.0000
+dl_norm_family: IN n=2 c=2 mean=-0.0000 var=1.0000
+dl_norm_family: IN n=2 c=3 mean=-0.0000 var=1.0000
+dl_norm_family: RMS col1 rms2=1.0000
+dl_norm_family: RMS col2 rms2=1.0000
+dl_norm_family: RMS col3 rms2=1.0000
+dl_norm_family: sum(M,[1 2 3]) ndims=4 size=1 1
+dl_norm_family: sum totals = 8 16 24
+dl_norm_family: mean(M2,[3 4]) ndims=2 size=4 4
+dl_norm_family: Mm(1,1)=2.750 Mm(4,4)=11.000
+dl_norm_family: PASS

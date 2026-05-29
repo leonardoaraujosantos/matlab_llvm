@@ -1875,6 +1875,99 @@ DIM_REDUCE(max, -INFINITY,  (x > acc ? x : acc), acc)
 
 #undef DIM_REDUCE
 
+/* sum(X, [1 2 3]) — multi-axis reduction.  The `dims_vec` argument is
+ * a 1×K (or K×1) matrix of 1-based axis indices.  Reduces over every
+ * axis in the list, leaving size 1 on each.  Output rank matches the
+ * input (with reduced axes collapsed to 1); trailing-singleton drop
+ * happens through matN_alloc.
+ *
+ * Generic pattern shared by sum / mean / prod / min / max. */
+#define MULTIDIM_REDUCE(NAME, INIT_EXPR, UPDATE_EXPR, FINALIZE_EXPR)     \
+    matlab_mat *matlab_##NAME##_dims(matlab_mat *A, matlab_mat *dims_vec) { \
+        if (!A || !dims_vec) return mat_alloc(0, 0);                       \
+        /* Recover input shape + strides for any rank. */                  \
+        int nd; int64_t dims[16], strides[16];                              \
+        const double *Ad;                                                  \
+        if (mat_is_nd(A)) {                                                \
+            matlab_matN *Mn = (matlab_matN *)A;                            \
+            nd = (int)Mn->ndims; if (nd > 16) nd = 16;                     \
+            for (int k = 0; k < nd; ++k) {                                 \
+                dims[k] = Mn->dims[k]; strides[k] = Mn->strides[k];        \
+            }                                                              \
+            Ad = Mn->data;                                                 \
+        } else if (mat_is_3d(A)) {                                         \
+            matlab_mat3 *M3 = (matlab_mat3 *)A;                            \
+            nd = 3; dims[0] = M3->rows; dims[1] = M3->cols; dims[2] = M3->depth; \
+            strides[0] = M3->cols; strides[1] = 1; strides[2] = M3->rows*M3->cols; \
+            Ad = M3->data;                                                 \
+        } else {                                                           \
+            nd = 2; dims[0] = A->rows; dims[1] = A->cols;                  \
+            strides[0] = A->cols; strides[1] = 1;                          \
+            Ad = A->data;                                                  \
+        }                                                                  \
+        /* Parse dims_vec into a bitmap of axes to reduce. */              \
+        int reduce[16] = {0};                                              \
+        int64_t reduceLen = 1;                                             \
+        int64_t numDims = dims_vec->rows * dims_vec->cols;                 \
+        for (int64_t i = 0; i < numDims; ++i) {                            \
+            int d = (int)dims_vec->data[i] - 1;                            \
+            if (d >= 0 && d < nd) {                                        \
+                if (!reduce[d]) reduceLen *= dims[d];                      \
+                reduce[d] = 1;                                             \
+            }                                                              \
+        }                                                                  \
+        /* Output dims: reduced axes -> 1, others unchanged. */            \
+        int64_t outDims[16];                                               \
+        int64_t outerN = 1;                                                \
+        for (int k = 0; k < nd; ++k) {                                     \
+            outDims[k] = reduce[k] ? 1 : dims[k];                          \
+            outerN *= outDims[k];                                          \
+        }                                                                  \
+        void *Rv = matN_alloc(nd, outDims);                                \
+        double *Rd = mat_is_nd(Rv) ? ((matlab_matN *)Rv)->data             \
+                  : mat_is_3d(Rv) ? ((matlab_mat3 *)Rv)->data               \
+                                  : ((matlab_mat *)Rv)->data;              \
+        /* Walk every output cell; for each, sum over the reduce axes. */ \
+        int64_t outerIdx[16] = {0};                                        \
+        for (int64_t oo = 0; oo < outerN; ++oo) {                          \
+            int64_t srcBase = 0;                                           \
+            for (int k = 0; k < nd; ++k)                                   \
+                if (!reduce[k]) srcBase += outerIdx[k] * strides[k];       \
+            /* Iterate over reduce-axis product. */                        \
+            double acc = INIT_EXPR;                                        \
+            int64_t total = reduceLen;                                     \
+            (void)total;                                                   \
+            int64_t redIdx[16] = {0};                                      \
+            for (int64_t rr = 0; rr < reduceLen; ++rr) {                   \
+                int64_t off = srcBase;                                     \
+                for (int k = 0; k < nd; ++k)                               \
+                    if (reduce[k]) off += redIdx[k] * strides[k];          \
+                double x = Ad[off];                                        \
+                acc = UPDATE_EXPR;                                         \
+                for (int k = nd - 1; k >= 0; --k) {                        \
+                    if (!reduce[k]) continue;                              \
+                    if (++redIdx[k] < dims[k]) break;                      \
+                    redIdx[k] = 0;                                         \
+                }                                                          \
+            }                                                              \
+            Rd[oo] = reduceLen > 0 ? (FINALIZE_EXPR) : INIT_EXPR;           \
+            for (int k = nd - 1; k >= 0; --k) {                            \
+                if (reduce[k]) continue;                                   \
+                if (++outerIdx[k] < dims[k]) break;                        \
+                outerIdx[k] = 0;                                           \
+            }                                                              \
+        }                                                                  \
+        return (matlab_mat *)Rv;                                           \
+    }
+
+MULTIDIM_REDUCE(sum,  0.0,       acc + x,                   acc)
+MULTIDIM_REDUCE(prod, 1.0,       acc * x,                   acc)
+MULTIDIM_REDUCE(mean, 0.0,       acc + x,                   acc / (double)total)
+MULTIDIM_REDUCE(min,  INFINITY,  (x < acc ? x : acc),       acc)
+MULTIDIM_REDUCE(max, -INFINITY,  (x > acc ? x : acc),       acc)
+
+#undef MULTIDIM_REDUCE
+
 /* max(A, [], dim) / min(A, [], dim): the MATLAB along-dim form — the empty
  * middle arg distinguishes it from elementwise max(A, B). Ignore the empty
  * placeholder and reduce along dim (incl. dim 3 on a mat3 -> M×N). */
@@ -7142,6 +7235,13 @@ double matlab_subscript1_s(matlab_mat *A, double i) {
      * flat slice-major buffer (the project's documented order — not MATLAB's
      * column-major; order-independent reductions like sum(A(:)) are
      * unaffected). */
+    if (mat_is_nd(A)) {
+        matlab_matN *m = (matlab_matN *)A;
+        int64_t total = 1;
+        for (uint32_t k = 0; k < m->ndims; ++k) total *= m->dims[k];
+        if (idx < 0 || idx >= total) return 0.0;
+        return m->data[idx];
+    }
     if (mat_is_3d(A)) {
         matlab_mat3 *m = (matlab_mat3 *)A;
         int64_t total = m->rows * m->cols * m->depth;

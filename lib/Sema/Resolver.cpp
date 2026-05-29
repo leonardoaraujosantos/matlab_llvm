@@ -639,6 +639,7 @@ void Resolver::registerBuiltins() {
     "maxpool2d", "avgpool2d", "batchnorm", "conv2d_full",
     "layernorm", "batchnorm_eval",
     "groupnorm", "batchnorm_train",
+    "instancenorm", "rmsnorm",
     /* DL HDL Tier H1 — INT8 quantization (plain numeric in/out). */
     "dlquantize", "dlqscale",
     /* DL T6.5 — quantizer calibration + activation clipping. */
@@ -663,6 +664,7 @@ void Resolver::registerBuiltins() {
     "matlab_dlnet_softmax_dim",
     "matlab_dlnet_layernorm", "matlab_dlnet_batchnorm_eval",
     "matlab_dlnet_groupnorm", "matlab_dlnet_batchnorm_train",
+    "matlab_dlnet_instancenorm", "matlab_dlnet_rmsnorm",
     "matlab_dlnet_quantize", "matlab_dlnet_qscale",
     "matlab_dlnet_qclip", "matlab_dlnet_qcalibrate",
     "matlab_dlnet_grad", "matlab_dlnet_reset",
