@@ -603,6 +603,88 @@ matlab_mat *matlab_matmul_mm(matlab_mat *A, matlab_mat *B) {
     return C;
 }
 
+/* matmul3(A, B) — batched 2-D matmul.  A is (M, K, B), B is (K, N, B);
+ * result is (M, N, B).  Implemented as B independent matlab_matmul_mm
+ * calls per (M, K) × (K, N) slice, returning a contiguous rank-3 matN
+ * (or mat3 — both are valid receiving descriptors via matN_alloc).
+ *
+ * Useful for multi-head attention where the per-head matmul is the
+ * inner kernel: reshape (D, T) -> (d, H, T) -> permute -> 3-way slice
+ * over H, then matmul3.  The shipped matlab_matmul_mm already routes
+ * to BLAS dgemm above the 64^3 threshold; this layer composes B such
+ * calls without per-pair allocator overhead. */
+void *matlab_matmul3(void *Av, void *Bv) {
+    if (!Av || !Bv) return mat_alloc(0, 0);
+    /* Recover (M, K, Ba) and (Kb, N, Bb) — both must be rank-3 matN /
+     * mat3.  Trailing-singleton drop means a 2-D input with B = 1 is
+     * also accepted (delegates to plain matlab_matmul_mm). */
+    int64_t M, K, Ba; const double *Ad; int64_t As0, As1, As2;
+    int64_t Kb, N, Bb; const double *Bd; int64_t Bs0, Bs1, Bs2;
+    auto loadShape = [](void *p, int64_t &d0, int64_t &d1, int64_t &d2,
+                        const double *&data,
+                        int64_t &s0, int64_t &s1, int64_t &s2) -> bool {
+        if (mat_is_nd(p)) {
+            matlab_matN *M_ = (matlab_matN *)p;
+            if (M_->ndims != 3) return false;
+            d0 = M_->dims[0]; d1 = M_->dims[1]; d2 = M_->dims[2];
+            s0 = M_->strides[0]; s1 = M_->strides[1]; s2 = M_->strides[2];
+            data = M_->data; return true;
+        }
+        if (mat_is_3d(p)) {
+            matlab_mat3 *M3 = (matlab_mat3 *)p;
+            d0 = M3->rows; d1 = M3->cols; d2 = M3->depth;
+            s0 = M3->cols; s1 = 1; s2 = M3->rows * M3->cols;
+            data = M3->data; return true;
+        }
+        /* 2-D fallback: B = 1. */
+        matlab_mat *M2 = (matlab_mat *)p;
+        d0 = M2->rows; d1 = M2->cols; d2 = 1;
+        s0 = M2->cols; s1 = 1; s2 = 0;
+        data = M2->data; return true;
+    };
+    if (!loadShape(Av, M, K, Ba, Ad, As0, As1, As2)) return mat_alloc(0, 0);
+    if (!loadShape(Bv, Kb, N, Bb, Bd, Bs0, Bs1, Bs2)) return mat_alloc(0, 0);
+    if (K != Kb || Ba != Bb) return mat_alloc(0, 0);
+    int64_t Bn = Ba;
+    /* Output: (M, N, Bn). */
+    int64_t outDims[3] = {M, N, Bn};
+    void *Rv = matN_alloc(3, outDims);
+    double *Yd = mat_is_nd(Rv) ? ((matlab_matN *)Rv)->data
+              : mat_is_3d(Rv) ? ((matlab_mat3 *)Rv)->data
+                              : ((matlab_mat *)Rv)->data;
+    int64_t Ys0, Ys1, Ys2;
+    if (mat_is_nd(Rv)) {
+        matlab_matN *Rn = (matlab_matN *)Rv;
+        Ys0 = Rn->strides[0]; Ys1 = Rn->strides[1]; Ys2 = Rn->strides[2];
+    } else if (mat_is_3d(Rv)) {
+        matlab_mat3 *R3 = (matlab_mat3 *)Rv;
+        Ys0 = R3->cols; Ys1 = 1; Ys2 = R3->rows * R3->cols;
+    } else {
+        matlab_mat *R2 = (matlab_mat *)Rv;
+        Ys0 = R2->cols; Ys1 = 1; Ys2 = 0;
+    }
+    /* Per-slice: pack slices into 2-D scratch matrices and call
+     * matlab_matmul_mm so each batch element gets the BLAS path. */
+    matlab_mat *Asl = mat_alloc(M, K);
+    matlab_mat *Bsl = mat_alloc(K, N);
+    for (int64_t b = 0; b < Bn; ++b) {
+        for (int64_t i = 0; i < M; ++i)
+            for (int64_t k = 0; k < K; ++k)
+                Asl->data[i * K + k] = Ad[i*As0 + k*As1 + b*As2];
+        for (int64_t k = 0; k < K; ++k)
+            for (int64_t j = 0; j < N; ++j)
+                Bsl->data[k * N + j] = Bd[k*Bs0 + j*Bs1 + b*Bs2];
+        matlab_mat *C = matlab_matmul_mm(Asl, Bsl);
+        for (int64_t i = 0; i < M; ++i)
+            for (int64_t j = 0; j < N; ++j)
+                Yd[i*Ys0 + j*Ys1 + b*Ys2] = C->data[i * N + j];
+        free(C->data); free(C);
+    }
+    free(Asl->data); free(Asl);
+    free(Bsl->data); free(Bsl);
+    return Rv;
+}
+
 /*
  * In-place LU factorization with partial pivoting.
  *

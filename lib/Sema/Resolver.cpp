@@ -667,7 +667,14 @@ void Resolver::registerBuiltins() {
     "matlab_dlnet_instancenorm", "matlab_dlnet_rmsnorm",
     "matlab_dlnet_quantize", "matlab_dlnet_qscale",
     "matlab_dlnet_qclip", "matlab_dlnet_qcalibrate",
-    "matlab_dlnet_grad", "matlab_dlnet_reset",
+    "matlab_dlnet_grad", "matlab_dlnet_reset", "matlab_dlnet_reset0",
+    "matlab_dltape_size", "matlab_dltape_truncate",
+    "matlab_dlnet_sgdmupdate", "matlab_dlnet_adamupdate",
+    /* User-facing names — `dlreset()` between training iters, plus
+     * `dltape_size()` / `dltape_truncate(n)` for fine-grained checkpoints;
+     * `sgdmupdate` / `adamupdate` for functional optimizer step. */
+    "dlreset", "dltape_size", "dltape_truncate",
+    "sgdmupdate", "adamupdate",
     /* Inverse Tustin: discrete-to-continuous. */
     "d2c_tustin",
     /* Tier 3.4 / 2.3 — gramians and state-space step response. */
@@ -896,6 +903,7 @@ void Resolver::registerBuiltins() {
     "conv", "conv2",
     /* Tier C: rank-4 batched convolution forward + im2col helper. */
     "conv2d_batch", "im2col_2d", "im2col_2d_pad", "conv2d_batch_full",
+    "matmul3",
     "filter", "any", "all", "tril", "triu",
     "fftshift", "ifftshift",
     "std", "var", "median", "diff",

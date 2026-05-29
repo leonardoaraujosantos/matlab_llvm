@@ -1,0 +1,4 @@
+dl_digit_classifier: loss(0)=1.386 loss(40)=0.000
+dl_digit_classifier: final tape size = 18 (bounded by dlreset)
+dl_digit_classifier: P .* T sum = 4.000 / 4 (mean self-prob = 1.000)
+dl_digit_classifier: PASS

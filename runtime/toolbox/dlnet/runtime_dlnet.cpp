@@ -3698,6 +3698,123 @@ matlab_mat *matlab_dlnet_grad(void *lossv, void *varv) {
 
 // Reset the tape (dlfeval entry / start of a fresh forward pass).
 matlab_mat *matlab_dlnet_reset(double dummy) { (void)dummy; dlnet::g_tape.clear(); return mat_alloc(0,0); }
+matlab_mat *matlab_dlnet_reset0(void) { dlnet::g_tape.clear(); return mat_alloc(0,0); }
+
+// ---- Tape-scoping primitives ----------------------------------------------
+// Without explicit scoping, the dlnet tape grows monotonically across
+// training iterations — each forward records new nodes that survive
+// until the program exits.  For long-running loops this means:
+//   (a) memory grows ~linearly with iter count, and
+//   (b) every dlgradient walks all prior nodes (zero-init adj for
+//       each), so per-iter wall time grows too.
+//
+// The recommended pattern is:
+//
+//   for k = 1:N
+//       dlreset();           % truncate tape back to zero
+//       Y = forward(...);    % build a fresh subgraph
+//       loss = ...;
+//       g    = dlgradient(loss, w);
+//       w    = update(w, g);
+//   end
+//
+// dltape_size() returns the current tape node count (debug + tests).
+// dltape_truncate(n) drops everything past index n — lets a caller
+// "checkpoint + restore" for partial reuse (e.g. shared encoder, fresh
+// classifier head per minibatch).
+double matlab_dltape_size(double dummy) {
+    (void)dummy;
+    return static_cast<double>(dlnet::g_tape.size());
+}
+matlab_mat *matlab_dltape_truncate(double n) {
+    int64_t target = static_cast<int64_t>(n);
+    if (target < 0) target = 0;
+    if (target > static_cast<int64_t>(dlnet::g_tape.size()))
+        target = static_cast<int64_t>(dlnet::g_tape.size());
+    dlnet::g_tape.resize(static_cast<size_t>(target));
+    return mat_alloc(0, 0);
+}
+
+/* ---- Functional optimizers ------------------------------------------------
+ *
+ * MATLAB exposes a small family of "update" functions that take the current
+ * parameter, its gradient, and the optimiser-state buffers; return the new
+ * parameter while updating the state buffers in place.  Same shape as the
+ * BatchNorm-train EMA pattern (running stats threaded through dlarrays).
+ *
+ * Each helper is rank-agnostic — walks via nelem/flatdata so matN / mat3 /
+ * mat all work.  Caller maintains the state buffers as plain numeric matrices
+ * (or dlarrays whose extractdata they thread back through the loop). */
+
+/* SGD with momentum:
+ *   v_new   = β·v + (1 − β)·g       (heavy-ball variant)
+ *   w_new   = w − lr·v_new
+ * `v` is updated in place. */
+matlab_mat *matlab_dlnet_sgdmupdate(matlab_mat *W, matlab_mat *G,
+                                    matlab_mat *V,
+                                    double lr, double beta) {
+    using namespace dlnet;
+    if (!W || !G || !V) return mat_alloc(0, 0);
+    int64_t nw = nelem(W), ng = nelem(G), nv = nelem(V);
+    if (nw != ng || nw != nv) return mat_alloc(0, 0);
+    double *Wd = flatdata(W);
+    const double *Gd = flatdata(G);
+    double *Vd = flatdata(V);
+    matlab_mat *Wn = clone(W);
+    double *Wnd = flatdata(Wn);
+    double oneMinusB = 1.0 - beta;
+    for (int64_t i = 0; i < nw; ++i) {
+        double vnew = beta * Vd[i] + oneMinusB * Gd[i];
+        Vd[i] = vnew;
+        Wnd[i] = Wd[i] - lr * vnew;
+    }
+    return Wn;
+}
+
+/* Adam (Kingma & Ba 2014):
+ *   m_new   = β1·m + (1 − β1)·g
+ *   v_new   = β2·v + (1 − β2)·g²
+ *   m_hat   = m_new / (1 − β1^t)
+ *   v_hat   = v_new / (1 − β2^t)
+ *   w_new   = w − lr · m_hat / (√v_hat + ε)
+ * `m` and `v` are updated in place; `t` is the 1-based step counter
+ * (caller increments per call). */
+matlab_mat *matlab_dlnet_adamupdate(matlab_mat *W, matlab_mat *G,
+                                    matlab_mat *M, matlab_mat *V,
+                                    double t_d,
+                                    double lr, double b1, double b2, double eps) {
+    using namespace dlnet;
+    if (!W || !G || !M || !V) return mat_alloc(0, 0);
+    int64_t nw = nelem(W);
+    if (nelem(G) != nw || nelem(M) != nw || nelem(V) != nw) return mat_alloc(0, 0);
+    double *Wd = flatdata(W);
+    const double *Gd = flatdata(G);
+    double *Md = flatdata(M);
+    double *Vd = flatdata(V);
+    matlab_mat *Wn = clone(W);
+    double *Wnd = flatdata(Wn);
+    int64_t t = static_cast<int64_t>(t_d);
+    if (t < 1) t = 1;
+    double bc1 = 1.0 - std::pow(b1, static_cast<double>(t));
+    double bc2 = 1.0 - std::pow(b2, static_cast<double>(t));
+    if (bc1 <= 0) bc1 = 1e-12;
+    if (bc2 <= 0) bc2 = 1e-12;
+    double inv_bc1 = 1.0 / bc1;
+    double inv_bc2 = 1.0 / bc2;
+    double oneMinusB1 = 1.0 - b1;
+    double oneMinusB2 = 1.0 - b2;
+    for (int64_t i = 0; i < nw; ++i) {
+        double g = Gd[i];
+        double mnew = b1 * Md[i] + oneMinusB1 * g;
+        double vnew = b2 * Vd[i] + oneMinusB2 * g * g;
+        Md[i] = mnew;
+        Vd[i] = vnew;
+        double mhat = mnew * inv_bc1;
+        double vhat = vnew * inv_bc2;
+        Wnd[i] = Wd[i] - lr * mhat / (std::sqrt(vhat) + eps);
+    }
+    return Wn;
+}
 
 // ---- HDL Tier H1 — symmetric INT8 quantization ----------------------------
 // dlquantize(W)   -> the dequantized weight matrix (Q * scale), bit-accurate

@@ -1,0 +1,2 @@
+matmul3_batched: cumulative sse = 0.000000
+matmul3_batched: PASS
