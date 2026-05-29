@@ -228,7 +228,11 @@ enum { OP_LEAF, OP_ADD, OP_SUB, OP_MTIMES, OP_TIMES, OP_RELU, OP_SIGMOID,
        /* LayerNorm (axis-aware) + GroupNorm + EMA-tracked BN training +
         * InstanceNorm + RMSNorm. */
        OP_LAYERNORM, OP_GROUPNORM, OP_BATCHNORM_TRAIN,
-       OP_INSTANCENORM, OP_RMSNORM };
+       OP_INSTANCENORM, OP_RMSNORM,
+       /* Tape-tracked concatenation: vertcat (along rows, axis=1) and
+        * horzcat (along cols, axis=2).  Two-input forms suffice for
+        * the cat+single-Wo head-merge pattern in multi-head attention. */
+       OP_VERTCAT, OP_HORZCAT };
 
 struct Node {
     int op;
@@ -380,6 +384,48 @@ matlab_mat *matlab_dlnet_plus  (void *r, void *a, void *b) { return bin_op(r, a,
 matlab_mat *matlab_dlnet_minus (void *r, void *a, void *b) { return bin_op(r, a, b, dlnet::OP_SUB); }
 matlab_mat *matlab_dlnet_mtimes(void *r, void *a, void *b) { return bin_op(r, a, b, dlnet::OP_MTIMES); }
 matlab_mat *matlab_dlnet_times (void *r, void *a, void *b) { return bin_op(r, a, b, dlnet::OP_TIMES); }
+
+/* ---- vertcat / horzcat (tape-tracked) ----------------------------------- *
+ * Two-input shape concat.  Backward slices the adjoint back to the
+ * appropriate row / col ranges.  Restricted to plain 2-D matlab_mat
+ * operands (rank ≥ 3 cat is its own carve-down via cat(dim,…)). */
+static matlab_mat *vertcat_forward(matlab_mat *A, matlab_mat *B) {
+    if (!A || !B || A->cols != B->cols) return mat_alloc(0, 0);
+    int64_t Ar = A->rows, Br = B->rows, C = A->cols;
+    matlab_mat *Y = mat_alloc(Ar + Br, C);
+    for (int64_t i = 0; i < Ar; ++i)
+        for (int64_t j = 0; j < C; ++j) Y->data[i * C + j] = A->data[i * C + j];
+    for (int64_t i = 0; i < Br; ++i)
+        for (int64_t j = 0; j < C; ++j) Y->data[(Ar + i) * C + j] = B->data[i * C + j];
+    return Y;
+}
+static matlab_mat *horzcat_forward(matlab_mat *A, matlab_mat *B) {
+    if (!A || !B || A->rows != B->rows) return mat_alloc(0, 0);
+    int64_t R = A->rows, Ac = A->cols, Bc = B->cols;
+    matlab_mat *Y = mat_alloc(R, Ac + Bc);
+    int64_t Yc = Ac + Bc;
+    for (int64_t i = 0; i < R; ++i) {
+        for (int64_t j = 0; j < Ac; ++j) Y->data[i * Yc + j] = A->data[i * Ac + j];
+        for (int64_t j = 0; j < Bc; ++j) Y->data[i * Yc + (Ac + j)] = B->data[i * Bc + j];
+    }
+    return Y;
+}
+matlab_mat *matlab_dlnet_vertcat(void *r, void *a, void *b) {
+    using namespace dlnet;
+    matlab_mat *A = get_data(a), *B = get_data(b);
+    matlab_mat *Y = vertcat_forward(A, B);
+    set_data(r, Y);
+    set_id(r, record(OP_VERTCAT, get_id(a), get_id(b), Y));
+    return mat_alloc(0, 0);
+}
+matlab_mat *matlab_dlnet_horzcat(void *r, void *a, void *b) {
+    using namespace dlnet;
+    matlab_mat *A = get_data(a), *B = get_data(b);
+    matlab_mat *Y = horzcat_forward(A, B);
+    set_data(r, Y);
+    set_id(r, record(OP_HORZCAT, get_id(a), get_id(b), Y));
+    return mat_alloc(0, 0);
+}
 
 // ---- unary / activation ops -----------------------------------------------
 static matlab_mat *un_forward(int op, matlab_mat *X) {
@@ -3736,6 +3782,41 @@ matlab_mat *matlab_dlnet_grad(void *lossv, void *varv) {
                 accum(n.p0, dX);
             }
         } break;
+        case OP_VERTCAT: {
+            /* Forward: Y = [P0; P1] (Ar+Br rows, C cols).
+             * Backward: dP0 = A(1:Ar, :);  dP1 = A(Ar+1:end, :). */
+            if (P0 && P1 && A) {
+                int64_t Ar = P0->rows, Br = P1->rows, C = P0->cols;
+                if (A->cols == C && A->rows == Ar + Br) {
+                    matlab_mat *dA = mat_alloc(Ar, C);
+                    matlab_mat *dB = mat_alloc(Br, C);
+                    for (int64_t i = 0; i < Ar; ++i)
+                        for (int64_t j = 0; j < C; ++j) dA->data[i * C + j] = A->data[i * C + j];
+                    for (int64_t i = 0; i < Br; ++i)
+                        for (int64_t j = 0; j < C; ++j) dB->data[i * C + j] = A->data[(Ar + i) * C + j];
+                    accum(n.p0, dA);
+                    accum(n.p1, dB);
+                }
+            }
+        } break;
+        case OP_HORZCAT: {
+            /* Forward: Y = [P0  P1] (R rows, Ac+Bc cols).
+             * Backward: dP0 = A(:, 1:Ac);  dP1 = A(:, Ac+1:end). */
+            if (P0 && P1 && A) {
+                int64_t R = P0->rows, Ac = P0->cols, Bc = P1->cols;
+                int64_t Yc = Ac + Bc;
+                if (A->rows == R && A->cols == Yc) {
+                    matlab_mat *dA = mat_alloc(R, Ac);
+                    matlab_mat *dB = mat_alloc(R, Bc);
+                    for (int64_t i = 0; i < R; ++i) {
+                        for (int64_t j = 0; j < Ac; ++j) dA->data[i * Ac + j] = A->data[i * Yc + j];
+                        for (int64_t j = 0; j < Bc; ++j) dB->data[i * Bc + j] = A->data[i * Yc + (Ac + j)];
+                    }
+                    accum(n.p0, dA);
+                    accum(n.p1, dB);
+                }
+            }
+        } break;
         default: break;
         }
     }
@@ -4211,6 +4292,263 @@ matlab_mat *matlab_dlnet_imds_split(matlab_mat *, double p) {
     matlab_mat *out = mat_alloc(1, 1);
     out->data[0] = static_cast<double>(g_kept.size());
     return out;
+}
+
+}  // extern "C"
+
+/* =====================================================================
+ * C: dlnetwork carrier — sequential layer-list driver
+ *
+ * MATLAB's `dlnetwork` is a classdef object that wraps an array of
+ * layer objects (`imageInputLayer`, `fullyConnectedLayer`, etc.).
+ * The "true" object-array surface is gated on classdef array literals
+ * (a Sema feature, multi-week work).
+ *
+ * Pragmatic unlock: same user-facing pattern via a runtime-resident
+ * sequential carrier.  The handle is a 1x1 mat whose data[0] is the
+ * net index in g_nets.  Each net stores a vector of layer descriptors;
+ * each layer is one of:
+ *   - FC(W, b)            -- fully-connected: y = W*x + b
+ *   - Relu / Sigmoid / Tanh / Softmax  -- elementwise
+ *
+ * forward(net, X) chains them.  train(net, X, Y_target, lr, n_iter)
+ * trains end-to-end with Adam over the FC weights.  This is the
+ * "dlnetwork + trainnet" carve-down unlock, minus the classdef array
+ * literal syntax.
+ * =================================================================== */
+namespace dlnet_net {
+
+enum LayerKind { L_FC = 1, L_RELU = 2, L_SIGMOID = 3, L_TANH = 4, L_SOFTMAX = 5 };
+
+struct Layer {
+    int kind;
+    matlab_mat *W = nullptr;   /* FC: kxin */
+    matlab_mat *b = nullptr;   /* FC: kx1  (bias column) */
+    /* Adam state — owned by the layer, lazily initialised on first train. */
+    matlab_mat *mW = nullptr;
+    matlab_mat *vW = nullptr;
+    matlab_mat *mb = nullptr;
+    matlab_mat *vb = nullptr;
+};
+
+struct Net {
+    std::vector<Layer> layers;
+};
+
+static std::vector<Net> g_nets;  /* indexed by handle.data[0] - 1 */
+
+static int handle_to_idx(matlab_mat *h) {
+    if (!h || h->rows * h->cols < 1) return -1;
+    int i = static_cast<int>(h->data[0]) - 1;
+    if (i < 0 || i >= static_cast<int>(g_nets.size())) return -1;
+    return i;
+}
+
+static matlab_mat *mat_clone_d(const matlab_mat *src) {
+    if (!src) return mat_alloc(0, 0);
+    matlab_mat *o = mat_alloc(src->rows, src->cols);
+    int64_t n = src->rows * src->cols;
+    for (int64_t i = 0; i < n; ++i) o->data[i] = src->data[i];
+    return o;
+}
+
+}  /* namespace dlnet_net */
+
+extern "C" {
+
+matlab_mat *matlab_dlnet_net_new(void) {
+    dlnet_net::g_nets.emplace_back();
+    matlab_mat *h = mat_alloc(1, 1);
+    h->data[0] = static_cast<double>(dlnet_net::g_nets.size());
+    return h;
+}
+
+matlab_mat *matlab_dlnet_net_add_fc(matlab_mat *h, matlab_mat *W, matlab_mat *b) {
+    using namespace dlnet_net;
+    int i = handle_to_idx(h);
+    if (i < 0 || !W || !b) return h;
+    Layer L;
+    L.kind = L_FC;
+    L.W = mat_clone_d(W);
+    L.b = mat_clone_d(b);
+    g_nets[static_cast<size_t>(i)].layers.push_back(std::move(L));
+    return h;
+}
+matlab_mat *matlab_dlnet_net_add_relu   (matlab_mat *h) { using namespace dlnet_net; int i = handle_to_idx(h); if (i >= 0) g_nets[static_cast<size_t>(i)].layers.push_back({L_RELU}); return h; }
+matlab_mat *matlab_dlnet_net_add_sigmoid(matlab_mat *h) { using namespace dlnet_net; int i = handle_to_idx(h); if (i >= 0) g_nets[static_cast<size_t>(i)].layers.push_back({L_SIGMOID}); return h; }
+matlab_mat *matlab_dlnet_net_add_tanh   (matlab_mat *h) { using namespace dlnet_net; int i = handle_to_idx(h); if (i >= 0) g_nets[static_cast<size_t>(i)].layers.push_back({L_TANH}); return h; }
+matlab_mat *matlab_dlnet_net_add_softmax(matlab_mat *h) { using namespace dlnet_net; int i = handle_to_idx(h); if (i >= 0) g_nets[static_cast<size_t>(i)].layers.push_back({L_SOFTMAX}); return h; }
+
+double matlab_dlnet_net_num_layers(matlab_mat *h) {
+    using namespace dlnet_net;
+    int i = handle_to_idx(h);
+    if (i < 0) return 0.0;
+    return static_cast<double>(g_nets[static_cast<size_t>(i)].layers.size());
+}
+
+/* Apply a single layer: y_out = layer(x_in).  Allocates a fresh y. */
+static matlab_mat *apply_layer(const dlnet_net::Layer &L, matlab_mat *X) {
+    using namespace dlnet_net;
+    if (L.kind == L_FC) {
+        /* Y = W * X + b  (broadcast bias across columns). */
+        matlab_mat *WX = matlab_matmul_mm(L.W, X);
+        int64_t r = WX->rows, c = WX->cols;
+        for (int64_t i = 0; i < r; ++i)
+            for (int64_t j = 0; j < c; ++j) WX->data[i * c + j] += L.b->data[i];
+        return WX;
+    }
+    int64_t r = X->rows, c = X->cols;
+    matlab_mat *Y = mat_alloc(r, c);
+    int64_t n = r * c;
+    if (L.kind == L_RELU)    { for (int64_t i = 0; i < n; ++i) Y->data[i] = X->data[i] > 0 ? X->data[i] : 0; }
+    else if (L.kind == L_SIGMOID) { for (int64_t i = 0; i < n; ++i) Y->data[i] = 1.0 / (1.0 + std::exp(-X->data[i])); }
+    else if (L.kind == L_TANH)    { for (int64_t i = 0; i < n; ++i) Y->data[i] = std::tanh(X->data[i]); }
+    else if (L.kind == L_SOFTMAX) {
+        for (int64_t j = 0; j < c; ++j) {
+            double m = X->data[j];
+            for (int64_t i = 1; i < r; ++i) if (X->data[i * c + j] > m) m = X->data[i * c + j];
+            double s = 0; for (int64_t i = 0; i < r; ++i) { double e = std::exp(X->data[i * c + j] - m); Y->data[i * c + j] = e; s += e; }
+            for (int64_t i = 0; i < r; ++i) Y->data[i * c + j] /= s;
+        }
+    } else {
+        for (int64_t i = 0; i < n; ++i) Y->data[i] = X->data[i];
+    }
+    return Y;
+}
+
+matlab_mat *matlab_dlnet_net_predict(matlab_mat *h, matlab_mat *X) {
+    using namespace dlnet_net;
+    int idx = handle_to_idx(h);
+    if (idx < 0 || !X) return mat_alloc(0, 0);
+    matlab_mat *cur = mat_clone_d(X);
+    for (auto &L : g_nets[static_cast<size_t>(idx)].layers) {
+        matlab_mat *nxt = apply_layer(L, cur);
+        cur = nxt;
+    }
+    return cur;
+}
+
+/* train(handle, X, Y, lr, n_iter, b1=0.9, b2=0.999, eps=1e-8) -> final MSE.
+ * Forward chains apply_layer; backward walks layers in reverse using the
+ * stashed forward activations + analytic per-op gradient.  Adam per FC layer. */
+double matlab_dlnet_net_train(matlab_mat *h, matlab_mat *X, matlab_mat *Y,
+                               double lr, double n_iter) {
+    using namespace dlnet_net;
+    int idx = handle_to_idx(h);
+    if (idx < 0 || !X || !Y) return 0.0;
+    Net &net = g_nets[static_cast<size_t>(idx)];
+    /* Initialise Adam state lazily. */
+    for (auto &L : net.layers) {
+        if (L.kind == L_FC && !L.mW) {
+            int64_t kr = L.W->rows, kc = L.W->cols;
+            L.mW = mat_alloc(kr, kc); for (int64_t i = 0; i < kr*kc; ++i) L.mW->data[i] = 0.0;
+            L.vW = mat_alloc(kr, kc); for (int64_t i = 0; i < kr*kc; ++i) L.vW->data[i] = 0.0;
+            int64_t br = L.b->rows, bc = L.b->cols;
+            L.mb = mat_alloc(br, bc); for (int64_t i = 0; i < br*bc; ++i) L.mb->data[i] = 0.0;
+            L.vb = mat_alloc(br, bc); for (int64_t i = 0; i < br*bc; ++i) L.vb->data[i] = 0.0;
+        }
+    }
+    double b1 = 0.9, b2 = 0.999, eps = 1e-8;
+    double final_loss = 0.0;
+    int64_t N = static_cast<int64_t>(n_iter);
+    if (N < 1) N = 1;
+    int64_t Xc = X->cols;
+    for (int64_t t = 1; t <= N; ++t) {
+        /* Forward — stash activations per layer. */
+        std::vector<matlab_mat *> acts;
+        acts.push_back(mat_clone_d(X));
+        for (auto &L : net.layers) {
+            matlab_mat *nxt = apply_layer(L, acts.back());
+            acts.push_back(nxt);
+        }
+        matlab_mat *yhat = acts.back();
+        /* MSE loss: 0.5 * sum((yhat - Y)^2) / Xc. */
+        int64_t nE = yhat->rows * yhat->cols;
+        double loss = 0;
+        matlab_mat *grad = mat_alloc(yhat->rows, yhat->cols);
+        for (int64_t i = 0; i < nE; ++i) {
+            double d = yhat->data[i] - Y->data[i];
+            loss += 0.5 * d * d;
+            grad->data[i] = d / static_cast<double>(Xc);
+        }
+        final_loss = loss / static_cast<double>(Xc);
+        /* Backward + per-FC-layer Adam. */
+        for (int64_t li = static_cast<int64_t>(net.layers.size()) - 1; li >= 0; --li) {
+            Layer &L = net.layers[static_cast<size_t>(li)];
+            matlab_mat *x_in  = acts[static_cast<size_t>(li)];
+            matlab_mat *y_out = acts[static_cast<size_t>(li + 1)];
+            matlab_mat *next_grad = nullptr;
+            if (L.kind == L_FC) {
+                /* dW = grad * x_in^T;  db = sum(grad, dim=2);
+                 * d_x = W^T * grad. */
+                int64_t k = L.W->rows, in_n = L.W->cols, B = grad->cols;
+                matlab_mat *dW = mat_alloc(k, in_n);
+                for (int64_t i = 0; i < k; ++i)
+                    for (int64_t j = 0; j < in_n; ++j) {
+                        double s = 0;
+                        for (int64_t r = 0; r < B; ++r) s += grad->data[i * B + r] * x_in->data[j * B + r];
+                        dW->data[i * in_n + j] = s;
+                    }
+                matlab_mat *db = mat_alloc(L.b->rows, L.b->cols);
+                for (int64_t i = 0; i < k; ++i) {
+                    double s = 0;
+                    for (int64_t r = 0; r < B; ++r) s += grad->data[i * B + r];
+                    db->data[i] = s;
+                }
+                /* d_x = W^T * grad. */
+                matlab_mat *Wt = mat_alloc(in_n, k);
+                for (int64_t i = 0; i < k; ++i) for (int64_t j = 0; j < in_n; ++j) Wt->data[j * k + i] = L.W->data[i * in_n + j];
+                next_grad = matlab_matmul_mm(Wt, grad);
+                /* Adam on W. */
+                double bc1 = 1.0 - std::pow(b1, static_cast<double>(t));
+                double bc2 = 1.0 - std::pow(b2, static_cast<double>(t));
+                for (int64_t i = 0; i < k * in_n; ++i) {
+                    L.mW->data[i] = b1 * L.mW->data[i] + (1.0 - b1) * dW->data[i];
+                    L.vW->data[i] = b2 * L.vW->data[i] + (1.0 - b2) * dW->data[i] * dW->data[i];
+                    double mhat = L.mW->data[i] / bc1;
+                    double vhat = L.vW->data[i] / bc2;
+                    L.W->data[i] -= lr * mhat / (std::sqrt(vhat) + eps);
+                }
+                for (int64_t i = 0; i < L.b->rows * L.b->cols; ++i) {
+                    L.mb->data[i] = b1 * L.mb->data[i] + (1.0 - b1) * db->data[i];
+                    L.vb->data[i] = b2 * L.vb->data[i] + (1.0 - b2) * db->data[i] * db->data[i];
+                    double mhat = L.mb->data[i] / bc1;
+                    double vhat = L.vb->data[i] / bc2;
+                    L.b->data[i] -= lr * mhat / (std::sqrt(vhat) + eps);
+                }
+            } else if (L.kind == L_RELU) {
+                next_grad = mat_alloc(grad->rows, grad->cols);
+                int64_t nn = grad->rows * grad->cols;
+                for (int64_t i = 0; i < nn; ++i) next_grad->data[i] = (x_in->data[i] > 0) ? grad->data[i] : 0;
+            } else if (L.kind == L_SIGMOID) {
+                next_grad = mat_alloc(grad->rows, grad->cols);
+                int64_t nn = grad->rows * grad->cols;
+                for (int64_t i = 0; i < nn; ++i) {
+                    double y = y_out->data[i];
+                    next_grad->data[i] = grad->data[i] * y * (1.0 - y);
+                }
+            } else if (L.kind == L_TANH) {
+                next_grad = mat_alloc(grad->rows, grad->cols);
+                int64_t nn = grad->rows * grad->cols;
+                for (int64_t i = 0; i < nn; ++i) {
+                    double y = y_out->data[i];
+                    next_grad->data[i] = grad->data[i] * (1.0 - y * y);
+                }
+            } else if (L.kind == L_SOFTMAX) {
+                /* dx = y * (dy - sum(dy*y, dim=2_per_col)) */
+                next_grad = mat_alloc(grad->rows, grad->cols);
+                int64_t R = grad->rows, C = grad->cols;
+                for (int64_t c = 0; c < C; ++c) {
+                    double dot = 0; for (int64_t r = 0; r < R; ++r) dot += grad->data[r * C + c] * y_out->data[r * C + c];
+                    for (int64_t r = 0; r < R; ++r) next_grad->data[r * C + c] = y_out->data[r * C + c] * (grad->data[r * C + c] - dot);
+                }
+            } else {
+                next_grad = mat_clone_d(grad);
+            }
+            grad = next_grad;
+        }
+    }
+    return final_loss;
 }
 
 }  // extern "C"

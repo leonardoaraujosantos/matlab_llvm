@@ -675,6 +675,14 @@ void Resolver::registerBuiltins() {
     "matlab_dlnet_mkdir", "matlab_dlnet_imds_load",
     "matlab_dlnet_imds_count", "matlab_dlnet_imds_split",
     "matlab_dlnet_imds_numfiles", "matlab_dlnet_augment_image",
+    /* Tape-tracked shape concatenation (dlarray vertcat / horzcat). */
+    "matlab_dlnet_vertcat", "matlab_dlnet_horzcat",
+    /* C: dlnetwork sequential layer carrier. */
+    "matlab_dlnet_net_new", "matlab_dlnet_net_add_fc",
+    "matlab_dlnet_net_add_relu", "matlab_dlnet_net_add_sigmoid",
+    "matlab_dlnet_net_add_tanh", "matlab_dlnet_net_add_softmax",
+    "matlab_dlnet_net_predict", "matlab_dlnet_net_num_layers",
+    "matlab_dlnet_net_train",
     /* T3.8 — GPU training dispatch. */
     "matlab_dlnet_gpu_set", "matlab_dlnet_gpu_get",
     /* H5 — ONNX importer + programmatic builder. */
@@ -701,6 +709,8 @@ void Resolver::registerBuiltins() {
     "onnxNodeAttrInt", "onnxNodeAttrFloat", "onnxNodeAttrInts",
     "onnxEndNode", "onnxSave",
     "dlnetGpu", "dlnetGpuActive",
+    "dlnetwork", "addFC", "addRelu", "addSigmoid", "addTanh", "addSoftmax",
+    "netPredict", "netNumLayers", "trainnet",
     /* Inverse Tustin: discrete-to-continuous. */
     "d2c_tustin",
     /* Tier 3.4 / 2.3 — gramians and state-space step response. */

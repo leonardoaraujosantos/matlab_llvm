@@ -1,0 +1,6 @@
+dl_dlnetwork: net has 4 layers
+dl_dlnetwork: pre-train Y(:, 1) = [0.500; 0.500]
+dl_dlnetwork: post-train Y(:, 1) = [0.984; 0.016]
+dl_dlnetwork: post-train Y(:, 2) = [0.000; 1.000]
+dl_dlnetwork: final loss = 0.0002
+dl_dlnetwork: PASS

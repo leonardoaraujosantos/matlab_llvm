@@ -6180,6 +6180,19 @@ bool TensorLowering::rewriteBuiltinCalls() {
         /* T3.4b — random rotate/scale/translate augmenter. */
         {"matlab_dlnet_augment_image",  "matlab_dlnet_augment_image",  PtrTy, {PtrTy, F64, F64, F64, F64, F64}},
         {"augmentImage",                "matlab_dlnet_augment_image",  PtrTy, {PtrTy, F64, F64, F64, F64, F64}},
+        /* Tape-tracked shape concatenation — `[a; b]` / `[a b]` over
+         * dlarray (matrix lane).  Backward slices the adjoint along the
+         * concat axis. */
+        {"matlab_dlnet_vertcat",        "matlab_dlnet_vertcat",        PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_dlnet_horzcat",        "matlab_dlnet_horzcat",        PtrTy, {PtrTy, PtrTy, PtrTy}},
+        /* C: dlnetwork carrier — sequential layer-list driver. */
+        {"matlab_dlnet_net_new",        "matlab_dlnet_net_new",        PtrTy, {}},
+        {"matlab_dlnet_net_add_fc",     "matlab_dlnet_net_add_fc",     PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_dlnet_net_add_relu",   "matlab_dlnet_net_add_relu",   PtrTy, {PtrTy}},
+        {"matlab_dlnet_net_add_sigmoid","matlab_dlnet_net_add_sigmoid",PtrTy, {PtrTy}},
+        {"matlab_dlnet_net_add_tanh",   "matlab_dlnet_net_add_tanh",   PtrTy, {PtrTy}},
+        {"matlab_dlnet_net_add_softmax","matlab_dlnet_net_add_softmax",PtrTy, {PtrTy}},
+        {"matlab_dlnet_net_predict",    "matlab_dlnet_net_predict",    PtrTy, {PtrTy, PtrTy}},
         /* T3.8 — GPU training dispatch toggle.  When `dlnetGpu(1)` is
          * on, dlnet's MTIMES forward + backward routes through
          * matlab_gpu_gemm (Metal-accelerated above 128³, CPU fallback
@@ -6872,6 +6885,16 @@ bool TensorLowering::rewriteBuiltinCalls() {
       /* T3.8 — GPU training dispatch toggle + introspection. */
       {"dlnetGpu",         "matlab_dlnet_gpu_set",        1, "f"},
       {"dlnetGpuActive",   "matlab_dlnet_gpu_get",        0, "f"},
+      /* C: dlnetwork carrier — sequential layer driver. */
+      {"dlnetwork",        "matlab_dlnet_net_new",        1, ""},
+      {"addFC",            "matlab_dlnet_net_add_fc",     1, "ppp"},
+      {"addRelu",          "matlab_dlnet_net_add_relu",   1, "p"},
+      {"addSigmoid",       "matlab_dlnet_net_add_sigmoid",1, "p"},
+      {"addTanh",          "matlab_dlnet_net_add_tanh",   1, "p"},
+      {"addSoftmax",       "matlab_dlnet_net_add_softmax",1, "p"},
+      {"netPredict",       "matlab_dlnet_net_predict",    1, "pp"},
+      {"netNumLayers",     "matlab_dlnet_net_num_layers", 0, "p"},
+      {"trainnet",         "matlab_dlnet_net_train",      0, "pppff"},
       /* im2col helper exposed to user code so callers can write their
        * own GEMM-based conv (e.g. depthwise, dilation, stride>1). */
       {"im2col_2d",    "matlab_im2col_2d",    1, "pff"},

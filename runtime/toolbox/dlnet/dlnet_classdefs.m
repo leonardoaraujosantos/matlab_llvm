@@ -38,6 +38,18 @@ classdef dlarray
             r = dlarray();
             matlab_dlnet_times(r, a, b);
         end
+        % ---- shape concatenation (tape-tracked) ---------------------------
+        % `[a; b]` -> vertcat (along rows), `[a b]` -> horzcat (along cols).
+        % Two-input forms; nested cat composes naturally if the parser
+        % expands `[a; b; c]` to vertcat(vertcat(a, b), c).
+        function r = vertcat(a, b)
+            r = dlarray();
+            matlab_dlnet_vertcat(r, a, b);
+        end
+        function r = horzcat(a, b)
+            r = dlarray();
+            matlab_dlnet_horzcat(r, a, b);
+        end
 
         % ---- activations + reductions (function-call dispatch) ------------
         function r = relu(x)
