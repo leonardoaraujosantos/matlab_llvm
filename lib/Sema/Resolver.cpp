@@ -675,6 +675,15 @@ void Resolver::registerBuiltins() {
     "matlab_dlnet_mkdir", "matlab_dlnet_imds_load",
     "matlab_dlnet_imds_count", "matlab_dlnet_imds_split",
     "matlab_dlnet_imds_numfiles", "matlab_dlnet_augment_image",
+    /* H5 — ONNX importer + programmatic builder. */
+    "matlab_onnx_read", "matlab_onnx_run",
+    "matlab_onnx_num_nodes", "matlab_onnx_num_inits", "matlab_onnx_opset",
+    "matlab_onnx_new_model", "matlab_onnx_add_init",
+    "matlab_onnx_set_input", "matlab_onnx_set_output",
+    "matlab_onnx_begin_node", "matlab_onnx_node_input",
+    "matlab_onnx_node_output", "matlab_onnx_node_attr_int",
+    "matlab_onnx_node_attr_float", "matlab_onnx_node_attr_ints",
+    "matlab_onnx_end_node", "matlab_onnx_save",
     /* User-facing names — `dlreset()` between training iters, plus
      * `dltape_size()` / `dltape_truncate(n)` for fine-grained checkpoints;
      * `sgdmupdate` / `adamupdate` / `rmspropupdate` for functional
@@ -684,6 +693,11 @@ void Resolver::registerBuiltins() {
     "prune_mask", "mask_sparsity", "runExperiment",
     "mkdir", "imageDatastore", "countEachLabel", "splitEachLabel",
     "numpartitions", "augmentImage",
+    "onnxRead", "onnxRun", "onnxNumNodes", "onnxNumInits", "onnxOpset",
+    "onnxNewModel", "onnxAddInit", "onnxSetInput", "onnxSetOutput",
+    "onnxBeginNode", "onnxNodeInput", "onnxNodeOutput",
+    "onnxNodeAttrInt", "onnxNodeAttrFloat", "onnxNodeAttrInts",
+    "onnxEndNode", "onnxSave",
     /* Inverse Tustin: discrete-to-continuous. */
     "d2c_tustin",
     /* Tier 3.4 / 2.3 — gramians and state-space step response. */

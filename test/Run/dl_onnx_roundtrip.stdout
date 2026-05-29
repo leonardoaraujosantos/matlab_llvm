@@ -1,0 +1,5 @@
+dl_onnx_roundtrip: handle = 1, nodes = 7, inits = 6
+dl_onnx_roundtrip: Y = [0.734081, 0.265919]
+dl_onnx_roundtrip: ref = [0.734081, 0.265919]
+dl_onnx_roundtrip: |err| = 0.00000000
+dl_onnx_roundtrip: PASS

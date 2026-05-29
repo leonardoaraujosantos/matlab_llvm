@@ -6180,6 +6180,21 @@ bool TensorLowering::rewriteBuiltinCalls() {
         /* T3.4b — random rotate/scale/translate augmenter. */
         {"matlab_dlnet_augment_image",  "matlab_dlnet_augment_image",  PtrTy, {PtrTy, F64, F64, F64, F64, F64}},
         {"augmentImage",                "matlab_dlnet_augment_image",  PtrTy, {PtrTy, F64, F64, F64, F64, F64}},
+        /* H5 — ONNX inference-graph importer + programmatic builder. */
+        {"onnxRead",            "matlab_onnx_read",            PtrTy, {PtrTy}},
+        {"onnxRun",             "matlab_onnx_run",             PtrTy, {PtrTy, PtrTy}},
+        {"onnxNewModel",        "matlab_onnx_new_model",       PtrTy, {}},
+        {"onnxAddInit",         "matlab_onnx_add_init",        PtrTy, {PtrTy, PtrTy}},
+        {"onnxSetInput",        "matlab_onnx_set_input",       PtrTy, {PtrTy, PtrTy}},
+        {"onnxSetOutput",       "matlab_onnx_set_output",      PtrTy, {PtrTy}},
+        {"onnxBeginNode",       "matlab_onnx_begin_node",      PtrTy, {PtrTy}},
+        {"onnxNodeInput",       "matlab_onnx_node_input",      PtrTy, {PtrTy}},
+        {"onnxNodeOutput",      "matlab_onnx_node_output",     PtrTy, {PtrTy}},
+        {"onnxNodeAttrInt",     "matlab_onnx_node_attr_int",   PtrTy, {PtrTy, F64}},
+        {"onnxNodeAttrFloat",   "matlab_onnx_node_attr_float", PtrTy, {PtrTy, F64}},
+        {"onnxNodeAttrInts",    "matlab_onnx_node_attr_ints",  PtrTy, {PtrTy, PtrTy}},
+        {"onnxEndNode",         "matlab_onnx_end_node",        PtrTy, {}},
+        {"onnxSave",            "matlab_onnx_save",            PtrTy, {PtrTy}},
         /* Deep Learning Toolbox Phase 1 — small extra ops over dlarray. */
         {"matlab_dlnet_rdivide",        "matlab_dlnet_rdivide",        PtrTy, {PtrTy, PtrTy, PtrTy}},
         {"matlab_dlnet_sqrt",           "matlab_dlnet_sqrt",           PtrTy, {PtrTy, PtrTy}},
@@ -6842,6 +6857,10 @@ bool TensorLowering::rewriteBuiltinCalls() {
        * typed Spec table above (line ~6168) so const_char → matlab_string
        * promotion can fire on the folder/path literal. */
       {"numpartitions",    "matlab_dlnet_imds_numfiles",  0, "p"},
+      /* ONNX introspection — scalar f64 returns. */
+      {"onnxNumNodes",     "matlab_onnx_num_nodes",       0, "p"},
+      {"onnxNumInits",     "matlab_onnx_num_inits",       0, "p"},
+      {"onnxOpset",        "matlab_onnx_opset",           0, "p"},
       /* im2col helper exposed to user code so callers can write their
        * own GEMM-based conv (e.g. depthwise, dilation, stride>1). */
       {"im2col_2d",    "matlab_im2col_2d",    1, "pff"},
