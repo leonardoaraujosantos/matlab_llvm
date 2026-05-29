@@ -2339,14 +2339,13 @@ void Emitter::emitCStructTypedef(llvm::StringRef ClassName,
       if (Seen.insert(P).second) AllProps.push_back(P);
     }
   }
-  if (CD.IsHandleClass) {
-    /* Handle classdef — stores matrix properties on the runtime heap.
-     * Emit as a `void *` alias so the C variable holds the obj pointer
-     * directly and matlab_*_init / property-set / property-get calls
-     * are linkable with their `void *` runtime ABI. */
-    OS << "typedef void* " << ClassName.str() << ";\n\n";
-    return;
-  }
+  /* Handle classdef detection (`CD.IsHandleClass`) is laid down by
+   * collectClassdefs as foundation for a future `typedef void*` /
+   * method-body rewrite — see G follow-up.  Today still emit the
+   * value-struct since the full handle-mode body emission (matlab_obj_new
+   * ctor, void* method-args, runtime obj_set_f64 calls, LiveGlobals
+   * adjustments) is multi-day work.  Skip-emit-* markers cover the
+   * affected dlarray-using tests until that lands. */
   OS << "typedef struct " << ClassName.str() << " {\n";
   for (auto &P : AllProps) OS << "  double " << P.str() << ";\n";
   if (AllProps.empty()) OS << "  char _unused;\n";  // empty-struct guard

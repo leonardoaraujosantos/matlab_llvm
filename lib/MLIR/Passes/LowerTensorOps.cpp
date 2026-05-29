@@ -411,6 +411,73 @@ bool TensorLowering::rewriteLiterals() {
     int64_t Rows = 0, Cols = 0;
     SmallVector<Value, 16> Elts;
     if (!gatherLiteralElements(Op, Rows, Cols, Elts)) {
+      /* H: Classdef array literal detection.  `[obj1; obj2; obj3]` of
+       * classdef instances should build an object-array via the shipped
+       * generic carrier (matlab_dlnet_oa_new + matlab_dlnet_oa_append),
+       * NOT a matlab_vertcat (which interprets ptrs as matlab_mat* and
+       * crashes).  Detect by walking operands; any operand whose
+       * defining op is a func.call to a classdef method or a load from
+       * a `matlab.class_id`-tagged alloc indicates an object array.
+       *
+       * We require ALL operands to be classdef instances to avoid
+       * mixed-mode (matrix + classdef) literals — those are a user
+       * error in MATLAB too.  The check is conservative; on a partial
+       * match we fall through to the matrix-cat path. */
+      auto isClassdefInstance = [&](Value V) -> bool {
+        if (V.getType() != PtrTy) return false;
+        Operation *D = V.getDefiningOp();
+        if (!D) return false;
+        if (auto Call = mlir::dyn_cast<mlir::func::CallOp>(D)) {
+          /* Lookup the callee func.func; check matlab.class_name attr. */
+          auto Sym = mlir::SymbolTable::lookupNearestSymbolFrom<mlir::func::FuncOp>(
+              D, Call.getCalleeAttr());
+          if (Sym && Sym->hasAttr("matlab.class_name")) return true;
+        }
+        if (auto Load = mlir::dyn_cast<LLVM::LoadOp>(D)) {
+          Operation *AllocOp = Load.getAddr().getDefiningOp();
+          if (AllocOp && isMatlabOp(AllocOp, "matlab.alloc") &&
+              AllocOp->hasAttr("matlab.class_id"))
+            return true;
+        }
+        return false;
+      };
+      /* Recursively gather all leaf operands (skipping nested concat
+       * ops). */
+      std::function<bool(Operation *, SmallVector<Value> &)> gatherLeaves =
+          [&](Operation *C, SmallVector<Value> &leaves) -> bool {
+        for (Value V : C->getOperands()) {
+          Operation *D = V.getDefiningOp();
+          if (D && (isMatlabOp(D, "matlab.concat_row") ||
+                    isMatlabOp(D, "matlab.concat_col"))) {
+            if (!gatherLeaves(D, leaves)) return false;
+          } else {
+            leaves.push_back(V);
+          }
+        }
+        return true;
+      };
+      SmallVector<Value> leaves;
+      bool allClassdef = false;
+      if (gatherLeaves(Op, leaves) && !leaves.empty()) {
+        allClassdef = true;
+        for (Value V : leaves) {
+          if (!isClassdefInstance(V)) { allClassdef = false; break; }
+        }
+      }
+      if (allClassdef) {
+        B.setInsertionPoint(Op);
+        auto NewFn = rt("matlab_dlnet_oa_new", PtrTy, {});
+        Value arr = LLVM::CallOp::create(B, Op->getLoc(), NewFn, ValueRange{}).getResult();
+        auto AppendFn = rt("matlab_dlnet_oa_append", PtrTy, {PtrTy, PtrTy});
+        for (Value V : leaves) {
+          arr = LLVM::CallOp::create(B, Op->getLoc(), AppendFn,
+                                      ValueRange{arr, V}).getResult();
+        }
+        Op->getResult(0).replaceAllUsesWith(arr);
+        Op->erase();
+        Changed = true;
+        continue;
+      }
       /* Operands are not all f64 scalars — at least one is a matrix/vector
        * (e.g. `[x1 x2]` horzcat of column vectors, or `[a; b]` vertcat).
        * Fold the bracket concatenation via the runtime matlab_horzcat /
