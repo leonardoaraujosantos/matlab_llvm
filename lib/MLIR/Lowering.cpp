@@ -731,8 +731,10 @@ bool Lowerer::exprIsThreeD(const Expr *E,
     if (N->Name == "cat" && C->Args.size() >= 2) {
       if (auto *DimL = dynamic_cast<const IntegerLiteral *>(C->Args[0])) {
         /* cat(3, p1, p2, …) of >=2 planes is 3-D; any cat dim whose
-         * operands are already 3-D stays 3-D. */
+         * operands are already 3-D stays 3-D — EXCEPT dim 4, which
+         * promotes to rank-4 (matN) and isn't 3-D anymore. */
         if (DimL->Text == "3" && C->Args.size() >= 3) return true;
+        if (DimL->Text == "4") return false;
         for (size_t a = 1; a < C->Args.size(); ++a)
           if (exprIsThreeD(C->Args[a], Set)) return true;
       }
@@ -4736,7 +4738,8 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
               "gru", "bilstm", "lstmp", "dlarray",
               "sqrt", "leakyrelu", "gelu", "swish",
               "softplus", "elu", "conv2d_batch", "conv2d_full",
-              "reshape", "maxpool2d", "avgpool2d", "batchnorm"};
+              "reshape", "maxpool2d", "avgpool2d", "batchnorm",
+              "layernorm", "batchnorm_eval"};
           if (DlRet2.contains(NX->Name) && this->CurTU) {
             bool argPinned = false;
             for (size_t i = 0; i < CX->Args.size(); ++i)
@@ -7165,9 +7168,10 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             "gru", "bilstm", "lstmp",
             /* Phase 1 small ops. */
             "sqrt", "leakyrelu", "gelu", "swish", "softplus", "elu",
-            /* Tier C: rank-4 batched conv + reshape + pooling + BN. */
+            /* Tier C: rank-4 batched conv + reshape + pooling + BN + LN. */
             "conv2d_batch", "conv2d_full", "reshape",
-            "maxpool2d", "avgpool2d", "batchnorm"};
+            "maxpool2d", "avgpool2d", "batchnorm",
+            "layernorm", "batchnorm_eval"};
         if (DlFns.contains(N->Name)) {
           std::function<bool(const Expr *)> pinnedDl =
               [&pinnedDl](const Expr *X) -> bool {
@@ -7191,7 +7195,8 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                     "gru", "bilstm", "lstmp", "dlarray",
                     "sqrt", "leakyrelu", "gelu", "swish",
                     "softplus", "elu", "conv2d_batch", "conv2d_full",
-                    "reshape", "maxpool2d", "avgpool2d", "batchnorm"};
+                    "reshape", "maxpool2d", "avgpool2d", "batchnorm",
+                    "layernorm", "batchnorm_eval"};
                 if (DlRet.contains(NX->Name))
                   for (size_t i = 0; i < CX->Args.size(); ++i)
                     if (pinnedDl(CX->Args[i])) return true;
@@ -8787,6 +8792,23 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                 Acc = emitUnreg("matlab.call_builtin", {Acc, Ms[a]}, PtrTy, L, {CalN});
               }
               return Acc;
+            }
+            if (DimL->Text == "4") {
+              /* cat(4, mat3_or_mat, ...): stack 3-D images (or 2-D
+               * grayscale) into a rank-4 matN.  Fixed-arity entries
+               * cover N = 2 / 3 / 4; tuck the implementation against
+               * those for the common image-batch sizes.  Arities > 4
+               * fall through to a sequence of cat4_2 + (carved) append. */
+              const char *Sym = nullptr;
+              if (Ms.size() == 2) Sym = "matlab_cat4_2";
+              else if (Ms.size() == 3) Sym = "matlab_cat4_3";
+              else if (Ms.size() == 4) Sym = "matlab_cat4_4";
+              if (Sym) {
+                mlir::NamedAttribute Cal(
+                    mlir::StringAttr::get(&MCtx, "callee"),
+                    mlir::StringAttr::get(&MCtx, Sym));
+                return emitUnreg("matlab.call_builtin", Ms, PtrTy, L, {Cal});
+              }
             }
             const char *Sym = (DimL->Text == "1") ? "vertcat" : "horzcat";
             mlir::Value Acc = Ms[0];

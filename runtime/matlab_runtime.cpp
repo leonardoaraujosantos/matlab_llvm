@@ -9081,6 +9081,77 @@ void *matlab_squeezeN(void *A) {
  * Then Y_2d = W_2d * out where W_2d[k, c*kH*kW+kh*kW+kw] = W[kh,kw,c,k]
  * gives Y_2d[k, n*Hout*Wout+h*Wout+w] = sum_inner W_2d[k,inner]*out[inner,…].
  * That collapses to Y[h, w, k, n] after a transpose+reshape. */
+/* matlab_im2col_2d_pad(X, kH, kW, pad_h, pad_w, stride_h, stride_w) —
+ * patch extraction with zero-padding + stride.  Same layout convention
+ * as matlab_im2col_2d (no-pad/stride-1 variant), but Hout / Wout depend
+ * on pad + stride and out-of-bounds cells become zero.  Used by the
+ * GEMM-based conv2d_batch_full forward (and the dlnet backward). */
+matlab_mat *matlab_im2col_2d_pad(void *Xv, double kHd, double kWd,
+                                 double pad_h_d, double pad_w_d,
+                                 double stride_h_d, double stride_w_d) {
+    if (!Xv) return mat_alloc(0, 0);
+    int64_t H, W, C, N, Xs0, Xs1, Xs2, Xs3;
+    const double *Xdata;
+    if (mat_is_nd(Xv)) {
+        matlab_matN *X = (matlab_matN *)Xv;
+        if (X->ndims < 2 || X->ndims > 4) return mat_alloc(0, 0);
+        H = X->dims[0]; W = X->dims[1];
+        C = X->ndims >= 3 ? X->dims[2] : 1;
+        N = X->ndims >= 4 ? X->dims[3] : 1;
+        Xs0 = X->strides[0]; Xs1 = X->strides[1];
+        Xs2 = X->ndims >= 3 ? X->strides[2] : 0;
+        Xs3 = X->ndims >= 4 ? X->strides[3] : 0;
+        Xdata = X->data;
+    } else if (mat_is_3d(Xv)) {
+        matlab_mat3 *X3 = (matlab_mat3 *)Xv;
+        H = X3->rows; W = X3->cols; C = X3->depth; N = 1;
+        /* mat3 slice-major: data[k*rows*cols + i*cols + j]. */
+        Xs0 = X3->cols; Xs1 = 1; Xs2 = X3->rows * X3->cols; Xs3 = 0;
+        Xdata = X3->data;
+    } else {
+        matlab_mat *X2 = (matlab_mat *)Xv;
+        H = X2->rows; W = X2->cols; C = 1; N = 1;
+        Xs0 = X2->cols; Xs1 = 1; Xs2 = 0; Xs3 = 0;
+        Xdata = X2->data;
+    }
+    int64_t kH = (int64_t)kHd, kW = (int64_t)kWd;
+    int64_t pad_h = (int64_t)pad_h_d, pad_w = (int64_t)pad_w_d;
+    int64_t stride_h = (int64_t)stride_h_d, stride_w = (int64_t)stride_w_d;
+    if (stride_h <= 0) stride_h = 1;
+    if (stride_w <= 0) stride_w = 1;
+    if (kH <= 0 || kW <= 0) return mat_alloc(0, 0);
+    int64_t Hout = (H + 2*pad_h - kH) / stride_h + 1;
+    int64_t Wout = (W + 2*pad_w - kW) / stride_w + 1;
+    if (Hout <= 0 || Wout <= 0) return mat_alloc(0, 0);
+    int64_t rows = kH * kW * C;
+    int64_t cols = Hout * Wout * N;
+    matlab_mat *Y = mat_alloc(rows, cols);
+    if (!Y || !Y->data) return Y;
+    double * __restrict__ Yd = Y->data;
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t hO = 0; hO < Hout; ++hO) {
+            for (int64_t wO = 0; wO < Wout; ++wO) {
+                int64_t col = n * Hout * Wout + hO * Wout + wO;
+                for (int64_t c = 0; c < C; ++c) {
+                    for (int64_t kh = 0; kh < kH; ++kh) {
+                        int64_t hi = hO * stride_h - pad_h + kh;
+                        for (int64_t kw = 0; kw < kW; ++kw) {
+                            int64_t wi = wO * stride_w - pad_w + kw;
+                            int64_t row = c * kH * kW + kh * kW + kw;
+                            double v = 0.0;
+                            if (hi >= 0 && hi < H && wi >= 0 && wi < W) {
+                                v = Xdata[hi*Xs0 + wi*Xs1 + c*Xs2 + n*Xs3];
+                            }
+                            Yd[row * cols + col] = v;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return Y;
+}
+
 matlab_mat *matlab_im2col_2d(void *Xv, double kHd, double kWd) {
     if (!Xv) return mat_alloc(0, 0);
     /* Accept any rank ≥ 2: trailing-singleton drop in matN_alloc means
@@ -9228,7 +9299,7 @@ void *matlab_conv2d_batch_full(void *Xv, void *Wv, void *bv,
         for (uint32_t k = 0; k < Rn->ndims; ++k) Ys[k] = Rn->strides[k];
     } else if (mat_is_3d(Rv)) {
         matlab_mat3 *R3 = (matlab_mat3 *)Rv;
-        Ys[0] = R3->cols * R3->depth; Ys[1] = R3->depth; Ys[2] = 1;
+        Ys[0] = R3->cols; Ys[1] = 1; Ys[2] = R3->rows * R3->cols;
     } else {
         matlab_mat *R2 = (matlab_mat *)Rv;
         Ys[0] = R2->cols; Ys[1] = 1;
@@ -9246,30 +9317,49 @@ void *matlab_conv2d_batch_full(void *Xv, void *Wv, void *bv,
         }
     }
 
-    for (int64_t n = 0; n < N; ++n) {
-        for (int64_t k = 0; k < K; ++k) {
-            double bias = bdata ? bdata[k] : 0.0;
-            for (int64_t hO = 0; hO < Hout; ++hO) {
-                for (int64_t wO = 0; wO < Wout; ++wO) {
-                    double acc = bias;
-                    for (int64_t c = 0; c < C; ++c) {
-                        for (int64_t kh = 0; kh < kH; ++kh) {
-                            int64_t hi = hO * stride_h - pad_h + kh;
-                            if (hi < 0 || hi >= H) continue;
-                            for (int64_t kw = 0; kw < kW; ++kw) {
-                                int64_t wi = wO * stride_w - pad_w + kw;
-                                if (wi < 0 || wi >= W) continue;
-                                double xv = Xdata[hi*Xs0 + wi*Xs1 + c*Xs2 + n*Xs3];
-                                double wv = Wdata[kh*Ws0 + kw*Ws1 + c*Ws2 + k*Ws3];
-                                acc += xv * wv;
-                            }
-                        }
-                    }
-                    Yd[hO*Ys[0] + wO*Ys[1] + k*Ys[2] + n*Ys[3]] = acc;
-                }
-            }
-        }
+    /* im2col-with-pad + GEMM.  X_col (inner, Hout*Wout*N) with padded
+     * patches zero-filled; W_2d (K, inner) where W_2d[k, inner_idx] =
+     * W[kh, kw, c, k]; Y_2d (K, Hout*Wout*N) = W_2d * X_col.  Bias adds
+     * row-wise to Y_2d before scatter.  ~3-5x throughput over the naive
+     * 7-deep loop once the matmul kernel hits BLAS (m*n*k >= 64^3). */
+    int64_t inner = kH * kW * C;
+    matlab_mat *Xcol = matlab_im2col_2d_pad(Xv, (double)kH, (double)kW,
+                                            (double)pad_h, (double)pad_w,
+                                            (double)stride_h, (double)stride_w);
+    if (!Xcol || !Xcol->data) {
+        if (Xcol) { free(Xcol->data); free(Xcol); }
+        return mat_alloc(0, 0);
     }
+    matlab_mat *W2d = mat_alloc(K, inner);
+    if (!W2d || !W2d->data) {
+        free(Xcol->data); free(Xcol);
+        return mat_alloc(0, 0);
+    }
+    for (int64_t k = 0; k < K; ++k)
+        for (int64_t c = 0; c < C; ++c)
+            for (int64_t kh = 0; kh < kH; ++kh)
+                for (int64_t kw = 0; kw < kW; ++kw) {
+                    int64_t col = c * kH * kW + kh * kW + kw;
+                    W2d->data[k * inner + col] =
+                        Wdata[kh*Ws0 + kw*Ws1 + c*Ws2 + k*Ws3];
+                }
+    matlab_mat *Y2d = matlab_matmul_mm(W2d, Xcol);
+    free(Xcol->data); free(Xcol);
+    free(W2d->data);  free(W2d);
+    /* Bias + scatter to (Hout, Wout, K, N). */
+    int64_t hwn = Hout * Wout * N;
+    for (int64_t k = 0; k < K; ++k) {
+        double bias = bdata ? bdata[k] : 0.0;
+        for (int64_t nn = 0; nn < N; ++nn)
+            for (int64_t hO = 0; hO < Hout; ++hO)
+                for (int64_t wO = 0; wO < Wout; ++wO) {
+                    int64_t col2d = nn * Hout * Wout + hO * Wout + wO;
+                    Yd[hO*Ys[0] + wO*Ys[1] + k*Ys[2] + nn*Ys[3]] =
+                        Y2d->data[k * hwn + col2d] + bias;
+                }
+    }
+    free(Y2d->data); free(Y2d);
+    (void)Xdata; (void)Xs0; (void)Xs1; (void)Xs2; (void)Xs3;
     return Rv;
 }
 
@@ -9393,9 +9483,10 @@ void *matlab_conv2d_batch(void *Xv, void *Wv) {
         for (uint32_t k = 0; k < Rn->ndims; ++k) Ys[k] = Rn->strides[k];
     } else if (mat_is_3d(Rv)) {
         matlab_mat3 *R3 = (matlab_mat3 *)Rv;
-        Ys[0] = R3->cols * R3->depth;
-        Ys[1] = R3->depth;
-        Ys[2] = 1;
+        /* mat3 is slice-major: data[k*rows*cols + i*cols + j]. */
+        Ys[0] = R3->cols;
+        Ys[1] = 1;
+        Ys[2] = R3->rows * R3->cols;
         Ys[3] = 0;
     } else {
         matlab_mat *R2 = (matlab_mat *)Rv;
@@ -9512,6 +9603,123 @@ matlab_mat3 *matlab_cat3_append(matlab_mat3 *A, matlab_mat *B) {
     for (int64_t t = 0; t < pl * d; ++t) R->data[t] = A->data[t];
     if (B) for (int64_t t = 0; t < pl; ++t) R->data[pl * d + t] = B->data[t];
     return R;
+}
+
+/* cat(4, A, B[, C, D, ...]) — stack 3-D images into a rank-4 matN batch.
+ * Each input must share the (H, W, C) shape; the result is (H, W, C, N).
+ *
+ * The 3-D inputs are slice-major (mat3) but matN is row-major-extended:
+ *   X[h, w, c, n] = mat3_n[c*H*W + h*W + w]
+ * So we copy per-(h, w, c, n) cell during the stack.  Used by user code
+ * after imread to assemble multiple images into a CNN-ready batch. */
+static void cat4_copy_one(double *Yd, const int64_t *Ys,
+                           const matlab_mat *Im, int64_t n,
+                           int64_t H, int64_t W, int64_t C) {
+    if (!Im) return;
+    if (mat_is_3d(Im)) {
+        const matlab_mat3 *I = (const matlab_mat3 *)Im;
+        int64_t pl = I->rows * I->cols;
+        for (int64_t c = 0; c < C; ++c)
+            for (int64_t h = 0; h < H; ++h)
+                for (int64_t w = 0; w < W; ++w)
+                    Yd[h*Ys[0] + w*Ys[1] + c*Ys[2] + n*Ys[3]] =
+                        I->data[c * pl + h * I->cols + w];
+    } else {
+        const matlab_mat *I = (const matlab_mat *)Im;
+        /* 2-D fallback: treat as a single-channel image. */
+        for (int64_t h = 0; h < H; ++h)
+            for (int64_t w = 0; w < W; ++w)
+                Yd[h*Ys[0] + w*Ys[1] + 0*Ys[2] + n*Ys[3]] =
+                    I->data[h * I->cols + w];
+    }
+}
+
+/* Variadic-by-fixed-arity convenience entries for the lowering.  cat4_2,
+ * cat4_3, cat4_4 cover the common batch sizes; cat4_append builds up
+ * batches larger than 4 incrementally. */
+static int64_t cat4_HWC(const matlab_mat *Im, int64_t &H, int64_t &W, int64_t &C) {
+    if (!Im) { H = 0; W = 0; C = 1; return 0; }
+    if (mat_is_3d(Im)) {
+        const matlab_mat3 *I = (const matlab_mat3 *)Im;
+        H = I->rows; W = I->cols; C = I->depth; return 1;
+    }
+    H = Im->rows; W = Im->cols; C = 1; return 1;
+}
+
+void *matlab_cat4_2(matlab_mat *A, matlab_mat *B) {
+    int64_t H, W, C;
+    if (!cat4_HWC(A, H, W, C)) return mat_alloc(0, 0);
+    int64_t outDims[4] = {H, W, C, 2};
+    void *Rv = matN_alloc(4, outDims);
+    double *Yd = mat_is_nd(Rv) ? ((matlab_matN *)Rv)->data
+              : mat_is_3d(Rv) ? ((matlab_mat3 *)Rv)->data
+                              : ((matlab_mat *)Rv)->data;
+    int64_t Ys[4] = {0,0,0,0};
+    if (mat_is_nd(Rv)) {
+        matlab_matN *Rn = (matlab_matN *)Rv;
+        for (uint32_t k = 0; k < Rn->ndims; ++k) Ys[k] = Rn->strides[k];
+    } else if (mat_is_3d(Rv)) {
+        matlab_mat3 *R3 = (matlab_mat3 *)Rv;
+        Ys[0] = R3->cols; Ys[1] = 1; Ys[2] = R3->rows * R3->cols;
+    } else {
+        matlab_mat *R2 = (matlab_mat *)Rv;
+        Ys[0] = R2->cols; Ys[1] = 1;
+    }
+    cat4_copy_one(Yd, Ys, A, 0, H, W, C);
+    cat4_copy_one(Yd, Ys, B, 1, H, W, C);
+    return Rv;
+}
+
+void *matlab_cat4_3(matlab_mat *A, matlab_mat *B, matlab_mat *C_) {
+    int64_t H, W, C;
+    if (!cat4_HWC(A, H, W, C)) return mat_alloc(0, 0);
+    int64_t outDims[4] = {H, W, C, 3};
+    void *Rv = matN_alloc(4, outDims);
+    double *Yd = mat_is_nd(Rv) ? ((matlab_matN *)Rv)->data
+              : mat_is_3d(Rv) ? ((matlab_mat3 *)Rv)->data
+                              : ((matlab_mat *)Rv)->data;
+    int64_t Ys[4] = {0,0,0,0};
+    if (mat_is_nd(Rv)) {
+        matlab_matN *Rn = (matlab_matN *)Rv;
+        for (uint32_t k = 0; k < Rn->ndims; ++k) Ys[k] = Rn->strides[k];
+    } else if (mat_is_3d(Rv)) {
+        matlab_mat3 *R3 = (matlab_mat3 *)Rv;
+        Ys[0] = R3->cols; Ys[1] = 1; Ys[2] = R3->rows * R3->cols;
+    } else {
+        matlab_mat *R2 = (matlab_mat *)Rv;
+        Ys[0] = R2->cols; Ys[1] = 1;
+    }
+    cat4_copy_one(Yd, Ys, A,  0, H, W, C);
+    cat4_copy_one(Yd, Ys, B,  1, H, W, C);
+    cat4_copy_one(Yd, Ys, C_, 2, H, W, C);
+    return Rv;
+}
+
+void *matlab_cat4_4(matlab_mat *A, matlab_mat *B,
+                    matlab_mat *C_, matlab_mat *D) {
+    int64_t H, W, C;
+    if (!cat4_HWC(A, H, W, C)) return mat_alloc(0, 0);
+    int64_t outDims[4] = {H, W, C, 4};
+    void *Rv = matN_alloc(4, outDims);
+    double *Yd = mat_is_nd(Rv) ? ((matlab_matN *)Rv)->data
+              : mat_is_3d(Rv) ? ((matlab_mat3 *)Rv)->data
+                              : ((matlab_mat *)Rv)->data;
+    int64_t Ys[4] = {0,0,0,0};
+    if (mat_is_nd(Rv)) {
+        matlab_matN *Rn = (matlab_matN *)Rv;
+        for (uint32_t k = 0; k < Rn->ndims; ++k) Ys[k] = Rn->strides[k];
+    } else if (mat_is_3d(Rv)) {
+        matlab_mat3 *R3 = (matlab_mat3 *)Rv;
+        Ys[0] = R3->cols; Ys[1] = 1; Ys[2] = R3->rows * R3->cols;
+    } else {
+        matlab_mat *R2 = (matlab_mat *)Rv;
+        Ys[0] = R2->cols; Ys[1] = 1;
+    }
+    cat4_copy_one(Yd, Ys, A,  0, H, W, C);
+    cat4_copy_one(Yd, Ys, B,  1, H, W, C);
+    cat4_copy_one(Yd, Ys, C_, 2, H, W, C);
+    cat4_copy_one(Yd, Ys, D,  3, H, W, C);
+    return Rv;
 }
 
 double matlab_size3_dim(matlab_mat3 *A, double d) {

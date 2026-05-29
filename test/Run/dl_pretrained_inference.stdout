@@ -1,0 +1,8 @@
+dl_pretrained_inference: batch size = 6 6 3 3
+dl_pretrained_inference: sample 1 P=[0.999 0.000 0.000]
+dl_pretrained_inference: sample 2 P=[0.017 0.976 0.007]
+dl_pretrained_inference: sample 3 P=[0.011 0.011 0.978]
+dl_pretrained_inference: sample 1 -> class 1 (correct)
+dl_pretrained_inference: sample 2 -> class 2 (correct)
+dl_pretrained_inference: sample 3 -> class 3 (correct)
+dl_pretrained_inference: PASS

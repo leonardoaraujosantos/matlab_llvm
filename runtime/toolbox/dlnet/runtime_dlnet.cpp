@@ -174,7 +174,9 @@ enum { OP_LEAF, OP_ADD, OP_SUB, OP_MTIMES, OP_TIMES, OP_RELU, OP_SIGMOID,
        /* Shape / pool ops over matN tensors. */
        OP_RESHAPE, OP_MAXPOOL2D, OP_AVGPOOL2D,
        /* BatchNorm + conv-with-bias-pad-stride + axis-aware reductions. */
-       OP_BATCHNORM, OP_CONV2D_FULL, OP_SOFTMAX_DIM, OP_MEAN_DIM_ND };
+       OP_BATCHNORM, OP_CONV2D_FULL, OP_SOFTMAX_DIM, OP_MEAN_DIM_ND,
+       /* LayerNorm (axis-aware) + GroupNorm + BN inference (no backward). */
+       OP_LAYERNORM };
 
 struct Node {
     int op;
@@ -1128,7 +1130,7 @@ matlab_mat *matlab_dlnet_maxpool2d(void *r, void *x, double kHd, double kWd) {
         for (uint32_t k = 0; k < Rn->ndims; ++k) Ys[k] = Rn->strides[k];
     } else if (mat_is_3d(Rv)) {
         matlab_mat3 *R3 = reinterpret_cast<matlab_mat3 *>(Rv);
-        Ys[0] = R3->cols * R3->depth; Ys[1] = R3->depth; Ys[2] = 1;
+        Ys[0] = R3->cols; Ys[1] = 1; Ys[2] = R3->rows * R3->cols;
     } else {
         matlab_mat *R2 = reinterpret_cast<matlab_mat *>(Rv);
         Ys[0] = R2->cols; Ys[1] = 1;
@@ -1189,7 +1191,7 @@ matlab_mat *matlab_dlnet_avgpool2d(void *r, void *x, double kHd, double kWd) {
         for (uint32_t k = 0; k < Rn->ndims; ++k) Ys[k] = Rn->strides[k];
     } else if (mat_is_3d(Rv)) {
         matlab_mat3 *R3 = reinterpret_cast<matlab_mat3 *>(Rv);
-        Ys[0] = R3->cols * R3->depth; Ys[1] = R3->depth; Ys[2] = 1;
+        Ys[0] = R3->cols; Ys[1] = 1; Ys[2] = R3->rows * R3->cols;
     } else {
         matlab_mat *R2 = reinterpret_cast<matlab_mat *>(Rv);
         Ys[0] = R2->cols; Ys[1] = 1;
@@ -1309,7 +1311,7 @@ matlab_mat *matlab_dlnet_batchnorm(void *r, void *x, void *gv, void *bv) {
         for (uint32_t k = 0; k < Rn->ndims; ++k) Ys[k] = Rn->strides[k];
     } else if (mat_is_3d(Rv)) {
         matlab_mat3 *R3 = reinterpret_cast<matlab_mat3 *>(Rv);
-        Ys[0] = R3->cols * R3->depth; Ys[1] = R3->depth; Ys[2] = 1;
+        Ys[0] = R3->cols; Ys[1] = 1; Ys[2] = R3->rows * R3->cols;
     } else {
         matlab_mat *R2 = reinterpret_cast<matlab_mat *>(Rv);
         Ys[0] = R2->cols; Ys[1] = 1;
@@ -1389,7 +1391,7 @@ matlab_mat *matlab_dlnet_softmax_dim(void *r, void *x, double dim_d) {
     } else if (mat_is_3d(Rv)) {
         matlab_mat3 *R3 = reinterpret_cast<matlab_mat3 *>(Rv);
         Yd = R3->data;
-        Ys[0] = R3->cols * R3->depth; Ys[1] = R3->depth; Ys[2] = 1;
+        Ys[0] = R3->cols; Ys[1] = 1; Ys[2] = R3->rows * R3->cols;
     } else {
         matlab_mat *R2 = reinterpret_cast<matlab_mat *>(Rv);
         Yd = R2->data;
@@ -1433,6 +1435,178 @@ matlab_mat *matlab_dlnet_softmax_dim(void *r, void *x, double dim_d) {
     matlab_mat *dm = mat_alloc(1, 1); dm->data[0] = static_cast<double>(dim);
     g_tape[id].auxData.push_back(dm);
     set_id(r, id);
+    return mat_alloc(0, 0);
+}
+
+/* layernorm(X, gamma, beta, dim) — normalize X along a single feature
+ * axis.  γ, β are length-K vectors (K = size(X, dim)) applied per-axis-
+ * position via broadcast over every other axis.  Unlike BatchNorm, the
+ * mean/variance are computed PER (non-dim) position rather than per
+ * channel — the canonical formulation for Transformer / RMSNorm-class
+ * stacks where each token has its own normalization.
+ *
+ * Forward (for one slice of length K along dim):
+ *   μ        = (1/K) Σ_i x_i
+ *   σ²       = (1/K) Σ_i (x_i - μ)²
+ *   xhat_i   = (x_i - μ) / √(σ² + ε)
+ *   y_i      = γ_i * xhat_i + β_i
+ *
+ * Saves xhat (full flat) + σ_per_slice (1 × outerN) in auxData for
+ * backward.  Records OP_LAYERNORM with X as p0, γ as p1, β as
+ * auxParents[0], and dim in auxData[2]. */
+matlab_mat *matlab_dlnet_layernorm(void *r, void *x, void *gv, void *bv,
+                                   double dim_d) {
+    using namespace dlnet;
+    matlab_mat *X = get_data(x);
+    matlab_mat *G = get_data(gv);
+    matlab_mat *B = get_data(bv);
+    int dim = static_cast<int>(dim_d);
+    int nd; int64_t dims[16], strides[16];
+    const double *Xd;
+    if (mat_is_nd(X)) {
+        matlab_matN *Mn = reinterpret_cast<matlab_matN *>(X);
+        nd = static_cast<int>(Mn->ndims); if (nd > 16) nd = 16;
+        for (int k = 0; k < nd; ++k) { dims[k] = Mn->dims[k]; strides[k] = Mn->strides[k]; }
+        Xd = Mn->data;
+    } else if (mat_is_3d(X)) {
+        matlab_mat3 *M3 = reinterpret_cast<matlab_mat3 *>(X);
+        nd = 3; dims[0] = M3->rows; dims[1] = M3->cols; dims[2] = M3->depth;
+        strides[0] = M3->cols; strides[1] = 1; strides[2] = M3->rows * M3->cols;
+        Xd = M3->data;
+    } else {
+        nd = 2; dims[0] = X->rows; dims[1] = X->cols;
+        strides[0] = X->cols; strides[1] = 1;
+        Xd = X->data;
+    }
+    if (dim < 1 || dim > nd) {
+        matlab_mat *Y = mat_alloc(0, 0);
+        set_data(r, Y);
+        set_id(r, record(OP_LAYERNORM, get_id(x), get_id(gv), Y));
+        return mat_alloc(0, 0);
+    }
+    int axis = dim - 1;
+    int64_t K = dims[axis];
+    int64_t outerN = 1;
+    for (int k = 0; k < nd; ++k) if (k != axis) outerN *= dims[k];
+    const double eps = 1e-5;
+    /* Allocate Y at same rank as X. */
+    int64_t outDims[16]; for (int k = 0; k < nd; ++k) outDims[k] = dims[k];
+    void *Rv = matN_alloc(nd, outDims);
+    double *Yd = mat_is_nd(Rv) ? reinterpret_cast<matlab_matN *>(Rv)->data
+              : mat_is_3d(Rv) ? reinterpret_cast<matlab_mat3 *>(Rv)->data
+                              : reinterpret_cast<matlab_mat *>(Rv)->data;
+    int64_t Ys[16];
+    if (mat_is_nd(Rv)) {
+        matlab_matN *Rn = reinterpret_cast<matlab_matN *>(Rv);
+        for (uint32_t k = 0; k < Rn->ndims; ++k) Ys[k] = Rn->strides[k];
+    } else if (mat_is_3d(Rv)) {
+        matlab_mat3 *R3 = reinterpret_cast<matlab_mat3 *>(Rv);
+        Ys[0] = R3->cols; Ys[1] = 1; Ys[2] = R3->rows * R3->cols;
+    } else {
+        matlab_mat *R2 = reinterpret_cast<matlab_mat *>(Rv);
+        Ys[0] = R2->cols; Ys[1] = 1;
+    }
+    const double *Gd = flatdata(G);
+    const double *Bd = flatdata(B);
+    /* xhat: 1 × (outerN * K), laid out by outer-major / axis-minor. */
+    matlab_mat *xhat = mat_alloc(1, outerN * K);
+    matlab_mat *sigvec = mat_alloc(1, outerN);   /* σ per slice */
+    int64_t idx[16] = {0};
+    for (int64_t oo = 0; oo < outerN; ++oo) {
+        int64_t baseSrc = 0, baseDst = 0;
+        for (int k = 0; k < nd; ++k) {
+            if (k == axis) continue;
+            baseSrc += idx[k] * strides[k];
+            baseDst += idx[k] * Ys[k];
+        }
+        /* μ, σ over this slice. */
+        double mu = 0;
+        for (int64_t a = 0; a < K; ++a) mu += Xd[baseSrc + a * strides[axis]];
+        mu /= static_cast<double>(K > 0 ? K : 1);
+        double vs = 0;
+        for (int64_t a = 0; a < K; ++a) {
+            double d = Xd[baseSrc + a * strides[axis]] - mu;
+            vs += d * d;
+        }
+        double sig = std::sqrt(vs / static_cast<double>(K > 0 ? K : 1) + eps);
+        sigvec->data[oo] = sig;
+        for (int64_t a = 0; a < K; ++a) {
+            double xh = (Xd[baseSrc + a * strides[axis]] - mu) / sig;
+            xhat->data[oo * K + a] = xh;
+            Yd[baseDst + a * Ys[axis]] = Gd[a] * xh + Bd[a];
+        }
+        /* Advance idx (skip axis). */
+        for (int k = nd - 1; k >= 0; --k) {
+            if (k == axis) continue;
+            if (++idx[k] < dims[k]) break;
+            idx[k] = 0;
+        }
+    }
+    matlab_mat *Y = reinterpret_cast<matlab_mat *>(Rv);
+    set_data(r, Y);
+    int id = record(OP_LAYERNORM, get_id(x), get_id(gv), Y);
+    g_tape[id].auxParents.push_back(get_id(bv));
+    g_tape[id].auxData.push_back(xhat);
+    g_tape[id].auxData.push_back(sigvec);
+    matlab_mat *dm = mat_alloc(1, 1); dm->data[0] = static_cast<double>(dim);
+    g_tape[id].auxData.push_back(dm);
+    set_id(r, id);
+    return mat_alloc(0, 0);
+}
+
+/* batchnorm_eval(X, gamma, beta, running_mean, running_var) — frozen-
+ * statistics BN forward.  No autodiff backward (inference-only); the
+ * tape node is OP_LEAF so dlgradient skips it.  Returns
+ *   Y[h,w,c,n] = γ_c * (X[h,w,c,n] - μ_c) / √(σ²_c + ε) + β_c
+ * with μ, σ² taken from the supplied running-stat vectors. */
+matlab_mat *matlab_dlnet_batchnorm_eval(void *r, void *x, void *gv, void *bv,
+                                        void *muv, void *varv) {
+    using namespace dlnet;
+    matlab_mat *X = get_data(x);
+    matlab_mat *G = get_data(gv);
+    matlab_mat *B = get_data(bv);
+    matlab_mat *MU = get_data(muv);
+    matlab_mat *VR = get_data(varv);
+    Shape4 S = shape4(X);
+    if (S.C <= 0) { matlab_mat *Y = mat_alloc(0, 0);
+                    set_data(r, Y);
+                    set_id(r, record(OP_LEAF, -1, -1, Y));
+                    return mat_alloc(0, 0); }
+    const double eps = 1e-5;
+    int64_t outDims[4] = {S.H, S.W, S.C, S.N};
+    void *Rv = matN_alloc(4, outDims);
+    double *Yd = mat_is_nd(Rv) ? reinterpret_cast<matlab_matN *>(Rv)->data
+              : mat_is_3d(Rv) ? reinterpret_cast<matlab_mat3 *>(Rv)->data
+                              : reinterpret_cast<matlab_mat *>(Rv)->data;
+    int64_t Ys[4] = {0,0,0,0};
+    if (mat_is_nd(Rv)) {
+        matlab_matN *Rn = reinterpret_cast<matlab_matN *>(Rv);
+        for (uint32_t k = 0; k < Rn->ndims; ++k) Ys[k] = Rn->strides[k];
+    } else if (mat_is_3d(Rv)) {
+        matlab_mat3 *R3 = reinterpret_cast<matlab_mat3 *>(Rv);
+        Ys[0] = R3->cols; Ys[1] = 1; Ys[2] = R3->rows * R3->cols;
+    } else {
+        matlab_mat *R2 = reinterpret_cast<matlab_mat *>(Rv);
+        Ys[0] = R2->cols; Ys[1] = 1;
+    }
+    const double *Gd = flatdata(G), *Bd = flatdata(B);
+    const double *MUd = flatdata(MU), *VRd = flatdata(VR);
+    for (int64_t c = 0; c < S.C; ++c) {
+        double sig = std::sqrt(VRd[c] + eps);
+        double inv = 1.0 / sig;
+        double gc = Gd[c], bc = Bd[c], muc = MUd[c];
+        for (int64_t n = 0; n < S.N; ++n)
+            for (int64_t h = 0; h < S.H; ++h)
+                for (int64_t ww = 0; ww < S.W; ++ww) {
+                    double x = S.data[h*S.s0 + ww*S.s1 + c*S.s2 + n*S.s3];
+                    Yd[h*Ys[0] + ww*Ys[1] + c*Ys[2] + n*Ys[3]] = gc * (x - muc) * inv + bc;
+                }
+    }
+    matlab_mat *Y = reinterpret_cast<matlab_mat *>(Rv);
+    set_data(r, Y);
+    /* Record as a leaf so backward sweep treats it as a constant -- no
+     * upstream gradient flows through inference-mode BN. */
+    set_id(r, record(OP_LEAF, -1, -1, Y));
     return mat_alloc(0, 0);
 }
 
@@ -2651,6 +2825,106 @@ matlab_mat *matlab_dlnet_grad(void *lossv, void *varv) {
                     }
                 }
                 accum(n.p0, g);
+            }
+        } break;
+        case OP_LAYERNORM: {
+            /* P0 = X, P1 = γ, auxParents[0] = β.
+             * auxData[0] = xhat (1 × outerN*K), [1] = σ (1 × outerN), [2] = dim.
+             *
+             * Per-slice (length K) backward (LayerNorm has dγ/dβ summed
+             * across non-axis positions but per-axis-i; dx uses the σ
+             * for THAT slice, not a per-channel sigma like BN):
+             *   dxhat_i  = dy_i * γ_i
+             *   dx_i     = (1/σ) * (dxhat_i - mean(dxhat) - xhat_i * mean(dxhat*xhat))
+             *   dγ_i    += Σ_outer  dy_i * xhat_i_at_that_outer
+             *   dβ_i    += Σ_outer  dy_i
+             */
+            if (P0 && P1 && n.auxParents.size() >= 1 && n.auxData.size() >= 3) {
+                matlab_mat *xhat = n.auxData[0];
+                matlab_mat *sigvec = n.auxData[1];
+                int dim = static_cast<int>(n.auxData[2]->data[0]);
+                int nd; int64_t dims[16], Xstr[16];
+                if (mat_is_nd(P0)) {
+                    matlab_matN *Mn = reinterpret_cast<matlab_matN *>(P0);
+                    nd = static_cast<int>(Mn->ndims); if (nd > 16) nd = 16;
+                    for (int k = 0; k < nd; ++k) {
+                        dims[k] = Mn->dims[k]; Xstr[k] = Mn->strides[k];
+                    }
+                } else if (mat_is_3d(P0)) {
+                    matlab_mat3 *M3 = reinterpret_cast<matlab_mat3 *>(P0);
+                    nd = 3; dims[0] = M3->rows; dims[1] = M3->cols; dims[2] = M3->depth;
+                    Xstr[0] = M3->cols; Xstr[1] = 1; Xstr[2] = M3->rows * M3->cols;
+                } else {
+                    nd = 2; dims[0] = P0->rows; dims[1] = P0->cols;
+                    Xstr[0] = P0->cols; Xstr[1] = 1;
+                }
+                int axis = dim - 1;
+                if (axis < 0 || axis >= nd) break;
+                int64_t K = dims[axis];
+                int64_t outerN = 1;
+                for (int k = 0; k < nd; ++k) if (k != axis) outerN *= dims[k];
+                /* Adjoint A strides. */
+                int64_t As0[16];
+                if (mat_is_nd(A)) {
+                    matlab_matN *Mn = reinterpret_cast<matlab_matN *>(A);
+                    for (uint32_t k = 0; k < Mn->ndims && static_cast<int>(k) < 16; ++k) As0[k] = Mn->strides[k];
+                } else if (mat_is_3d(A)) {
+                    matlab_mat3 *M3 = reinterpret_cast<matlab_mat3 *>(A);
+                    As0[0] = M3->cols; As0[1] = 1; As0[2] = M3->rows*M3->cols;
+                } else {
+                    As0[0] = A->cols; As0[1] = 1;
+                }
+                const double *Ad = flatdata(A);
+                const double *Gd = flatdata(P1);
+                /* dG, dB are length-K vectors (1×K shape from γ/β). */
+                matlab_mat *dG = zero_clone(P1);
+                matlab_mat *dB = zero_clone(g_tape[n.auxParents[0]].val);
+                double *dGd = flatdata(dG);
+                double *dBd = flatdata(dB);
+                matlab_mat *dX = zero_clone(P0);
+                double *dXd = flatdata(dX);
+                int64_t idx[16] = {0};
+                for (int64_t oo = 0; oo < outerN; ++oo) {
+                    int64_t baseA = 0, baseX = 0;
+                    for (int k = 0; k < nd; ++k) {
+                        if (k == axis) continue;
+                        baseA += idx[k] * As0[k];
+                        baseX += idx[k] * Xstr[k];
+                    }
+                    double sig = sigvec->data[oo];
+                    /* Compute dxhat_i = dy_i * γ_i, plus the running means. */
+                    double mean_dxh = 0, mean_dxh_xh = 0;
+                    /* First pass: build dxhat means; per-i dγ/dβ. */
+                    for (int64_t a = 0; a < K; ++a) {
+                        double dy = Ad[baseA + a * As0[axis]];
+                        double xh = xhat->data[oo * K + a];
+                        double dxhat = dy * Gd[a];
+                        mean_dxh    += dxhat;
+                        mean_dxh_xh += dxhat * xh;
+                        dGd[a] += dy * xh;
+                        dBd[a] += dy;
+                    }
+                    mean_dxh    /= static_cast<double>(K);
+                    mean_dxh_xh /= static_cast<double>(K);
+                    /* Second pass: dx_i. */
+                    double inv_sig = 1.0 / sig;
+                    for (int64_t a = 0; a < K; ++a) {
+                        double dy = Ad[baseA + a * As0[axis]];
+                        double xh = xhat->data[oo * K + a];
+                        double dxhat = dy * Gd[a];
+                        double dx = (dxhat - mean_dxh - xh * mean_dxh_xh) * inv_sig;
+                        dXd[baseX + a * Xstr[axis]] = dx;
+                    }
+                    /* Advance idx (skip axis). */
+                    for (int k = nd - 1; k >= 0; --k) {
+                        if (k == axis) continue;
+                        if (++idx[k] < dims[k]) break;
+                        idx[k] = 0;
+                    }
+                }
+                accum(n.p1, dG);
+                accum(n.auxParents[0], dB);
+                accum(n.p0, dX);
             }
         } break;
         default: break;

@@ -2571,12 +2571,14 @@ static std::string buildReplPrelude(const std::string &Src) {
     {false, "swish",                     "dlnet_classdefs.m"},
     {false, "softplus",                  "dlnet_classdefs.m"},
     {false, "elu",                       "dlnet_classdefs.m"},
-    /* Tier C: rank-4 batched conv + reshape + pool + BN, all autodiff-tracked. */
+    /* Tier C: rank-4 batched conv + reshape + pool + BN + LN. */
     {false, "conv2d_batch",              "dlnet_classdefs.m"},
     {false, "conv2d_full",               "dlnet_classdefs.m"},
     {false, "maxpool2d",                 "dlnet_classdefs.m"},
     {false, "avgpool2d",                 "dlnet_classdefs.m"},
     {false, "batchnorm",                 "dlnet_classdefs.m"},
+    {false, "layernorm",                 "dlnet_classdefs.m"},
+    {false, "batchnorm_eval",            "dlnet_classdefs.m"},
     /* Global Optimization Toolbox Tier-2 — `gads_classdefs.m` holds the
      * MultiStart + GlobalSearch solver objects.  (`run` is too generic
      * to trigger on; the solver-object mentions pull the prelude.) */
@@ -11807,6 +11809,7 @@ int main(int Argc, char **Argv) {
       "gru", "bilstm", "lstmp",
       "leakyrelu", "gelu", "swish", "softplus", "elu",
       "conv2d_batch", "conv2d_full", "maxpool2d", "avgpool2d", "batchnorm",
+      "layernorm", "batchnorm_eval",
       /* GPU Coder T5 design-pattern helpers — runtime entries, no
        * prelude file needed.  Listed here only for the AOT-prelude
        * scanner's awareness (no leaf to map). */
@@ -12097,7 +12100,8 @@ int main(int Argc, char **Argv) {
         ClsName == "softplus" || ClsName == "elu" ||
         ClsName == "conv2d_batch" || ClsName == "conv2d_full" ||
         ClsName == "maxpool2d" || ClsName == "avgpool2d" ||
-        ClsName == "batchnorm")
+        ClsName == "batchnorm" || ClsName == "layernorm" ||
+        ClsName == "batchnorm_eval")
       return "dlnet_classdefs.m";
     /* GPU Coder T5 design-pattern helpers are C runtime entries; no
      * classdef file to pull in. */

@@ -193,6 +193,21 @@ classdef dlarray
             r = dlarray();
             matlab_dlnet_softmax_dim(r, x, dim);
         end
+
+        % LayerNorm: per-(non-axis position) normalization along `dim`.
+        % γ, β are length-K vectors (K = size(X, dim)).
+        function r = layernorm(x, gamma, beta, dim)
+            r = dlarray();
+            matlab_dlnet_layernorm(r, x, gamma, beta, dim);
+        end
+
+        % BatchNorm inference mode: frozen running mean / variance.  No
+        % autodiff backward — the result tape node is OP_LEAF so
+        % dlgradient treats it as a constant.
+        function r = batchnorm_eval(x, gamma, beta, run_mean, run_var)
+            r = dlarray();
+            matlab_dlnet_batchnorm_eval(r, x, gamma, beta, run_mean, run_var);
+        end
     end
 end
 % `extractdata(x)` and `dlgradient(loss, v)` are intercepted in Lowering.cpp

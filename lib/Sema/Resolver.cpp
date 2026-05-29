@@ -637,6 +637,7 @@ void Resolver::registerBuiltins() {
     /* Tier C dlarray methods: pool / reshape go through method-by-arity
      * split (reshape) or fixed-name (maxpool2d / avgpool2d / batchnorm). */
     "maxpool2d", "avgpool2d", "batchnorm", "conv2d_full",
+    "layernorm", "batchnorm_eval",
     /* DL HDL Tier H1 — INT8 quantization (plain numeric in/out). */
     "dlquantize", "dlqscale",
     /* DL T6.5 — quantizer calibration + activation clipping. */
@@ -659,6 +660,7 @@ void Resolver::registerBuiltins() {
     "matlab_dlnet_maxpool2d", "matlab_dlnet_avgpool2d",
     "matlab_dlnet_batchnorm", "matlab_dlnet_conv2d_full",
     "matlab_dlnet_softmax_dim",
+    "matlab_dlnet_layernorm", "matlab_dlnet_batchnorm_eval",
     "matlab_dlnet_quantize", "matlab_dlnet_qscale",
     "matlab_dlnet_qclip", "matlab_dlnet_qcalibrate",
     "matlab_dlnet_grad", "matlab_dlnet_reset",
@@ -889,7 +891,7 @@ void Resolver::registerBuiltins() {
     "fft", "ifft", "fft2", "ifft2",
     "conv", "conv2",
     /* Tier C: rank-4 batched convolution forward + im2col helper. */
-    "conv2d_batch", "im2col_2d", "conv2d_batch_full",
+    "conv2d_batch", "im2col_2d", "im2col_2d_pad", "conv2d_batch_full",
     "filter", "any", "all", "tril", "triu",
     "fftshift", "ifftshift",
     "std", "var", "median", "diff",

@@ -3349,6 +3349,19 @@ bool TensorLowering::rewriteBuiltinCalls() {
     }
     /* cat(3, A, B[, C]) -> matlab_cat3_{2,3} : slice-major matlab_mat3.
      * matlab_cat3_append folds N>2 planes (append one plane to a mat3). */
+    /* cat(4, …) — image-batch stack via the matN row-major-extended layout. */
+    if ((Name == "matlab_cat4_2" || Name == "matlab_cat4_3" ||
+         Name == "matlab_cat4_4") &&
+        Call->getOperand(0).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      llvm::SmallVector<Type, 4> ArgTys(Call->getNumOperands(), PtrTy);
+      auto Fn = rt(Name.str(), PtrTy, ArgTys);
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn, Call->getOperands());
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
     if ((Name == "matlab_cat3_2" || Name == "matlab_cat3_3" ||
          Name == "matlab_cat3_append") &&
         Call->getNumResults() == 1) {
@@ -6133,6 +6146,9 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"matlab_dlnet_batchnorm",     "matlab_dlnet_batchnorm",    PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy}},
         {"matlab_dlnet_conv2d_full",   "matlab_dlnet_conv2d_full",  PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, F64, F64, F64, F64}},
         {"matlab_dlnet_softmax_dim",   "matlab_dlnet_softmax_dim",  PtrTy, {PtrTy, PtrTy, F64}},
+        /* LayerNorm + BN inference (frozen-stats). */
+        {"matlab_dlnet_layernorm",     "matlab_dlnet_layernorm",    PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, F64}},
+        {"matlab_dlnet_batchnorm_eval","matlab_dlnet_batchnorm_eval",PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy}},
         /* Deep Learning Toolbox Phase 1 — small extra ops over dlarray. */
         {"matlab_dlnet_rdivide",        "matlab_dlnet_rdivide",        PtrTy, {PtrTy, PtrTy, PtrTy}},
         {"matlab_dlnet_sqrt",           "matlab_dlnet_sqrt",           PtrTy, {PtrTy, PtrTy}},
@@ -6770,6 +6786,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
       /* im2col helper exposed to user code so callers can write their
        * own GEMM-based conv (e.g. depthwise, dilation, stride>1). */
       {"im2col_2d",    "matlab_im2col_2d",    1, "pff"},
+      {"im2col_2d_pad","matlab_im2col_2d_pad",1, "pffffff"},
       /* Tier-1 builtins added alongside conv. filter is the IIR/FIR
        * difference equation (3 ptr args). The fftshift pair is
        * polymorphic on real/complex via the matlab_mat_c magic. */
