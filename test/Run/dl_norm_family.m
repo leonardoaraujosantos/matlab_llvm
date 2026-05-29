@@ -28,7 +28,9 @@ for n = 1:2
             end
         end
         mu = s / 16;  vr = ss / 16 - mu * mu;
-        fprintf('dl_norm_family: IN n=%.0f c=%.0f mean=%.4f var=%.4f\n', n, c, mu, vr);
+        % abs(mu) dodges the -0.0000 vs 0.0000 libstdc++/libc++ printf split
+        % on the Linux full-ctest gate.
+        fprintf('dl_norm_family: IN n=%.0f c=%.0f mean=%.4f var=%.4f\n', n, c, abs(mu), vr);
     end
 end
 

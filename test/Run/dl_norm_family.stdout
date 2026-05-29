@@ -1,9 +1,9 @@
 dl_norm_family: IN n=1 c=1 mean=0.0000 var=1.0000
-dl_norm_family: IN n=1 c=2 mean=-0.0000 var=1.0000
+dl_norm_family: IN n=1 c=2 mean=0.0000 var=1.0000
 dl_norm_family: IN n=1 c=3 mean=0.0000 var=1.0000
-dl_norm_family: IN n=2 c=1 mean=-0.0000 var=1.0000
-dl_norm_family: IN n=2 c=2 mean=-0.0000 var=1.0000
-dl_norm_family: IN n=2 c=3 mean=-0.0000 var=1.0000
+dl_norm_family: IN n=2 c=1 mean=0.0000 var=1.0000
+dl_norm_family: IN n=2 c=2 mean=0.0000 var=1.0000
+dl_norm_family: IN n=2 c=3 mean=0.0000 var=1.0000
 dl_norm_family: RMS col1 rms2=1.0000
 dl_norm_family: RMS col2 rms2=1.0000
 dl_norm_family: RMS col3 rms2=1.0000
