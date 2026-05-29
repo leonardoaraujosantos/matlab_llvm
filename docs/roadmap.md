@@ -773,7 +773,7 @@ folded into the Comm roadmap as priority §3.
 
 | # | Toolbox | Effort | Notes |
 |---|---|---|---|
-| 7 | **Deep Learning** | XL (10-15w) | Cornerstone — autograd, `dlarray`, `dlnetwork`, optimizers (SGD/Adam/RMSProp), layer DAG runtime, training loop. **Unlocks RL · DL-CV · Text DL · DL HDL · DL Vision HDL.** |
+| ~~7~~ | **Deep Learning** | ✅ **SHIPPED 2026-05-28** | All 6 tiers — `dlarray` + reverse-mode autodiff tape, `dlnetwork` carrier + `trainnet` driver + custom-loop API (`adamupdate`/`sgdmupdate`/`rmspropupdate`), full activation/loss/conv2d/conv1d/BN/LN/GN/IN/RMSNorm/dropout surface, LSTM/GRU/BiLSTM/LSTMP + functional MHA + `embed`, residual/transfer-learning/GAN/VAE/Siamese/Neural-ODE patterns, gradCAM (MLP + image-domain)/occlusion/LIME/tsne, classification metrics, dlquantizer calibrate/validate, magnitude pruning, programmatic experiment-sweep harness. **DL HDL H1–H5** ships in the same toolbox: INT8 quant → fi-typed SystemVerilog → cocotb bit-accuracy (`% hdl: precise_fi`) → LSTM-on-FPGA → minimal ONNX inference-graph importer (~56 ops). 39 `dl_*.m` tests + 44 examples. See [`feature_status.md`](feature_status.md) + [`deep_learning_toolbox_roadmap.md`](deep_learning_toolbox_roadmap.md). |
 | 8 | **Reinforcement Learning** | L (~8w) **after DL** | `rlAgent` / DQN / PPO / SAC + env API. Trivial after DL lands. |
 | 9 | **Robotics System** | L (6-8w) | `rigidBodyTree`, fwd/inv kinematics, motion planning, collisions. Massive overlap with the quadrotor work. Roadmap drafted ([`robotics_toolbox_roadmap.md`](robotics_toolbox_roadmap.md)). |
 | 10 | **UAV Toolbox** | M (4-5w) **after #1+#6+#9** | Mostly integration — drone flight stack on top of the three above. |
@@ -814,7 +814,7 @@ folded into the Comm roadmap as priority §3.
 | # | Toolbox | Notes |
 |---|---|---|
 | 32 | **Vision HDL** | DL-CV pipelines targeting FPGAs. Build after CV. |
-| 33 | **Deep Learning HDL** | DL inference on FPGAs. Build after DL. |
+| ~~33~~ | **Deep Learning HDL** | ✅ **SHIPPED 2026-05-28** (H1–H5) — bundled with the Deep Learning Toolbox (row 7). INT8 weight quant (`dlquantize`/`dlqscale`), fi-typed SV emission of a quantized MLP (`dlhdl_quant_mlp.m`, EmitSV regression sweep), cocotb bit-accuracy via the new `% hdl: precise_fi` opt-in pragma, LSTM-on-FPGA combinational + sequential cells (`dlhdl_lstm_step.m` closes the recurrent loop inside the DUT via `persistent` + `always_ff`), minimal ONNX inference-graph importer (~56 ops). cocotb DL-HDL sweep 44/44.  Simulation surface only — silicon (bitstream/board/LIBIIO/vendor-synthesis) explicitly carved. |
 | 34 | **Mixed-Signal / SerDes / Signal Integrity** | RF Toolbox extension for IC-level signaling. |
 | 35 | **RF PCB Toolbox** | PCB EM solver. Heavy. |
 | 36 | **Automated Driving** | Pairs with #4 (CV) + #6 (Navigation) + #1 (Sensor Fusion). |
@@ -825,9 +825,9 @@ If you want **maximum demo value per week**:
 
 > **Aerospace (S) → Sensor Fusion (M) → Computer Vision (M) → Navigation (M)** ≈ 14-18 weeks. Completes a self-contained "autonomous drone" research stack on top of the shipped MPC + GPU + Symbolic + Quadrotor demos.
 
-If you want **maximum strategic value** for compiler reach:
+If you want **maximum strategic value** for compiler reach (now that Deep Learning has shipped):
 
-> **Deep Learning (XL, ~12w)** — single-handedly unlocks RL · DL-CV · Text DL · DL HDL · Vision HDL · Reinforcement Learning and modernizes the whole AI surface. Highest ceiling but biggest single commit.
+> **Reinforcement Learning (L, ~8w)** — rides directly on shipped `dlnetwork`/`dlgradient`/`trainnet`; adds `rlAgent` / DQN / PPO / SAC + env API. Trivial after DL. Pair with **Computer Vision (M)** and **Text Analytics (S–L)** to convert DL into the broader AI demo surface.
 
 If you want **quick wins**:
 
