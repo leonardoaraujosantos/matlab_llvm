@@ -94,6 +94,7 @@ RUNTIME_SRCS=(
   "$ROOT/runtime/toolbox/robotics/runtime_robotics.cpp"
   "$ROOT/runtime/toolbox/navigation/runtime_navigation.cpp"
   "$ROOT/runtime/toolbox/dlnet/runtime_dlnet.cpp"
+  "$ROOT/runtime/toolbox/dlnet/runtime_onnx.cpp"
   "$ROOT/runtime/toolbox/stateflow/runtime_mstateflow.cpp"
   "$ROOT/runtime/gpu/runtime_gpu.cpp"
   "$ROOT/runtime/toolbox/gpu/runtime_gpu_helpers.cpp"
