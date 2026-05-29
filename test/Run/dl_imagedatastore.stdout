@@ -1,0 +1,8 @@
+dl_imagedatastore: count blue  = 4
+dl_imagedatastore: count green = 4
+dl_imagedatastore: count red   = 4
+dl_imagedatastore: train total = 6
+dl_imagedatastore: split blue  = 2
+dl_imagedatastore: split green = 2
+dl_imagedatastore: split red   = 2
+dl_imagedatastore: PASS

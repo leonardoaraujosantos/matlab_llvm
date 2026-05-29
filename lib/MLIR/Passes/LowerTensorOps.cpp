@@ -6158,9 +6158,28 @@ bool TensorLowering::rewriteBuiltinCalls() {
         /* Tape scoping (recommended between training iters to prevent
          * monotonic tape growth + slow dlgradient). */
         {"matlab_dltape_truncate",      "matlab_dltape_truncate",     PtrTy, {F64}},
-        /* Functional optimizers (SGD-momentum + Adam). */
+        /* Functional optimizers (SGD-momentum + Adam + RMSProp). */
         {"matlab_dlnet_sgdmupdate",     "matlab_dlnet_sgdmupdate",    PtrTy, {PtrTy, PtrTy, PtrTy, F64, F64}},
         {"matlab_dlnet_adamupdate",     "matlab_dlnet_adamupdate",    PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, F64, F64, F64, F64, F64}},
+        {"matlab_dlnet_rmspropupdate",  "matlab_dlnet_rmspropupdate", PtrTy, {PtrTy, PtrTy, PtrTy, F64, F64, F64}},
+        /* Magnitude pruning. */
+        {"matlab_dlnet_prune_mask",     "matlab_dlnet_prune_mask",    PtrTy, {PtrTy, F64}},
+        /* Experiment-sweep harness: runExperiment(@fn, Grid) -> Nx1 results. */
+        {"matlab_dlnet_run_experiment", "matlab_dlnet_run_experiment", PtrTy, {PtrTy, PtrTy}},
+        /* T1.8 — image-data plumbing.  User-facing names go in this typed
+         * Spec table (not the pde_table) so the const_char → matlab_string
+         * promotion fires for the string-literal folder/path args. */
+        {"matlab_dlnet_mkdir",          "matlab_dlnet_mkdir",          PtrTy, {PtrTy}},
+        {"matlab_dlnet_imds_load",      "matlab_dlnet_imds_load",      PtrTy, {PtrTy}},
+        {"matlab_dlnet_imds_count",     "matlab_dlnet_imds_count",     PtrTy, {PtrTy}},
+        {"matlab_dlnet_imds_split",     "matlab_dlnet_imds_split",     PtrTy, {PtrTy, F64}},
+        {"mkdir",           "matlab_dlnet_mkdir",      PtrTy, {PtrTy}},
+        {"imageDatastore",  "matlab_dlnet_imds_load",  PtrTy, {PtrTy}},
+        {"countEachLabel",  "matlab_dlnet_imds_count", PtrTy, {PtrTy}},
+        {"splitEachLabel",  "matlab_dlnet_imds_split", PtrTy, {PtrTy, F64}},
+        /* T3.4b — random rotate/scale/translate augmenter. */
+        {"matlab_dlnet_augment_image",  "matlab_dlnet_augment_image",  PtrTy, {PtrTy, F64, F64, F64, F64, F64}},
+        {"augmentImage",                "matlab_dlnet_augment_image",  PtrTy, {PtrTy, F64, F64, F64, F64, F64}},
         /* Deep Learning Toolbox Phase 1 — small extra ops over dlarray. */
         {"matlab_dlnet_rdivide",        "matlab_dlnet_rdivide",        PtrTy, {PtrTy, PtrTy, PtrTy}},
         {"matlab_dlnet_sqrt",           "matlab_dlnet_sqrt",           PtrTy, {PtrTy, PtrTy}},
@@ -6810,6 +6829,19 @@ bool TensorLowering::rewriteBuiltinCalls() {
        * are updated in place by the runtime. */
       {"sgdmupdate",       "matlab_dlnet_sgdmupdate", 1, "pppff"},
       {"adamupdate",       "matlab_dlnet_adamupdate", 1, "ppppfffff"},
+      {"rmspropupdate",    "matlab_dlnet_rmspropupdate", 1, "pppfff"},
+      /* Magnitude-based pruning helpers. */
+      {"prune_mask",       "matlab_dlnet_prune_mask",    1, "pf"},
+      {"mask_sparsity",    "matlab_dlnet_mask_sparsity", 0, "p"},
+      /* Experiment harness — first arg is a function handle (passed
+       * through as a raw ptr by LowerAnonCalls' retype path, mirroring
+       * bayesopt). */
+      {"runExperiment",    "matlab_dlnet_run_experiment", 1, "pp"},
+      /* T1.8: numpartitions returns a scalar f64; the string-arg helpers
+       * (mkdir/imageDatastore/countEachLabel/splitEachLabel) sit in the
+       * typed Spec table above (line ~6168) so const_char → matlab_string
+       * promotion can fire on the folder/path literal. */
+      {"numpartitions",    "matlab_dlnet_imds_numfiles",  0, "p"},
       /* im2col helper exposed to user code so callers can write their
        * own GEMM-based conv (e.g. depthwise, dilation, stride>1). */
       {"im2col_2d",    "matlab_im2col_2d",    1, "pff"},
@@ -7893,7 +7925,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
          * Accept tensor<*xf64> and `none` for those callees only —
          * broadening here would mis-route unrelated calls (e.g. linalg
          * multi-return helpers). */
-        bool DlOptim = (Name == "adamupdate" || Name == "sgdmupdate");
+        bool DlOptim = (Name == "adamupdate" || Name == "sgdmupdate" ||
+                        Name == "rmspropupdate");
         if (DlOptim &&
             (mlir::isa<mlir::NoneType>(Got) || isTensorLike(Got))) {
           /* accept */

@@ -1,0 +1,4 @@
+dl_augment_image: A1 size = 16x16 (input was 16x16)
+dl_augment_image: sum diff-to-input  > 0.5 (got 628.65)
+dl_augment_image: sum diff-to-first  > 0.5 (got 197.05)
+dl_augment_image: PASS

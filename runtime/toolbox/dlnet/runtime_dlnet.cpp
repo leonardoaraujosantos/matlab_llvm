@@ -24,6 +24,11 @@
 #include <cstdint>
 #include <cstring>
 #include <vector>
+#include <algorithm>
+#include <filesystem>
+#include <map>
+#include <set>
+#include <string>
 
 extern "C" matlab_mat *matlab_obj_get_mat(matlab_obj *o, const char *name, int64_t len);
 extern "C" void        matlab_obj_set_mat(matlab_obj *o, const char *name, int64_t len, matlab_mat *m);
@@ -3816,6 +3821,104 @@ matlab_mat *matlab_dlnet_adamupdate(matlab_mat *W, matlab_mat *G,
     return Wn;
 }
 
+/* RMSProp (Hinton):
+ *   v_new = γ·v + (1 − γ)·g²
+ *   w_new = w − lr · g / (√v_new + ε)
+ * `v` (running mean-square) is updated in place. */
+matlab_mat *matlab_dlnet_rmspropupdate(matlab_mat *W, matlab_mat *G,
+                                       matlab_mat *V,
+                                       double lr, double gamma, double eps) {
+    using namespace dlnet;
+    if (!W || !G || !V) return mat_alloc(0, 0);
+    int64_t nw = nelem(W);
+    if (nelem(G) != nw || nelem(V) != nw) return mat_alloc(0, 0);
+    double *Wd = flatdata(W);
+    const double *Gd = flatdata(G);
+    double *Vd = flatdata(V);
+    matlab_mat *Wn = clone(W);
+    double *Wnd = flatdata(Wn);
+    double oneMinusG = 1.0 - gamma;
+    for (int64_t i = 0; i < nw; ++i) {
+        double g = Gd[i];
+        double vnew = gamma * Vd[i] + oneMinusG * g * g;
+        Vd[i] = vnew;
+        Wnd[i] = Wd[i] - lr * g / (std::sqrt(vnew) + eps);
+    }
+    return Wn;
+}
+
+/* Magnitude-based pruning mask.
+ * Returns a 0/1 matrix the same shape as W whose entries are 0 wherever
+ * |W| falls below the (frac*100)-th percentile of |W|, 1 otherwise.
+ * Applying the mask as `W .* M` zeros the bottom-frac of weights so the
+ * remaining sparse tensor still fits the H2 SV/FPGA datapath. */
+matlab_mat *matlab_dlnet_prune_mask(matlab_mat *W, double frac) {
+    using namespace dlnet;
+    if (!W) return mat_alloc(0, 0);
+    int64_t n = nelem(W);
+    matlab_mat *M = clone(W);
+    double *Md = flatdata(M);
+    if (n == 0) return M;
+    if (frac <= 0.0) {
+        for (int64_t i = 0; i < n; ++i) Md[i] = 1.0;
+        return M;
+    }
+    if (frac >= 1.0) {
+        for (int64_t i = 0; i < n; ++i) Md[i] = 0.0;
+        return M;
+    }
+    const double *Wd = flatdata(W);
+    std::vector<double> absV(static_cast<size_t>(n));
+    for (int64_t i = 0; i < n; ++i) absV[static_cast<size_t>(i)] = std::fabs(Wd[i]);
+    /* k-th smallest |W| is the cutoff; weights with |w| <= cutoff are pruned. */
+    int64_t k = static_cast<int64_t>(std::floor(frac * static_cast<double>(n)));
+    if (k <= 0) k = 1;
+    if (k > n) k = n;
+    std::nth_element(absV.begin(), absV.begin() + (k - 1), absV.end());
+    double cutoff = absV[static_cast<size_t>(k - 1)];
+    for (int64_t i = 0; i < n; ++i)
+        Md[i] = (std::fabs(Wd[i]) > cutoff) ? 1.0 : 0.0;
+    return M;
+}
+
+/* Programmatic experiment-sweep harness.
+ * runExperiment(@trialFn, Grid) — Grid is N x K (one row per trial, one
+ * column per hyperparameter).  Calls trialFn(row_i_as_column) per row;
+ * trialFn must take a K x 1 dlarray-or-matrix and return a scalar metric.
+ * Returns an N x 1 column of metrics. */
+typedef double (*dlnet_obj_fn)(matlab_mat *);
+
+matlab_mat *matlab_dlnet_run_experiment(void *fn_p, matlab_mat *Gridm) {
+    using namespace dlnet;
+    if (!fn_p || !Gridm) return mat_alloc(0, 0);
+    dlnet_obj_fn f = reinterpret_cast<dlnet_obj_fn>(fn_p);
+    int64_t N = Gridm->rows, K = Gridm->cols;
+    if (N <= 0 || K <= 0) return mat_alloc(0, 0);
+    matlab_mat *Out = mat_alloc(N, 1);
+    for (int64_t i = 0; i < N; ++i) {
+        matlab_mat *row = mat_alloc(K, 1);
+        for (int64_t j = 0; j < K; ++j) {
+            /* matlab_mat is row-major: elem(r, c) = data[r * cols + c]. */
+            row->data[j] = Gridm->data[i * K + j];
+        }
+        Out->data[i] = f(row);
+    }
+    return Out;
+}
+
+/* Sparsity of a 0/1 mask: fraction of entries equal to zero. */
+double matlab_dlnet_mask_sparsity(matlab_mat *M) {
+    using namespace dlnet;
+    if (!M) return 0.0;
+    int64_t n = nelem(M);
+    if (n == 0) return 0.0;
+    const double *Md = flatdata(M);
+    int64_t zeros = 0;
+    for (int64_t i = 0; i < n; ++i)
+        if (Md[i] == 0.0) ++zeros;
+    return static_cast<double>(zeros) / static_cast<double>(n);
+}
+
 // ---- HDL Tier H1 — symmetric INT8 quantization ----------------------------
 // dlquantize(W)   -> the dequantized weight matrix (Q * scale), bit-accurate
 //                    to the int8 storage that would land on the device.
@@ -3892,6 +3995,179 @@ matlab_mat *matlab_dlnet_qcalibrate(matlab_mat *X, matlab_mat *Rm) {
     matlab_mat *o = mat_alloc(1, 1);
     o->data[0] = running;
     return o;
+}
+
+}  // extern "C"
+
+/* ===== T1.8 — image-data plumbing ======================================= *
+ * imageDatastore('folder','LabelSource','foldernames') walks `folder`, finds
+ * image files in each immediate subdirectory, and treats the subdirectory
+ * name as the label.  countEachLabel returns per-label counts (sorted by
+ * label name for determinism); splitEachLabel keeps the first `p*count`
+ * entries of each label group (deterministic since entries are sorted).
+ *
+ * State is a single thread-local datastore — multiple imageDatastore()
+ * calls reset it.  This matches the project's "one global at a time"
+ * pattern (cf. ident's lsqnonlin ctx).
+ *
+ * mkdir(path) is a sibling helper so tests can synthesise a class-folder
+ * layout via imwrite — no external setup scripts. */
+namespace dlnet_imds {
+struct Entry { std::string path; std::string label; };
+static std::vector<Entry> g_entries;
+static std::vector<Entry> g_kept;       /* current view (post-split) */
+static std::vector<std::string> g_labels;
+}  /* namespace dlnet_imds */
+
+namespace {
+struct dlnet_string_s { char *data; int64_t len; };
+}
+
+extern "C" {
+
+matlab_mat *matlab_dlnet_mkdir(void *path_s) {
+    auto *p = reinterpret_cast<const dlnet_string_s *>(path_s);
+    matlab_mat *out = mat_alloc(0, 0);
+    if (!p || !p->data || p->len <= 0) return out;
+    std::string path(p->data, p->data + p->len);
+    std::error_code ec;
+    std::filesystem::create_directories(path, ec);
+    return out;
+}
+
+matlab_mat *matlab_dlnet_imds_load(void *folder_s) {
+    using namespace dlnet_imds;
+    g_entries.clear();
+    g_kept.clear();
+    g_labels.clear();
+    auto *p = reinterpret_cast<const dlnet_string_s *>(folder_s);
+    matlab_mat *handle = mat_alloc(1, 1);
+    handle->data[0] = 0.0;
+    if (!p || !p->data || p->len <= 0) return handle;
+    namespace fs = std::filesystem;
+    std::string root(p->data, p->data + p->len);
+    std::error_code ec;
+    if (!fs::exists(root, ec) || !fs::is_directory(root, ec)) return handle;
+    std::set<std::string> labelSet;
+    for (auto &sub : fs::directory_iterator(root, ec)) {
+        if (!sub.is_directory(ec)) continue;
+        std::string label = sub.path().filename().string();
+        labelSet.insert(label);
+        for (auto &f : fs::directory_iterator(sub.path(), ec)) {
+            if (!f.is_regular_file(ec)) continue;
+            std::string ext = f.path().extension().string();
+            for (auto &c : ext) c = static_cast<char>(std::tolower(c));
+            if (ext == ".pgm" || ext == ".ppm" || ext == ".bmp" ||
+                ext == ".png" || ext == ".jpg" || ext == ".jpeg") {
+                g_entries.push_back({f.path().string(), label});
+            }
+        }
+    }
+    g_labels.assign(labelSet.begin(), labelSet.end());
+    std::sort(g_labels.begin(), g_labels.end());
+    std::sort(g_entries.begin(), g_entries.end(),
+              [](const Entry &a, const Entry &b) {
+                  if (a.label != b.label) return a.label < b.label;
+                  return a.path < b.path;
+              });
+    g_kept = g_entries;
+    handle->data[0] = 1.0;
+    return handle;
+}
+
+matlab_mat *matlab_dlnet_imds_count(matlab_mat *) {
+    using namespace dlnet_imds;
+    int64_t N = static_cast<int64_t>(g_labels.size());
+    matlab_mat *out = mat_alloc(N, 1);
+    if (N == 0) return out;
+    std::map<std::string, int64_t> cnt;
+    for (auto &e : g_kept) cnt[e.label]++;
+    for (int64_t i = 0; i < N; ++i) {
+        auto it = cnt.find(g_labels[static_cast<size_t>(i)]);
+        out->data[i] = (it != cnt.end()) ? static_cast<double>(it->second) : 0.0;
+    }
+    return out;
+}
+
+double matlab_dlnet_imds_numfiles(matlab_mat *) {
+    using namespace dlnet_imds;
+    return static_cast<double>(g_kept.size());
+}
+
+/* T3.4b — augmentedImageDatastore's per-batch transform.
+ * Apply ONE random rotate (uniform in [-ang_max, ang_max] deg) + scale
+ * (uniform in [scale_min, scale_max]) + translation (uniform in
+ * [-tx_max, tx_max] x [-ty_max, ty_max] px) to the input.  Output is
+ * resized back to the original image size so it's drop-in for the
+ * input layer.
+ *
+ * Reuses runtime_images.cpp's imrotate / imresize / imtranslate.  The
+ * randomness pulls from matlab_rand() so seeds are reproducible.  Input
+ * I can be M×N grayscale or M×N×3 RGB; we operate per slice. */
+extern matlab_mat *matlab_image_imrotate(matlab_mat *, matlab_mat *, void *, void *);
+extern matlab_mat *matlab_image_imresize(matlab_mat *, matlab_mat *, void *);
+extern matlab_mat *matlab_image_imtranslate(matlab_mat *, matlab_mat *);
+extern "C" matlab_mat *matlab_rand(double, double);
+
+matlab_mat *matlab_dlnet_augment_image(matlab_mat *I,
+                                       double ang_max,
+                                       double scale_min, double scale_max,
+                                       double tx_max, double ty_max) {
+    if (!I) return mat_alloc(0, 0);
+    int64_t H = I->rows, W = I->cols;
+
+    /* Sample three uniform random scalars. */
+    matlab_mat *u = matlab_rand(3, 1);
+    double r0 = u->data[0], r1 = u->data[1], r2 = u->data[2];
+    double r3 = 0.0, r4 = 0.0;
+    matlab_mat *u2 = matlab_rand(2, 1);
+    r3 = u2->data[0]; r4 = u2->data[1];
+
+    double ang = (2.0 * r0 - 1.0) * ang_max;                     /* [-ang_max, ang_max] */
+    double scl = scale_min + r1 * (scale_max - scale_min);       /* [smin, smax] */
+    double tx  = (2.0 * r2 - 1.0) * tx_max;
+    double ty  = (2.0 * r3 - 1.0) * ty_max;
+    (void)r4;
+
+    /* 1. Rotate (crop bbox so size is preserved). */
+    matlab_mat *am = mat_alloc(1, 1); am->data[0] = ang;
+    matlab_mat *Ir = matlab_image_imrotate(I, am, nullptr, nullptr);
+
+    /* 2. Scale (uniform).  imresize takes a scalar scale. */
+    matlab_mat *sm = mat_alloc(1, 1); sm->data[0] = scl;
+    matlab_mat *Is = matlab_image_imresize(Ir, sm, nullptr);
+
+    /* 3. Resize back to the original (H, W) so the augmented sample is
+     * drop-in for the input layer. */
+    matlab_mat *sz = mat_alloc(2, 1);
+    sz->data[0] = static_cast<double>(H);
+    sz->data[1] = static_cast<double>(W);
+    matlab_mat *Ifit = matlab_image_imresize(Is, sz, nullptr);
+
+    /* 4. Translate. */
+    matlab_mat *tm = mat_alloc(2, 1);
+    tm->data[0] = tx; tm->data[1] = ty;
+    matlab_mat *Ot = matlab_image_imtranslate(Ifit, tm);
+    return Ot;
+}
+
+matlab_mat *matlab_dlnet_imds_split(matlab_mat *, double p) {
+    using namespace dlnet_imds;
+    if (p < 0.0) p = 0.0;
+    if (p > 1.0) p = 1.0;
+    std::map<std::string, std::vector<const Entry *>> by_label;
+    for (auto &e : g_entries) by_label[e.label].push_back(&e);
+    std::vector<Entry> kept_new;
+    for (auto &kv : by_label) {
+        int64_t total = static_cast<int64_t>(kv.second.size());
+        int64_t k = static_cast<int64_t>(std::floor(p * static_cast<double>(total)));
+        if (k < 1 && p > 0.0) k = 1;
+        for (int64_t i = 0; i < k; ++i) kept_new.push_back(*kv.second[static_cast<size_t>(i)]);
+    }
+    g_kept = std::move(kept_new);
+    matlab_mat *out = mat_alloc(1, 1);
+    out->data[0] = static_cast<double>(g_kept.size());
+    return out;
 }
 
 }  // extern "C"

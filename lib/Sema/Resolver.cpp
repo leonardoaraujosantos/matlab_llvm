@@ -670,11 +670,20 @@ void Resolver::registerBuiltins() {
     "matlab_dlnet_grad", "matlab_dlnet_reset", "matlab_dlnet_reset0",
     "matlab_dltape_size", "matlab_dltape_truncate",
     "matlab_dlnet_sgdmupdate", "matlab_dlnet_adamupdate",
+    "matlab_dlnet_rmspropupdate", "matlab_dlnet_prune_mask",
+    "matlab_dlnet_mask_sparsity", "matlab_dlnet_run_experiment",
+    "matlab_dlnet_mkdir", "matlab_dlnet_imds_load",
+    "matlab_dlnet_imds_count", "matlab_dlnet_imds_split",
+    "matlab_dlnet_imds_numfiles", "matlab_dlnet_augment_image",
     /* User-facing names — `dlreset()` between training iters, plus
      * `dltape_size()` / `dltape_truncate(n)` for fine-grained checkpoints;
-     * `sgdmupdate` / `adamupdate` for functional optimizer step. */
+     * `sgdmupdate` / `adamupdate` / `rmspropupdate` for functional
+     * optimizer step; `prune_mask` / `mask_sparsity` for magnitude pruning. */
     "dlreset", "dltape_size", "dltape_truncate",
-    "sgdmupdate", "adamupdate",
+    "sgdmupdate", "adamupdate", "rmspropupdate",
+    "prune_mask", "mask_sparsity", "runExperiment",
+    "mkdir", "imageDatastore", "countEachLabel", "splitEachLabel",
+    "numpartitions", "augmentImage",
     /* Inverse Tustin: discrete-to-continuous. */
     "d2c_tustin",
     /* Tier 3.4 / 2.3 — gramians and state-space step response. */
