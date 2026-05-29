@@ -49,6 +49,12 @@ struct CppClassDef {
   std::vector<std::string> Properties;
   std::vector<mlir::func::FuncOp> Ctors;
   std::vector<mlir::func::FuncOp> Methods;  // non-ctor (regular / get / op / static)
+  // True when the class stores matrix properties via matlab_obj_set_mat
+  // — too rich for a C struct.  In C mode such a class is emitted as
+  // `typedef void* ClassName;` (runtime obj handle); the runtime owns
+  // the actual property storage on the heap.  Used for dlarray and any
+  // other handle-style classdef (e.g. dlquantizer).
+  bool IsHandleClass = false;
 };
 
 /// Metadata for an scf.while op that matched the canonical for-loop shape
@@ -1603,6 +1609,14 @@ void Emitter::collectClassdefs(mlir::ModuleOp M) {
     F.getBody().walk([&](mlir::LLVM::CallOp C) {
       if (!C.getCallee()) return;
       llvm::StringRef Callee = *C.getCallee();
+      /* Handle-classdef detection: any class with a matrix-typed property
+       * (set/get via _mat helpers) holds runtime state too rich for a
+       * C struct.  Mark it as a handle class so emit-c uses `void *`
+       * instead of `typedef struct { ... }`. */
+      if (Callee == "matlab_obj_set_mat" || Callee == "matlab_obj_get_mat") {
+        CD.IsHandleClass = true;
+        return;
+      }
       if (Callee != "matlab_obj_set_f64" && Callee != "matlab_obj_get_f64")
         return;
       if (C.getNumOperands() < 2) return;
@@ -2325,11 +2339,18 @@ void Emitter::emitCStructTypedef(llvm::StringRef ClassName,
       if (Seen.insert(P).second) AllProps.push_back(P);
     }
   }
+  if (CD.IsHandleClass) {
+    /* Handle classdef — stores matrix properties on the runtime heap.
+     * Emit as a `void *` alias so the C variable holds the obj pointer
+     * directly and matlab_*_init / property-set / property-get calls
+     * are linkable with their `void *` runtime ABI. */
+    OS << "typedef void* " << ClassName.str() << ";\n\n";
+    return;
+  }
   OS << "typedef struct " << ClassName.str() << " {\n";
   for (auto &P : AllProps) OS << "  double " << P.str() << ";\n";
   if (AllProps.empty()) OS << "  char _unused;\n";  // empty-struct guard
   OS << "} " << ClassName.str() << ";\n\n";
-  (void)CD;
 }
 
 void Emitter::emitCppClass(llvm::StringRef ClassName,
@@ -5544,6 +5565,88 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
         return;
       }
     }
+    /* Generic fallback: emit a plain C call to the named runtime entry.
+     * Handles every `matlab_*` callee that the LowerTensorOps pde_table
+     * doesn't claim (e.g. matlab_subscript4_pstore_s, matlab_dlnet_*
+     * dispatchers introduced via tape ops, debug registrants).  The
+     * runtime symbol is linked from libMatlabRuntime; types are derived
+     * from the op's operand/result types via cTypeOfValue. */
+    if (CA && Op.getNumResults() <= 1) {
+      auto callee = CA.getValue().str();
+      /* Skip the user-facing names that LowerTensorOps SHOULD have
+       * rewritten — surfacing them here would generate an undefined
+       * runtime reference.  These are the names from the pde_table's
+       * user-facing column ("zeros", "ones", "size", "fprintf", etc.). */
+      static const std::set<std::string> userFacing = {
+          "zeros", "ones", "size", "ndims", "numel", "length",
+          "fprintf", "disp", "printf", "sprintf", "fopen", "fclose",
+          "sum", "mean", "max", "min", "abs", "sqrt", "exp", "log",
+          "rand", "randn", "transpose", "ctranspose", "cat",
+      };
+      if (userFacing.count(callee) == 0) {
+        std::string Out;
+        if (Op.getNumResults() == 1) {
+          std::string N = this->name(Op.getResult(0));
+          std::string Ty = cTypeOfValue(Op.getResult(0));
+          Out = Ty + " " + N + " = " + callee + "(";
+        } else {
+          Out = callee + "(";
+        }
+        for (unsigned i = 0; i < Op.getNumOperands(); ++i) {
+          if (i) Out += ", ";
+          mlir::Value V = Op.getOperand(i);
+          mlir::Type T = V.getType();
+          /* Runtime matlab_* functions universally take `void *` for
+           * pointer-typed args.  Cast every non-scalar operand to
+           * `(void *)`: tensor, ptr, none, and classdef-struct types
+           * all carry a runtime ptr.  Scalars (f64/i64/i32) pass-thru. */
+          bool isScalar =
+              mlir::isa<mlir::Float64Type, mlir::Float32Type>(T) ||
+              mlir::isa<mlir::IntegerType>(T);
+          if (isScalar) {
+            Out += stmtExpr(V);
+          } else {
+            Out += "(void*)";
+            /* For struct types we need the address.  Detect classdef
+             * struct types by checking the C type name — primitives
+             * stringify to "double"/"int64_t"/etc, classdef instances
+             * stringify to a struct name. */
+            std::string CTy = cTypeOfValue(V);
+            if (CTy.find("void*") == std::string::npos &&
+                CTy.find("char*") == std::string::npos &&
+                CTy.find("*") == std::string::npos &&
+                CTy != "double" && CTy != "float" &&
+                CTy.find("int") == std::string::npos &&
+                CTy.find("bool") == std::string::npos) {
+              /* Struct value — take its address. */
+              Out += "&";
+            }
+            Out += stmtExpr(V);
+          }
+        }
+        Out += ");\n";
+        indent(Indent);
+        OS << Out;
+        return;
+      }
+    }
+  }
+
+  // --- builtin.unrealized_conversion_cast ------------------------------
+  // LowerTensorOps inserts these to bridge tensor<*xf64> / none -> ptr
+  // for runtime calls that take matlab_mat*.  At the C level all those
+  // types are the same matlab_mat* runtime pointer, so the cast is a
+  // pure type-system reannotation — emit as a simple assignment between
+  // C variables of compatible pointer types.  Single-result, single-
+  // operand form is what LowerTensorOps emits.
+  if (Name == "builtin.unrealized_conversion_cast" &&
+      Op.getNumOperands() == 1 && Op.getNumResults() == 1) {
+    std::string N = this->name(Op.getResult(0));
+    std::string Ty = cTypeOfValue(Op.getResult(0));
+    indent(Indent);
+    OS << Ty << " " << N << " = (" << Ty << ")"
+       << stmtExpr(Op.getOperand(0)) << ";\n";
+    return;
   }
 
   // --- Fallback: unknown op — refuse to emit rather than silently drop it.
