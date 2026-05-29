@@ -1,0 +1,7 @@
+dl_gpu_training: dlnetGpu(0) -> active=0, dlnetGpu(1) -> active=1
+dl_gpu_training: CPU loss(0)=2.7727 loss(50)=1.387201
+dl_gpu_training: GPU loss(0)=2.7727 loss(50)=1.387201
+dl_gpu_training: |W1_gpu - W1_cpu| sample = 0.00e+00
+dl_gpu_training: |W2_gpu - W2_cpu| sample = 0.00e+00
+dl_gpu_training: |loss_gpu - loss_cpu|    = 0.00e+00
+dl_gpu_training: PASS

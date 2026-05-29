@@ -42,6 +42,48 @@ extern "C" matlab_mat *matlab_im2col_2d_pad(void *X, double kH, double kW,
                                             double pad_h, double pad_w,
                                             double stride_h, double stride_w);
 extern "C" matlab_mat *matlab_matmul_mm(matlab_mat *A, matlab_mat *B);
+extern "C" matlab_mat *matlab_gpu_gemm  (matlab_mat *A, matlab_mat *B);
+
+/* GPU-training dispatch toggle.  When set, dlnet's MTIMES forward +
+ * backward routes through matlab_gpu_gemm — which Metal-accelerates
+ * above the (M, N, K all ≥ 128) threshold and falls back to BLAS /
+ * the naive triple-loop on small matrices.  Set via matlab_dlnet_gpu_set
+ * from MATLAB (`dlnetGpu(1)` / `dlnetGpu(0)`).  Default off — keeps the
+ * existing CPU lane bit-for-bit identical for the catalog of small
+ * gating tests. */
+static int g_dlnet_gpu = 0;
+static matlab_mat *dlnet_gemm(matlab_mat *A, matlab_mat *B) {
+    if (g_dlnet_gpu) return matlab_gpu_gemm(A, B);
+    return matlab_matmul_mm(A, B);
+}
+/* Y = A^T * B (rows of A reduced).  We transpose A then call gemm — the
+ * transpose is O(M·K) vs the gemm's O(M·N·K), so the asymptotic cost
+ * stays gemm-dominated.  Kept inline so the GPU lane sees a single
+ * gemm call per backward leg (matches MathWorks' cuBLAS strided dgemm
+ * with op=T at the cuBLAS call site). */
+static matlab_mat *dlnet_gemm_AtB(matlab_mat *A, matlab_mat *B) {
+    matlab_mat *AT = mat_alloc(A->cols, A->rows);
+    for (int64_t i = 0; i < A->rows; ++i)
+        for (int64_t j = 0; j < A->cols; ++j)
+            AT->data[j * A->rows + i] = A->data[i * A->cols + j];
+    return dlnet_gemm(AT, B);
+}
+static matlab_mat *dlnet_gemm_ABt(matlab_mat *A, matlab_mat *B) {
+    matlab_mat *BT = mat_alloc(B->cols, B->rows);
+    for (int64_t i = 0; i < B->rows; ++i)
+        for (int64_t j = 0; j < B->cols; ++j)
+            BT->data[j * B->rows + i] = B->data[i * B->cols + j];
+    return dlnet_gemm(A, BT);
+}
+
+extern "C" matlab_mat *matlab_dlnet_gpu_set(double flag) {
+    g_dlnet_gpu = (flag != 0.0) ? 1 : 0;
+    return mat_alloc(0, 0);
+}
+extern "C" double matlab_dlnet_gpu_get(double dummy) {
+    (void)dummy;
+    return static_cast<double>(g_dlnet_gpu);
+}
 
 namespace dlnet {
 
@@ -296,13 +338,12 @@ matlab_mat *matlab_dlnet_extractdata(void *obj_v) {
 static matlab_mat *bin_forward(int op, matlab_mat *A, matlab_mat *B) {
     int64_t m = A->rows, n = A->cols;
     if (op == dlnet::OP_MTIMES) {
-        matlab_mat *C = mat_alloc(A->rows, B->cols);
-        for (int64_t i = 0; i < A->rows; ++i)
-            for (int64_t j = 0; j < B->cols; ++j) {
-                double s = 0; for (int64_t k = 0; k < A->cols; ++k) s += A->data[i*A->cols+k]*B->data[k*B->cols+j];
-                C->data[i*C->cols+j] = s;
-            }
-        return C;
+        /* Dispatch through dlnet_gemm — calls matlab_gpu_gemm when the
+         * GPU training toggle is on (Metal-accelerated above 128³),
+         * matlab_matmul_mm (BLAS dgemm) otherwise.  Both yield identical
+         * results to the naive triple-loop within double-precision
+         * rounding. */
+        return dlnet_gemm(A, B);
     }
     // Decide result shape — A defines it when A is "bigger".  Pure scalar
     // A is also handled (swap so the bigger side leads).
@@ -2074,12 +2115,14 @@ matlab_mat *matlab_dlnet_grad(void *lossv, void *varv) {
         case OP_MTIMES: {
             // C = P0 * P1 ; gP0 = A * P1' ; gP1 = P0' * A
             if (P0 && P1) {
-                matlab_mat *gA = mat_alloc(P0->rows, P0->cols);
-                for (int64_t r=0;r<P0->rows;++r) for(int64_t c=0;c<P0->cols;++c){ double s=0; for(int64_t k=0;k<P1->cols;++k) s+=A->data[r*A->cols+k]*P1->data[c*P1->cols+k]; gA->data[r*gA->cols+c]=s; }
-                accum(n.p0, gA);
-                matlab_mat *gB = mat_alloc(P1->rows, P1->cols);
-                for (int64_t r=0;r<P1->rows;++r) for(int64_t c=0;c<P1->cols;++c){ double s=0; for(int64_t k=0;k<P0->rows;++k) s+=P0->data[k*P0->cols+r]*A->data[k*A->cols+c]; gB->data[r*gB->cols+c]=s; }
-                accum(n.p1, gB);
+                /* dlnet_gemm_ABt / _AtB go through the same GPU-aware
+                 * dispatcher as the forward pass, so training with
+                 * `dlnetGpu(1)` accelerates both forward AND backward
+                 * MTIMES on the Metal lane (above 128³).  Below the
+                 * threshold each call falls through to BLAS dgemm /
+                 * the naive triple-loop without overhead. */
+                accum(n.p0, dlnet_gemm_ABt(A,  P1));
+                accum(n.p1, dlnet_gemm_AtB(P0, A));
             }
         } break;
         case OP_RELU:    { matlab_mat *g=zero_clone(V); double *gd=flatdata(g); const double *Vd=flatdata(V), *Ad=flatdata(A); int64_t ne=nelem(V); for(int64_t k=0;k<ne;++k) gd[k]= (Vd[k]>0)?Ad[k]:0; accum(n.p0,g);} break;

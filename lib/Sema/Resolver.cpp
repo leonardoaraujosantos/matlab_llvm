@@ -675,6 +675,8 @@ void Resolver::registerBuiltins() {
     "matlab_dlnet_mkdir", "matlab_dlnet_imds_load",
     "matlab_dlnet_imds_count", "matlab_dlnet_imds_split",
     "matlab_dlnet_imds_numfiles", "matlab_dlnet_augment_image",
+    /* T3.8 — GPU training dispatch. */
+    "matlab_dlnet_gpu_set", "matlab_dlnet_gpu_get",
     /* H5 — ONNX importer + programmatic builder. */
     "matlab_onnx_read", "matlab_onnx_run",
     "matlab_onnx_num_nodes", "matlab_onnx_num_inits", "matlab_onnx_opset",
@@ -698,6 +700,7 @@ void Resolver::registerBuiltins() {
     "onnxBeginNode", "onnxNodeInput", "onnxNodeOutput",
     "onnxNodeAttrInt", "onnxNodeAttrFloat", "onnxNodeAttrInts",
     "onnxEndNode", "onnxSave",
+    "dlnetGpu", "dlnetGpuActive",
     /* Inverse Tustin: discrete-to-continuous. */
     "d2c_tustin",
     /* Tier 3.4 / 2.3 — gramians and state-space step response. */

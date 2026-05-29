@@ -6180,6 +6180,14 @@ bool TensorLowering::rewriteBuiltinCalls() {
         /* T3.4b — random rotate/scale/translate augmenter. */
         {"matlab_dlnet_augment_image",  "matlab_dlnet_augment_image",  PtrTy, {PtrTy, F64, F64, F64, F64, F64}},
         {"augmentImage",                "matlab_dlnet_augment_image",  PtrTy, {PtrTy, F64, F64, F64, F64, F64}},
+        /* T3.8 — GPU training dispatch toggle.  When `dlnetGpu(1)` is
+         * on, dlnet's MTIMES forward + backward routes through
+         * matlab_gpu_gemm (Metal-accelerated above 128³, CPU fallback
+         * otherwise).  Solver-step (adamupdate / sgdmupdate / rmsprop)
+         * stays on the host — it's bandwidth-bound elementwise, and
+         * the single-device pattern keeps parameter updates host-side
+         * by convention (matches PyTorch / TF). */
+        {"matlab_dlnet_gpu_set",        "matlab_dlnet_gpu_set",        PtrTy, {F64}},
         /* H5 — ONNX inference-graph importer + programmatic builder. */
         {"onnxRead",            "matlab_onnx_read",            PtrTy, {PtrTy}},
         {"onnxRun",             "matlab_onnx_run",             PtrTy, {PtrTy, PtrTy}},
@@ -6861,6 +6869,9 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"onnxNumNodes",     "matlab_onnx_num_nodes",       0, "p"},
       {"onnxNumInits",     "matlab_onnx_num_inits",       0, "p"},
       {"onnxOpset",        "matlab_onnx_opset",           0, "p"},
+      /* T3.8 — GPU training dispatch toggle + introspection. */
+      {"dlnetGpu",         "matlab_dlnet_gpu_set",        1, "f"},
+      {"dlnetGpuActive",   "matlab_dlnet_gpu_get",        0, "f"},
       /* im2col helper exposed to user code so callers can write their
        * own GEMM-based conv (e.g. depthwise, dilation, stride>1). */
       {"im2col_2d",    "matlab_im2col_2d",    1, "pff"},
