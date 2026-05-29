@@ -677,6 +677,9 @@ void Resolver::registerBuiltins() {
     "matlab_dlnet_imds_numfiles", "matlab_dlnet_augment_image",
     /* Tape-tracked shape concatenation (dlarray vertcat / horzcat). */
     "matlab_dlnet_vertcat", "matlab_dlnet_horzcat",
+    /* F: generic obj-array carrier (literal-free). */
+    "matlab_dlnet_oa_new", "matlab_dlnet_oa_append",
+    "matlab_dlnet_oa_len", "matlab_dlnet_oa_get",
     /* C: dlnetwork sequential layer carrier. */
     "matlab_dlnet_net_new", "matlab_dlnet_net_add_fc",
     "matlab_dlnet_net_add_relu", "matlab_dlnet_net_add_sigmoid",
@@ -711,6 +714,7 @@ void Resolver::registerBuiltins() {
     "dlnetGpu", "dlnetGpuActive",
     "dlnetwork", "addFC", "addRelu", "addSigmoid", "addTanh", "addSoftmax",
     "netPredict", "netNumLayers", "trainnet",
+    "objArrayNew", "objArrayAppend", "objArrayLen", "objArrayGet",
     /* Inverse Tustin: discrete-to-continuous. */
     "d2c_tustin",
     /* Tier 3.4 / 2.3 — gramians and state-space step response. */

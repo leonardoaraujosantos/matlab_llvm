@@ -1,0 +1,7 @@
+dl_gradcam_image: A size = 2 2 2 2
+dl_gradcam_image: forward loss = 20.0000
+dl_gradcam_image: gW size = 3 3 1 2
+dl_gradcam_image: cam(1,1)=3.00 cam(1,2)=0.00
+dl_gradcam_image: cam(2,1)=3.00 cam(2,2)=0.00
+dl_gradcam_image: peak saliency = 3.00
+dl_gradcam_image: PASS

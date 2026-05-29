@@ -4297,6 +4297,79 @@ matlab_mat *matlab_dlnet_imds_split(matlab_mat *, double p) {
 }  // extern "C"
 
 /* =====================================================================
+ * F: Generic object-array carrier
+ *
+ * MATLAB's classdef array literal `[obj1; obj2; obj3]` builds a 3x1
+ * array of classdef instances.  Implementing the literal syntax is a
+ * substantial Sema project (parser-level recognition of all-classdef
+ * vertcat + new ObjectArray type in the Type hierarchy + lowering
+ * dispatch + subscript through object-array slots).
+ *
+ * Pragmatic unlock: a runtime-resident generic object-array carrier
+ * keyed by an integer handle.  Provides the same capability surface
+ * (build a heterogeneous list of classdef instances, index into them,
+ * iterate over them) without parser changes.  User-facing API:
+ *
+ *   arr = objArrayNew();           -- create empty (handle scalar)
+ *   arr = objArrayAppend(arr, x);  -- append an obj (classdef inst, matrix, ...)
+ *   n   = objArrayLen(arr);        -- number of elements
+ *   obj = objArrayGet(arr, i);     -- 1-based index
+ *
+ * The carrier stores arbitrary `void *` payloads — any runtime
+ * descriptor (matlab_obj *, matlab_mat *, ...) — so it accepts both
+ * classdef instances and plain matrices.  Index returns the stored
+ * pointer; the caller is responsible for treating it as the right
+ * type at the call site.  This is the same convention as cell arrays
+ * use for heterogeneous storage.
+ * =================================================================== */
+namespace dlnet_oa {
+struct ObjArray { std::vector<void *> elems; };
+static std::vector<ObjArray> g_arrays;
+
+static int handle_to_idx_oa(matlab_mat *h) {
+    if (!h || h->rows * h->cols < 1) return -1;
+    int i = static_cast<int>(h->data[0]) - 1;
+    if (i < 0 || i >= static_cast<int>(g_arrays.size())) return -1;
+    return i;
+}
+}  /* namespace dlnet_oa */
+
+extern "C" {
+
+matlab_mat *matlab_dlnet_oa_new(void) {
+    dlnet_oa::g_arrays.emplace_back();
+    matlab_mat *h = mat_alloc(1, 1);
+    h->data[0] = static_cast<double>(dlnet_oa::g_arrays.size());
+    return h;
+}
+
+matlab_mat *matlab_dlnet_oa_append(matlab_mat *h, void *elem) {
+    using namespace dlnet_oa;
+    int i = handle_to_idx_oa(h);
+    if (i >= 0) g_arrays[static_cast<size_t>(i)].elems.push_back(elem);
+    return h;
+}
+
+double matlab_dlnet_oa_len(matlab_mat *h) {
+    using namespace dlnet_oa;
+    int i = handle_to_idx_oa(h);
+    if (i < 0) return 0.0;
+    return static_cast<double>(g_arrays[static_cast<size_t>(i)].elems.size());
+}
+
+void *matlab_dlnet_oa_get(matlab_mat *h, double idx_d) {
+    using namespace dlnet_oa;
+    int i = handle_to_idx_oa(h);
+    if (i < 0) return nullptr;
+    int idx = static_cast<int>(idx_d) - 1;
+    auto &arr = g_arrays[static_cast<size_t>(i)];
+    if (idx < 0 || idx >= static_cast<int>(arr.elems.size())) return nullptr;
+    return arr.elems[static_cast<size_t>(idx)];
+}
+
+}  // extern "C"
+
+/* =====================================================================
  * C: dlnetwork carrier — sequential layer-list driver
  *
  * MATLAB's `dlnetwork` is a classdef object that wraps an array of

@@ -1,0 +1,4 @@
+dl_lime_image: w_lime = [3.000 0.000 3.000 -0.000]
+dl_lime_image: bar-covering weight sum   = 6.000
+dl_lime_image: empty-quad  weight sum   = -0.000
+dl_lime_image: PASS

@@ -6185,6 +6185,9 @@ bool TensorLowering::rewriteBuiltinCalls() {
          * concat axis. */
         {"matlab_dlnet_vertcat",        "matlab_dlnet_vertcat",        PtrTy, {PtrTy, PtrTy, PtrTy}},
         {"matlab_dlnet_horzcat",        "matlab_dlnet_horzcat",        PtrTy, {PtrTy, PtrTy, PtrTy}},
+        /* F: generic obj-array carrier — runtime-resident, handle-keyed. */
+        {"matlab_dlnet_oa_new",         "matlab_dlnet_oa_new",         PtrTy, {}},
+        {"matlab_dlnet_oa_append",      "matlab_dlnet_oa_append",      PtrTy, {PtrTy, PtrTy}},
         /* C: dlnetwork carrier — sequential layer-list driver. */
         {"matlab_dlnet_net_new",        "matlab_dlnet_net_new",        PtrTy, {}},
         {"matlab_dlnet_net_add_fc",     "matlab_dlnet_net_add_fc",     PtrTy, {PtrTy, PtrTy, PtrTy}},
@@ -6885,6 +6888,11 @@ bool TensorLowering::rewriteBuiltinCalls() {
       /* T3.8 — GPU training dispatch toggle + introspection. */
       {"dlnetGpu",         "matlab_dlnet_gpu_set",        1, "f"},
       {"dlnetGpuActive",   "matlab_dlnet_gpu_get",        0, "f"},
+      /* F: generic obj-array carrier (literal-free object arrays). */
+      {"objArrayNew",      "matlab_dlnet_oa_new",         1, ""},
+      {"objArrayAppend",   "matlab_dlnet_oa_append",      1, "pp"},
+      {"objArrayLen",      "matlab_dlnet_oa_len",         0, "p"},
+      {"objArrayGet",      "matlab_dlnet_oa_get",         1, "pf"},
       /* C: dlnetwork carrier — sequential layer driver. */
       {"dlnetwork",        "matlab_dlnet_net_new",        1, ""},
       {"addFC",            "matlab_dlnet_net_add_fc",     1, "ppp"},

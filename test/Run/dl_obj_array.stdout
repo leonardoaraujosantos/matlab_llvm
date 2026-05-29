@@ -1,0 +1,5 @@
+dl_obj_array: length = 3
+dl_obj_array: arr(1) = [0 0; 0 0]
+dl_obj_array: arr(2) = [1 1; 1 1]
+dl_obj_array: arr(3) = [1 2; 3 4]
+dl_obj_array: PASS
