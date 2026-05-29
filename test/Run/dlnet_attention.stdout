@@ -1,0 +1,4 @@
+attention shape ok = 1
+softmax weights sum to 1 = 1
+gradient nonzero across Q,K,V = 1
+loss drops after gradient step = 1

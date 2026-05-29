@@ -64,6 +64,20 @@ RUNTIME_DEBUG="$ROOT/runtime/runtime_debug.cpp"
 RUNTIME_COMPLEX="$ROOT/runtime/runtime_complex.cpp"
 RUNTIME_COMM="$ROOT/runtime/toolbox/comm/runtime_comm.cpp"
 RUNTIME_PROP="$ROOT/runtime/toolbox/prop/runtime_prop.cpp"
+# Deep Learning Toolbox runtime — handle-classdef + autodiff tape +
+# functional optimizers + ONNX + dlnetwork carrier.  Required by the dl_*
+# / array_tierc / stats_tsne / matmul3_batched tests when their
+# .skip-emit-* markers are absent (i.e., after the dlarray-in-C-mode
+# rewrite lifted them).
+RUNTIME_DLNET="$ROOT/runtime/toolbox/dlnet/runtime_dlnet.cpp"
+RUNTIME_ONNX="$ROOT/runtime/toolbox/dlnet/runtime_onnx.cpp"
+# Image Processing Toolbox runtime — augmentImage uses imrotate /
+# imresize / imtranslate from runtime_images.cpp.
+RUNTIME_IMAGES="$ROOT/runtime/toolbox/images/runtime_images.cpp"
+# Statistics & ML — stats_tsne, bayesopt (used by dl_bayesopt_hp).
+RUNTIME_STATS="$ROOT/runtime/toolbox/stats/runtime_stats.cpp"
+# GPU dispatcher — matlab_gpu_gemm pulled in by dlnet's GPU-aware MTIMES.
+RUNTIME_GPU="$ROOT/runtime/gpu/runtime_gpu.cpp"
 TESTDIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Precompile the runtime TUs once (they used to be recompiled per fixture,
@@ -74,7 +88,9 @@ TESTDIR="$(cd "$(dirname "$0")" && pwd)"
 OBJDIR="$(mktemp -d -t mlc-emitc.XXXXXX)"
 trap 'rm -rf "$OBJDIR"' EXIT
 RUNTIME_OBJS=()
-for src in "$RUNTIME_MAIN" "$RUNTIME_DEBUG" "$RUNTIME_COMPLEX" "$RUNTIME_COMM" "$RUNTIME_PROP"; do
+for src in "$RUNTIME_MAIN" "$RUNTIME_DEBUG" "$RUNTIME_COMPLEX" "$RUNTIME_COMM" "$RUNTIME_PROP" \
+           "$RUNTIME_DLNET" "$RUNTIME_ONNX" "$RUNTIME_IMAGES" "$RUNTIME_STATS" \
+           "$RUNTIME_GPU"; do
   obj="$OBJDIR/$(basename "${src%.cpp}").o"
   if ! "$CXX" $CXXSTD "${WFLAGS[@]}" "-I$ROOT/runtime" -x c++ -c "$src" -o "$obj" 2>"$OBJDIR/cc.err"; then
     echo "FATAL: failed to compile runtime TU $src" >&2

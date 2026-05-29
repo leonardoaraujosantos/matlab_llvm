@@ -1,0 +1,4 @@
+calibrated max-abs x10 rounds to 24
+scale x10000 rounds to 189
+clip(3.0) x10 rounds to 24
+clipped values on int8 grid = 1

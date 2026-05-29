@@ -1366,6 +1366,41 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
       /* Degree-argument trigonometry — element-wise like sin/cos. */
       Name == "sind"  || Name == "cosd"  || Name == "tand" ||
       Name == "asind" || Name == "acosd" || Name == "atand") {
+    /* If the argument is (or reduces to) a class-pinned binding — e.g.
+     * a `dlarray` — back off to `any` so the dispatch path picks the
+     * classdef method instead of forcing a scalar/array numeric type.
+     * Without this the result alloc is typed `f64` while the classdef
+     * method returns a pointer, producing an alloc/store type mismatch.
+     *
+     * Recurse through composite expressions (BinaryOp / UnaryOp / a
+     * CallOrIndex of a dlarray-returning builtin) so `sqrt(v + eps_dl)`
+     * routes correctly when `v` and `eps_dl` are dlarray. */
+    if (!Args.empty()) {
+      std::function<bool(const Expr *)> argIsClassPinned =
+          [&argIsClassPinned](const Expr *X) -> bool {
+        if (!X) return false;
+        if (auto *NE = dynamic_cast<const NameExpr *>(X))
+          return NE->Ref && NE->Ref->PinnedClass;
+        if (auto *Bi = dynamic_cast<const BinaryOpExpr *>(X))
+          return argIsClassPinned(Bi->LHS) || argIsClassPinned(Bi->RHS);
+        if (auto *U = dynamic_cast<const UnaryOpExpr *>(X))
+          return argIsClassPinned(U->Operand);
+        if (auto *CX = dynamic_cast<const CallOrIndex *>(X)) {
+          /* Direct ctor call on a class — pinned. */
+          if (auto *NX = dynamic_cast<const NameExpr *>(CX->Callee)) {
+            if (NX->Ref && NX->Ref->Kind == BindingKind::Class &&
+                NX->Ref->ClassDef) return true;
+          }
+          /* Reduce/activation calls (`sqrt(x)`, `mean(x,1)`, ...) where
+           * the FIRST arg is class-pinned — the result inherits the
+           * pin via the classdef method. */
+          for (Expr *A : CX->Args)
+            if (argIsClassPinned(A)) return true;
+        }
+        return false;
+      };
+      if (argIsClassPinned(Args[0])) return TC.any();
+    }
     // Element-wise: preserves shape, promotes to floating.
     if (!ArgTys.empty() && ArgTys[0] && ArgTys[0]->K == Type::Kind::Array) {
       auto &A = static_cast<const ArrayType &>(*ArgTys[0]);

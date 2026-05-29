@@ -1,0 +1,2 @@
+autoencoder loss drops = 1
+encoder + decoder both receive gradient = 1

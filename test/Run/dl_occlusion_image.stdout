@@ -1,0 +1,5 @@
+dl_occlusion_image: baseline score = 6.00
+dl_occlusion_image: peak drop = 2.00 at (2, 2)
+dl_occlusion_image: drops(1, :) = 0 1 0 0
+dl_occlusion_image: drops(2, :) = 0 2 0 0
+dl_occlusion_image: PASS

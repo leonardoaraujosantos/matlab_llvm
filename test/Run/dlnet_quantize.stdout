@@ -1,0 +1,4 @@
+quantize shape ok = 1
+scale matches max(abs(W))/127 = 1
+every weight on int8 lattice = 1
+quantization error <= scale/2 = 1

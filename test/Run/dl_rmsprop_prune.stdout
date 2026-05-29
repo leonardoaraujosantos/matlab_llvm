@@ -1,0 +1,3 @@
+dl_rmsprop_prune: loss(0)=91.000 loss(200)=0.024
+dl_rmsprop_prune: prune sparsity = 0.50 (target 0.50)
+dl_rmsprop_prune: PASS

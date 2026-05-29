@@ -43,6 +43,7 @@ extern "C" {
  * the descriptor kind without a separate id field. */
 #define MATLAB_MAT_C_MAGIC 0xC0FFEE01u
 #define MATLAB_MAT3_MAGIC  0xC0FFEE03u
+#define MATLAB_MATN_MAGIC  0xC0FFEE04u
 
 /*--- Real matrix descriptor ----------------------------------------------*/
 struct matlab_mat {
@@ -72,6 +73,28 @@ struct matlab_mat3 {
 };
 typedef struct matlab_mat3 matlab_mat3;
 
+/*--- N-D matrix descriptor (rank >= 4) ----------------------------------- *
+ * Tier C of any_shape_roadmap.  Covers ranks the 2-D / 3-D fast paths can't
+ * represent (e.g. H×W×C×N batches, RGB video, 4-D conv kernels).  Element
+ * order is row-major-extended: the rightmost dim varies fastest, matching
+ * the existing 2-D row-major + 3-D slice-major linearisation when ndims
+ * == 2 or 3.  Trailing singleton dims drop at construction time (mirrors
+ * MATLAB: zeros(2,3,1,1) is 2-D, ndims==2).
+ *
+ * `strides` are element strides (stride[k] = product of dims[k+1..ndims-1]),
+ * pre-computed so subscript / reshape / permute can build the offset
+ * without re-walking the dims vector.  Stored as a single allocation
+ * after the descriptor header — see matN_alloc — so a single free reclaims
+ * everything but the data buffer. */
+struct matlab_matN {
+    uint32_t magic;    /* MATLAB_MATN_MAGIC */
+    uint32_t ndims;    /* >= 4 (lower ranks use mat / mat3) */
+    int64_t *dims;     /* length ndims; owned by this descriptor */
+    int64_t *strides;  /* length ndims; element strides for row-major */
+    double  *data;     /* prod(dims) doubles (contiguous, calloc'd) */
+};
+typedef struct matlab_matN matlab_matN;
+
 /*--- Magic-tag predicates -------------------------------------------------
  * Inline so they don't impose a TU boundary cost. Both accept a raw
  * void* — callers pass either descriptor kind interchangeably. */
@@ -83,6 +106,10 @@ static inline int mat_is_3d(const void *p) {
     if (!p) return 0;
     return *reinterpret_cast<const uint32_t *>(p) == MATLAB_MAT3_MAGIC;
 }
+static inline int mat_is_nd(const void *p) {
+    if (!p) return 0;
+    return *reinterpret_cast<const uint32_t *>(p) == MATLAB_MATN_MAGIC;
+}
 
 /*--- Allocator helpers ---------------------------------------------------
  * Defined once in runtime/matlab_runtime.cpp; declared here for the other
@@ -91,6 +118,12 @@ static inline int mat_is_3d(const void *p) {
 matlab_mat   *mat_alloc  (int64_t m, int64_t n);
 matlab_mat_c *mat_c_alloc(int64_t m, int64_t n);
 matlab_mat3  *mat3_alloc (int64_t m, int64_t n, int64_t p);
+/* matN_alloc(ndims, dims): allocates the descriptor + dims/strides + data
+ * in one allocation block.  Trailing singleton dims are dropped (so a
+ * caller passing (4, [3,2,1,1]) gets a 2-D matlab_mat back, NOT a matN);
+ * if the dropped rank is exactly 3 it returns a matlab_mat3; rank 2 a
+ * matlab_mat.  Returns void* — the caller must magic-check the result. */
+void *matN_alloc(int ndims, const int64_t *dims);
 
 /*--- Shared global I/O mutex --------------------------------------------- */
 extern pthread_mutex_t matlab_io_mutex;

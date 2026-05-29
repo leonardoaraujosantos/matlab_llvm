@@ -1,0 +1,2 @@
+residual gradient nonzero through both branches = 1
+loss drops after residual-branch step = 1

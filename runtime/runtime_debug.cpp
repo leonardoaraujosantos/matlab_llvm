@@ -504,10 +504,27 @@ void matlab_ws_whos(void) {
             printf("  %-16s %-16s %-8s\n", name, "1x1", "double");
         } else if (matlab_ws->kinds[i] == 1) {
             matlab_mat *m = (matlab_mat *)matlab_ws->ptr_vals[i];
-            char shape[32];
-            if (m) snprintf(shape, sizeof shape, "%lldx%lld",
-                            (long long)m->rows, (long long)m->cols);
-            else    snprintf(shape, sizeof shape, "-");
+            char shape[64];
+            if (!m) {
+                snprintf(shape, sizeof shape, "-");
+            } else if (mat_is_nd(m)) {
+                /* Tier C matN: write the dims tuple as "AxBxCx..." */
+                matlab_matN *mn = (matlab_matN *)m;
+                int n = 0;
+                for (uint32_t k = 0; k < mn->ndims && n < (int)sizeof(shape) - 8; ++k) {
+                    n += snprintf(shape + n, sizeof(shape) - (size_t)n,
+                                  k == 0 ? "%lld" : "x%lld",
+                                  (long long)mn->dims[k]);
+                }
+            } else if (mat_is_3d(m)) {
+                matlab_mat3 *m3 = (matlab_mat3 *)m;
+                snprintf(shape, sizeof shape, "%lldx%lldx%lld",
+                         (long long)m3->rows, (long long)m3->cols,
+                         (long long)m3->depth);
+            } else {
+                snprintf(shape, sizeof shape, "%lldx%lld",
+                         (long long)m->rows, (long long)m->cols);
+            }
             printf("  %-16s %-16s %-8s\n", name, shape, "double");
         } else if (matlab_ws->kinds[i] == 3) {
             printf("  %-16s %-16s %-8s\n", name, "1x1", "string");
@@ -2594,7 +2611,37 @@ int32_t matlab_dbg_mat_kind(const void *p) {
     if (!p) return 0;
     if (mat_is_complex(p)) return 2;   /* matlab_mat_c */
     if (mat_is_3d(p))      return 3;   /* matlab_mat3   */
+    if (mat_is_nd(p))      return 4;   /* matlab_matN   */
     return 1;                          /* plain matlab_mat */
+}
+
+/* matN accessors — ndims / per-axis dim / flat-element read.  Caller-side
+ * (matlabc DAP handlers, the workspace mirror) treat a matN like a
+ * sequence: total = prod(dims), iterate by flat linear index.  The dims
+ * tuple itself is exposed via matlab_dbg_matN_dim(M, k) (1-based k). */
+int32_t matlab_dbg_matN_ndims(const void *p) {
+    if (!p || !mat_is_nd(p)) return 0;
+    return (int32_t)((const matlab_matN *)p)->ndims;
+}
+int64_t matlab_dbg_matN_dim(const void *p, int32_t k_1based) {
+    if (!p || !mat_is_nd(p)) return 0;
+    const matlab_matN *m = (const matlab_matN *)p;
+    if (k_1based < 1 || (uint32_t)k_1based > m->ndims) return 1;
+    return m->dims[k_1based - 1];
+}
+int64_t matlab_dbg_matN_numel(const void *p) {
+    if (!p || !mat_is_nd(p)) return 0;
+    const matlab_matN *m = (const matlab_matN *)p;
+    int64_t t = 1; for (uint32_t k = 0; k < m->ndims; ++k) t *= m->dims[k];
+    return t;
+}
+/* Flat-linear read (0-based); cheap for the debugger's per-cell drill. */
+double matlab_dbg_matN_get_lin(const void *p, int64_t lin_zero_based) {
+    if (!p || !mat_is_nd(p)) return 0.0;
+    const matlab_matN *m = (const matlab_matN *)p;
+    int64_t n = matlab_dbg_matN_numel(p);
+    if (lin_zero_based < 0 || lin_zero_based >= n) return 0.0;
+    return m->data[lin_zero_based];
 }
 /* matlab_mat_c accessors are defined alongside its struct body
  * further down in the complex section — that section needs to be
@@ -2630,6 +2677,7 @@ void *matlab_dbg_mat_data_ptr(void *Mraw) {
     int32_t kind = matlab_dbg_mat_kind(Mraw);
     if (kind == 1) return ((matlab_mat *)Mraw)->data;
     if (kind == 3) return ((matlab_mat3 *)Mraw)->data;
+    if (kind == 4) return ((matlab_matN *)Mraw)->data;
     /* Complex matrices have two parallel buffers (re/im); a single
      * pointer can't cover both. Refuse for now — the IDE's memory
      * view would only see the real component, which would be
@@ -2646,6 +2694,9 @@ int64_t matlab_dbg_mat_data_bytes(void *Mraw) {
     if (kind == 3) {
         matlab_mat3 *m = (matlab_mat3 *)Mraw;
         return m->rows * m->cols * m->depth * (int64_t)sizeof(double);
+    }
+    if (kind == 4) {
+        return matlab_dbg_matN_numel(Mraw) * (int64_t)sizeof(double);
     }
     return 0;
 }

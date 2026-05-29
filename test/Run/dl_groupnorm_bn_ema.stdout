@@ -1,0 +1,7 @@
+dl_groupnorm_bn_ema: GN g1 mean=0.0000 var=1.0000
+dl_groupnorm_bn_ema: GN g2 mean=-0.0000 var=1.0000
+dl_groupnorm_bn_ema: GN sum(gG)=0.0000
+dl_groupnorm_bn_ema: BN train run_mean = 3.325 5.825
+dl_groupnorm_bn_ema: BN train run_var  = 13.126 13.126
+dl_groupnorm_bn_ema: bn_eval (1,1,1,1)=-0.614 (2,2,2,2)=3.140
+dl_groupnorm_bn_ema: PASS

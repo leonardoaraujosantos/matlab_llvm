@@ -1,0 +1,2 @@
+discriminator loss strictly drops = 1
+generator mean moves toward target = 1

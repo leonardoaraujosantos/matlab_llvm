@@ -119,6 +119,42 @@ declare -a CASES=(
   # Closes the integrator-chain divergence that previously kept
   # cic_decimator out of the sweep.
   cic_decimator
+  # Tier-9 — added with the `% cocotb: range(<port>, <lo>, <hi>)` pragma
+  # that bounds the random stimulus to a real-value window.  Useful when
+  # the natural fi_range would let stimulus exercise overflow regions
+  # that SV's mid-computation truncation and the Python reference's
+  # saturate-and-grow disagree on.  The fixture itself is a trivial
+  # Q16.0 adder, so the cocotb compare is at the same FL on both sides
+  # -- what gets exercised here is the new pragma + harness emit.
+  cocotb_range_pragma
+  # Tier-10 — DL HDL H3 bit-accuracy.  A Q16.8 quantized 2-2-1 MLP
+  # forward using the `% hdl: precise_fi` pragma to enable Sema-mono
+  # on the HW lane, so the FL-grown intermediates flow through both
+  # the SV emit and the Python reference identically.  Closes the
+  # documented bias-FL divergence (issue #75): SV bias now lowers as
+  # `64'sd8192` (= 0.125 * 2^16) instead of the Q16.8 raw 32, matching
+  # the Python ref's Q33.16 / Q34.16 internal precision.
+  dlhdl_quant_mlp
+  # Tier-11 — DL HDL H4 LSTM-on-FPGA.  Two precise_fi fixtures that
+  # demonstrate the recurrent kernel compiles to bit-accurate fi SV:
+  #   dlhdl_rnn_cell  — simple recurrent cell `h_new = hardtanh(Wx*x + Wh*h + b)`.
+  #   dlhdl_lstm_cell — full LSTM cell with `hardsigmoid` (i/f/o gates) +
+  #                     `hardtanh` (g gate + final hidden activation) +
+  #                     cell-state update `c_new = f*c_prev + i*g`.
+  # Both DUTs are combinational (caller threads h_prev / c_prev across
+  # timesteps externally); the multi-timestep recurrence with persistent
+  # registers is a documented follow-on slice.
+  dlhdl_rnn_cell
+  dlhdl_lstm_cell
+  # Tier-12 — multi-timestep LSTM with persistent register state.
+  # Same gate machinery as dlhdl_lstm_cell, but holds h_state /
+  # c_state across cycles via MATLAB `persistent` -- lowers to the
+  # SV always_comb (next-state expr) + always_ff (register sample
+  # on posedge clk with async-low reset) pattern.  cocotb's
+  # `% cocotb: stimulus(reset, impulse, 1)` fires reset at cycle 0
+  # to match the SV's rst_n preamble; subsequent cycles use random
+  # x within [-1, 1] and stream through the recurrent loop.
+  dlhdl_lstm_step
 )
 
 # Run each fixture in parallel via xargs -P. Default to up to 8

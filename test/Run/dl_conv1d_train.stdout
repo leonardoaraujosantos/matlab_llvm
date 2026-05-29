@@ -1,0 +1,4 @@
+dl_conv1d_train: loss(0) = 0.4727
+dl_conv1d_train: loss(200) = 0.029961
+dl_conv1d_train: ratio = 0.063384
+dl_conv1d_train: PASS

@@ -1,0 +1,4 @@
+dl_layernorm: sum(|per-col mean|) = 8.1416e-16
+dl_layernorm: mean(per-col var)   = 1.0000
+dl_layernorm: sum(gG)=0.0000 sum(gB)=12.0000
+dl_layernorm: PASS

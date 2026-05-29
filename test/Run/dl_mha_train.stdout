@@ -1,0 +1,4 @@
+dl_mha_train: loss(0) = 8.7226
+dl_mha_train: loss(600) = 0.299974
+dl_mha_train: ratio L_last/L0 = 0.034390
+dl_mha_train: PASS

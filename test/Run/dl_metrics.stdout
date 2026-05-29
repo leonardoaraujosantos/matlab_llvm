@@ -1,0 +1,5 @@
+accuracy x100 = 75
+precision class1 x100 = 75
+recall class2 x100 = 67
+fscore class3 x100 = 67
+aucroc x100 = 78

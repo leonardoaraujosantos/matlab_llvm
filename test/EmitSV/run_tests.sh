@@ -99,9 +99,19 @@ for m in "$TESTDIR"/*.m; do
   # one-module-per-file is a verilator preference, not an SV
   # requirement; HDL workflow tools split modules at synth time).
   if [[ -n "$VERILATOR" && -x "$VERILATOR" ]]; then
-    if ! "$VERILATOR" --lint-only -Wall -Wno-DECLFILENAME --top-module "$base" "$tmp" >/dev/null 2>&1; then
+    # Per-fixture `<name>.lint-extra` adds extra verilator flags (e.g.
+    # `-Wno-WIDTHEXPAND -Wno-WIDTHTRUNC`) for fixtures that use the
+    # `% hdl: precise_fi` opt-in -- their FL-grown intermediates +
+    # narrow output port legitimately trip the width-narrowing
+    # warnings, even though the math is bit-accurate vs. the Python
+    # reference (issue #75).
+    extra_lint=""
+    if [[ -f "${m%.m}.lint-extra" ]]; then
+      extra_lint="$(cat "${m%.m}.lint-extra")"
+    fi
+    if ! "$VERILATOR" --lint-only -Wall -Wno-DECLFILENAME $extra_lint --top-module "$base" "$tmp" >/dev/null 2>&1; then
       echo "FAIL $base: verilator lint"
-      "$VERILATOR" --lint-only -Wall -Wno-DECLFILENAME --top-module "$base" "$tmp" 2>&1 | sed 's/^/  /'
+      "$VERILATOR" --lint-only -Wall -Wno-DECLFILENAME $extra_lint --top-module "$base" "$tmp" 2>&1 | sed 's/^/  /'
       fail=$((fail+1))
       rm -rf "$tmpdir"
       continue

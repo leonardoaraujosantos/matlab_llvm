@@ -1,0 +1,6 @@
+dl_onnx_ops_coverage: handle=1, nodes=14, inits=8
+dl_onnx_ops_coverage: Y = [-0.2180 -1.6305 0.3617 1.4470]
+dl_onnx_ops_coverage: softmax sum = 1.000000 (target 1)
+dl_onnx_ops_coverage: global-avg = 0.3617
+dl_onnx_ops_coverage: reduce-sum = 1.4470
+dl_onnx_ops_coverage: PASS

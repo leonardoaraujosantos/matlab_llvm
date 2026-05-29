@@ -1,0 +1,6 @@
+dl_layernorm_op: col1 mean=-0.0000 var=1.0000
+dl_layernorm_op: col2 mean=-0.0000 var=1.0000
+dl_layernorm_op: col3 mean=-0.0000 var=1.0000
+dl_layernorm_op: sum(gG)=2.0000 sum(gB)=-0.0000
+dl_layernorm_op: bn_eval ch1 = -1.342 -0.447 0.447 1.342
+dl_layernorm_op: PASS

@@ -731,8 +731,10 @@ bool Lowerer::exprIsThreeD(const Expr *E,
     if (N->Name == "cat" && C->Args.size() >= 2) {
       if (auto *DimL = dynamic_cast<const IntegerLiteral *>(C->Args[0])) {
         /* cat(3, p1, p2, …) of >=2 planes is 3-D; any cat dim whose
-         * operands are already 3-D stays 3-D. */
+         * operands are already 3-D stays 3-D — EXCEPT dim 4, which
+         * promotes to rank-4 (matN) and isn't 3-D anymore. */
         if (DimL->Text == "3" && C->Args.size() >= 3) return true;
+        if (DimL->Text == "4") return false;
         for (size_t a = 1; a < C->Args.size(); ++a)
           if (exprIsThreeD(C->Args[a], Set)) return true;
       }
@@ -4298,6 +4300,23 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
           }
         }
     }
+    /* Rank-4 scalar store: A(i,j,k,l) = v on any binding.  Routes through
+     * matlab_subscript4_pstore_s, which is N-D-aware (falls back to lower-
+     * rank descriptors via mat_is_3d / mat_is_nd). */
+    if (C.Args.size() == 4 && Rhs) {
+      bool anyColon = false;
+      for (size_t a = 0; a < 4; ++a)
+        if (dynamic_cast<const ColonExpr *>(C.Args[a])) { anyColon = true; break; }
+      if (!anyColon) {
+        mlir::NamedAttribute Cal4(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_subscript4_pstore_s"));
+        emitUnregOp("matlab.call_builtin",
+                    {Os[0], Os[1], Os[2], Os[3], Os[4], Os[5]},
+                    {mlir::NoneType::get(&MCtx)}, loc(C.Range), {Cal4});
+        return;
+      }
+    }
     mlir::NamedAttribute Cal(
         mlir::StringAttr::get(&MCtx, "callee"),
         mlir::StringAttr::get(&MCtx, "__subscript_store"));
@@ -4685,7 +4704,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
      * still picks up the class. CallOrIndex on a class constructor
      * also returns a class instance. */
     std::function<const ClassDef *(const Expr *)> pinnedFromExpr =
-        [&pinnedFromExpr](const Expr *X) -> const ClassDef * {
+        [&pinnedFromExpr, this](const Expr *X) -> const ClassDef * {
       if (!X) return nullptr;
       if (auto *NE = dynamic_cast<const NameExpr *>(X))
         if (NE->Ref && NE->Ref->PinnedClass) return NE->Ref->PinnedClass;
@@ -4703,10 +4722,36 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
       if (auto *U2 = dynamic_cast<const UnaryOpExpr *>(X))
         return pinnedFromExpr(U2->Operand);
       if (auto *CX = dynamic_cast<const CallOrIndex *>(X)) {
-        if (auto *NX = dynamic_cast<const NameExpr *>(CX->Callee))
+        if (auto *NX = dynamic_cast<const NameExpr *>(CX->Callee)) {
           if (NX->Ref && NX->Ref->Kind == BindingKind::Class &&
               NX->Ref->ClassDef)
             return NX->Ref->ClassDef;
+          /* dlarray-returning function-style calls (`relu`/`sigmoid`/
+           * `mse`/...).  Without this branch, two dlarray-returning
+           * calls combined by `+` (`mse(Y1,T1) + mse(Y2,T2)`) miss the
+           * classdef-operator-overloading dispatch and crash through
+           * `matlab_add_mm` interpreting dlarray pointers as matrices. */
+          static const llvm::StringSet<> DlRet2 = {
+              "relu", "sigmoid", "tanh", "softmax", "sum", "mean",
+              "log", "exp", "crossentropy", "mse", "lstm",
+              "transpose", "ctranspose", "embed",
+              "gru", "bilstm", "lstmp", "dlarray",
+              "sqrt", "leakyrelu", "gelu", "swish",
+              "softplus", "elu", "conv2d_batch", "conv2d_full",
+              "reshape", "maxpool2d", "avgpool2d", "batchnorm",
+              "layernorm", "batchnorm_eval",
+              "groupnorm", "batchnorm_train",
+              "instancenorm", "rmsnorm"};
+          if (DlRet2.contains(NX->Name) && this->CurTU) {
+            bool argPinned = false;
+            for (size_t i = 0; i < CX->Args.size(); ++i)
+              if (pinnedFromExpr(CX->Args[i])) { argPinned = true; break; }
+            if (argPinned) {
+              for (const ClassDef *DC : this->CurTU->Classes)
+                if (DC && DC->Name == "dlarray") return DC;
+            }
+          }
+        }
       }
       return nullptr;
     };
@@ -6307,6 +6352,20 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                       {mlir::NoneType::get(&MCtx)}, L, {Cal});
           return Obj;
         }
+        /* ===== Deep Learning Toolbox — dlarray(X) leaf wrap ============== */
+        if (CD->Name == "dlarray" && C.Args.size() == 1) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "dlarray__dlarray"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value X = lowerExpr(*C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_dlnet_dlarray_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, X},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
         if (CD->Name == "so3" && C.Args.size() == 1) {
           mlir::NamedAttribute CtorCal(
               mlir::StringAttr::get(&MCtx, "callee"),
@@ -7072,6 +7131,113 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                       {mlir::NoneType::get(&MCtx)}, L, {Cal2});
         }
         return Obj;
+      }
+      /* extractdata(x) -> the underlying matrix; dlgradient(loss, v) -> the
+       * gradient matrix (reverse sweep of the autodiff tape).  Both names are
+       * deep-learning-exclusive, so route unconditionally. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "extractdata" && C.Args.size() == 1) {
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        mlir::Value X = lowerExpr(*C.Args[0]);
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_dlnet_extractdata"));
+        return emitUnreg("matlab.call_builtin", {X}, PtrTy, L, {Cal});
+      }
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "dlgradient" && C.Args.size() == 2) {
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        mlir::Value Lv = lowerExpr(*C.Args[0]);
+        mlir::Value Vv = lowerExpr(*C.Args[1]);
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_dlnet_grad"));
+        return emitUnreg("matlab.call_builtin", {Lv, Vv}, PtrTy, L, {Cal});
+      }
+      /* ===== Deep Learning Toolbox — dlarray activation/reduction/loss ====
+       * relu/sigmoid/tanh/softmax/sum/mean/log/exp/crossentropy/mse on a
+       * dlarray-pinned argument route to the dlarray method (recording onto
+       * the autodiff tape).  pinnedDl recurses through operators + ctor calls
+       * + dlarray-returning calls so `relu(W*X+b)` is recognised via the
+       * pinned leaf W.  Falls through to the numeric builtin when no operand
+       * is a dlarray (so matrix `tanh`/`sum`/`log`/`exp` are unaffected). */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          C.Args.size() >= 1) {
+        static const llvm::StringSet<> DlFns = {
+            "relu", "sigmoid", "tanh", "softmax", "sum", "mean",
+            "log", "exp", "crossentropy", "mse", "lstm",
+            "transpose", "ctranspose", "embed",
+            "gru", "bilstm", "lstmp",
+            /* Phase 1 small ops. */
+            "sqrt", "leakyrelu", "gelu", "swish", "softplus", "elu",
+            /* Tier C: rank-4 batched conv + reshape + pooling + full norm family. */
+            "conv2d_batch", "conv2d_full", "reshape",
+            "maxpool2d", "avgpool2d", "batchnorm",
+            "layernorm", "batchnorm_eval",
+            "groupnorm", "batchnorm_train",
+            "instancenorm", "rmsnorm"};
+        if (DlFns.contains(N->Name)) {
+          std::function<bool(const Expr *)> pinnedDl =
+              [&pinnedDl](const Expr *X) -> bool {
+            if (!X) return false;
+            if (auto *NE = dynamic_cast<const NameExpr *>(X))
+              return NE->Ref && NE->Ref->PinnedClass &&
+                     NE->Ref->PinnedClass->Name == "dlarray";
+            if (auto *Bi2 = dynamic_cast<const BinaryOpExpr *>(X))
+              return pinnedDl(Bi2->LHS) || pinnedDl(Bi2->RHS);
+            if (auto *U2 = dynamic_cast<const UnaryOpExpr *>(X))
+              return pinnedDl(U2->Operand);
+            if (auto *CX = dynamic_cast<const CallOrIndex *>(X)) {
+              if (auto *NX = dynamic_cast<const NameExpr *>(CX->Callee)) {
+                if (NX->Ref && NX->Ref->Kind == BindingKind::Class &&
+                    NX->Ref->ClassDef && NX->Ref->ClassDef->Name == "dlarray")
+                  return true;
+                static const llvm::StringSet<> DlRet = {
+                    "relu", "sigmoid", "tanh", "softmax", "sum", "mean",
+                    "log", "exp", "crossentropy", "mse", "lstm",
+                    "transpose", "ctranspose", "embed",
+                    "gru", "bilstm", "lstmp", "dlarray",
+                    "sqrt", "leakyrelu", "gelu", "swish",
+                    "softplus", "elu", "conv2d_batch", "conv2d_full",
+                    "reshape", "maxpool2d", "avgpool2d", "batchnorm",
+                    "layernorm", "batchnorm_eval",
+                    "groupnorm", "batchnorm_train",
+                    "instancenorm", "rmsnorm"};
+                if (DlRet.contains(NX->Name))
+                  for (size_t i = 0; i < CX->Args.size(); ++i)
+                    if (pinnedDl(CX->Args[i])) return true;
+              }
+            }
+            return false;
+          };
+          bool anyDl = false;
+          for (size_t i = 0; i < C.Args.size(); ++i)
+            if (pinnedDl(C.Args[i])) { anyDl = true; break; }
+          if (anyDl) {
+            auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+            std::vector<mlir::Value> Vs;
+            for (size_t i = 0; i < C.Args.size(); ++i)
+              Vs.push_back(lowerExpr(*C.Args[i]));
+            /* Per-arity rename: `mean(X)` -> dlarray__mean (1-arg) but
+             * `mean(X, dim)` -> dlarray__mean_dim (2-arg); same shape
+             * for `reshape(X, m, n)` vs `reshape(X, d1, d2, d3, d4)`,
+             * `softmax(X)` vs `softmax(X, dim)`. */
+            std::string MethodName(N->Name);
+            if (MethodName == "mean" && C.Args.size() == 2)
+              MethodName = "mean_dim";
+            else if (MethodName == "reshape" && C.Args.size() == 3)
+              MethodName = "reshape2";
+            else if (MethodName == "reshape" && C.Args.size() == 5)
+              MethodName = "reshape4";
+            else if (MethodName == "softmax" && C.Args.size() == 2)
+              MethodName = "softmax_dim";
+            std::string Callee = std::string("dlarray__") + MethodName;
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, Callee));
+            return emitUnreg("matlab.call", Vs, PtrTy, L, {Cal});
+          }
+        }
       }
       /* bin(fi) / hex(fi) / dec(fi) — render the stored integer as a
        * matlab_string. The result is tagged through StringBindings on
@@ -8632,6 +8798,23 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                 Acc = emitUnreg("matlab.call_builtin", {Acc, Ms[a]}, PtrTy, L, {CalN});
               }
               return Acc;
+            }
+            if (DimL->Text == "4") {
+              /* cat(4, mat3_or_mat, ...): stack 3-D images (or 2-D
+               * grayscale) into a rank-4 matN.  Fixed-arity entries
+               * cover N = 2 / 3 / 4; tuck the implementation against
+               * those for the common image-batch sizes.  Arities > 4
+               * fall through to a sequence of cat4_2 + (carved) append. */
+              const char *Sym = nullptr;
+              if (Ms.size() == 2) Sym = "matlab_cat4_2";
+              else if (Ms.size() == 3) Sym = "matlab_cat4_3";
+              else if (Ms.size() == 4) Sym = "matlab_cat4_4";
+              if (Sym) {
+                mlir::NamedAttribute Cal(
+                    mlir::StringAttr::get(&MCtx, "callee"),
+                    mlir::StringAttr::get(&MCtx, Sym));
+                return emitUnreg("matlab.call_builtin", Ms, PtrTy, L, {Cal});
+              }
             }
             const char *Sym = (DimL->Text == "1") ? "vertcat" : "horzcat";
             mlir::Value Acc = Ms[0];

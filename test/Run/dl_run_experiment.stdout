@@ -1,0 +1,3 @@
+dl_run_experiment: best trial = 5 (lr=0.10, h=8)
+dl_run_experiment: best loss = 0.0000
+dl_run_experiment: PASS

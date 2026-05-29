@@ -1583,7 +1583,7 @@ static void printHelpOverview() {
 /* ---- `ver` — product version + shipped-toolbox inventory --------------- *
  * matlab_llvm's analogue of MATLAB's `ver`.  The version's minor number
  * tracks the shipped-toolbox count (bump alongside the README badge). */
-static const char *kProductVersion = "0.24.0";
+static const char *kProductVersion = "0.25.3";
 static const char *kProductTagline =
     "a MATLAB compiler + runtime on MLIR / LLVM";
 
@@ -1618,6 +1618,7 @@ static const ToolboxInfo kToolboxes[] = {
   {"Sensor Fusion and Tracking",        "Tier 1-6"},
   {"Robotics System",                   "Tier 1-6"},
   {"Navigation",                        "Tier 1-6"},
+  {"Deep Learning",                     "Tier 1-4 complete (dlarray + autodiff + training + LSTM/GRU/bilstm/lstmp + attention + embedding)"},
 };
 
 static void printVersion(const std::string &filter) {
@@ -2261,6 +2262,7 @@ static std::string buildReplPrelude(const std::string &Src) {
     "comm", "rf", "optim", "mpc", "ident", "gads", "pde", "prop", "sym",
     "stateflow", "antenna", "control", "stats", "images", "curvefit",
     "dsp", "gpu", "finance", "econ", "fusion", "robotics", "navigation",
+    "dlnet",
   };
   std::vector<std::string> Files;
   auto add = [&](const std::string &Leaf) {
@@ -2548,6 +2550,39 @@ static std::string buildReplPrelude(const std::string &Src) {
     {false, "frenet2global",             "navigation_classdefs.m"},
     {false, "gnssconstellation",         "navigation_classdefs.m"},
     {false, "receiverposition",          "navigation_classdefs.m"},
+    /* Deep Learning Toolbox — `dlnet_classdefs.m` (dlarray + autodiff). */
+    {false, "dlarray",                   "dlnet_classdefs.m"},
+    {false, "dlgradient",                "dlnet_classdefs.m"},
+    {false, "extractdata",               "dlnet_classdefs.m"},
+    {false, "relu",                      "dlnet_classdefs.m"},
+    {false, "sigmoid",                   "dlnet_classdefs.m"},
+    {false, "softmax",                   "dlnet_classdefs.m"},
+    {false, "crossentropy",              "dlnet_classdefs.m"},
+    {false, "mse",                       "dlnet_classdefs.m"},
+    {false, "lstm",                      "dlnet_classdefs.m"},
+    {false, "embed",                     "dlnet_classdefs.m"},
+    {false, "gru",                       "dlnet_classdefs.m"},
+    {false, "bilstm",                    "dlnet_classdefs.m"},
+    {false, "lstmp",                     "dlnet_classdefs.m"},
+    /* DL Phase 1 small ops.  `sqrt` is a generic builtin -- not a trigger.
+     * The DL-only activation names trigger the dlnet prelude. */
+    {false, "leakyrelu",                 "dlnet_classdefs.m"},
+    {false, "gelu",                      "dlnet_classdefs.m"},
+    {false, "swish",                     "dlnet_classdefs.m"},
+    {false, "softplus",                  "dlnet_classdefs.m"},
+    {false, "elu",                       "dlnet_classdefs.m"},
+    /* Tier C: rank-4 batched conv + reshape + pool + BN + LN. */
+    {false, "conv2d_batch",              "dlnet_classdefs.m"},
+    {false, "conv2d_full",               "dlnet_classdefs.m"},
+    {false, "maxpool2d",                 "dlnet_classdefs.m"},
+    {false, "avgpool2d",                 "dlnet_classdefs.m"},
+    {false, "batchnorm",                 "dlnet_classdefs.m"},
+    {false, "layernorm",                 "dlnet_classdefs.m"},
+    {false, "batchnorm_eval",            "dlnet_classdefs.m"},
+    {false, "groupnorm",                 "dlnet_classdefs.m"},
+    {false, "batchnorm_train",           "dlnet_classdefs.m"},
+    {false, "instancenorm",              "dlnet_classdefs.m"},
+    {false, "rmsnorm",                   "dlnet_classdefs.m"},
     /* Global Optimization Toolbox Tier-2 — `gads_classdefs.m` holds the
      * MultiStart + GlobalSearch solver objects.  (`run` is too generic
      * to trigger on; the solver-object mentions pull the prelude.) */
@@ -3055,6 +3090,11 @@ extern "C" int64_t matlab_dbg_mat3_cols(const struct matlab_mat3 *m);
 extern "C" int64_t matlab_dbg_mat3_depth(const struct matlab_mat3 *m);
 extern "C" double matlab_dbg_mat3_get(const struct matlab_mat3 *m,
                                        int64_t i, int64_t j, int64_t k);
+/* Tier C — matN (rank >= 4) reflection. */
+extern "C" int32_t matlab_dbg_matN_ndims(const void *p);
+extern "C" int64_t matlab_dbg_matN_dim(const void *p, int32_t k_1based);
+extern "C" int64_t matlab_dbg_matN_numel(const void *p);
+extern "C" double  matlab_dbg_matN_get_lin(const void *p, int64_t lin_zero_based);
 
 /* Phase 5 heterogeneous types — workspace rows for kind 6 (table) /
  * 9 (categorical) / 10 (datetime) / 11 (duration) need their own
@@ -4554,6 +4594,7 @@ int64_t matIndexedCount(struct matlab_mat *Mraw) {
     return matlab_dbg_mat3_rows(M) * matlab_dbg_mat3_cols(M)
          * matlab_dbg_mat3_depth(M);
   }
+  if (Kind == 4) return matlab_dbg_matN_numel(Mraw);
   int64_t r = matlab_dbg_mat_rows(Mraw);
   int64_t c = matlab_dbg_mat_cols(Mraw);
   if (r <= 0 || c <= 0) return 0;
@@ -4574,6 +4615,7 @@ bool matIsMultiCell(struct matlab_mat *Mraw) {
     return matlab_dbg_mat_c_rows(M) != 1 || matlab_dbg_mat_c_cols(M) != 1;
   }
   if (Kind == 3) return true;
+  if (Kind == 4) return matlab_dbg_matN_numel(Mraw) > 1;
   return matlab_dbg_mat_rows(Mraw) != 1 || matlab_dbg_mat_cols(Mraw) != 1;
 }
 
@@ -4878,6 +4920,23 @@ std::string formatMatShape(struct matlab_mat *Mraw) {
              (long long)matlab_dbg_mat3_depth(M));
     return Buf;
   }
+  if (Kind == 4) {
+    /* Tier C: render the dims tuple as "AxBxCx... double".  Most matN
+     * values stay within 4-6 axes; cap at 8 to bound the buffer. */
+    int32_t nd = matlab_dbg_matN_ndims(Mraw);
+    if (nd <= 0) return "[]";
+    if (nd > 8) nd = 8;
+    char Buf[128];
+    int n = 0;
+    for (int32_t k = 1; k <= nd; ++k) {
+      int64_t d = matlab_dbg_matN_dim(Mraw, k);
+      n += snprintf(Buf + n, sizeof(Buf) - (size_t)n,
+                    k == 1 ? "%lld" : "x%lld", (long long)d);
+      if (n >= (int)sizeof(Buf) - 12) break;
+    }
+    snprintf(Buf + n, sizeof(Buf) - (size_t)n, " double");
+    return Buf;
+  }
   int64_t R = matlab_dbg_mat_rows(Mraw);
   int64_t C = matlab_dbg_mat_cols(Mraw);
   if (R == 1 && C == 1) {
@@ -4974,6 +5033,44 @@ void appendMatChildren(Array &Vs, struct matlab_mat *Mraw) {
                    matlab_dbg_mat3_get(M, i, j, k));
           emit(LabelBuf, ValBuf, "double");
         }
+      }
+    }
+    return;
+  }
+
+  if (Kind == 4) {
+    /* matN drill: walk the flat buffer in row-major-extended order,
+     * de-linearising each linear index back into the (i1, i2, ..., in)
+     * tuple via the dims tuple read off via matlab_dbg_matN_dim. */
+    int32_t nd = matlab_dbg_matN_ndims(Mraw);
+    if (nd <= 0) return;
+    if (nd > 8) nd = 8;
+    int64_t dims[8] = {0};
+    int64_t total = 1;
+    for (int32_t k = 0; k < nd; ++k) {
+      dims[k] = matlab_dbg_matN_dim(Mraw, k + 1);
+      total *= dims[k];
+    }
+    int64_t idx[8] = {0};
+    for (int64_t lin = 0; lin < total; ++lin) {
+      if (emitted >= MatExpandCap) { emitTruncated(); return; }
+      char LabelBuf[96];
+      int n = 0;
+      n += snprintf(LabelBuf + n, sizeof(LabelBuf) - (size_t)n, "(");
+      for (int32_t k = 0; k < nd; ++k) {
+        n += snprintf(LabelBuf + n, sizeof(LabelBuf) - (size_t)n,
+                      k == 0 ? "%lld" : ",%lld",
+                      (long long)(idx[k] + 1));
+      }
+      n += snprintf(LabelBuf + n, sizeof(LabelBuf) - (size_t)n, ")");
+      char ValBuf[64];
+      snprintf(ValBuf, sizeof ValBuf, "%g",
+               matlab_dbg_matN_get_lin(Mraw, lin));
+      emit(LabelBuf, ValBuf, "double");
+      /* Advance idx — rightmost varies fastest, mirroring storage order. */
+      for (int32_t k = nd - 1; k >= 0; --k) {
+        if (++idx[k] < dims[k]) break;
+        idx[k] = 0;
       }
     }
     return;
@@ -8827,10 +8924,10 @@ struct CocotbPortSpec {
    * pipelined DUTs whose per-call reference can't keep up with
    * random per-cycle inputs (the multi-stage cascade in
    * sequential_processor / fir_asic_pipelined). */
-  enum class StimKind { Random, Impulse, Constant, Ramp };
+  enum class StimKind { Random, Impulse, Constant, Ramp, Range };
   StimKind Stim = StimKind::Random;
-  double StimArg1 = 0.0;   // impulse: value@0 / constant: value / ramp: start
-  double StimArg2 = 0.0;   // ramp: stride
+  double StimArg1 = 0.0;   // impulse: value@0 / constant: value / ramp: start / range: lo
+  double StimArg2 = 0.0;   // ramp: stride / range: hi
 };
 
 struct CocotbFuncSpec {
@@ -8968,7 +9065,27 @@ scanCocotbPragmas(const std::string &SrcPath) {
         S.Kind = CocotbPortSpec::StimKind::Ramp;
         S.Arg1 = std::strtod(Args[2].c_str(), nullptr);
         S.Arg2 = std::strtod(Args[3].c_str(), nullptr);
+      } else if (Kind == "range" && Args.size() >= 4) {
+        S.Kind = CocotbPortSpec::StimKind::Range;
+        S.Arg1 = std::strtod(Args[2].c_str(), nullptr);
+        S.Arg2 = std::strtod(Args[3].c_str(), nullptr);
       } else continue;
+      if (!Args[0].empty()) Out.Stim[Args[0]] = S;
+      continue;
+    }
+    /* `% cocotb: range(<name>, <lo>, <hi>)` shorthand — equivalent to
+     * `stimulus(<name>, range, <lo>, <hi>)`. Lets a DUT whose port pragma
+     * declares `fi, signed, WL, FL` with FL > 0 constrain the random
+     * stimulus to the natural real-value range; the SV erases FL from the
+     * port list, so the harness would otherwise draw values up to ±2^(WL-1)
+     * which overflow the SV's mid-computation truncation differently from
+     * the Python reference's saturate-and-grow.  See the DL HDL H3 note in
+     * docs/deep_learning_toolbox_roadmap.md.  */
+    if (Head == "range" && Args.size() >= 3) {
+      CocotbStim S;
+      S.Kind = CocotbPortSpec::StimKind::Range;
+      S.Arg1 = std::strtod(Args[1].c_str(), nullptr);
+      S.Arg2 = std::strtod(Args[2].c_str(), nullptr);
       if (!Args[0].empty()) Out.Stim[Args[0]] = S;
       continue;
     }
@@ -9863,6 +9980,7 @@ renderCocotbHarness(const CocotbFuncSpec &S, const std::string &Stem,
         case CocotbPortSpec::StimKind::Impulse:  K = "impulse"; break;
         case CocotbPortSpec::StimKind::Constant: K = "constant"; break;
         case CocotbPortSpec::StimKind::Ramp:     K = "ramp"; break;
+        case CocotbPortSpec::StimKind::Range:    K = "range"; break;
       }
       char Buf[128];
       snprintf(Buf, sizeof Buf,
@@ -9895,6 +10013,18 @@ renderCocotbHarness(const CocotbFuncSpec &S, const std::string &Stem,
     append("                p = pack_fi(v, signed, wl, fl)\n");
     append("                return p, unpack_fi(p, signed, wl, fl)\n");
     append("            packed = [pack_fi(v + j * a2, signed, wl, fl) for j in range(alen)]\n");
+    append("            return packed, [unpack_fi(p, signed, wl, fl) for p in packed]\n");
+    append("        if kind == 'range':\n");
+    /* `range` constrains the random stimulus to a real-value window
+     * (a1=lo, a2=hi).  Used when SV erases the fi FL on the port list
+     * and the natural fi_range would let stimulus overflow the SV's
+     * mid-computation truncation.  See DL HDL H3. */
+    append("            lo, hi = a1, a2\n");
+    append("            if alen == 0:\n");
+    append("                v = random.uniform(lo, hi)\n");
+    append("                p = pack_fi(v, signed, wl, fl)\n");
+    append("                return p, unpack_fi(p, signed, wl, fl)\n");
+    append("            packed = [pack_fi(random.uniform(lo, hi), signed, wl, fl) for _ in range(alen)]\n");
     append("            return packed, [unpack_fi(p, signed, wl, fl) for p in packed]\n");
     append("        # default: random\n");
     append("        return _gen_random(signed, wl, fl, alen)\n");
@@ -11677,6 +11807,14 @@ int main(int Argc, char **Argv) {
       "gnssSensor", "referencePathFrenet", "trajectoryGeneratorFrenet",
       "getStateEstimate", "global2frenet", "frenet2global",
       "gnssconstellation", "receiverposition",
+      /* Deep Learning Toolbox — `dlnet_classdefs.m`. */
+      "dlarray", "dlgradient", "extractdata", "relu", "sigmoid",
+      "softmax", "crossentropy", "mse", "lstm", "embed",
+      "gru", "bilstm", "lstmp",
+      "leakyrelu", "gelu", "swish", "softplus", "elu",
+      "conv2d_batch", "conv2d_full", "maxpool2d", "avgpool2d", "batchnorm",
+      "layernorm", "batchnorm_eval", "groupnorm", "batchnorm_train",
+      "instancenorm", "rmsnorm",
       /* GPU Coder T5 design-pattern helpers — runtime entries, no
        * prelude file needed.  Listed here only for the AOT-prelude
        * scanner's awareness (no leaf to map). */
@@ -11956,6 +12094,22 @@ int main(int Argc, char **Argv) {
         ClsName == "frenet2global" || ClsName == "gnssconstellation" ||
         ClsName == "receiverposition")
       return "navigation_classdefs.m";
+    /* Deep Learning Toolbox umbrella. */
+    if (ClsName == "dlarray" || ClsName == "dlgradient" ||
+        ClsName == "extractdata" || ClsName == "relu" ||
+        ClsName == "sigmoid" || ClsName == "softmax" ||
+        ClsName == "crossentropy" || ClsName == "mse" ||
+        ClsName == "lstm" || ClsName == "embed" ||
+        ClsName == "gru" || ClsName == "bilstm" || ClsName == "lstmp" ||
+        ClsName == "leakyrelu" || ClsName == "gelu" || ClsName == "swish" ||
+        ClsName == "softplus" || ClsName == "elu" ||
+        ClsName == "conv2d_batch" || ClsName == "conv2d_full" ||
+        ClsName == "maxpool2d" || ClsName == "avgpool2d" ||
+        ClsName == "batchnorm" || ClsName == "layernorm" ||
+        ClsName == "batchnorm_eval" || ClsName == "groupnorm" ||
+        ClsName == "batchnorm_train" || ClsName == "instancenorm" ||
+        ClsName == "rmsnorm")
+      return "dlnet_classdefs.m";
     /* GPU Coder T5 design-pattern helpers are C runtime entries; no
      * classdef file to pull in. */
     return std::string();
@@ -12012,6 +12166,7 @@ int main(int Argc, char **Argv) {
       "comm", "rf", "optim", "mpc", "ident", "gads", "pde", "prop", "sym",
       "stateflow", "antenna", "control", "stats", "images", "curvefit",
       "dsp", "gpu", "finance", "econ", "fusion", "robotics", "navigation",
+      "dlnet",
     };
     std::vector<std::string> Cands;
     for (const char *Tb : kToolboxDirs) {
@@ -12513,6 +12668,31 @@ int main(int Argc, char **Argv) {
     bool MonoEnabled = !IsHwEmit;
     if (const char *Env = std::getenv("MATLAB_LLVM_SEMA_MONO"))
       MonoEnabled = !(*Env == '\0' || std::string_view(Env) == "0");
+    /* Issue #75 — per-source opt-in for HW emit.  The pragma
+     *   `% hdl: precise_fi`
+     * (anywhere in the source) enables Sema-mono on the HW lane for
+     * that file, which threads natural fi-growth widths through the
+     * matlab.matmul / matlab.add result types so EmitSystemVerilog +
+     * EmitPython produce mathematically equivalent fixed-point
+     * arithmetic.  Without the pragma the HW lane stays on its
+     * legacy lossy-truncation path (preserves the 79 existing EmitSV
+     * goldens whose hand-rolled fi expressions were authored against
+     * that behaviour).  Detected by a simple text scan over the
+     * source file -- the canonical pragma scan in ScanHWPragmas runs
+     * later in the pipeline. */
+    if (!MonoEnabled && IsHwEmit && !Opts.InputPath.empty()) {
+      std::ifstream PF(Opts.InputPath);
+      if (PF) {
+        std::string Src((std::istreambuf_iterator<char>(PF)),
+                         std::istreambuf_iterator<char>());
+        // Match `% hdl: precise_fi` with optional surrounding whitespace
+        // and optional trailing arguments / comments.  Conservative
+        // substring search keeps the check O(n) and tolerant of
+        // line-wrapping artefacts.
+        if (Src.find("hdl: precise_fi") != std::string::npos)
+          MonoEnabled = true;
+      }
+    }
     if (MonoEnabled) {
       auto runSemaPass = [&]() {
         Resolver R2(Sema, TC, Diag);

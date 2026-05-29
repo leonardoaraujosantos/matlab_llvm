@@ -1,0 +1,9 @@
+dl_new_ops: BN ch1 mean=-0.0000 var=0.9998
+dl_new_ops: BN ch2 mean=0.0000 var=0.9998
+dl_new_ops: BN sum(gG)=1.9995 sum(gB)=0.0000
+dl_new_ops: conv_full size = 5 5 2 2
+dl_new_ops: conv_full sum(gW)=-1.7600 sum(gb)=-0.8800
+dl_new_ops: softmax_dim col_sums = 1.0000 1.0000 1.0000
+dl_new_ops: mean(M3,3) ndims=2 size=2 2
+dl_new_ops: mean_dim_nd sum(gM3)=25.0000
+dl_new_ops: PASS

@@ -1,0 +1,3 @@
+dl_cnn_bn: loss(0)=1.0585 loss(60)=0.0087
+dl_cnn_bn: training accuracy = 4/4
+dl_cnn_bn: PASS

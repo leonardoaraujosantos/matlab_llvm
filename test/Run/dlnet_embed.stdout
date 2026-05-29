@@ -1,0 +1,4 @@
+embed shape ok = 1
+untouched columns have zero gradient = 1
+repeated index accumulates gradient = 1
+loss drops after gradient step = 1

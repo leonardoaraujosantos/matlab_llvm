@@ -411,6 +411,73 @@ bool TensorLowering::rewriteLiterals() {
     int64_t Rows = 0, Cols = 0;
     SmallVector<Value, 16> Elts;
     if (!gatherLiteralElements(Op, Rows, Cols, Elts)) {
+      /* H: Classdef array literal detection.  `[obj1; obj2; obj3]` of
+       * classdef instances should build an object-array via the shipped
+       * generic carrier (matlab_dlnet_oa_new + matlab_dlnet_oa_append),
+       * NOT a matlab_vertcat (which interprets ptrs as matlab_mat* and
+       * crashes).  Detect by walking operands; any operand whose
+       * defining op is a func.call to a classdef method or a load from
+       * a `matlab.class_id`-tagged alloc indicates an object array.
+       *
+       * We require ALL operands to be classdef instances to avoid
+       * mixed-mode (matrix + classdef) literals — those are a user
+       * error in MATLAB too.  The check is conservative; on a partial
+       * match we fall through to the matrix-cat path. */
+      auto isClassdefInstance = [&](Value V) -> bool {
+        if (V.getType() != PtrTy) return false;
+        Operation *D = V.getDefiningOp();
+        if (!D) return false;
+        if (auto Call = mlir::dyn_cast<mlir::func::CallOp>(D)) {
+          /* Lookup the callee func.func; check matlab.class_name attr. */
+          auto Sym = mlir::SymbolTable::lookupNearestSymbolFrom<mlir::func::FuncOp>(
+              D, Call.getCalleeAttr());
+          if (Sym && Sym->hasAttr("matlab.class_name")) return true;
+        }
+        if (auto Load = mlir::dyn_cast<LLVM::LoadOp>(D)) {
+          Operation *AllocOp = Load.getAddr().getDefiningOp();
+          if (AllocOp && isMatlabOp(AllocOp, "matlab.alloc") &&
+              AllocOp->hasAttr("matlab.class_id"))
+            return true;
+        }
+        return false;
+      };
+      /* Recursively gather all leaf operands (skipping nested concat
+       * ops). */
+      std::function<bool(Operation *, SmallVector<Value> &)> gatherLeaves =
+          [&](Operation *C, SmallVector<Value> &leaves) -> bool {
+        for (Value V : C->getOperands()) {
+          Operation *D = V.getDefiningOp();
+          if (D && (isMatlabOp(D, "matlab.concat_row") ||
+                    isMatlabOp(D, "matlab.concat_col"))) {
+            if (!gatherLeaves(D, leaves)) return false;
+          } else {
+            leaves.push_back(V);
+          }
+        }
+        return true;
+      };
+      SmallVector<Value> leaves;
+      bool allClassdef = false;
+      if (gatherLeaves(Op, leaves) && !leaves.empty()) {
+        allClassdef = true;
+        for (Value V : leaves) {
+          if (!isClassdefInstance(V)) { allClassdef = false; break; }
+        }
+      }
+      if (allClassdef) {
+        B.setInsertionPoint(Op);
+        auto NewFn = rt("matlab_dlnet_oa_new", PtrTy, {});
+        Value arr = LLVM::CallOp::create(B, Op->getLoc(), NewFn, ValueRange{}).getResult();
+        auto AppendFn = rt("matlab_dlnet_oa_append", PtrTy, {PtrTy, PtrTy});
+        for (Value V : leaves) {
+          arr = LLVM::CallOp::create(B, Op->getLoc(), AppendFn,
+                                      ValueRange{arr, V}).getResult();
+        }
+        Op->getResult(0).replaceAllUsesWith(arr);
+        Op->erase();
+        Changed = true;
+        continue;
+      }
       /* Operands are not all f64 scalars — at least one is a matrix/vector
        * (e.g. `[x1 x2]` horzcat of column vectors, or `[a; b]` vertcat).
        * Fold the bracket concatenation via the runtime matlab_horzcat /
@@ -3286,6 +3353,26 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Changed = true;
       continue;
     }
+    /* Rank-4 scalar store: A(i,j,k,l) = v on a matlab_matN binding.
+     * Routes to matlab_subscript4_pstore_s, which is N-D-aware.  Accepts
+     * either PtrTy or tensor<*xf64> base (early-tracking lane). */
+    if (Name == "matlab_subscript4_pstore_s" &&
+        Call->getNumOperands() == 6 &&
+        (Call->getOperand(0).getType() == PtrTy ||
+         mlir::isa<mlir::TensorType>(Call->getOperand(0).getType())) &&
+        Call->getOperand(1).getType() == F64 &&
+        Call->getOperand(2).getType() == F64 &&
+        Call->getOperand(3).getType() == F64 &&
+        Call->getOperand(4).getType() == F64 &&
+        Call->getOperand(5).getType() == F64) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_subscript4_pstore_s", VoidTy,
+                   {PtrTy, F64, F64, F64, F64, F64});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn, Call->getOperands());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
     /* A(:, :, k) = scalar  -> matlab_subscript3_pstore_s(A, k, v). */
     if (Name == "matlab_subscript3_pstore_s" &&
         Call->getNumOperands() == 3 &&
@@ -3329,6 +3416,19 @@ bool TensorLowering::rewriteBuiltinCalls() {
     }
     /* cat(3, A, B[, C]) -> matlab_cat3_{2,3} : slice-major matlab_mat3.
      * matlab_cat3_append folds N>2 planes (append one plane to a mat3). */
+    /* cat(4, …) — image-batch stack via the matN row-major-extended layout. */
+    if ((Name == "matlab_cat4_2" || Name == "matlab_cat4_3" ||
+         Name == "matlab_cat4_4") &&
+        Call->getOperand(0).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      llvm::SmallVector<Type, 4> ArgTys(Call->getNumOperands(), PtrTy);
+      auto Fn = rt(Name.str(), PtrTy, ArgTys);
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn, Call->getOperands());
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
     if ((Name == "matlab_cat3_2" || Name == "matlab_cat3_3" ||
          Name == "matlab_cat3_append") &&
         Call->getNumResults() == 1) {
@@ -5421,6 +5521,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"pdist",      "matlab_stats_pdist",      PtrTy, {PtrTy}},
         {"squareform", "matlab_stats_squareform", PtrTy, {PtrTy}},
         {"silhouette", "matlab_stats_silhouette", PtrTy, {PtrTy, PtrTy}},
+        /* Tier-6.2 — t-SNE non-linear embedding (closes carve-down). */
+        {"tsne",       "matlab_stats_tsne",       PtrTy, {PtrTy}},
         /* Tier-5 — classification (alloc-then-populate inits + predict + confusionmat). */
         {"matlab_stats_fitknn_init",  "matlab_stats_fitknn_init",  PtrTy, {PtrTy, PtrTy, PtrTy}},
         {"matlab_stats_fitnb_init",   "matlab_stats_fitnb_init",   PtrTy, {PtrTy, PtrTy, PtrTy}},
@@ -5430,6 +5532,19 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"matlab_stats_fitecoc_init", "matlab_stats_fitecoc_init", PtrTy, {PtrTy, PtrTy, PtrTy}},
         {"matlab_stats_clf_predict",  "matlab_stats_clf_predict",  PtrTy, {PtrTy, PtrTy}},
         {"confusionmat", "matlab_stats_confusionmat", PtrTy, {PtrTy, PtrTy}},
+        {"matlab_stats_accuracy",   "matlab_stats_accuracy",   PtrTy, {PtrTy, PtrTy}},
+        {"matlab_stats_precision",  "matlab_stats_precision",  PtrTy, {PtrTy, PtrTy}},
+        {"matlab_stats_recall",     "matlab_stats_recall",     PtrTy, {PtrTy, PtrTy}},
+        {"matlab_stats_fscore",     "matlab_stats_fscore",     PtrTy, {PtrTy, PtrTy}},
+        {"matlab_stats_rocmetrics", "matlab_stats_rocmetrics", PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_stats_aucroc",     "matlab_stats_aucroc",     PtrTy, {PtrTy, PtrTy, PtrTy}},
+        /* DL T6.3 user-facing names. */
+        {"accuracy",   "matlab_stats_accuracy",   PtrTy, {PtrTy, PtrTy}},
+        {"precision",  "matlab_stats_precision",  PtrTy, {PtrTy, PtrTy}},
+        {"recall",     "matlab_stats_recall",     PtrTy, {PtrTy, PtrTy}},
+        {"fScore",     "matlab_stats_fscore",     PtrTy, {PtrTy, PtrTy}},
+        {"rocmetrics", "matlab_stats_rocmetrics", PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"aucroc",     "matlab_stats_aucroc",     PtrTy, {PtrTy, PtrTy, PtrTy}},
         /* Tier-6 — ensembles. */
         {"matlab_stats_fitensemble_init", "matlab_stats_fitensemble_init", PtrTy, {PtrTy, PtrTy, PtrTy, F64, F64}},
         /* Tier-6 — HMM (1-output forms; multi-output via splitter). */
@@ -6064,6 +6179,133 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"matlab_nav_frenet_f2g",       "matlab_nav_frenet_f2g",       PtrTy, {PtrTy, PtrTy}},
         {"matlab_nav_trajgen_init",     "matlab_nav_trajgen_init",     PtrTy, {PtrTy, PtrTy}},
         {"matlab_nav_trajgen_connect",  "matlab_nav_trajgen_connect",  PtrTy, {PtrTy, PtrTy, PtrTy, F64}},
+        /* ===== Deep Learning Toolbox Tiers 1-2 (dlarray + autodiff) ===== */
+        {"matlab_dlnet_dlarray_init",   "matlab_dlnet_dlarray_init",   PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_extractdata",    "matlab_dlnet_extractdata",    PtrTy, {PtrTy}},
+        {"matlab_dlnet_plus",           "matlab_dlnet_plus",           PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_dlnet_minus",          "matlab_dlnet_minus",          PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_dlnet_mtimes",         "matlab_dlnet_mtimes",         PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_dlnet_times",          "matlab_dlnet_times",          PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_dlnet_relu",           "matlab_dlnet_relu",           PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_sigmoid",        "matlab_dlnet_sigmoid",        PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_tanh",           "matlab_dlnet_tanh",           PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_softmax",        "matlab_dlnet_softmax",        PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_sum",            "matlab_dlnet_sum",            PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_mean",           "matlab_dlnet_mean",           PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_log",            "matlab_dlnet_log",            PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_exp",            "matlab_dlnet_exp",            PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_crossentropy",   "matlab_dlnet_crossentropy",   PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_dlnet_mse",            "matlab_dlnet_mse",            PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_dlnet_lstm",           "matlab_dlnet_lstm",           PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy}},
+        {"matlab_dlnet_transpose",      "matlab_dlnet_transpose",      PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_embed",          "matlab_dlnet_embed",          PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_dlnet_gru",            "matlab_dlnet_gru",            PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy}},
+        {"matlab_dlnet_bilstm",         "matlab_dlnet_bilstm",         PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy}},
+        {"matlab_dlnet_lstmp",          "matlab_dlnet_lstmp",          PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy}},
+        /* Tier C: rank-4 batched conv with autodiff support. */
+        {"matlab_dlnet_conv2d_batch",  "matlab_dlnet_conv2d_batch", PtrTy, {PtrTy, PtrTy, PtrTy}},
+        /* Tier C: dlarray reshape (2-D / 4-D output) + pooling. */
+        {"matlab_dlnet_reshape2",      "matlab_dlnet_reshape2",     PtrTy, {PtrTy, PtrTy, F64, F64}},
+        {"matlab_dlnet_reshape4",      "matlab_dlnet_reshape4",     PtrTy, {PtrTy, PtrTy, F64, F64, F64, F64}},
+        {"matlab_dlnet_maxpool2d",     "matlab_dlnet_maxpool2d",    PtrTy, {PtrTy, PtrTy, F64, F64}},
+        {"matlab_dlnet_avgpool2d",     "matlab_dlnet_avgpool2d",    PtrTy, {PtrTy, PtrTy, F64, F64}},
+        /* BatchNorm + conv-with-bias/pad/stride + axis-aware softmax. */
+        {"matlab_dlnet_batchnorm",     "matlab_dlnet_batchnorm",    PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy}},
+        {"matlab_dlnet_conv2d_full",   "matlab_dlnet_conv2d_full",  PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, F64, F64, F64, F64}},
+        {"matlab_dlnet_softmax_dim",   "matlab_dlnet_softmax_dim",  PtrTy, {PtrTy, PtrTy, F64}},
+        /* LayerNorm + BN inference (frozen-stats). */
+        {"matlab_dlnet_layernorm",     "matlab_dlnet_layernorm",    PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, F64}},
+        {"matlab_dlnet_batchnorm_eval","matlab_dlnet_batchnorm_eval",PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy}},
+        /* GroupNorm + EMA-tracked BN training. */
+        {"matlab_dlnet_groupnorm",     "matlab_dlnet_groupnorm",    PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, F64}},
+        {"matlab_dlnet_batchnorm_train","matlab_dlnet_batchnorm_train",PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, F64}},
+        /* InstanceNorm + RMSNorm. */
+        {"matlab_dlnet_instancenorm",  "matlab_dlnet_instancenorm", PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy}},
+        {"matlab_dlnet_rmsnorm",       "matlab_dlnet_rmsnorm",      PtrTy, {PtrTy, PtrTy, PtrTy, F64}},
+        /* Tape scoping (recommended between training iters to prevent
+         * monotonic tape growth + slow dlgradient). */
+        {"matlab_dltape_truncate",      "matlab_dltape_truncate",     PtrTy, {F64}},
+        /* Functional optimizers (SGD-momentum + Adam + RMSProp). */
+        {"matlab_dlnet_sgdmupdate",     "matlab_dlnet_sgdmupdate",    PtrTy, {PtrTy, PtrTy, PtrTy, F64, F64}},
+        {"matlab_dlnet_adamupdate",     "matlab_dlnet_adamupdate",    PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, F64, F64, F64, F64, F64}},
+        {"matlab_dlnet_rmspropupdate",  "matlab_dlnet_rmspropupdate", PtrTy, {PtrTy, PtrTy, PtrTy, F64, F64, F64}},
+        /* Magnitude pruning. */
+        {"matlab_dlnet_prune_mask",     "matlab_dlnet_prune_mask",    PtrTy, {PtrTy, F64}},
+        /* Experiment-sweep harness: runExperiment(@fn, Grid) -> Nx1 results. */
+        {"matlab_dlnet_run_experiment", "matlab_dlnet_run_experiment", PtrTy, {PtrTy, PtrTy}},
+        /* T1.8 — image-data plumbing.  User-facing names go in this typed
+         * Spec table (not the pde_table) so the const_char → matlab_string
+         * promotion fires for the string-literal folder/path args. */
+        {"matlab_dlnet_mkdir",          "matlab_dlnet_mkdir",          PtrTy, {PtrTy}},
+        {"matlab_dlnet_imds_load",      "matlab_dlnet_imds_load",      PtrTy, {PtrTy}},
+        {"matlab_dlnet_imds_count",     "matlab_dlnet_imds_count",     PtrTy, {PtrTy}},
+        {"matlab_dlnet_imds_split",     "matlab_dlnet_imds_split",     PtrTy, {PtrTy, F64}},
+        {"mkdir",           "matlab_dlnet_mkdir",      PtrTy, {PtrTy}},
+        {"imageDatastore",  "matlab_dlnet_imds_load",  PtrTy, {PtrTy}},
+        {"countEachLabel",  "matlab_dlnet_imds_count", PtrTy, {PtrTy}},
+        {"splitEachLabel",  "matlab_dlnet_imds_split", PtrTy, {PtrTy, F64}},
+        /* T3.4b — random rotate/scale/translate augmenter. */
+        {"matlab_dlnet_augment_image",  "matlab_dlnet_augment_image",  PtrTy, {PtrTy, F64, F64, F64, F64, F64}},
+        {"augmentImage",                "matlab_dlnet_augment_image",  PtrTy, {PtrTy, F64, F64, F64, F64, F64}},
+        /* Tape-tracked shape concatenation — `[a; b]` / `[a b]` over
+         * dlarray (matrix lane).  Backward slices the adjoint along the
+         * concat axis. */
+        {"matlab_dlnet_vertcat",        "matlab_dlnet_vertcat",        PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_dlnet_horzcat",        "matlab_dlnet_horzcat",        PtrTy, {PtrTy, PtrTy, PtrTy}},
+        /* F: generic obj-array carrier — runtime-resident, handle-keyed. */
+        {"matlab_dlnet_oa_new",         "matlab_dlnet_oa_new",         PtrTy, {}},
+        {"matlab_dlnet_oa_append",      "matlab_dlnet_oa_append",      PtrTy, {PtrTy, PtrTy}},
+        /* C: dlnetwork carrier — sequential layer-list driver. */
+        {"matlab_dlnet_net_new",        "matlab_dlnet_net_new",        PtrTy, {}},
+        {"matlab_dlnet_net_add_fc",     "matlab_dlnet_net_add_fc",     PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_dlnet_net_add_relu",   "matlab_dlnet_net_add_relu",   PtrTy, {PtrTy}},
+        {"matlab_dlnet_net_add_sigmoid","matlab_dlnet_net_add_sigmoid",PtrTy, {PtrTy}},
+        {"matlab_dlnet_net_add_tanh",   "matlab_dlnet_net_add_tanh",   PtrTy, {PtrTy}},
+        {"matlab_dlnet_net_add_softmax","matlab_dlnet_net_add_softmax",PtrTy, {PtrTy}},
+        {"matlab_dlnet_net_predict",    "matlab_dlnet_net_predict",    PtrTy, {PtrTy, PtrTy}},
+        /* T3.8 — GPU training dispatch toggle.  When `dlnetGpu(1)` is
+         * on, dlnet's MTIMES forward + backward routes through
+         * matlab_gpu_gemm (Metal-accelerated above 128³, CPU fallback
+         * otherwise).  Solver-step (adamupdate / sgdmupdate / rmsprop)
+         * stays on the host — it's bandwidth-bound elementwise, and
+         * the single-device pattern keeps parameter updates host-side
+         * by convention (matches PyTorch / TF). */
+        {"matlab_dlnet_gpu_set",        "matlab_dlnet_gpu_set",        PtrTy, {F64}},
+        /* H5 — ONNX inference-graph importer + programmatic builder. */
+        {"onnxRead",            "matlab_onnx_read",            PtrTy, {PtrTy}},
+        {"onnxRun",             "matlab_onnx_run",             PtrTy, {PtrTy, PtrTy}},
+        {"onnxNewModel",        "matlab_onnx_new_model",       PtrTy, {}},
+        {"onnxAddInit",         "matlab_onnx_add_init",        PtrTy, {PtrTy, PtrTy}},
+        {"onnxSetInput",        "matlab_onnx_set_input",       PtrTy, {PtrTy, PtrTy}},
+        {"onnxSetOutput",       "matlab_onnx_set_output",      PtrTy, {PtrTy}},
+        {"onnxBeginNode",       "matlab_onnx_begin_node",      PtrTy, {PtrTy}},
+        {"onnxNodeInput",       "matlab_onnx_node_input",      PtrTy, {PtrTy}},
+        {"onnxNodeOutput",      "matlab_onnx_node_output",     PtrTy, {PtrTy}},
+        {"onnxNodeAttrInt",     "matlab_onnx_node_attr_int",   PtrTy, {PtrTy, F64}},
+        {"onnxNodeAttrFloat",   "matlab_onnx_node_attr_float", PtrTy, {PtrTy, F64}},
+        {"onnxNodeAttrInts",    "matlab_onnx_node_attr_ints",  PtrTy, {PtrTy, PtrTy}},
+        {"onnxEndNode",         "matlab_onnx_end_node",        PtrTy, {}},
+        {"onnxSave",            "matlab_onnx_save",            PtrTy, {PtrTy}},
+        /* Deep Learning Toolbox Phase 1 — small extra ops over dlarray. */
+        {"matlab_dlnet_rdivide",        "matlab_dlnet_rdivide",        PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_dlnet_sqrt",           "matlab_dlnet_sqrt",           PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_mean_dim",       "matlab_dlnet_mean_dim",       PtrTy, {PtrTy, PtrTy, F64}},
+        {"matlab_dlnet_leakyrelu",      "matlab_dlnet_leakyrelu",      PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_gelu",           "matlab_dlnet_gelu",           PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_swish",          "matlab_dlnet_swish",          PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_softplus",       "matlab_dlnet_softplus",       PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_elu",            "matlab_dlnet_elu",            PtrTy, {PtrTy, PtrTy}},
+        /* DL HDL Tier H1 — INT8 quantization (plain matrix in/out). */
+        {"dlquantize",                  "matlab_dlnet_quantize",       PtrTy, {PtrTy}},
+        {"matlab_dlnet_quantize",       "matlab_dlnet_quantize",       PtrTy, {PtrTy}},
+        {"dlqscale",                    "matlab_dlnet_qscale",         PtrTy, {PtrTy}},
+        {"matlab_dlnet_qscale",         "matlab_dlnet_qscale",         PtrTy, {PtrTy}},
+        {"dlqclip",                     "matlab_dlnet_qclip",          PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_qclip",          "matlab_dlnet_qclip",          PtrTy, {PtrTy, PtrTy}},
+        {"dlqcalibrate",                "matlab_dlnet_qcalibrate",     PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_qcalibrate",     "matlab_dlnet_qcalibrate",     PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_grad",           "matlab_dlnet_grad",           PtrTy, {PtrTy, PtrTy}},
+        {"matlab_dlnet_reset",          "matlab_dlnet_reset",          PtrTy, {F64}},
       };
       bool matched = false;
       for (const auto &E : pde_table) {
@@ -6344,8 +6586,14 @@ bool TensorLowering::rewriteBuiltinCalls() {
     static const Spec Table[] = {
       {"zeros",      "matlab_zeros",      1, "ff"},
       {"zeros",      "matlab_zeros3",     1, "fff"},
+      {"zeros",      "matlab_zeros4",     1, "ffff"},
+      {"zeros",      "matlab_zeros5",     1, "fffff"},
+      {"zeros",      "matlab_zeros6",     1, "ffffff"},
       {"ones",       "matlab_ones",       1, "ff"},
       {"ones",       "matlab_ones3",      1, "fff"},
+      {"ones",       "matlab_ones4",      1, "ffff"},
+      {"ones",       "matlab_ones5",      1, "fffff"},
+      {"ones",       "matlab_ones6",      1, "ffffff"},
       {"eye",        "matlab_eye",        1, "ff"},
       {"magic",      "matlab_magic",      1, "f"},
       {"rand",       "matlab_rand",       1, "ff"},
@@ -6360,10 +6608,13 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"gpuArray_linspace", "matlab_gpuArray_linspace2",1, "ff"},
       {"sum",        "matlab_sum",        1, "p"},
       {"sum",        "matlab_sum_dim",    1, "pf"},
+      {"sum",        "matlab_sum_dims",   1, "pp"},
       {"prod",       "matlab_prod",       1, "p"},
       {"prod",       "matlab_prod_dim",   1, "pf"},
+      {"prod",       "matlab_prod_dims",  1, "pp"},
       {"mean",       "matlab_mean",       1, "p"},
       {"mean",       "matlab_mean_dim",   1, "pf"},
+      {"mean",       "matlab_mean_dims",  1, "pp"},
       {"min",        "matlab_min",        1, "p"},
       {"min",        "matlab_min_mm",     1, "pp"},  /* min(A, B) elementwise */
       {"min",        "matlab_min_dim3",   1, "ppf"}, /* min(A, [], dim) */
@@ -6413,6 +6664,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"diag",       "matlab_diag",       1, "p"},
       {"reshape",    "matlab_reshape",    1, "pff"},
       {"reshape",    "matlab_reshape3",   1, "pfff"},  /* reshape(A,m,n,p) */
+      {"reshape",    "matlab_reshape4",   1, "pffff"}, /* reshape(A,d1,d2,d3,d4) */
       {"repmat",     "matlab_repmat",     1, "pff"},
       {"repmat",     "matlab_repmat3",    1, "pfff"},  /* repmat(A,r,c,p) */
       {"exp",        "matlab_exp_m",      1, "p"},
@@ -6667,6 +6919,61 @@ bool TensorLowering::rewriteBuiltinCalls() {
       /* Convolution. Both operands are matrices (vector layout for conv). */
       {"conv",       "matlab_conv",       1, "pp"},
       {"conv2",      "matlab_conv2",      1, "pp"},
+      /* Tier-C rank-4 batched conv: X(H,W,C,N) * W(kH,kW,C,K) -> Y(H',W',K,N). */
+      {"conv2d_batch", "matlab_conv2d_batch", 1, "pp"},
+      /* Batched 2-D matmul: A(M, K, B) * B(K, N, B) -> Y(M, N, B). */
+      {"matmul3",      "matlab_matmul3",     1, "pp"},
+      /* Full conv: + bias (K-vec), pad_h, pad_w, stride_h, stride_w. */
+      {"conv2d_batch_full", "matlab_conv2d_batch_full", 1, "pppffff"},
+      /* Tape-scoping convenience wrappers (user-facing names).
+       * dlreset / dltape_truncate return ptr (empty matrix); dltape_size
+       * returns scalar f64 (the current node count). */
+      {"dlreset",          "matlab_dlnet_reset0",    1, ""},
+      {"dltape_size",      "matlab_dltape_size",     0, "f"},
+      {"dltape_truncate",  "matlab_dltape_truncate", 1, "f"},
+      /* Functional optimizers — return a new W ptr; m / v / [adam's t]
+       * are updated in place by the runtime. */
+      {"sgdmupdate",       "matlab_dlnet_sgdmupdate", 1, "pppff"},
+      {"adamupdate",       "matlab_dlnet_adamupdate", 1, "ppppfffff"},
+      {"rmspropupdate",    "matlab_dlnet_rmspropupdate", 1, "pppfff"},
+      /* Magnitude-based pruning helpers. */
+      {"prune_mask",       "matlab_dlnet_prune_mask",    1, "pf"},
+      {"mask_sparsity",    "matlab_dlnet_mask_sparsity", 0, "p"},
+      /* Experiment harness — first arg is a function handle (passed
+       * through as a raw ptr by LowerAnonCalls' retype path, mirroring
+       * bayesopt). */
+      {"runExperiment",    "matlab_dlnet_run_experiment", 1, "pp"},
+      /* T1.8: numpartitions returns a scalar f64; the string-arg helpers
+       * (mkdir/imageDatastore/countEachLabel/splitEachLabel) sit in the
+       * typed Spec table above (line ~6168) so const_char → matlab_string
+       * promotion can fire on the folder/path literal. */
+      {"numpartitions",    "matlab_dlnet_imds_numfiles",  0, "p"},
+      /* ONNX introspection — scalar f64 returns. */
+      {"onnxNumNodes",     "matlab_onnx_num_nodes",       0, "p"},
+      {"onnxNumInits",     "matlab_onnx_num_inits",       0, "p"},
+      {"onnxOpset",        "matlab_onnx_opset",           0, "p"},
+      /* T3.8 — GPU training dispatch toggle + introspection. */
+      {"dlnetGpu",         "matlab_dlnet_gpu_set",        1, "f"},
+      {"dlnetGpuActive",   "matlab_dlnet_gpu_get",        0, "f"},
+      /* F: generic obj-array carrier (literal-free object arrays). */
+      {"objArrayNew",      "matlab_dlnet_oa_new",         1, ""},
+      {"objArrayAppend",   "matlab_dlnet_oa_append",      1, "pp"},
+      {"objArrayLen",      "matlab_dlnet_oa_len",         0, "p"},
+      {"objArrayGet",      "matlab_dlnet_oa_get",         1, "pf"},
+      /* C: dlnetwork carrier — sequential layer driver. */
+      {"dlnetwork",        "matlab_dlnet_net_new",        1, ""},
+      {"addFC",            "matlab_dlnet_net_add_fc",     1, "ppp"},
+      {"addRelu",          "matlab_dlnet_net_add_relu",   1, "p"},
+      {"addSigmoid",       "matlab_dlnet_net_add_sigmoid",1, "p"},
+      {"addTanh",          "matlab_dlnet_net_add_tanh",   1, "p"},
+      {"addSoftmax",       "matlab_dlnet_net_add_softmax",1, "p"},
+      {"netPredict",       "matlab_dlnet_net_predict",    1, "pp"},
+      {"netNumLayers",     "matlab_dlnet_net_num_layers", 0, "p"},
+      {"trainnet",         "matlab_dlnet_net_train",      0, "pppff"},
+      /* im2col helper exposed to user code so callers can write their
+       * own GEMM-based conv (e.g. depthwise, dilation, stride>1). */
+      {"im2col_2d",    "matlab_im2col_2d",    1, "pff"},
+      {"im2col_2d_pad","matlab_im2col_2d_pad",1, "pffffff"},
       /* Tier-1 builtins added alongside conv. filter is the IIR/FIR
        * difference equation (3 ptr args). The fftshift pair is
        * polymorphic on real/complex via the matlab_mat_c magic. */
@@ -7524,7 +7831,11 @@ bool TensorLowering::rewriteBuiltinCalls() {
         if (Kind == 'f') {
           if (!isFTagOK(Got)) return false;
         } else { /* 'p' */
-          if (Got != PtrTy && !isTensorLike(Got)) return false;
+          /* Accept Ptr, tensor<*xf64>, and `none` (untyped ptr — common
+           * for dlgradient-returned gradients flowing into optimizers). */
+          if (Got != PtrTy && !isTensorLike(Got) &&
+              !mlir::isa<mlir::NoneType>(Got))
+            return false;
         }
       }
       return true;
@@ -7735,7 +8046,22 @@ bool TensorLowering::rewriteBuiltinCalls() {
       // come from allocs that our slot-retype handled, so by the time we
       // run this they should already be ptr.
       if (Exp == F64 && !isFTagOK(Got)) { OK = false; break; }
-      if (Exp == PtrTy && Got != PtrTy) { OK = false; break; }
+      if (Exp == PtrTy && Got != PtrTy) {
+        /* Narrow opt-in: dlnet functional optimizers receive a tensor-typed
+         * weight matrix from a zeros() alloc and a `none`-typed gradient
+         * from dlgradient (upstream Sema doesn't infer ptr for either).
+         * Accept tensor<*xf64> and `none` for those callees only —
+         * broadening here would mis-route unrelated calls (e.g. linalg
+         * multi-return helpers). */
+        bool DlOptim = (Name == "adamupdate" || Name == "sgdmupdate" ||
+                        Name == "rmspropupdate");
+        if (DlOptim &&
+            (mlir::isa<mlir::NoneType>(Got) || isTensorLike(Got))) {
+          /* accept */
+        } else {
+          OK = false; break;
+        }
+      }
     }
     if (!OK) continue;
 
@@ -8101,8 +8427,15 @@ bool TensorLowering::rewriteSubscript() {
   });
   for (Operation *Op : Subs) {
     unsigned N = Op->getNumOperands();
-    if (N < 2 || N > 3) continue;
-    if (Op->getOperand(0).getType() != PtrTy) continue;
+    /* Accept N=2 (one index), N=3 (two indices), N=5 (four indices — Tier C
+     * rank-4 fast path).  Higher arities still fall through. */
+    if (N != 2 && N != 3 && N != 5) continue;
+    /* Base may be PtrTy (matlab_mat / matlab_mat3 / matlab_matN pointer)
+     * or `tensor<*xf64>` from the early-tracking lane.  Both reach the
+     * runtime as a plain pointer. */
+    if (Op->getOperand(0).getType() != PtrTy &&
+        !mlir::isa<mlir::TensorType>(Op->getOperand(0).getType()))
+      continue;
 
     // Classify each index.
     bool AllScalar = true;
@@ -8117,7 +8450,19 @@ bool TensorLowering::rewriteSubscript() {
     // All scalar + scalar f64 result => fast path, per-element access.
     if (AllScalar && Op->getNumResults() == 1 &&
         Op->getResult(0).getType() == F64) {
-      if (N == 3) {
+      if (N == 5) {
+        /* A(i,j,k,l) on a rank-4 (or higher with implicit trailing dims)
+         * array.  Routes through matlab_subscript4_s, which is N-D-aware
+         * and falls back to 2-D / 3-D when the descriptor is narrower. */
+        auto Fn = rt("matlab_subscript4_s", F64,
+                     {PtrTy, F64, F64, F64, F64});
+        auto NC = LLVM::CallOp::create(B, Op->getLoc(), Fn,
+                                        ValueRange{Base, Op->getOperand(1),
+                                                   Op->getOperand(2),
+                                                   Op->getOperand(3),
+                                                   Op->getOperand(4)});
+        Op->getResult(0).replaceAllUsesWith(NC.getResult());
+      } else if (N == 3) {
         auto Fn = rt("matlab_subscript2_s", F64, {PtrTy, F64, F64});
         auto NC = LLVM::CallOp::create(B, Op->getLoc(), Fn,
                                         ValueRange{Base, Op->getOperand(1),

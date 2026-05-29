@@ -262,9 +262,13 @@ void Resolver::registerBuiltins() {
     "matlab_stats_lm_predict", "matlab_stats_ridge", "matlab_stats_regress",
     /* Tier-4 — PCA + clustering. */
     "pca", "kmeans", "pdist2", "pdist", "squareform", "silhouette",
+    /* Tier-6.2 — t-SNE non-linear embedding. */
+    "tsne",
     /* Tier-5 — classification. */
     "fitcknn", "fitcnb", "fitcdiscr", "fitctree", "fitcsvm", "fitcecoc",
     "confusionmat",
+    /* DL T6.3 — classification metrics. */
+    "accuracy", "precision", "recall", "fScore", "rocmetrics", "aucroc",
     /* Tier-6 — ensembles. */
     "fitcensemble", "TreeBagger", "matlab_stats_fitensemble_init",
     /* Tier-6 — Hidden Markov Models. */
@@ -301,6 +305,8 @@ void Resolver::registerBuiltins() {
     "matlab_stats_fitknn_init", "matlab_stats_fitnb_init", "matlab_stats_fitlda_init",
     "matlab_stats_fittree_init", "matlab_stats_fitsvm_init", "matlab_stats_fitecoc_init",
     "matlab_stats_clf_predict", "matlab_stats_confusionmat",
+    "matlab_stats_accuracy", "matlab_stats_precision", "matlab_stats_recall",
+    "matlab_stats_fscore", "matlab_stats_rocmetrics", "matlab_stats_aucroc",
     /* ===== Curve Fitting Toolbox Tier-1 + Tier-2 + Tier-3 ===== */
     "fit", "feval", "coeffvalues",
     "differentiate", "integrate", "confint", "formula", "numcoeffs",
@@ -617,6 +623,98 @@ void Resolver::registerBuiltins() {
     "matlab_nav_pseudoranges", "matlab_nav_receiverposition",
     "matlab_nav_frenet_init", "matlab_nav_frenet_g2f", "matlab_nav_frenet_f2g",
     "matlab_nav_trajgen_init", "matlab_nav_trajgen_connect",
+    /* ===== Deep Learning Toolbox — Tiers 1-2 (dlarray + autodiff) =========
+     * `dlarray` is a class (resolves via prelude, NOT registered).  The
+     * activation/loss free-function names + extractdata + dlgradient register
+     * here; tanh/sum/mean/log/exp are already builtins (the Lowering arm only
+     * reroutes them when the argument is a dlarray). */
+    "relu", "sigmoid", "softmax", "crossentropy", "mse", "lstm", "embed",
+    "gru", "bilstm", "lstmp",
+    /* DL Phase 1 — small dlarray-flavoured ops (`sqrt`, `mean`, `exp`, `log`
+     * remain ordinary builtins; only the strictly-DL-only names register
+     * here. */
+    "leakyrelu", "gelu", "swish", "softplus", "elu",
+    /* Tier C dlarray methods: pool / reshape go through method-by-arity
+     * split (reshape) or fixed-name (maxpool2d / avgpool2d / batchnorm). */
+    "maxpool2d", "avgpool2d", "batchnorm", "conv2d_full",
+    "layernorm", "batchnorm_eval",
+    "groupnorm", "batchnorm_train",
+    "instancenorm", "rmsnorm",
+    /* DL HDL Tier H1 — INT8 quantization (plain numeric in/out). */
+    "dlquantize", "dlqscale",
+    /* DL T6.5 — quantizer calibration + activation clipping. */
+    "dlqclip", "dlqcalibrate",
+    "extractdata", "dlgradient",
+    "matlab_dlnet_dlarray_init", "matlab_dlnet_extractdata",
+    "matlab_dlnet_plus", "matlab_dlnet_minus", "matlab_dlnet_mtimes",
+    "matlab_dlnet_times",
+    "matlab_dlnet_relu", "matlab_dlnet_sigmoid", "matlab_dlnet_tanh",
+    "matlab_dlnet_softmax", "matlab_dlnet_sum", "matlab_dlnet_mean",
+    "matlab_dlnet_log", "matlab_dlnet_exp",
+    "matlab_dlnet_crossentropy", "matlab_dlnet_mse", "matlab_dlnet_lstm",
+    "matlab_dlnet_transpose", "matlab_dlnet_embed",
+    "matlab_dlnet_gru", "matlab_dlnet_bilstm", "matlab_dlnet_lstmp",
+    "matlab_dlnet_rdivide", "matlab_dlnet_sqrt", "matlab_dlnet_mean_dim",
+    "matlab_dlnet_leakyrelu", "matlab_dlnet_gelu", "matlab_dlnet_swish",
+    "matlab_dlnet_softplus", "matlab_dlnet_elu",
+    "matlab_dlnet_conv2d_batch",
+    "matlab_dlnet_reshape2", "matlab_dlnet_reshape4",
+    "matlab_dlnet_maxpool2d", "matlab_dlnet_avgpool2d",
+    "matlab_dlnet_batchnorm", "matlab_dlnet_conv2d_full",
+    "matlab_dlnet_softmax_dim",
+    "matlab_dlnet_layernorm", "matlab_dlnet_batchnorm_eval",
+    "matlab_dlnet_groupnorm", "matlab_dlnet_batchnorm_train",
+    "matlab_dlnet_instancenorm", "matlab_dlnet_rmsnorm",
+    "matlab_dlnet_quantize", "matlab_dlnet_qscale",
+    "matlab_dlnet_qclip", "matlab_dlnet_qcalibrate",
+    "matlab_dlnet_grad", "matlab_dlnet_reset", "matlab_dlnet_reset0",
+    "matlab_dltape_size", "matlab_dltape_truncate",
+    "matlab_dlnet_sgdmupdate", "matlab_dlnet_adamupdate",
+    "matlab_dlnet_rmspropupdate", "matlab_dlnet_prune_mask",
+    "matlab_dlnet_mask_sparsity", "matlab_dlnet_run_experiment",
+    "matlab_dlnet_mkdir", "matlab_dlnet_imds_load",
+    "matlab_dlnet_imds_count", "matlab_dlnet_imds_split",
+    "matlab_dlnet_imds_numfiles", "matlab_dlnet_augment_image",
+    /* Tape-tracked shape concatenation (dlarray vertcat / horzcat). */
+    "matlab_dlnet_vertcat", "matlab_dlnet_horzcat",
+    /* F: generic obj-array carrier (literal-free). */
+    "matlab_dlnet_oa_new", "matlab_dlnet_oa_append",
+    "matlab_dlnet_oa_len", "matlab_dlnet_oa_get",
+    /* C: dlnetwork sequential layer carrier. */
+    "matlab_dlnet_net_new", "matlab_dlnet_net_add_fc",
+    "matlab_dlnet_net_add_relu", "matlab_dlnet_net_add_sigmoid",
+    "matlab_dlnet_net_add_tanh", "matlab_dlnet_net_add_softmax",
+    "matlab_dlnet_net_predict", "matlab_dlnet_net_num_layers",
+    "matlab_dlnet_net_train",
+    /* T3.8 — GPU training dispatch. */
+    "matlab_dlnet_gpu_set", "matlab_dlnet_gpu_get",
+    /* H5 — ONNX importer + programmatic builder. */
+    "matlab_onnx_read", "matlab_onnx_run",
+    "matlab_onnx_num_nodes", "matlab_onnx_num_inits", "matlab_onnx_opset",
+    "matlab_onnx_new_model", "matlab_onnx_add_init",
+    "matlab_onnx_set_input", "matlab_onnx_set_output",
+    "matlab_onnx_begin_node", "matlab_onnx_node_input",
+    "matlab_onnx_node_output", "matlab_onnx_node_attr_int",
+    "matlab_onnx_node_attr_float", "matlab_onnx_node_attr_ints",
+    "matlab_onnx_end_node", "matlab_onnx_save",
+    /* User-facing names — `dlreset()` between training iters, plus
+     * `dltape_size()` / `dltape_truncate(n)` for fine-grained checkpoints;
+     * `sgdmupdate` / `adamupdate` / `rmspropupdate` for functional
+     * optimizer step; `prune_mask` / `mask_sparsity` for magnitude pruning. */
+    "dlreset", "dltape_size", "dltape_truncate",
+    "sgdmupdate", "adamupdate", "rmspropupdate",
+    "prune_mask", "mask_sparsity", "runExperiment",
+    "mkdir", "imageDatastore", "countEachLabel", "splitEachLabel",
+    "numpartitions", "augmentImage",
+    "onnxRead", "onnxRun", "onnxNumNodes", "onnxNumInits", "onnxOpset",
+    "onnxNewModel", "onnxAddInit", "onnxSetInput", "onnxSetOutput",
+    "onnxBeginNode", "onnxNodeInput", "onnxNodeOutput",
+    "onnxNodeAttrInt", "onnxNodeAttrFloat", "onnxNodeAttrInts",
+    "onnxEndNode", "onnxSave",
+    "dlnetGpu", "dlnetGpuActive",
+    "dlnetwork", "addFC", "addRelu", "addSigmoid", "addTanh", "addSoftmax",
+    "netPredict", "netNumLayers", "trainnet",
+    "objArrayNew", "objArrayAppend", "objArrayLen", "objArrayGet",
     /* Inverse Tustin: discrete-to-continuous. */
     "d2c_tustin",
     /* Tier 3.4 / 2.3 — gramians and state-space step response. */
@@ -843,6 +941,9 @@ void Resolver::registerBuiltins() {
     "conj", "real", "imag", "angle", "complex",
     "fft", "ifft", "fft2", "ifft2",
     "conv", "conv2",
+    /* Tier C: rank-4 batched convolution forward + im2col helper. */
+    "conv2d_batch", "im2col_2d", "im2col_2d_pad", "conv2d_batch_full",
+    "matmul3",
     "filter", "any", "all", "tril", "triu",
     "fftshift", "ifftshift",
     "std", "var", "median", "diff",

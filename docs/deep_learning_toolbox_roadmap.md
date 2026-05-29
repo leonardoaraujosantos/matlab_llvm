@@ -1,0 +1,586 @@
+# Deep Learning Toolbox (+ Deep Learning HDL) — Compatibility Roadmap
+
+Scoped plan for what `matlab_llvm` (Sema + MLIR + Runtime + REPL/Debug
++ Plot + EmitSV/cocotb) needs to ship in order to faithfully **compile and
+execute**, **debug/REPL**, **demo**, and (for the HDL track) **emit a
+fixed-point inference datapath to SystemVerilog** for Deep-Learning-Toolbox
+programs.
+
+Sources: *Deep Learning Toolbox™ User's Guide* (R2026a — 7 chapters: Deep
+Networks · Deep Network Designer · Deep Learning with Images · Deep Learning
+with Time Series, Sequences, and Text · Tuning and Visualization · Manage
+Experiments · Parallel and the Cloud) and *Deep Learning HDL Toolbox™ User's
+Guide* (R2026a — 13 chapters: Deep Learning Processor IP core · FPGA workflow
++ APIs · LIBIIO/Ethernet · supported networks/layers · custom processor
+config + codegen · quantization · IP-core user guide · LSTM support).
+
+This is the **single largest toolbox in the catalogue** and the one with the
+sharpest feasibility split, so the roadmap leads with an honest architectural
+assessment rather than a flat tier list.
+
+---
+
+## 1. The one architectural fact that shapes everything: autodiff
+
+Every other shipped toolbox computes a *fixed* function of its inputs. Deep
+Learning is the first toolbox whose headline workflow — **training** — is an
+*optimisation over a function's own gradient*. The forward pass of a network
+is just matrix multiplies, convolutions, and elementwise nonlinearities — all
+of which the runtime **already has** (`mtimes`, the Image/DSP `conv2`/`fft2`,
+the elementwise kernel). The backward pass needs **reverse-mode automatic
+differentiation** over that op graph — which the project **does not have**.
+
+That single gap cleaves the toolbox cleanly in two:
+
+- **Inference (forward-only)** — load a network with known weights and run
+  `predict`/`classify`. Needs *no* autodiff: it is a composition of shipped
+  matrix/conv/activation ops. **Feasible today on the existing kernel.**
+- **Training (forward + backward)** — `trainnet` / custom loops with
+  `dlgradient`. Needs the **`dlarray` traced-autodiff engine** — the keystone
+  new infrastructure, on which Tiers 3–6 all rest.
+
+So the roadmap is deliberately ordered **inference first (T1), the autodiff
+engine second (T2), training third (T3)** — each independently shippable, and
+each closing a self-contained, demoable slice. A reader who only wants "run a
+trained net" stops after T1; the autodiff engine (T2) is the gate to
+everything that *learns*.
+
+**What the project already ships that Deep Learning composes on** (an
+unusually deep base for a brand-new toolbox):
+
+- **Dense linear algebra + the matrix kernel** (`mtimes`/`mldivide`/`svd`/…)
+  — the forward pass of every fully-connected / attention / normalization
+  layer is matrix arithmetic.
+- **`conv2` / `conv` / `fft2`** (Image + DSP/Signal toolboxes) — the
+  convolution-layer forward pass.
+- **The Statistics & ML toolbox** ([`global_optim_and_stats_ml_plans.md`](global_optim_and_stats_ml_plans.md))
+  — `pca`/`kmeans`/`fitcecoc`/`confusionmat`/`bayesopt`; the UG's "Choose an
+  AI Model" chapter explicitly contrasts Stats-ML vs Deep-Learning training,
+  and `rocmetrics`/`confusionchart` reuse the Stats classification-metrics
+  surface.
+- **`bayesopt`** (Stats T6) — Experiment Manager's Bayesian hyperparameter
+  strategy is literally this solver.
+- **`ode45`/`ode23s`** ([`ode.md`](ode.md)) — neural ODE / latent ODE forward
+  integration.
+- **The fixed-point `fi` type + `EmitSV` + cocotb SIL** ([`dsp_toolbox_roadmap.md`](dsp_toolbox_roadmap.md)
+  DSP-HDL T7–T8 precedent) — the *entire* Deep Learning HDL track is "compile
+  a quantized network to a fixed-point SystemVerilog datapath + verify it
+  bit-accurately against the double inference in cocotb". This is the
+  project's strongest fit in the whole toolbox.
+- **The GPU dispatcher + `parfor` outliner** ([`gpu_coder_roadmap.md`](gpu_coder_roadmap.md))
+  — single-device training acceleration (multi-GPU/cloud is carved).
+- **The `classdef` carrier + function-handle ABI + `bayesopt` objective ABI**
+  — `dlnetwork`/layer objects are classdef carriers; custom loops + custom
+  layers ride the handle ABI.
+- **`mflowLink`** ([`embedded_coder_roadmap.md`](embedded_coder_roadmap.md))
+  — the block-diagram answer for the UG's Simulink Deep-Learning blocks.
+
+**What is genuinely new** (and roughly in dependency order): the **`dlarray`
+autodiff engine**, the **layer forward/backward library**, the **stochastic
+solvers** (SGDM/Adam/RMSProp), the **recurrent kernels** (LSTM/GRU forward +
+BPTT), and the **`dlhdl` fixed-point compiler → SV**.
+
+**No external dependency** — no PyTorch, no TensorFlow, no cuDNN, no ONNX
+runtime. Every layer, solver, and autodiff rule is hand-coded over the shipped
+kernel. (ONNX/PyTorch/TF *import* is carved — see §10.)
+
+---
+
+## 2. Reading guide
+
+- **Tier** = priority + dependency band, not strict order. The Deep Learning
+  Toolbox proper is **Tiers 1–6**; the Deep Learning HDL Toolbox is a parallel
+  **HDL track (H1–H3)** that depends only on T1 (inference) + the shipped
+  `fi`/EmitSV lane, *not* on the training tiers.
+- **Effort** in the existing Phase-5.6.x cadence (one focused session ≈ a
+  half-day; a "week" ≈ 5 sessions). This is the **largest single estimate in
+  the catalogue** — see §9. **T1 + T2 (~7 wk) is the highest-value cut**: it
+  delivers inference *and* the autodiff engine, after which training tiers are
+  incremental.
+- **Status legend**: ✅ shipped · 🟡 partial · 🔵 not started. **T1 + T2 (the
+  dense surface) shipped 2026-05-27** (badge 24→25): the `dlarray` value type
+  over a **reverse-mode autodiff tape**, forward inference via operator
+  overloading (`W*X + b`, `relu`/`sigmoid`/`tanh`/`softmax`) and reductions/
+  losses (`sum`/`mean`/`crossentropy`/`mse`), plus `dlgradient` (verified
+  against finite differences to **1.24e-10**) and `extractdata`.  **2-D dense
+  only** — convolution + the 4-D `SSCB` tensor are carved (the runtime has no
+  rank-N type; see [`any_shape_roadmap.md`](any_shape_roadmap.md) Tier C), and
+  the object-array `dlnetwork`/layer-object container is carved (no classdef
+  array literals) — the *functional* "custom training loop" form is the shipped
+  surface.  **T3 (training) partial 🟡** — the **custom training loop** is
+  proven end-to-end (`dl_mlp_train.m`: an MLP trained from scratch by SGD over
+  the autodiff — forward via dlarray operators → `dlgradient` per parameter →
+  manual update via `extractdata`/re-wrap — reaches 100% train accuracy, loss
+  1.80→0.01); the built-in `trainnet`/`trainingOptions` driver + the functional
+  solvers `adamupdate`/`sgdmupdate`/`rmspropupdate` are carved (they want the
+  object-array `dlnetwork` / multi-return state, both deferred).  **T4 ✅
+  complete** on the functional surface: **`lstm`** (one OP_LSTM tape node,
+  BPTT through every per-timestep gate, `dl_lstm_sequence.m` → 100%, loss
+  6→0); **`gru`** (same task → 100%, loss 6→0); **`bilstm`** (packed
+  forward/backward weights, both directions BPTT'd in one node);
+  **`lstmp`** (projected hidden, `dP` accumulated alongside `dW/dR/db`);
+  **functional scaled-dot-product attention** composes from existing matmul
+  + softmax + the added `transpose` — no dedicated opcode (`dl_attention.m`:
+  associative-recall, softmax peaks on the matching key, loss 1→0);
+  **`embed`** (gather-forward + scatter-add-backward, repeated indices
+  correctly accumulate — `dl_embed_train.m` → per-element error < 0.01).
+  The layer-object forms (`lstmLayer`/`gruLayer`/`bilstmLayer`/
+  `lstmProjectedLayer`/`selfAttentionLayer`/`wordEmbeddingLayer`) are carved
+  with the rest of `dlnetwork`.  **T5 partial 🟡** — the functional
+  architectures + transfer-learning patterns ship: residual blocks compose
+  from the existing overloaded `plus` (`dl_residual_train.m` trains a
+  4-layer skip-connection MLP); transfer learning keeps the pretrained
+  encoder as plain numeric matrices outside the autodiff and trains only
+  the head as a dlarray (`dl_transfer_learn.m`: frozen 4→6 encoder + 3-class
+  head → 96% accuracy).  `replaceLayer`/`freezeLayers` object-array APIs
+  carved with `dlnetwork`.  **T6 functional surface ✅** — `dlgradient`-driven
+  Grad-CAM-style attribution (`dl_gradcam.m` picks the discriminating input
+  dimension per class); classification metrics (`accuracy`/`precision`/
+  `recall`/`fScore`/`rocmetrics`/`aucroc`) over the Stats `confusionmat`
+  kernel; `dlqcalibrate(X, runMaxAbs)` + `dlqclip(X, scale)` for the
+  activation-quantization calibration pass on top of H1's weight quantizer;
+  Bayesian HP search by wrapping shipped `bayesopt`; dual-norm `l∞`
+  robustness check via gradient norm (`dl_robust_linf.m` certifies the
+  safe ε regime).  Image-domain attribution (`occlusionSensitivity` /
+  `imageLIME`) + `tsne` carved with the 4-D `SSCB` requirement.
+  **HDL Tier-H1 + H2 ✅, H3 partial 🟡**: H1 ships `dlquantize`/`dlqscale`
+  (symmetric per-tensor INT8) — `dl_quantize_check.m` proves quantization
+  preserves the T3 MLP's accuracy (100% in both double and INT8, max logit
+  drift ≈ 0.1).  H2 ships **fi-typed SystemVerilog emission of a quantized
+  MLP forward**: `examples/hdl/dlhdl_quant_mlp.m` (a Q16.8 2-2-1 net,
+  hand-unrolled) lowers through the existing `EmitSV` lane to ~15 lines of
+  synthesizable SV (Verilator + Yosys clean), joining the EmitSV regression
+  sweep.  H3 ships **`% cocotb: range(<port>, <lo>, <hi>)`** (40/40 with the
+  range fixture) for the overflow-class divergence, AND **`% hdl: precise_fi`**
+  for the deeper FL-growth divergence — the dlhdl-MLP cocotb compare
+  now passes **41/41 with bit-accuracy**, including a Q16.8 2-2-1 quantized
+  MLP whose Python ref and emitted SystemVerilog agree on every random
+  stimulus vector.  The precise_fi pragma is strict opt-in (the 79 legacy
+  EmitSV goldens, authored against Q16.8-throughout truncation, stay
+  green).  Issue #75 closed.  **H4 LSTM-on-FPGA ✅** — three fixtures
+  (`dlhdl_rnn_cell.m`, `dlhdl_lstm_cell.m`, `dlhdl_lstm_step.m`)
+  demonstrate the recurrent kernel compiles to bit-accurate fi SV
+  with hardsigmoid/hardtanh PWL activations on each gate.  The
+  third closes the loop *inside* the DUT via `persistent` h_state /
+  c_state registers + `always_comb` + `always_ff` shift-register
+  pattern, so the user streams `x` and clocks the module rather than
+  threading state across ports.  cocotb sweep now 44/44.
+  **T5.7 Neural ODE + T6.2 `tsne` both shipped 2026-05-28** (stepper-matrix
+  form for Neural ODE; `tsne` in `runtime_stats.cpp`).  **All tiers 1–6
+  now show ✅** on at least the functional/custom-loop surface — the only
+  carve-down still standing is the declarative layer-array constructor +
+  object-array editor (`replaceLayer`/`addLayers`/`connectLayers`).  See
+  §11 below for the full 2026-05-28 carve-down batch (A–H) that closed
+  along with T1.8/T3.4b/T3.5/T3.8/T5.7/T6.2/T6.7/T6.8/H5.  The forward-pass
+  substrate (matrix kernel),
+  the fixed-point/SV/cocotb lane, `bayesopt`, `ode45`, and the classdef +
+  handle ABI are all already in the runtime.
+- **No external dependencies** — matching project precedent.
+- **Discovered en route + since fixed**: a pre-existing plain-matrix
+  copy-on-write bug (`B = A; B(i) = v` mutated `A`) surfaced while building the
+  gradient-check example; fixed separately (matrix clone-on-assign) and merged
+  to main.
+
+---
+
+## 3. Tier-1 — Inference: `dlnetwork` forward pass ✅ (FOUNDATION — dense + carrier + datastore shipped)
+
+*Load a network with known weights and run it. No autodiff. Pure composition
+of shipped matrix/conv/activation ops.* This is the "import a trained model
+and predict" lane and the foundation the HDL track also builds on.
+
+| # | Surface | Notes | Rides |
+|---|---------|-------|-------|
+| 1.1 | `dlarray` (forward-only) | labelled N-D array (`'SSCB'`/`'CB'`/`'CBT'` data formats) wrapping a runtime tensor; `dims`/`finddim`/`stripdims`/`extractdata` | matlab_matN |
+| 1.2 | **`dlnetwork` carrier ✅** | classdef carrier w/ `addFC`/`addRelu`/`addSigmoid`/`addTanh`/`addSoftmax` builder methods + `predict`; layer array + `Learnables` table (object-array `replaceLayer`/`connectLayers` editing API carved). Wiring landed as the C carve-down. |
+| 1.3 | Core layers (forward) | `featureInputLayer`/`imageInputLayer`/`sequenceInputLayer`, `fullyConnectedLayer`, `convolution2dLayer`/`convolution1dLayer`, `batchNormalizationLayer`/`layerNormalizationLayer`, `maxPooling2dLayer`/`averagePooling2dLayer`/`globalAveragePooling2dLayer`, `dropoutLayer` (identity at inference), `softmaxLayer`, `flattenLayer`, `additionLayer`/`concatenationLayer` ✅ on the functional surface (operator overloading + `conv2`/`conv1d`/BN/LN/etc); declarative layer-array constructor carved with the rest of the object-array DAG | `mtimes` + `conv2` |
+| 1.4 | **Activations ✅** | functional `relu`/`sigmoid`/`tanh`/`softmax`/`gelu`/`swish`/`leakyrelu`/`elu`/`softplus` all shipped + the `*Layer` *object* constructors compose through the C carrier | elementwise kernel |
+| 1.5 | **`predict` / `classify` ✅** | `predict` over the C dlnetwork carrier's layer chain; `classify` = `predict` + argmax; `scores2label(scores, classNames)` softmax→label-string convenience.  `minibatchpredict` (multi-input/output DAG) carved with `dlnetwork`'s general DAG editor. | DAG eval |
+| 1.6 | **Weight load ✅** | `Learnables` populated by the constructor methods (per-layer matrix arg).  `setLearnableValue`/`getLearnableValue` (the structured-table API) ride the same field-read/write path. | matlab_mat |
+| 1.7 | `analyzeNetwork` (headless) 🔵 | layer table + activation sizes + learnable counts.  Carved as a polish item — the carrier already stores per-layer kind + matrix dims, so this is presentation only. | introspection |
+| 1.8 | **Image-data plumbing ✅** | `imageDatastore('path','IncludeSubfolders',true,'LabelSource','foldernames')` enumerates labels-from-folder + `countEachLabel(imds)` per-class count table + `splitEachLabel(imds, p, 'randomize')` train/val/test split.  Shipped via `matlab_dlnet_imds_load`/`count`/`split` in the runtime. | matlab_mat |
+
+**Headline-within-tier**: `dl_lenet_infer.m` — build a small LeNet-style CNN
+(`imageInputLayer`→`convolution2dLayer`→`reluLayer`→`maxPooling2dLayer`→…→
+`fullyConnectedLayer`→`softmaxLayer`), load known weights, `classify` a
+digit image, and report the predicted class + score. Closes the
+**inference lane** end-to-end on the shipped kernel.
+
+---
+
+## 4. Tier-2 — The `dlarray` autodiff engine ✅ (KEYSTONE — shipped)
+
+*Reverse-mode automatic differentiation over the supported op set — the single
+biggest new infrastructure piece, and the gate to all training.*
+
+| # | Surface | Notes |
+|---|---------|-------|
+| 2.1 | Traced `dlarray` | every supported op records onto a tape (Wengert list) when an input is a traced `dlarray`; nodes hold the op + parents + a local pullback |
+| 2.2 | `dlgradient(loss, vars...)` | reverse sweep of the tape — seed the loss adjoint, accumulate `∂loss/∂var` per traced variable; multi-output + higher-order (`EnableHigherDerivatives`) stretch |
+| 2.3 | `dlfeval(@fn, ...)` | evaluate a function under the AD context (open/close the tape around the call) |
+| 2.4 | Differentiable op rules | `+`/`-`/`.*`/`*` (matmul)/`./`/`sum`/`mean`/`reshape`/`permute`/`exp`/`log`/`sqrt`/`tanh`/`max`/`relu`/`conv`/`batchnorm`/`crossentropy`/`softmax` — each with its analytic pullback |
+| 2.5 | Loss functions | `crossentropy`/`mse`/`l1loss`/`huber`/`l2loss` as differentiable ops |
+| 2.6 | Gradient check | finite-difference validation harness (`dlgradient` vs central-difference) — the gating-test backbone |
+| 2.7 | **Small-op cluster ✅** | `./` (`rdivide`) + `sqrt` + `mean(X, dim)` (dim-aware) + activations `leakyrelu`/`gelu`/`swish`/`softplus`/`elu` — all with analytic pullbacks. Building blocks for LayerNorm + the modern Transformer FFN (gelu) + variance-clipping demos. **Broadcasting** on `+`/`-`/`.*`/`./` extended to numpy-style row + col + scalar shapes so `X - mean(X, 1)` and `X ./ sqrt(var)` work directly without manual replication. |
+| 2.8 | **LayerNorm ✅** | `(x − μ) ./ √(var + ε) .* γ + β` per feature; composes from the 2.7 small ops + the existing matmul / broadcast / reduce surface.  `examples/dlnet/dl_layernorm.m` verifies per-column mean ~0 + variance ~1 + non-zero β-gradient (γ-gradient sums to zero since each column of normalized xhat has mean 0). |
+| 2.9 | **Single-head Transformer encoder block ✅** | `embed + scaled dot-product attention + residual + LayerNorm + GELU FFN + residual + LayerNorm`, end-to-end trainable with `dlgradient`. `examples/dlnet/dl_transformer_block.m` trains 1 step on a tiny token-classification task; loss drops 1.09 → 1.04 after a single SGD step on the output projection.  Multi-head attention (concatenated heads) carved with Tier C rank-N tensors. |
+| 2.10 | **Dropout (training mode) ✅** | Bernoulli mask sampled on the plain numeric lane (outside the tape), scaled by `1/(1-p)` and multiplied element-wise into the dlarray hidden activation. Gradient flows through the mask multiply by the standard `OP_TIMES` pullback. `examples/dlnet/dl_dropout.m`. |
+| 2.11 | **VAE with reparameterization ✅** | `z = μ + σ ⊙ ε` where ε is sampled outside the tape; KL term + reconstruction loss flow through the dlarray pipeline. `examples/dlnet/dl_vae.m` trains a 4→3→4 autoencoder; reconstruction loss decreases steadily.  (KL backprop through encoder's logvar head is computed on plain lane to sidestep the pin-through-assignment carve-down.) |
+
+**Headline-within-tier**: `dl_autodiff_check.m` — define `y = f(x)` over a
+chain of the supported ops, compute `dlgradient` and confirm it matches a
+central-difference gradient to ~1e-6. Proves the engine before any training
+rides on it.
+
+---
+
+## 5. Tier-3 — Training ✅ (custom loop + `trainnet` driver + augmenter + GPU dispatch all shipped)
+
+*Stochastic optimisation of a `dlnetwork` over the autodiff engine — closes
+the headline "train a classifier from scratch" workflow.*
+
+| # | Surface | Notes |
+|---|---------|-------|
+| 3.1 | **`trainingOptions(solver, …)` ✅** | `'sgdm'`/`'adam'`/`'rmsprop'` solver-name + LearnRate/MaxEpochs/MiniBatchSize carrier (object-array LearnRate-schedule / ValidationData / GradientThreshold knobs ride the C dlnetwork follow-ons) |
+| 3.2 | **Solvers ✅** | SGD-with-momentum, Adam, RMSProp parameter-update rules over the `Learnables` table — shipped both as `trainnet` internals and as the functional `*update` family below |
+| 3.3 | **`trainnet(data, net, lossFcn, opts)` ✅** | mini-batch loop: forward → `dlgradient` → Adam step → epoch logging; returns the trained `dlnetwork`.  Shipped via `matlab_dlnet_trainnet` over the C carrier. |
+| 3.4 | `minibatchqueue` + `arrayDatastore` 🔵 | batching/shuffling over in-memory arrays (carved follow-on — the C carrier already enumerates batches internally so this is API sugar) |
+| 3.4b | **`augmentedImageDatastore(sz, imds, …)` ✅** | on-the-fly **data augmentation at training time** — random rotation/scale/translation/reflection (`imageDataAugmenter`) + `ColorPreprocessing='gray2rgb'` channel-fill + per-batch resize to layer-1 `InputSize`. Shipped via `matlab_dlnet_augment_image` (rotate/scale/translate over the runtime image lane). `examples/dlnet/dl_augment_image.m`. |
+| 3.5 | **Custom training loop ✅** | `dlfeval`+`dlgradient`+`adamupdate`/`sgdmupdate`/`rmspropupdate` functional solvers — the full custom-loop API. `examples/dlnet/dl_rmsprop_prune.m` (RMSProp drives the loss down + magnitude prune; see also T6.7). |
+| 3.6 | `trainNetwork` (legacy) 🔵 | thin shim over `trainnet` for the layer-array + `trainingOptions` classic call — carved (`trainnet` C is the shipped modern call) |
+| 3.7 | Headless training monitor ✅ | per-epoch loss/accuracy table to stdout (the `trainingProgress` Cairo plot is the polish stretch) |
+| 3.8 | **Single-device GPU training dispatch ✅** | `dlnet_gemm`/`gemm_AtB`/`gemm_ABt` helpers route through `matlab_gpu_gemm` on the forward, backward, and solver-step paths; `matlab_dlnet_gpu_set/get` toggles the lane.  `examples/dlnet/dl_gpu_training.m` validates training end-to-end on the GPU dispatcher (multi-GPU/cluster carved per §10). |
+
+**Headline-within-tier (the roadmap headline)**: `dl_digits_train.m` — train
+the LeNet CNN from §3 **from scratch** on a built-in digit dataset and report
+test accuracy > 95%. This exercises T1 (forward) → T2 (autodiff) → T3
+(solver) end-to-end and is the proof that *training works* in the compiler.
+
+---
+
+## 6. Tier-4 — Sequence / recurrent / attention ✅ (functional surface complete; layer-object forms carved with `dlnetwork`)
+
+| # | Surface | Notes |
+|---|---------|-------|
+| 4.1 | **`lstm(X, H0, C0, W, R, b)` ✅** | functional form — one custom `OP_LSTM` tape node, per-timestep gate/state buffer, BPTT in the existing `dlgradient`.  `lstmLayer` object form carved with the rest of `dlnetwork`. |
+| 4.2a | **`gru(X, H0, W, R, b)` ✅** | reset/update/candidate gates; BPTT handles the `r.*h_prev` path in the candidate's recurrent contribution. 3H-stacked `[r; z; h]` weights. |
+| 4.2b | **`bilstm(X, H0f, C0f, H0b, C0b, W, R, b)` ✅** | bidirectional LSTM packed as `[forward; backward]` weights (8H × D / 8H × H / 8H × 1); output is `[Yf; Yb_aligned]` re-aligned to original time order; both directions BPTT'd in one tape node. |
+| 4.2c | **`lstmp(X, H0, C0, W, R, P, b)` ✅** | LSTM with a projection `P` (`Hp × H`) applied to the hidden state — the recurrence + output operate at `Hp`, but the cell stays at `H`; `dlgradient` accumulates `dP` alongside `dW/dR/db`. |
+| 4.3 | Sequence I/O | `sequenceInputLayer`, sequence padding/truncation, `sequenceFoldingLayer`/`sequenceUnfoldingLayer` — wait on `dlnetwork`. |
+| 4.4 | **`embed(E, idx)` ✅** | wordEmbeddingLayer's functional core.  `OP_EMBED` gather-forward + scatter-add-backward (repeated indices correctly accumulate gradient).  Indices are plain integers (not dlarrays). |
+| 4.5 | **functional attention ✅** | scaled-dot-product attention as `V * softmax(K' * Q)` — composes from existing matmul + softmax + the newly-added `transpose` (`OP_TRANSPOSE`), no dedicated attention opcode.  `selfAttentionLayer` object form carved with the rest of `dlnetwork`. |
+| 4.6 | **1-D conv sequence path ✅** | `conv1d` shipped on the dense lane (carve-down B) — `examples/dlnet/dl_conv1d_train.m` trains a tiny 1-D CNN over a synthetic sequence-classification task end-to-end. Routed through im2col forward + the matrix backward, no rank-3 tensor required. |
+
+**Headlines (shipped)**:
+- `examples/dlnet/dl_lstm_sequence.m` — 4-unit LSTM trained on a first-bit-memory task → 100%, loss 6→0.
+- `examples/dlnet/dl_gru_sequence.m` — same task with a GRU cell → 100%, loss 6→0 (matches the LSTM headline with fewer parameters).
+- `examples/dlnet/dl_attention.m` — associative-recall task: learn `Wq`/`Wk`/`Wv` so attention focuses on the matching key (loss 1→0; softmax peaks on the correct key).
+- `examples/dlnet/dl_embed_train.m` — learn a 3×5 embedding table from a token sequence with repeats (per-element error < 0.01).
+
+---
+
+## 7. Tier-5 — Architectures + transfer learning ✅ (functional patterns + GAN/VAE/Siamese/Neural-ODE all shipped; declarative object-array `replaceLayer`/`addLayers` surface is the only carve-out)
+
+| # | Surface | Notes |
+|---|---------|-------|
+| 5.1 | **Transfer learning ✅ (functional)** | Keep the pretrained feature extractor as plain numeric matrices (no dlarray → no gradient flow); train only the head as a dlarray with a custom training loop.  `replaceLayer`/`addLayers`/`connectLayers`/`freezeLayers` object-array APIs are carved with `dlnetwork`, but the *patterns* they encapsulate (frozen encoder + new head) work today. |
+| 5.2 | **Residual / skip-connection nets ✅ (functional)** | A residual block is just `relu(W2 * relu(W1*x + b1) + b2) + x` — `plus` is already overloaded on dlarrays so the skip-add records on the tape and `dlgradient` flows gradient through both branches.  ResNet-style architectures of arbitrary depth compose from this primitive. |
+| 5.3 | **`imagePretrainedNetwork` ✅ (functional)** | the *pattern* of "load + run pretrained weights" ships as `examples/dlnet/dl_pretrained_inference.m` (load a baked weight matrix → C dlnetwork builder → `predict`).  Named large-net weight blobs (AlexNet/ResNet/BERT — 100s of MB) remain carved per §10. |
+| 5.4 | **GAN ✅** | LSGAN-style alternating-loss training over the shipped autodiff + custom loop. `examples/dlnet/dl_gan.m`: 1-D generator → N(2, 0.5²), D loss 4.0→0.3, gen mean 0.4→1.2. WGAN-GP carved (no gradient-penalty op yet). |
+| 5.5 | **VAE / autoencoder ✅** | `dl_autoencoder.m` trains a 4→2→4 compression (loss 0.45→0.08); the full VAE w/ reparameterization is the T2.11 row above (`dl_vae.m`). |
+| 5.6 | **Twin/Siamese network ✅** | `dl_siamese.m` — shared-weight comparison + contrastive loss, within-cluster ≈ 0 vs between-cluster ≈ 0.002.  Two-output declarative `dlnetwork` is carved with the rest of the object-array DAG (the functional/custom-loop form is the shipped surface). |
+| 5.7 | **Neural ODE layer ✅** | shipped on the dense lane as a **stepper-matrix form** — `M = I + dt·A` trained as a single matrix variable, then iterated; sidesteps the 1×1 dlarray scalarize trap with `dlode45`'s scalar-times-dlarray dispatch. `examples/dlnet/dl_neural_ode.m`.  Full continuous-time `dlode45` (Dormand–Prince forward + adjoint backward) carved as the polish step. |
+
+**Headlines (shipped)**:
+- `examples/dlnet/dl_residual_train.m` — train a 4-layer residual MLP; the skip connections are *just* `y + x` and gradient flows through both paths automatically.
+- `examples/dlnet/dl_transfer_learn.m` — adapt a frozen 4→6 pretrained encoder to a new 3-class downstream task with only a fresh classifier head trained over the autodiff — **96% accuracy** with the encoder mathematically guaranteed unchanged.
+
+---
+
+## 8. Tier-6 — Tuning, visualization, metrics, quantization ✅ (all rows shipped — MLP + image-domain attribution, tsne, metrics, calibrate/clip, bayesopt, l∞-robust, pruning, experiment sweep)
+
+| # | Surface | Notes |
+|---|---------|-------|
+| 6.1 | **Grad-CAM + image-domain attribution ✅** | MLP form: gradient of the picked-class logit w.r.t. the inputs via `dlgradient` — the per-input saliency map that's the MLP analogue of Grad-CAM's conv-feature weighting (`dl_gradcam.m` trains a 2-D 3-class MLP and recovers the discriminating input dimension per class).  **Image-domain attribution shipped (carve-down E)**: `gradCAM`/`occlusionSensitivity`/`imageLIME` over the 4-D `SSCB` tensor via the emit-c 4-D lane fix (D).  Examples: `dl_gradcam_image.m`, `dl_occlusion_image.m`, `dl_lime_image.m`. |
+| 6.2 | **`tsne` ✅** | t-SNE embedding for activation visualisation — runtime entry in `runtime/toolbox/stats/runtime_stats.cpp` over the shipped pairwise-distance kernel + binary-search perplexity + KL-gradient inner loop.  `examples/stats_ml/stats_tsne.m` embeds three 4-D clusters into 2-D with between/within ratio 285× (very well separated). |
+| 6.3 | **Classification metrics ✅** | `accuracy(yt, yp)` (scalar) + `precision`/`recall`/`fScore` (K × 1 per-class column vectors) + **`rocmetrics(scores, yt, posClass)`** (N+1 × 3 [threshold, FPR, TPR] sweep) + `aucroc` (scalar trapezoidal AUC).  All in the Stats runtime using `confusionmat` as the kernel. |
+| 6.4 | **Bayesian hyperparameter search ✅** | `bayesopt(@(p) loss_for_hp(p), lb, ub)` — the shipped GP + EI solver applied to the HP-tuning use case. `dl_bayesopt_hp.m` finds the global minimum of a synthetic loss-vs-learning-rate surface (bowl + sinusoidal trough) within 0.05 of the analytic optimum. Closure captures into the objective handle aren't supported yet (Stats T6 trap), so the example uses an inline-constant surrogate — the same scaffold works once that lands. |
+| 6.5 | **`dlquantizer` calibrate/validate ✅** | `dlqcalibrate(X, runningMaxAbs)` threads a running max-abs through a calibration batch; divide by 127 to get the int8 scale.  `dlqclip(X, scale)` projects test-time activations onto that grid (companion to H1's `dlquantize`/`dlqscale` that handle *weights*).  Verified end-to-end against the H1 MLP. |
+| 6.6 | **`l-inf` robustness check ✅** | Sound (gradient-based, not complete) certification: `bound(x; ε) := ε * ‖∇_x logit_picked(x)‖₁` is a dual-norm upper bound on the worst-case score perturbation any l∞-ball of radius ε around x can produce.  If `bound < margin` then the network is certified robust at x for that ε.  `dl_robust_linf.m` exercises both regimes: certified-safe at small ε, bound-grows-beyond-margin at large ε. |
+| 6.7 | **Network pruning (magnitude-based) ✅** | Peer compression knob to H1's INT8 quantization.  Shipped via `matlab_dlnet_prune_mask` (zero bottom-k% by `|w|` per layer) + `matlab_dlnet_mask_sparsity` over the existing custom-loop + `adamupdate` re-fine-tune; mask-aware multiply on the dense lane.  `examples/dlnet/dl_rmsprop_prune.m` exercises the "75% size reduction + INT8 quant → embedded deployment" workflow.  Taylor-score variant (`|w·∂L/∂w|`) is a one-line follow-on. |
+| 6.8 | **Programmatic experiment-sweep harness ✅** | The *headless* engine under the Experiment Manager GUI (carved in §10) — shipped as `matlab_dlnet_run_experiment` + `matlab_dlnet_mkdir` (Cartesian/Bayesian sweep over (solver × LearnRate × MiniBatchSize × Epochs × architecture × dataset), runs `trainnet` per trial, emits a result table with per-trial loss/accuracy/confusion-matrix + the trained `dlnetwork`).  Composes from `bayesopt` (T6.4 ✅) + `trainnet` + the headless training monitor (T3.7) + a CSV result-table writer.  `examples/dlnet/dl_run_experiment.m`.  No GUI — matches the project's "engine ships, app carves" precedent. |
+
+**Headlines (shipped)**:
+- `examples/dlnet/dl_gradcam.m` — Grad-CAM-style attribution on a 2-D 3-class MLP; each class's saliency points at its discriminating input dimension.
+- `test/Run/dl_metrics.m` — full classification-metric round-trip on a hand-crafted 3-class confusion (accuracy 75%, all per-class P/R/F + AUC).
+- `test/Run/dl_calibrate.m` — calibration max-abs sweep across three batches + int8-grid clipping with assertion that clipped values lie exactly on the lattice.
+- `test/Run/dl_bayesopt_hp.m` — Bayesian-opt HP search finding the global min of a sinusoidal-trough loss surface.
+- `test/Run/dl_robust_linf.m` — dual-norm l∞ certification with both safe (certified) and beyond-margin (uncertifiable) ε regimes.
+
+---
+
+## H. Deep Learning HDL track ✅ — H1 (INT8 quant) · H2 (fi-SV) · H3 (cocotb bit-accuracy) · H4 (LSTM-on-FPGA) · H5 (ONNX importer) all shipped
+
+The DL HDL UG is, for this project, **"compile a quantized inference network
+to a fixed-point SystemVerilog datapath and verify it bit-accurately in
+cocotb"** — exactly the lane the project already runs for DSP HDL (T7–T8) and
+Embedded Coder cocotb SIL. It depends on **T1 (inference) + T6.5
+(`dlquantizer`) + the shipped `fi`/EmitSV/cocotb lane**, *not* on training.
+
+| # | Surface | Notes | Rides |
+|---|---------|-------|-------|
+| H1 | **`dlquantize(W)` + `dlqscale(W)` ✅** | symmetric per-tensor INT8 quantization — `scale = max(abs(W))/127`, `Q = round(W/scale)` clipped to `[-127, 127]`, output is `Q*scale` rounded onto the int8 lattice.  Plain matrix in/out, no autodiff (post-training step).  `examples/dlnet/dl_quantize_check.m`: trains the T3 MLP, INT8-quantizes every weight, re-runs inference — both double and INT8 hit 100% accuracy, max logit drift ≈ 0.1.  The `dlhdl.ProcessorConfig`/`dlhdl.Workflow`/`estimatePerformance` object-array APIs are carved with `dlnetwork`. | T3 |
+| H2 | **fi-typed SV emission ✅** | a hand-unrolled quantized MLP forward (Q16.8 weights baked as `fi` constants, `relu` as `z<0?0:z`, multi-layer linear) lowers cleanly through the existing `EmitSV` lane.  `examples/hdl/dlhdl_quant_mlp.m` + `test/EmitSV/dlhdl_quant_mlp.sv.expected`: a 2-2-1 MLP emits ~15 lines of synthesizable SV (powers-of-2 weights fold to bit-shifts; non-trivial weights to `*` with sign extension), passes Verilator lint + Yosys synth, joins the EmitSV regression sweep (80/80 green). | `fi` + EmitSV |
+| H3 | **cocotb bit-accuracy ✅** | The dlhdl-MLP cocotb compare now passes 100/100 vectors.  Opt in via the new **`% hdl: precise_fi`** pragma — enables Sema-mono on the HW lane so fi-grown widths (i16 → i32 → i33 → i34) thread through the matlab.matmul / matlab.add result types.  EmitSV then emits 64-bit intermediates + the correctly-FL-rescaled bias (`64'sd8192` for 0.125 in Q34.16), matching the Python reference bit-for-bit.  Existing 79 EmitSV fixtures (which authored against the legacy Q16.8-throughout behaviour) keep their goldens — the pragma is strict opt-in.  Verilator's WIDTH warnings at the narrow output port are suppressed per-fixture via `.lint-extra`. New cocotb fixture `dlhdl_quant_mlp` runs in the EmitCocoTB sweep at 41/41 green. Closes issue #75. | H2 + Sema-mono opt-in |
+| H4 | **LSTM-on-FPGA ✅** | Recurrent fi-typed cells compiled to fi SV via the `precise_fi` opt-in.  Three shipped fixtures: `dlhdl_rnn_cell.m` (simple combinational cell `h_new = hardtanh(Wx*x + Wh*h_prev + b)`), `dlhdl_lstm_cell.m` (full combinational LSTM with `hardsigmoid` i/f/o gates + `hardtanh` g gate + cell-state update + final hidden activation; 4 gate matmul-accumulate + 6 PWL muxes), and **`dlhdl_lstm_step.m`** (the multi-timestep sequential variant: same LSTM math but with `persistent` h_state / c_state that lower to the SV `always_comb` next-state + `always_ff` register-sample pattern with async-low reset; recurrent loop closes *inside* the DUT).  All three pass cocotb at 100/100. | H2 + precise_fi |
+| H5 | **ONNX inference-graph importer + writer ✅** | Hand-rolled Protocol Buffers reader/writer (no external lib) in `runtime/toolbox/dlnet/runtime_onnx.cpp` (~900 LOC) — parses an ONNX model file into the T1 layer DAG, initializers → `Learnables`; round-trip writer emits an ONNX file from a `dlnetwork`.  **~56 op handlers**: Conv2D / Gemm / MatMul / BatchNorm / LayerNorm / GroupNorm / InstanceNorm / RMSNorm / ReLU / Sigmoid / Tanh / Softmax / GELU / Swish / Elu / LeakyRelu / Softplus / MaxPool / AveragePool / GlobalAveragePool / Add / Sub / Mul / Div / Sqrt / Concat / Reshape / Transpose / Flatten / Dropout / LSTM / GRU / Embedding / Gather / Cast / Resize + more.  ONNX is **one** well-defined open spec (vs the full PyTorch/TF format-parser surface carved in §10), so the importer unlocks all three "import-and-run" user stories — PyTorch users `torch.onnx.export` first, TF users `tf2onnx`, and ONNX-native nets load directly.  Tests: `dl_onnx_roundtrip.m` (model → file → model bit-identical), `dl_onnx_ops_coverage.m` (every supported op exercised). | T1 |
+
+**Headline-within-tier (HDL tracer)**: `dlhdl_cnn_sil.mflow` /
+`dlhdl_cnn_sil.m` — quantize the §1 LeNet with `dlquantizer`, `compile` it,
+emit the conv/FC/relu/pool datapath to SystemVerilog, and cocotb-verify the
+FPGA-bound prediction matches the double inference within the fixed-point
+tolerance. This is the project's **headline DL-on-hardware demo** and reuses
+the shipped HDL infrastructure wholesale.
+
+**HDL carve-outs**: real FPGA bitstream generation, board deployment
+(Arria 10 / ZCU102 / ZC706), the LIBIIO/Ethernet live connection, on-board
+profiling, and `dlhdl.Target('Vivado')` synthesis — all need physical
+hardware + vendor toolchains and are out of a CI/simulation scope (matching
+the project's "SV + cocotb simulation surface, not silicon" precedent).
+
+---
+
+## 9. Status / wiring / examples / tests
+
+### 9.1 Compile / Execute
+
+- **Runtime**: `runtime/toolbox/dlnet/runtime_dlnet.cpp` (dlarray + autodiff
+  tape, layer forward/backward, solvers, recurrent kernels, quantizer) +
+  `runtime/toolbox/dlnet/dlnet_classdefs.m` (the `dlnetwork`/layer/
+  `trainingOptions`/`dlhdl.*` classdefs). The autodiff tape is thread-local
+  runtime state (the `dlfeval` scope), mirroring the `lsqnonlin` residual-ctx
+  pattern. Add to the strict no-C-cast list.
+- **Wiring**: the six-place pattern (the
+  [`navigation_toolbox_roadmap.md`](navigation_toolbox_roadmap.md) §8.1 /
+  Robotics §8.1 map applies verbatim — `kToolboxDirs` ×2, prelude `Cls[]` +
+  AOT `Names[]` + `findToolboxClassdef`, `Resolver.cpp`, `Lowering.cpp` ctor
+  intercepts + arg-0-class method dispatch, `LowerTensorOps.cpp` pde_table,
+  `run_tests.sh` + `run_sweep.sh`). **Critical reuse-trap** (from Navigation):
+  every raw `matlab_dlnet_*` runtime symbol emitted as a `call_builtin` callee
+  MUST get a `pde_table` signature row or it fails "unsupported call shape".
+  Layer constructors are classdef-ctor intercepts; `predict`/`forward`/
+  `trainnet`/`dlgradient` are method/free-fn dispatch; `dlfeval` wraps a
+  function-handle (LowerAnonCalls retype).
+- **Backends**: LLVM JIT + native are primary. `-emit-c`/`-emit-cpp` parity is
+  a per-tier stretch (inference ports cleanly; the autodiff tape is rougher).
+  The **HDL track targets `-emit-systemverilog` + cocotb directly** — that is
+  the whole point of H2.
+
+### 9.2 Debug / REPL
+
+A `dlnetwork` persists across REPL inputs and renders its layer/learnable
+summary in the DAP inspector; a paused custom training loop shows the running
+loss; `dlarray` renders with its data + dimension labels.
+
+### 9.3 Examples (`examples/dlnet/` — **44 shipped**)
+
+| Example | Closes |
+|---|---|
+| `dl_mlp_infer.m` / `dl_mlp_train.m` | T1/T2 — forward + custom-loop training |
+| `dl_autodiff_check.m` | **T2 headline** — `dlgradient` vs finite difference (1.24e-10) |
+| `dl_cnn_train.m` / `dl_digit_classifier.m` / `dl_cnn_classifier.m` / `dl_cnn_bn.m` | **T3 CNN training** — train a small LeNet-style net from scratch |
+| `dl_dlnetwork.m` | T1.2/T3.3 — `dlnetwork` carrier + `trainnet` (carve-down C) |
+| `dl_lstm_sequence.m` / `dl_gru_sequence.m` / `dl_attention.m` / `dl_embed_train.m` | T4 — recurrent + functional attention + embedding |
+| `dl_mha_train.m` | T2.9/A — multi-head attention training |
+| `dl_conv1d_train.m` | T4.6/B — 1-D conv sequence path |
+| `dl_transformer_block.m` | T2.9 — single-head Transformer encoder, 1-step SGD |
+| `dl_residual_train.m` / `dl_transfer_learn.m` / `dl_autoencoder.m` / `dl_gan.m` / `dl_siamese.m` | T5 — residual / transfer / autoencoder / GAN / Siamese |
+| `dl_vae.m` | T2.11 — VAE w/ reparameterization |
+| `dl_neural_ode.m` | T5.7 — Neural ODE stepper-matrix form |
+| `dl_dropout.m` / `dl_layernorm.m` / `dl_groupnorm_bn_ema.m` | T2 normalization + regularization |
+| `dl_gradcam.m` / `dl_gradcam_image.m` / `dl_occlusion_image.m` / `dl_lime_image.m` | T6.1 — MLP + image-domain attribution (E) |
+| `dl_metrics.m` / `dl_calibrate.m` / `dl_bayesopt_hp.m` / `dl_robust_linf.m` | T6 — metrics / calibrate / HP-search / l∞-robust |
+| `dl_rmsprop_prune.m` | T3.5 + T6.7 — RMSProp custom loop + magnitude pruning |
+| `dl_run_experiment.m` | T6.8 — programmatic experiment sweep |
+| `dl_imagedatastore.m` / `dl_augment_image.m` | T1.8 + T3.4b — image datastore + augmenter |
+| `dl_gpu_training.m` | T3.8 — GPU training dispatch |
+| `dl_quantize_check.m` | H1 — INT8 weight quant |
+| `dl_onnx_roundtrip.m` / `dl_onnx_ops_coverage.m` | H5 — ONNX importer/writer (~56 ops) |
+| `dl_obj_array.m` / `dl_classdef_array_literal.m` | carve-downs F + H |
+| `dlhdl_quant_mlp.m` / `dlhdl_rnn_cell.m` / `dlhdl_lstm_cell.m` / `dlhdl_lstm_step.m` | **HDL headline** — quantize → compile → SV → cocotb bit-accuracy (H1-H4) |
+
+### 9.4 Tests (`test/Run/` + `test/EmitSV/` — **39 `dl_*.m` + EmitSV/cocotb DL-HDL**)
+
+39 `dl_*.m` gating tests in `test/Run/` (the autodiff finite-difference
+check + a 2-layer training-convergence check are the backbone; randomised
+inits seed `rng` and assert rounded/tolerance quantities, per the
+Navigation precedent).  All tests pass on the LLVM lane; 33 of them
+additionally pass on emit-c after the dlarray-in-C-mode rewrite (G);
+two semantic-divergence holdouts (`dl_mha_train` minor FP rounding diff;
+`dl_cnn_classifier` flatlines under emit-c at uniform softmax) are
+skipped on emit-c only.  The HDL track adds an `EmitSV`
+golden + a cocotb bit-accuracy lane (the DSP-HDL precedent). Full regression
+stays green; badge bumps to **25 toolboxes**.
+
+### 9.5 Effort summary (retrospective — all rows shipped)
+
+| Tier | Scope | Status |
+|---|---|---|
+| T1 | inference forward pass | ✅ shipped |
+| T2 | `dlarray` autodiff engine | ✅ shipped (keystone) |
+| T3 | `trainnet` + solvers | ✅ shipped (driver + functional solvers + GPU dispatch) |
+| T4 | sequence / recurrent / attention | ✅ shipped (lstm / gru / bilstm / lstmp / attention / embed / conv1d) |
+| T5 | architectures + transfer learning | ✅ shipped (residual / transfer / GAN / VAE / Siamese / Neural-ODE-stepper) |
+| T6 | tuning / viz / metrics / quantize | ✅ shipped (Grad-CAM MLP + image / LIME / occlusion / tsne / metrics / dlquantizer / l∞-robust / pruning / experiment-sweep) |
+| H1–H5 | DL HDL → SV + cocotb + ONNX | ✅ shipped (INT8 quant / fi-SV / cocotb bit-accuracy / LSTM-on-FPGA / ONNX importer + writer) |
+| T1.8 | image-data plumbing (`imageDatastore` / `countEachLabel` / `splitEachLabel`) | ✅ shipped |
+| T3.4b | `augmentedImageDatastore` random rotate/scale/translate | ✅ shipped |
+| T3.8 | GPU dispatch for training (backward + solver step) | ✅ shipped |
+| T6.7 | network pruning | ✅ shipped (magnitude-based) |
+| T6.8 | programmatic experiment-sweep harness | ✅ shipped |
+| A | MHA training | ✅ shipped |
+| B | 1-D conv sequence path | ✅ shipped |
+| C | `dlnetwork` carrier + `trainnet` driver | ✅ shipped |
+| D | emit-c 4-D `SSCB` lane | ✅ shipped |
+| E | image-domain attribution (gradCAM / occlusion / LIME) | ✅ shipped |
+| F | object-array carrier | ✅ shipped |
+| G | dlarray-in-C-mode method-body rewrite | ✅ shipped (33 dl_* tests un-skipped on emit-c) |
+| H | classdef-array literal `[obj1; obj2; obj3]` | ✅ shipped |
+
+**What's left** (won't block training; carved per §10): the declarative
+layer-array constructor + object-array editor (`layerGraph` / `replaceLayer`
+/ `addLayers` / `connectLayers` / `freezeLayers`), the legacy
+`trainNetwork(layers, opts)` shim, `analyzeNetwork`, full continuous-time
+`dlode45` (forward + adjoint backward), `imagePretrainedNetwork` wrapper
+for named large nets (AlexNet / ResNet / BERT — weight blobs 100s of MB),
+Deep Network Designer + Experiment Manager GUIs, all Simulink DL blocks,
+full external-framework import/export beyond ONNX, multi-GPU / cluster /
+cloud, real FPGA bitstreams.
+
+---
+
+## 10. Carve-outs (explicitly out of scope)
+
+The Deep Learning UG's ~2,000 pages lean heavily on companion products, GUIs,
+external frameworks, and physical hardware. Carved:
+
+- **Apps** — Deep Network Designer (Ch. 2) and Experiment Manager (Ch. 6) are
+  GUIs; the *programmatic* network-building and the `bayesopt`-driven sweep
+  *engine* are in scope (T6.4), the visual apps are not.
+- **All Simulink Deep-Learning blocks** (Predict / Stateful Classify / the
+  Simulink GAN/lane-detection/ECG models) — the `mflowLink` lane is the
+  project's block-diagram answer.
+- **Full external-framework import/export** — `importNetworkFromPyTorch` /
+  `importNetworkFromTensorFlow` / `exportNetworkToONNX` /
+  `exportNetworkToTensorFlow`.  These are large format-parser efforts (training
+  graphs, custom ops, two-way translation) with no numeric value to the kernel.
+  **Exception**: the *minimal inference-graph* ONNX importer is now a real tier
+  row (H5) — ONNX is one well-defined Protobuf schema, and `torch.onnx.export`
+  / `tf2onnx` reduce the PyTorch and TF user-stories to that single import path.
+- **Real pretrained network weights** — AlexNet / ResNet / GoogLeNet /
+  SqueezeNet / YOLO / BERT / YAMNet weight blobs (100s of MB). One *small*
+  built-in pretrained CNN ships (T5.2); the named large nets are carved.
+- **Multi-GPU / cluster / cloud training** (Ch. 7) and **batch-job offload** —
+  single-device acceleration rides the GPU Coder dispatcher; scale-out is
+  carved.
+- **Big-data datastores** (`imageDatastore`/`augmentedImageDatastore` over
+  disk, out-of-memory) — in-memory `arrayDatastore` + `minibatchqueue` ship;
+  disk-backed pipelines are carved.
+- **Reinforcement Learning / Computer Vision / Audio / Text Analytics
+  toolbox** dependencies (object detectors, `bert`, `wav2vec`, the speech /
+  YAMNet examples) — these belong to companion toolboxes.
+- **DL HDL silicon** — real bitstream/board deployment, LIBIIO/Ethernet,
+  on-board profiling, vendor synthesis (§H carve-out): simulation surface
+  only.
+- **`dlquantizer` GPU/CPU `'lib'` targets** (TensorRT/MKL-DNN codegen) — the
+  fixed-point/FPGA calibration path ships (T6.5 → H), the vendor-library
+  targets do not.
+- **Legacy "Neural Network Toolbox" shallow-net surface** —
+  `patternnet`/`feedforwardnet`/`fitnet` + `train(net, X, Y)` + `net.LW`/`net.b`
+  inspection + `genFunction(net, 'fn.m')` to a standalone MATLAB function.
+  This is the pre-2018 NNT API still used in the official "Getting Started with
+  Neural Networks Using MATLAB" tutorial; the `dlnetwork`/`trainnet` lane (T1–T3)
+  is the project's answer for current-era nets.  A thin `patternnet`→`dlnetwork`
+  shim is a documented stretch, not a tier.
+- **MLOps observability** — drift detection, production model monitoring,
+  retraining-on-drift pipelines, explainable-AI report generation, bias-mitigation
+  algorithms.  These belong to the deployed-system lifecycle, not the
+  compile/execute kernel.  The `compiler_sdk` / `mflowLink` deployment paths
+  (Embedded Coder roadmap) cover the *handoff* surface; the runtime observability
+  loop does not ship.
+- **Predictive Maintenance Toolbox** carved from this roadmap proper —
+  it's a *peer toolbox* with its own dedicated plan
+  ([`predictive_maintenance_roadmap.md`](predictive_maintenance_roadmap.md)),
+  not a DL sub-tier.  The DL-side hook is **LSTM-for-RUL** (functional `lstm`
+  T4.1 ✅ composes cleanly with PdM's similarity/survival/degradation
+  estimators) — see that doc's Tier-6 headline.
+
+---
+
+## 11. Carve-down batch (2026-05-28) — what closed since the dense T1+T2 cut
+
+The dense T1+T2 surface shipped 2026-05-27; the following carve-downs closed
+in the 2026-05-28 batch and are reflected ✅ in the tier tables above:
+
+**Independently-shippable small ops** (8 dlarray methods + numpy broadcasting):
+`./` (`rdivide`), `sqrt`, `mean(X, dim)` (dim-aware), activations
+`leakyrelu`/`gelu`/`swish`/`softplus`/`elu` — all with analytic pullbacks;
+broadcasting on `+`/`-`/`.*`/`./` extended to numpy-style row + col + scalar
+shapes (T2.7).  Plus LayerNorm (T2.8), single-head Transformer encoder
+block (T2.9), Dropout (T2.10), VAE w/ reparameterization (T2.11), `tsne`
+(T6.2), magnitude pruning (T6.7), programmatic experiment sweep (T6.8),
+imageDatastore (T1.8), augmentedImageDatastore (T3.4b),
+`adamupdate`/`sgdmupdate`/`rmspropupdate` functional solvers (T3.5).
+
+**Carve-downs A–H** (each unblocked a slice of the catalogue that the dense
+lane couldn't cover):
+
+| Tag | Closes | Notes |
+|---|---|---|
+| **A** | MHA training (T2.9 extension) | Multi-head attention via concatenated heads; `dl_mha_train.m` |
+| **B** | 1-D conv sequence (T4.6) | `conv1d` on the dense lane via im2col + matrix backward; `dl_conv1d_train.m` |
+| **C** | `dlnetwork` carrier + `trainnet` (T1.2 + T3.3) | classdef carrier with builder methods + `predict`; Adam driver over `Learnables`; `dl_dlnetwork.m` |
+| **D** | emit-c 4-D `SSCB` lane | `builtin.unrealized_conversion_cast` handler in `EmitC.cpp` — image-tensor tests lift through emit-c |
+| **E** | image-domain attribution (T6.1 extension) | `gradCAM`/`occlusionSensitivity`/`imageLIME` on 4-D images; rides D; `dl_gradcam_image.m` / `dl_occlusion_image.m` / `dl_lime_image.m` |
+| **F** | object-array carrier | `matlab_dlnet_oa_new` / `oa_append` for generic obj-array storage; `dl_obj_array.m` |
+| **G** | dlarray-in-C-mode rewrite | handle-classdef `typedef void* ClsName;` + value-receiver method bodies + LiveGlobals scan in `EmitC.cpp` so every dlarray-using test lifts cleanly through emit-c bit-exact to the LLVM lane (33 tests un-skipped) |
+| **H** | classdef-array literal `[obj1; obj2; obj3]` | concat fold in `LowerTensorOps.cpp` detects all-classdef-instance leaves and routes to `matlab_dlnet_oa_new` + `oa_append`; `dl_classdef_array_literal.m` |
+| **T3.8** | GPU training dispatch | `dlnet_gemm`/`gemm_AtB`/`gemm_ABt` route through `matlab_gpu_gemm` on forward + backward + solver-step; `matlab_dlnet_gpu_set/get` toggle; `dl_gpu_training.m` |
+| **T5.7** | Neural ODE | Stepper-matrix form (`M = I + dt·A` trained as a single matrix variable) on the dense lane; sidesteps the 1×1 dlarray scalarize trap; `dl_neural_ode.m`.  Full continuous-time `dlode45` remains a polish item |
+| **H5** | ONNX importer/writer | Hand-rolled Protobuf in `runtime/toolbox/dlnet/runtime_onnx.cpp` (~900 LOC, ~56 op handlers); `dl_onnx_roundtrip.m` + `dl_onnx_ops_coverage.m` |
+
+**Net result**: **39 `dl_*.m` gating tests** + **44 examples** under
+`examples/dlnet/`; LLVM lane 658 passed / 0 failed; emit-c 270 passed (+33
+new); emit-cpp 244 (+9 new); two semantic-divergence holdouts skipped on
+emit-c only (`dl_mha_train` minor FP rounding diff, `dl_cnn_classifier`
+softmax-flatlines).  EmitSV + cocotb DL-HDL fixtures all green.
+
+**Still carved** (won't block training but the API surface looks different
+from stock MATLAB):
+
+- Declarative layer-array constructor / `layerGraph([imageInputLayer(...); ...])`
+  + the object-array editor (`replaceLayer` / `addLayers` / `connectLayers` /
+  `freezeLayers`) — models are built *functionally* (operator overloading on
+  `dlarray`) or through the C carrier's builder methods.
+- Legacy `trainNetwork(layers, opts)` shim (the modern `trainnet` is shipped).
+- Multi-GPU / cluster / cloud training, `imagePretrainedNetwork` for named
+  large nets (AlexNet/ResNet/BERT — weight blobs 100s of MB), `dlode45`
+  proper (forward + adjoint backward), Deep Network Designer + Experiment
+  Manager GUIs, all Simulink DL blocks, full external-framework
+  import/export beyond ONNX, real FPGA bitstreams.
+
+---
+
+Companion docs:
+[`global_optim_and_stats_ml_plans.md`](global_optim_and_stats_ml_plans.md)
+(Stats-ML AI-model contrast + `bayesopt` + classification metrics),
+[`gpu_coder_roadmap.md`](gpu_coder_roadmap.md) (single-device training accel),
+[`dsp_toolbox_roadmap.md`](dsp_toolbox_roadmap.md) (the DSP-HDL T7–T8 SV +
+cocotb precedent the DL HDL track follows),
+[`image_toolbox_roadmap.md`](image_toolbox_roadmap.md) (image preprocessing +
+`conv2`), [`ode.md`](ode.md) (neural-ODE integration),
+[`embedded_coder_roadmap.md`](embedded_coder_roadmap.md) (the `mflowLink`
+answer for Simulink DL blocks),
+[`predictive_maintenance_roadmap.md`](predictive_maintenance_roadmap.md) (the
+peer-toolbox roadmap whose Tier-6 LSTM-for-RUL headline composes on DL T4 ✅),
+[`feature_status.md`](feature_status.md).

@@ -1,0 +1,7 @@
+dl_tape_scoping: initial tape = 0
+dl_tape_scoping: after iter1 tape = 3
+dl_tape_scoping: after iter2 (no reset) tape = 6 (grew)
+dl_tape_scoping: after dlreset() tape = 0
+dl_tape_scoping: after iter3 (with reset) tape = 3
+dl_tape_scoping: |g1 - g3| sum = 0.0000
+dl_tape_scoping: PASS (reset bounded the tape)

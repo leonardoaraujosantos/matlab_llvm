@@ -1,0 +1,7 @@
+dl_neural_ode: target a = [0.5087; -0.8041]
+dl_neural_ode: target b = [0.8041; 0.5087]
+dl_neural_ode: loss(0)=1.7757 loss(600)=0.000000
+dl_neural_ode: |A_rec - A_true| L1 = 0.0000
+dl_neural_ode: A_rec row1 = [-0.100, 1.000]
+dl_neural_ode: A_rec row2 = [-1.000, -0.100]
+dl_neural_ode: PASS

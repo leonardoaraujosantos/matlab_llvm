@@ -1,0 +1,4 @@
+dl_phase1_ops: S=24.3143
+dl_phase1_ops: sum(gX)=20.5810 sum(gY)=2.2385
+dl_phase1_ops: L=17.5000 sum(gM)=5.0000
+dl_phase1_ops: PASS

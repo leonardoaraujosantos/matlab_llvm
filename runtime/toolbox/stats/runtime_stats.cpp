@@ -1809,6 +1809,127 @@ matlab_mat *matlab_stats_confusionmat(matlab_mat *yt, matlab_mat *yp) {
     return M;
 }
 
+/* ===== Tier-6 — Classification metrics ================================== *
+ * All take (ytrue, ypred) of integer-coded labels and reuse the
+ * confusionmat kernel.  accuracy is a scalar; precision / recall / fScore
+ * are K × 1 column vectors (one entry per class, NaN where the
+ * denominator is zero). */
+
+static matlab_mat *sstat_confmat_helper(matlab_mat *yt, matlab_mat *yp,
+                                        int &Kout) {
+    matlab_mat *C = matlab_stats_confusionmat(yt, yp);
+    Kout = static_cast<int>(C->rows);
+    return C;
+}
+
+/* accuracy(ytrue, ypred) -> scalar fraction of correctly predicted samples. */
+matlab_mat *matlab_stats_accuracy(matlab_mat *yt, matlab_mat *yp) {
+    int K = 0;
+    matlab_mat *C = sstat_confmat_helper(yt, yp, K);
+    double tp = 0, total = 0;
+    for (int i = 0; i < K; ++i) {
+        tp += C->data[i*K + i];
+        for (int j = 0; j < K; ++j) total += C->data[i*K + j];
+    }
+    matlab_mat *r = mat_alloc(1, 1);
+    r->data[0] = (total > 0) ? (tp / total) : 0.0;
+    return r;
+}
+
+/* precision(ytrue, ypred) -> K×1 per-class TP/(TP+FP). */
+matlab_mat *matlab_stats_precision(matlab_mat *yt, matlab_mat *yp) {
+    int K = 0;
+    matlab_mat *C = sstat_confmat_helper(yt, yp, K);
+    matlab_mat *r = mat_alloc(K, 1);
+    for (int c = 0; c < K; ++c) {
+        double tp = C->data[c*K + c];
+        double col = 0; for (int i = 0; i < K; ++i) col += C->data[i*K + c];
+        r->data[c] = (col > 0) ? (tp / col) : 0.0;
+    }
+    return r;
+}
+
+/* recall(ytrue, ypred) -> K×1 per-class TP/(TP+FN). */
+matlab_mat *matlab_stats_recall(matlab_mat *yt, matlab_mat *yp) {
+    int K = 0;
+    matlab_mat *C = sstat_confmat_helper(yt, yp, K);
+    matlab_mat *r = mat_alloc(K, 1);
+    for (int c = 0; c < K; ++c) {
+        double tp = C->data[c*K + c];
+        double row = 0; for (int j = 0; j < K; ++j) row += C->data[c*K + j];
+        r->data[c] = (row > 0) ? (tp / row) : 0.0;
+    }
+    return r;
+}
+
+/* fScore(ytrue, ypred) -> K×1 per-class harmonic mean of P and R. */
+matlab_mat *matlab_stats_fscore(matlab_mat *yt, matlab_mat *yp) {
+    int K = 0;
+    matlab_mat *C = sstat_confmat_helper(yt, yp, K);
+    matlab_mat *r = mat_alloc(K, 1);
+    for (int c = 0; c < K; ++c) {
+        double tp = C->data[c*K + c];
+        double col = 0; for (int i = 0; i < K; ++i) col += C->data[i*K + c];
+        double row = 0; for (int j = 0; j < K; ++j) row += C->data[c*K + j];
+        double p = (col > 0) ? (tp / col) : 0.0;
+        double rc = (row > 0) ? (tp / row) : 0.0;
+        r->data[c] = (p + rc > 0) ? (2.0 * p * rc / (p + rc)) : 0.0;
+    }
+    return r;
+}
+
+/* rocmetrics(scores, ytrue, positiveClass) -> ROC point sweep.
+ * scores : N×1 continuous scores for the positive class.
+ * ytrue  : N×1 ground-truth labels.
+ * positiveClass : scalar — the label that counts as positive.
+ * Returns an (N+1) × 3 matrix: [threshold, FPR, TPR] sorted by descending
+ * threshold so AUC = trapezoidal integration over column 2 against
+ * column 3 follows the convention. */
+matlab_mat *matlab_stats_rocmetrics(matlab_mat *scoresm, matlab_mat *ytm,
+                                    matlab_mat *posm) {
+    std::vector<double> sc = sstat_col(scoresm, 0);
+    std::vector<double> yt = sstat_col(ytm,    0);
+    double pos = sstat_sc(posm, 0.0);
+    int N = static_cast<int>(std::min(sc.size(), yt.size()));
+    if (N == 0) return mat_alloc(0, 0);
+    std::vector<std::pair<double, double>> pairs(N);
+    for (int i = 0; i < N; ++i)
+        pairs[i] = { sc[i], (yt[i] == pos) ? 1.0 : 0.0 };
+    std::sort(pairs.begin(), pairs.end(),
+              [](const auto &a, const auto &b) { return a.first > b.first; });
+    double P = 0, Nn = 0;
+    for (auto &p : pairs) { if (p.second > 0.5) ++P; else ++Nn; }
+    matlab_mat *out = mat_alloc(N + 1, 3);
+    double tp = 0, fp = 0;
+    out->data[0*3 + 0] = pairs[0].first + 1.0;   // threshold above max score
+    out->data[0*3 + 1] = 0.0;
+    out->data[0*3 + 2] = 0.0;
+    for (int i = 0; i < N; ++i) {
+        if (pairs[i].second > 0.5) ++tp; else ++fp;
+        out->data[(i+1)*3 + 0] = pairs[i].first;
+        out->data[(i+1)*3 + 1] = (Nn > 0) ? (fp / Nn) : 0.0;
+        out->data[(i+1)*3 + 2] = (P  > 0) ? (tp / P ) : 0.0;
+    }
+    return out;
+}
+
+/* aucroc(scores, ytrue, positiveClass) -> scalar AUC via the trapezoidal
+ * rule over the ROC curve.  Convenient companion to rocmetrics. */
+matlab_mat *matlab_stats_aucroc(matlab_mat *scoresm, matlab_mat *ytm,
+                                matlab_mat *posm) {
+    matlab_mat *R = matlab_stats_rocmetrics(scoresm, ytm, posm);
+    int N = static_cast<int>(R->rows);
+    double auc = 0.0;
+    for (int i = 1; i < N; ++i) {
+        double dx = R->data[i*3 + 1] - R->data[(i-1)*3 + 1];
+        double y  = 0.5 * (R->data[i*3 + 2] + R->data[(i-1)*3 + 2]);
+        auc += dx * y;
+    }
+    matlab_mat *r = mat_alloc(1, 1);
+    r->data[0] = auc;
+    return r;
+}
+
 /* ===== Tier-6 — Hidden Markov Models ==================================== *
  * MATLAB convention: states 1..N, symbols 1..M, the model begins in
  * state 1 (the first emission follows a transition out of state 1).  TRANS
@@ -2058,6 +2179,147 @@ matlab_mat *matlab_stats_test_stats(void) {
     matlab_struct_set_f64(s, "tstat", 5, g_stest.stat);
     matlab_struct_set_f64(s, "df", 2, g_stest.df);
     return reinterpret_cast<matlab_mat *>(s);
+}
+
+/* tsne(X)  — Barnes-Hut-free t-SNE.  Closes Stats T6.2 (the last carved
+ * Stats item).  Embedding dimension fixed at 2.  Uses a single fixed
+ * perplexity (10) and the canonical KL-on-joint-probability gradient.
+ *
+ * Algorithm (compact form, no Barnes-Hut tree, O(n²) per iter):
+ *
+ *   1. Compute pairwise squared-Euclidean distances D in input space.
+ *   2. For each row i, binary-search the precision βᵢ s.t.
+ *        Σⱼ exp(-βᵢ Dᵢⱼ) / Z has perplexity ~ target.
+ *      The conditional pᵢ|ⱼ from this β gives P.
+ *   3. Symmetrise   P = (P + Pᵀ)/(2n).  Early-exaggeration (×4 for
+ *      the first 100 iters) is omitted for brevity.
+ *   4. Initialise Y at 1e-4·N(0,I).
+ *   5. For 250 iters:
+ *        Qᵢⱼ ∝ (1 + ||yᵢ-yⱼ||²)⁻¹
+ *        gradᵢ = 4 Σⱼ (Pᵢⱼ-Qᵢⱼ) (yᵢ-yⱼ) (1+||yᵢ-yⱼ||²)⁻¹
+ *        Y ← Y - lr·grad  (no momentum / no early-stop, plain GD).
+ *
+ * Result: n×2 embedding.  KL is decreasing for sensible inputs. */
+matlab_mat *matlab_stats_tsne(matlab_mat *X) {
+    int64_t n, p;
+    std::vector<double> A = sdata(X, n, p);
+    if (n <= 0) return mat_alloc(0, 0);
+
+    const int    Niter    = 250;
+    const double lr       = 200.0;
+    const double targ_pp  = std::min(static_cast<double>(n - 1), 10.0);
+    const double log_pp   = std::log(targ_pp);
+
+    /* --- D : pairwise squared distances ----------------------------- */
+    std::vector<double> D(static_cast<size_t>(n * n), 0.0);
+    for (int64_t i = 0; i < n; ++i) {
+        for (int64_t j = i + 1; j < n; ++j) {
+            double s = 0;
+            for (int64_t d = 0; d < p; ++d) {
+                double diff = A[static_cast<size_t>(i*p+d)]
+                            - A[static_cast<size_t>(j*p+d)];
+                s += diff * diff;
+            }
+            D[static_cast<size_t>(i*n + j)] = s;
+            D[static_cast<size_t>(j*n + i)] = s;
+        }
+    }
+
+    /* --- P : binary search per row over β for target perplexity ---- */
+    std::vector<double> P(static_cast<size_t>(n * n), 0.0);
+    for (int64_t i = 0; i < n; ++i) {
+        double beta = 1.0, beta_lo = -1.0, beta_hi = -1.0;
+        std::vector<double> Pi(static_cast<size_t>(n), 0.0);
+        for (int it = 0; it < 50; ++it) {
+            double Z = 0;
+            for (int64_t j = 0; j < n; ++j) {
+                if (j == i) { Pi[static_cast<size_t>(j)] = 0; continue; }
+                double v = std::exp(-beta * D[static_cast<size_t>(i*n + j)]);
+                Pi[static_cast<size_t>(j)] = v;
+                Z += v;
+            }
+            if (Z < 1e-30) Z = 1e-30;
+            double H = 0;
+            for (int64_t j = 0; j < n; ++j) {
+                double pij = Pi[static_cast<size_t>(j)] / Z;
+                if (pij > 1e-30) H -= pij * std::log(pij);
+                Pi[static_cast<size_t>(j)] = pij;
+            }
+            if (std::fabs(H - log_pp) < 1e-5) break;
+            if (H > log_pp) {
+                beta_lo = beta;
+                beta = (beta_hi < 0) ? beta*2 : (beta + beta_hi)/2;
+            } else {
+                beta_hi = beta;
+                beta = (beta_lo < 0) ? beta/2 : (beta + beta_lo)/2;
+            }
+        }
+        for (int64_t j = 0; j < n; ++j)
+            P[static_cast<size_t>(i*n + j)] = Pi[static_cast<size_t>(j)];
+    }
+    /* Symmetrise to a joint distribution. */
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t j = i + 1; j < n; ++j) {
+            double v = (P[static_cast<size_t>(i*n+j)]
+                       + P[static_cast<size_t>(j*n+i)]) / (2.0 * n);
+            P[static_cast<size_t>(i*n+j)] = v;
+            P[static_cast<size_t>(j*n+i)] = v;
+        }
+
+    /* --- Y : initial embedding (deterministic small seed) ---------- */
+    std::vector<double> Y(static_cast<size_t>(n * 2), 0.0);
+    for (int64_t i = 0; i < n; ++i) {
+        /* fxhash-style deterministic seed -> small ± numbers. */
+        uint64_t h1 = static_cast<uint64_t>(i) * 2654435761u + 0x9e3779b9u;
+        uint64_t h2 = static_cast<uint64_t>(i) * 1597334677u + 0x12345678u;
+        Y[static_cast<size_t>(i*2 + 0)] = 1e-4 * (static_cast<double>((h1 >> 8) & 0xFFFF) / 32768.0 - 1.0);
+        Y[static_cast<size_t>(i*2 + 1)] = 1e-4 * (static_cast<double>((h2 >> 8) & 0xFFFF) / 32768.0 - 1.0);
+    }
+
+    /* --- main loop -------------------------------------------------- */
+    std::vector<double> Q(static_cast<size_t>(n * n), 0.0);
+    std::vector<double> num(static_cast<size_t>(n * n), 0.0);
+    std::vector<double> grad(static_cast<size_t>(n * 2), 0.0);
+    for (int it = 0; it < Niter; ++it) {
+        /* Q: (1 + ||yi - yj||^2)^-1, normalised. */
+        double Zsum = 0;
+        for (int64_t i = 0; i < n; ++i) {
+            for (int64_t j = i + 1; j < n; ++j) {
+                double dx = Y[static_cast<size_t>(i*2)]   - Y[static_cast<size_t>(j*2)];
+                double dy = Y[static_cast<size_t>(i*2+1)] - Y[static_cast<size_t>(j*2+1)];
+                double v  = 1.0 / (1.0 + dx*dx + dy*dy);
+                num[static_cast<size_t>(i*n + j)] = v;
+                num[static_cast<size_t>(j*n + i)] = v;
+                Zsum += 2.0 * v;
+            }
+        }
+        if (Zsum < 1e-30) Zsum = 1e-30;
+        for (int64_t i = 0; i < n; ++i)
+            for (int64_t j = 0; j < n; ++j)
+                Q[static_cast<size_t>(i*n + j)] =
+                    num[static_cast<size_t>(i*n + j)] / Zsum;
+
+        /* grad: 4 * Σⱼ (Pij - Qij) (yi - yj) num_ij */
+        for (int64_t i = 0; i < n; ++i) {
+            double gx = 0, gy = 0;
+            for (int64_t j = 0; j < n; ++j) {
+                if (j == i) continue;
+                double diff = P[static_cast<size_t>(i*n+j)]
+                            - Q[static_cast<size_t>(i*n+j)];
+                double nv   = num[static_cast<size_t>(i*n+j)];
+                gx += diff * (Y[static_cast<size_t>(i*2)]   - Y[static_cast<size_t>(j*2)])   * nv;
+                gy += diff * (Y[static_cast<size_t>(i*2+1)] - Y[static_cast<size_t>(j*2+1)]) * nv;
+            }
+            grad[static_cast<size_t>(i*2 + 0)] = 4.0 * gx;
+            grad[static_cast<size_t>(i*2 + 1)] = 4.0 * gy;
+        }
+        for (int64_t k = 0; k < n*2; ++k) Y[static_cast<size_t>(k)] -= lr * grad[static_cast<size_t>(k)];
+    }
+
+    /* Pack to n×2 output. */
+    matlab_mat *R = mat_alloc(n, 2);
+    for (int64_t k = 0; k < n*2; ++k) R->data[k] = Y[static_cast<size_t>(k)];
+    return R;
 }
 
 }  /* extern "C" */

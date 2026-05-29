@@ -1,0 +1,3 @@
+forward shape ok = 1
+gradient nonzero = 1
+loss drops after BPTT step = 1
