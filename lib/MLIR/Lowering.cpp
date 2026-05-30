@@ -6035,6 +6035,32 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                     {mlir::NoneType::get(&MCtx)}, L, {Cal});
         return Obj;
       }
+      /* Reinforcement Learning Tier 1 — rlPredefinedEnv("BasicGridWorld").
+       * A free function returning an rlMDPEnv carrier; the runtime fills the
+       * grid-world transition/reward tensors.  (Only BasicGridWorld ships in
+       * T1; other predefined names are a documented carve to later tiers.) */
+      if (N && N->Name == "rlPredefinedEnv" && C.Args.size() == 1) {
+        std::string envName;
+        if (auto *CL = dynamic_cast<const CharLiteral *>(C.Args[0])) envName = CL->Value;
+        else if (auto *SL = dynamic_cast<const StringLiteral *>(C.Args[0])) envName = SL->Value;
+        bool isCartPole = envName.find("CartPole") != std::string::npos ||
+                          envName.find("cartpole") != std::string::npos;
+        bool isPendulum = envName.find("Pendulum") != std::string::npos ||
+                          envName.find("pendulum") != std::string::npos;
+        mlir::NamedAttribute CtorCal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "rlMDPEnv__rlMDPEnv"));
+        mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+        const char *rt = isPendulum ? "matlab_rl_pendulum_init"
+                       : isCartPole ? "matlab_rl_cartpole_init"
+                                     : "matlab_rl_gridworld_init";
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, rt));
+        emitUnregOp("matlab.call_builtin", {Obj},
+                    {mlir::NoneType::get(&MCtx)}, L, {Cal});
+        return Obj;
+      }
       /* Constructor call: `ClassName(args)` where ClassName resolves to
        * a user classdef. Route to the emitted `ClassName__ClassName`
        * function, returning a matlab_obj*. If the class has no explicit
@@ -6710,6 +6736,97 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
               mlir::StringAttr::get(&MCtx, "callee"),
               mlir::StringAttr::get(&MCtx, "matlab_nav_astar_init"));
           emitUnregOp("matlab.call_builtin", {Obj, Mp},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        /* ===== Reinforcement Learning Tier 1 — constructors ============= */
+        /* rlMDPEnv(nextState, reward) — direct deterministic-MDP builder from
+         * S×A next-state + reward tables (terminals self-loop). */
+        if (CD->Name == "rlMDPEnv" && C.Args.size() == 2) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "rlMDPEnv__rlMDPEnv"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Ns = lowerExpr(*C.Args[0]);
+          mlir::Value Rw = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_rl_mdp_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, Ns, Rw},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        /* rlDQNAgent / rlPGAgent / rlDDPGAgent (obsInfo, actInfo) — auto-build
+         * the critic/actor networks from the obs + action specs. */
+        if ((CD->Name == "rlDQNAgent" || CD->Name == "rlPGAgent" ||
+             CD->Name == "rlDDPGAgent") && C.Args.size() == 2) {
+          std::string Ctor = std::string(CD->Name) + "__" + std::string(CD->Name);
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, Ctor));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Oi = lowerExpr(*C.Args[0]);
+          mlir::Value Ai = lowerExpr(*C.Args[1]);
+          const char *rt = (CD->Name == "rlPGAgent")   ? "matlab_rl_pg_init"
+                         : (CD->Name == "rlDDPGAgent")  ? "matlab_rl_ddpg_init"
+                                                        : "matlab_rl_dqn_init";
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, rt));
+          emitUnregOp("matlab.call_builtin", {Obj, Oi, Ai},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        /* rlTable(obsInfo, actInfo) — zeros(S,A) action-value table. */
+        if (CD->Name == "rlTable" && C.Args.size() == 2) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "rlTable__rlTable"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Oi = lowerExpr(*C.Args[0]);
+          mlir::Value Ai = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_rl_table_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, Oi, Ai},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        /* rlQValueFunction(table, obsInfo, actInfo) — wrap the table; the
+         * spec args are accepted for fidelity but only the table is read. */
+        if (CD->Name == "rlQValueFunction" && C.Args.size() >= 1) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "rlQValueFunction__rlQValueFunction"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Tb = lowerExpr(*C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_rl_qvf_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, Tb},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        /* rlQAgent(critic[,opts]) / rlSARSAAgent(critic[,opts]) — copy the
+         * critic's Q table; hyperparameters are read from the agent's scalar
+         * properties at train time (the AgentOptions struct nesting is a
+         * documented Tier-1 simplification). */
+        if ((CD->Name == "rlQAgent" || CD->Name == "rlSARSAAgent") &&
+            C.Args.size() >= 1) {
+          std::string Ctor = std::string(CD->Name) + "__" + std::string(CD->Name);
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, Ctor));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Cr = lowerExpr(*C.Args[0]);
+          double isSarsa = (CD->Name == "rlSARSAAgent") ? 1.0 : 0.0;
+          mlir::Value Sf = emitUnreg("matlab.const_float", {}, mlir::Float64Type::get(&MCtx), L,
+              {mlir::NamedAttribute(mlir::StringAttr::get(&MCtx, "value"),
+                   mlir::FloatAttr::get(mlir::Float64Type::get(&MCtx), isSarsa))});
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_rl_agent_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, Cr, Sf},
                       {mlir::NoneType::get(&MCtx)}, L, {Cal});
           return Obj;
         }
@@ -10198,6 +10315,101 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
               mlir::StringAttr::get(&MCtx, "callee"),
               mlir::StringAttr::get(&MCtx, "matlab_robotics_rrt_plan"));
           return emitUnreg("matlab.call_builtin", {Obj, Qs, Qg}, PtrTy, L, {Cal});
+        }
+        /* ===== Reinforcement Learning Tier 1 — method dispatch ===========
+         * Keyed on arg-0's pinned class.  getObservationInfo/getActionInfo
+         * build a fresh rlFiniteSetSpec; train/sim/getCritic operate on the
+         * agent; getLearnableParameters reads the critic's Q table. */
+        if ((Nm == "getObservationInfo" || Nm == "getActionInfo") &&
+            Cls0 && Cn0 == "rlMDPEnv" && C.Args.size() == 1) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "rlFiniteSetSpec__rlFiniteSetSpec"));
+          mlir::Value Spec = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Env  = loadObj(C.Args[0]);
+          const char *rt = (Nm == "getObservationInfo") ? "matlab_rl_obs_info"
+                                                         : "matlab_rl_act_info";
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, rt));
+          emitUnregOp("matlab.call_builtin", {Spec, Env},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Spec;
+        }
+        if (Nm == "train" && Cls0 &&
+            (Cn0 == "rlQAgent" || Cn0 == "rlSARSAAgent" || Cn0 == "rlDQNAgent" ||
+             Cn0 == "rlPGAgent" || Cn0 == "rlDDPGAgent") && C.Args.size() == 3) {
+          mlir::Value Ag = loadObj(C.Args[0]);
+          mlir::Value En = loadObj(C.Args[1]);
+          mlir::Value Op = loadObj(C.Args[2]);
+          const char *rt = (Cn0 == "rlDQNAgent")  ? "matlab_rl_dqn_train"
+                         : (Cn0 == "rlPGAgent")   ? "matlab_rl_pg_train"
+                         : (Cn0 == "rlDDPGAgent") ? "matlab_rl_ddpg_train"
+                                                  : "matlab_rl_train";
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, rt));
+          return emitUnreg("matlab.call_builtin", {Ag, En, Op}, PtrTy, L, {Cal});
+        }
+        if (Nm == "sim" && Cls0 &&
+            (Cn0 == "rlQAgent" || Cn0 == "rlSARSAAgent" || Cn0 == "rlDQNAgent" ||
+             Cn0 == "rlPGAgent" || Cn0 == "rlDDPGAgent") && C.Args.size() == 2) {
+          mlir::Value Ag = loadObj(C.Args[0]);
+          mlir::Value En = loadObj(C.Args[1]);
+          const char *rt = (Cn0 == "rlDQNAgent")  ? "matlab_rl_dqn_sim"
+                         : (Cn0 == "rlPGAgent")   ? "matlab_rl_pg_sim"
+                         : (Cn0 == "rlDDPGAgent") ? "matlab_rl_ddpg_sim"
+                                                  : "matlab_rl_sim";
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, rt));
+          return emitUnreg("matlab.call_builtin", {Ag, En}, PtrTy, L, {Cal});
+        }
+        if (Nm == "getCritic" && Cls0 &&
+            (Cn0 == "rlQAgent" || Cn0 == "rlSARSAAgent") && C.Args.size() == 1) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "rlQValueFunction__rlQValueFunction"));
+          mlir::Value Qvf = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Ag  = loadObj(C.Args[0]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_rl_get_critic"));
+          emitUnregOp("matlab.call_builtin", {Qvf, Ag},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Qvf;
+        }
+        if (Nm == "getLearnableParameters" && Cls0 &&
+            Cn0 == "rlQValueFunction" && C.Args.size() == 1) {
+          mlir::Value Cr = loadObj(C.Args[0]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_rl_get_params"));
+          return emitUnreg("matlab.call_builtin", {Cr}, PtrTy, L, {Cal});
+        }
+        /* getAction / getMaxQValue (agent|policy, obs) — query the greedy
+         * policy.  Dispatch on any value-based agent or extracted policy. */
+        if ((Nm == "getAction" || Nm == "getMaxQValue") && Cls0 &&
+            (Cn0 == "rlDQNAgent" || Cn0 == "rlPGAgent" || Cn0 == "rlQAgent" ||
+             Cn0 == "rlSARSAAgent" || Cn0 == "rlMaxQPolicy") &&
+            C.Args.size() == 2) {
+          mlir::Value Ag = loadObj(C.Args[0]);
+          mlir::Value Ob = lowerExpr(*C.Args[1]);
+          const char *rt = (Nm == "getAction") ? "matlab_rl_get_action"
+                                                : "matlab_rl_get_maxq";
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, rt));
+          return emitUnreg("matlab.call_builtin", {Ag, Ob}, PtrTy, L, {Cal});
+        }
+        /* getGreedyPolicy(agent) → rlMaxQPolicy carrying a copy of the net/Q. */
+        if (Nm == "getGreedyPolicy" && Cls0 &&
+            (Cn0 == "rlDQNAgent" || Cn0 == "rlPGAgent" || Cn0 == "rlQAgent" ||
+             Cn0 == "rlSARSAAgent") && C.Args.size() == 1) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "rlMaxQPolicy__rlMaxQPolicy"));
+          mlir::Value Pol = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Ag  = loadObj(C.Args[0]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_rl_greedy_policy"));
+          emitUnregOp("matlab.call_builtin", {Pol, Ag},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Pol;
         }
         /* ===== Navigation Toolbox — method + free-function dispatch =======
          * All keyed on arg-0's pinned class (the Robotics precedent). */
