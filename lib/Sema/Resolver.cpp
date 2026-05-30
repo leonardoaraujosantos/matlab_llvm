@@ -1858,6 +1858,13 @@ void Resolver::resolveStmt(Stmt &St, Scope *S) {
       if (!RE) return nullptr;
       if (auto *NE = dynamic_cast<NameExpr *>(RE)) {
         if (NE->Ref && NE->Ref->PinnedClass) return NE->Ref->PinnedClass;
+        /* No-paren constructor on the RHS: `m = occupancyMap;` (#79.1).
+         * A bare name resolving to a classdef pins the LHS to that
+         * class, exactly as `m = occupancyMap()` would, so downstream
+         * method dispatch (`setOccupancy(m, …)`) resolves. */
+        if (NE->Ref && NE->Ref->Kind == BindingKind::Class &&
+            NE->Ref->ClassDef)
+          return NE->Ref->ClassDef;
         return nullptr;
       }
       if (auto *CX = dynamic_cast<CallOrIndex *>(RE)) {

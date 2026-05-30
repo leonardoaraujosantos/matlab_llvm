@@ -2231,8 +2231,8 @@ static std::string buildReplPrelude(const std::string &Src) {
     while ((P = Stripped.find(Name, P)) != std::string::npos) {
       bool LeftWord = (P > 0) && (std::isalnum((unsigned char)Stripped[P-1]) ||
                                     Stripped[P-1] == '_');
-      if (!LeftWord && P + NL < Stripped.size()) {
-        char R = Stripped[P + NL];
+      if (!LeftWord && P + NL <= Stripped.size()) {
+        char R = (P + NL < Stripped.size()) ? Stripped[P + NL] : '\0';
         if (R == Follow1) return true;
         size_t Q = P + NL;
         while (Q < Stripped.size() && (Stripped[Q] == ' ' || Stripped[Q] == '\t'))
@@ -2242,13 +2242,21 @@ static std::string buildReplPrelude(const std::string &Src) {
           if (Follow2 != '=' || Q + 1 >= Stripped.size() ||
               Stripped[Q+1] != '=') return true;
         }
+        /* No-paren constructor on the RHS: `m = occupancyMap;` (#79.1).
+         * A bare class name at end-of-line or followed only by a
+         * statement terminator counts as a mention, mirroring the AOT
+         * prelude scanner. */
+        if (Q >= Stripped.size() || Stripped[Q] == ';' ||
+            Stripped[Q] == ',' || Stripped[Q] == '\n' || Stripped[Q] == '\r')
+          return true;
       }
       P += NL;
     }
     return false;
   };
   auto mentions = [&](const char *Name) -> bool {
-    /* Call shape `Name(` or assignment shape `Name =`. */
+    /* Call shape `Name(`, assignment shape `Name =`, or a bare RHS
+     * mention `Name;` (no-paren constructor, #79.1). */
     return wordHit(Name, '(', '=');
   };
   /* CST prelude classes: tf lives in cst_classdefs.m (shares
@@ -11826,14 +11834,22 @@ int main(int Argc, char **Argv) {
       while ((P = Src.find(N, P)) != std::string::npos && !Hit) {
         bool LeftWord = (P > 0) && (std::isalnum((unsigned char)Src[P-1]) ||
                                      Src[P-1] == '_');
-        if (!LeftWord && P + NL < Src.size()) {
-          char Right = Src[P + NL];
+        if (!LeftWord && P + NL <= Src.size()) {
+          char Right = (P + NL < Src.size()) ? Src[P + NL] : '\0';
           if (Right == '(') { Hit = true; break; }
           size_t Q = P + NL;
           while (Q < Src.size() && (Src[Q] == ' ' || Src[Q] == '\t')) Q++;
           if (Q < Src.size() && Src[Q] == '=') {
             if (Q + 1 >= Src.size() || Src[Q+1] != '=') { Hit = true; break; }
           }
+          /* No-paren constructor on the RHS: `m = occupancyMap;` (#79.1).
+           * A bare class name at end-of-source or followed only by a
+           * statement terminator (`;`, `,`, newline) is also a mention,
+           * so the classdef prelude is pulled in. Matching terminators
+           * (not any non-word char) avoids treating `occupancyMap.foo`
+           * as a hit; a spurious prelude load would be harmless anyway. */
+          if (Q >= Src.size() || Src[Q] == ';' || Src[Q] == ',' ||
+              Src[Q] == '\n' || Src[Q] == '\r') { Hit = true; break; }
         }
         P += NL;
       }

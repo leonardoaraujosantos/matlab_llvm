@@ -323,6 +323,23 @@ private:
   // Empty vector = no captures (plain @name handles or capture-free anons).
   std::unordered_map<Binding *, std::vector<mlir::Value>> HandleBindings;
 
+  // Resolved target binding for a binding that holds a *named* function
+  // handle (`h = @inc` -> inc's binding).  Lets a handle stored into a
+  // struct field / property be resolved back to its callee (#81), and
+  // gives the callee's declared output arity for multi-return handle
+  // calls (#80).  Only named handles (FuncHandle, or a copy of another
+  // tracked named-handle binding) are recorded; anon closures with
+  // captures are not.  Ref->Name is the callee; Ref->FuncDef (when set)
+  // carries the output refs.
+  std::unordered_map<Binding *, Binding *> HandleTargetRef;
+
+  // (struct/obj binding, field name) -> resolved callee binding, for a
+  // named function handle stored in a field (#81: `s.h = @inc;
+  // v = s.h(5)` / `obj.StepFcn = @step`).  At the call site `s.h(args)`
+  // resolves to a direct `matlab.call @<name>` instead of leaving an
+  // unconverted matlab.subscript on the field-loaded handle.
+  std::map<std::pair<Binding *, std::string>, Binding *> FieldHandleBindings;
+
   // Side map populated inside the AnonFunction lowering so the enclosing
   // AssignStmt can link the resulting capture slot list to the LHS binding.
   // Keyed by the AnonFunction AST node; cleared after use.
@@ -565,6 +582,14 @@ private:
    * defaulting to get_f64 — Sema can't specialise through struct fields, so
    * without this `sum(s.v)` / `numel(s.v)` see a scalar and bail. */
   std::set<std::pair<Binding *, std::string>> MatStructFields;
+  /* (struct binding, field name) pairs assigned a char/string value
+   * (#79.2: `s.name = 'hello'`).  The field holds a matlab_string*
+   * (kind=3); reads still go through matlab_struct_get_mat (so the
+   * pair is also in MatStructFields), but this set lets isStringExpr /
+   * the fprintf str_mask tag the read as a string so `%s` routes the
+   * descriptor through the string path instead of mis-reading it as a
+   * numeric matrix (SIGSEGV). */
+  std::set<std::pair<Binding *, std::string>> StringStructFields;
   /* Bindings whose current value is a matlab_string (from a "..."
    * literal or a matlab_string_concat result). Tracked so `a + b`
    * on two string operands routes to matlab_string_concat rather
@@ -576,6 +601,12 @@ private:
    * A(i,j,k) = v, and size(A, 3) all route to matlab_mat3 runtime
    * entries instead of the 2-D path. */
   std::unordered_set<Binding *> ThreeDBindings;
+  /* (struct binding, field name) pairs holding a 3-D matlab_mat3 value
+   * (#78: `s.T = zeros(3,3,2)`).  Lets `s.T(i,j,k)=v` / `s.T(:,:,k)=…`
+   * stores and `s.T(i,j,k)` reads route through the matlab_subscript3_*
+   * helpers (load the field's mat3 ptr, mutate/read in place) the same
+   * way ThreeDBindings does for plain variables. */
+  std::set<std::pair<Binding *, std::string>> ThreeDStructFields;
   /* Memoized interprocedural "does this user function return a 3-D value,
    * given which of its params are 3-D?" so `A = f(...)` marks A 3-D when
    * f's output is 3-D (now that the func-boundary tensor->ptr fix makes the
@@ -685,6 +716,12 @@ bool Lowerer::isStringExpr(const Expr *E) const {
   if (E->Kind == NodeKind::StringLiteral) return true;
   if (auto *N = dynamic_cast<const NameExpr *>(E))
     return N->Ref && StringBindings.count(N->Ref) > 0;
+  /* A char/string-valued struct field (#79.2: `s.name='hello'`). */
+  if (auto *F = dynamic_cast<const FieldAccess *>(E))
+    if (auto *BN = dynamic_cast<const NameExpr *>(F->Base))
+      if (BN->Ref &&
+          StringStructFields.count({BN->Ref, std::string(F->Field)}))
+        return true;
   if (auto *C = dynamic_cast<const CallOrIndex *>(E)) {
     if (auto *NX = dynamic_cast<const NameExpr *>(C->Callee))
       if (NX->Ref && NX->Ref->Kind == BindingKind::Builtin &&
@@ -2733,6 +2770,68 @@ void Lowerer::lowerStmt(const Stmt &St) {
                       Callee->Ref->FuncDef;
       bool HasVarargout = IsUserFn && !Callee->Ref->FuncDef->Outputs.empty() &&
                           Callee->Ref->FuncDef->Outputs.back() == "varargout";
+      /* #80: multi-return through a function handle — `[a,b] = h(3)` or
+       * `[o,r,d] = env.StepFcn(act)`.  A named handle (variable, via
+       * HandleTargetRef; or struct field / property, via
+       * FieldHandleBindings) resolves to its target function; emit a
+       * direct multi-return call (callee `<name>`, nargout = LHS arity)
+       * exactly like a syntactic multi-output user-function call.
+       * Without this the indirect call defaulted to nargout=1 and every
+       * LHS past the first read a duplicated first output. */
+      const Function *HandleFn = nullptr;
+      std::string HandleFnName;
+      if (Callee && Callee->Ref && !IsBuiltin && !IsUserFn) {
+        auto HIt = HandleTargetRef.find(Callee->Ref);
+        if (HIt != HandleTargetRef.end() && HIt->second && HIt->second->FuncDef) {
+          HandleFn = HIt->second->FuncDef;
+          HandleFnName = std::string(HIt->second->Name);
+        }
+      } else if (auto *FA = dynamic_cast<const FieldAccess *>(C->Callee)) {
+        if (auto *BN = dynamic_cast<const NameExpr *>(FA->Base))
+          if (BN->Ref) {
+            auto HIt = FieldHandleBindings.find({BN->Ref, std::string(FA->Field)});
+            if (HIt != FieldHandleBindings.end() && HIt->second &&
+                HIt->second->FuncDef) {
+              HandleFn = HIt->second->FuncDef;
+              HandleFnName = std::string(HIt->second->Name);
+            }
+          }
+      }
+      if (HandleFn && !HandleFnName.empty()) {
+        size_t DeclOuts = HandleFn->Outputs.size();
+        size_t N = std::min(A.LHS.size(),
+                            DeclOuts ? DeclOuts : A.LHS.size());
+        if (N >= 2) {
+          llvm::SmallVector<mlir::Value, 4> Args;
+          for (const Expr *Arg : C->Args)
+            if (Arg) Args.push_back(lowerExpr(*Arg));
+          auto F64 = mlir::Float64Type::get(&MCtx);
+          llvm::SmallVector<mlir::Type, 4> Rtys;
+          Rtys.reserve(N);
+          for (size_t i = 0; i < N; ++i) {
+            const Type *OT = (i < HandleFn->OutputRefs.size() &&
+                              HandleFn->OutputRefs[i])
+                                 ? HandleFn->OutputRefs[i]->InferredType
+                                 : nullptr;
+            mlir::Type RT0 = OT ? mirTy(OT)
+                                : (mlir::Type)mlir::NoneType::get(&MCtx);
+            if (mlir::isa<mlir::NoneType>(RT0)) RT0 = F64;
+            Rtys.push_back(RT0);
+          }
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, HandleFnName));
+          mlir::NamedAttribute NO(
+              mlir::StringAttr::get(&MCtx, "nargout"),
+              mlir::IntegerAttr::get(
+                  mlir::IntegerType::get(&MCtx, 64), (int64_t)N));
+          mlir::Operation *Op = emitUnregOp("matlab.call", Args, Rtys,
+                                             loc(A.Range), {Cal, NO});
+          for (size_t i = 0; i < N; ++i)
+            if (A.LHS[i]) lowerLValueStore(*A.LHS[i], Op->getResult(i));
+          return;
+        }
+      }
       /* Function-style method dispatch for a multi-return call:
        * `[a, b, …] = meth(obj, …)` where `meth` names a method of the first
        * argument's class (e.g. `[A,B,C,D] = ssdata(sys)` -> ss.ssdata).
@@ -3322,10 +3421,53 @@ void Lowerer::lowerStmt(const Stmt &St) {
           PendingCaptures.erase(It);
         }
       }
-      for (const Expr *L : A.LHS) {
-        if (auto *N = dynamic_cast<const NameExpr *>(L))
-          if (N->Ref) HandleBindings[N->Ref] = Caps;
+      /* Resolve the target binding for a *named* handle RHS: `@inc`
+       * directly (FuncHandle->Ref), or a copy of another tracked named
+       * handle (`h2 = h` where `h = @inc`).  Used for the field-stored-
+       * handle call path (#81) and multi-return handle calls (#80). */
+      Binding *HandleTgt = nullptr;
+      if (A.RHS->Kind == NodeKind::FuncHandle)
+        HandleTgt = static_cast<const FuncHandle *>(A.RHS)->Ref;
+      else if (auto *RN = dynamic_cast<const NameExpr *>(A.RHS)) {
+        if (RN->Ref) {
+          auto It = HandleTargetRef.find(RN->Ref);
+          if (It != HandleTargetRef.end()) HandleTgt = It->second;
+        }
       }
+      for (const Expr *L : A.LHS) {
+        if (auto *N = dynamic_cast<const NameExpr *>(L)) {
+          if (N->Ref) {
+            HandleBindings[N->Ref] = Caps;
+            if (HandleTgt) HandleTargetRef[N->Ref] = HandleTgt;
+            else HandleTargetRef.erase(N->Ref);
+          }
+        }
+      }
+    }
+    /* #81: a named function handle stored into a struct field / classdef
+     * property — `s.h = @inc` (FuncHandle RHS) or `h = @inc; s.h = h`
+     * (a tracked handle variable).  Resolve the target name and record
+     * the (base, field) pair so a later `s.h(args)` lowers as a direct
+     * call.  Runs for any RHS shape (RhsIsHandle is false for the
+     * NameExpr form, so this can't live in the block above). */
+    {
+      Binding *FHTgt = nullptr;
+      if (A.RHS && A.RHS->Kind == NodeKind::FuncHandle)
+        FHTgt = static_cast<const FuncHandle *>(A.RHS)->Ref;
+      else if (auto *RN = dynamic_cast<const NameExpr *>(A.RHS)) {
+        if (RN->Ref) {
+          auto NIt = HandleTargetRef.find(RN->Ref);
+          if (NIt != HandleTargetRef.end()) FHTgt = NIt->second;
+        }
+      }
+      for (const Expr *L : A.LHS)
+        if (auto *F = dynamic_cast<const FieldAccess *>(L))
+          if (auto *BN = dynamic_cast<const NameExpr *>(F->Base))
+            if (BN->Ref) {
+              auto Key = std::make_pair(BN->Ref, std::string(F->Field));
+              if (FHTgt) FieldHandleBindings[Key] = FHTgt;
+              else FieldHandleBindings.erase(Key);
+            }
     }
     if (RhsIsCellLit) {
       for (const Expr *L : A.LHS)
@@ -3404,9 +3546,17 @@ void Lowerer::lowerStmt(const Stmt &St) {
           if (N->Ref) StringBindings.insert(N->Ref);
     }
     if (RhsIsThreeD) {
-      for (const Expr *L : A.LHS)
-        if (auto *N = dynamic_cast<const NameExpr *>(L))
+      for (const Expr *L : A.LHS) {
+        if (auto *N = dynamic_cast<const NameExpr *>(L)) {
           if (N->Ref) ThreeDBindings.insert(N->Ref);
+        } else if (auto *F = dynamic_cast<const FieldAccess *>(L)) {
+          /* #78: `s.T = zeros(3,3,2)` — remember the field is 3-D so
+           * later `s.T(i,j,k)=v` / reads route through subscript3. */
+          if (auto *BN = dynamic_cast<const NameExpr *>(F->Base))
+            if (BN->Ref)
+              ThreeDStructFields.insert({BN->Ref, std::string(F->Field)});
+        }
+      }
     }
     /* Phase 3: when the RHS is a value-class binding (`b = a`), clone
      * the underlying matlab_obj before the store so b owns its own
@@ -4272,8 +4422,19 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
      * matlab_subscript3_store; A(:,:,k)=v|M (whole plane) →
      * matlab_subscript3_pstore_{s,m}. */
     if (C.Args.size() == 3 && Rhs) {
+      /* 3-D base may be a plain variable (ThreeDBindings) or a struct
+       * field / classdef property (ThreeDStructFields, #78).  Os[0] is
+       * the already-lowered base — a mat3 ptr in both cases — and
+       * matlab_subscript3_store mutates it in place, so the field path
+       * needs no write-back. */
+      bool Is3D = false;
       if (auto *NE = dynamic_cast<const NameExpr *>(C.Callee))
-        if (NE->Ref && ThreeDBindings.count(NE->Ref)) {
+        Is3D = NE->Ref && ThreeDBindings.count(NE->Ref);
+      else if (auto *F = dynamic_cast<const FieldAccess *>(C.Callee))
+        if (auto *BN = dynamic_cast<const NameExpr *>(F->Base))
+          Is3D = BN->Ref &&
+                 ThreeDStructFields.count({BN->Ref, std::string(F->Field)});
+      if (Is3D) {
           bool c0 = dynamic_cast<const ColonExpr *>(C.Args[0]) != nullptr;
           bool c1 = dynamic_cast<const ColonExpr *>(C.Args[1]) != nullptr;
           bool c2 = dynamic_cast<const ColonExpr *>(C.Args[2]) != nullptr;
@@ -4373,6 +4534,31 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
      * matlab_struct_arr_get_or_create + matlab_struct_set_*. */
     auto &F = static_cast<const FieldAccess &>(LHS);
     auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+    /* Char-string field/property store (#79.2): `s.name = 'hello'`.
+     * A char literal lowers to a `matlab.const_char` (i8 tensor); the
+     * generic field-store paths below would mistake the tensor for a
+     * matrix payload (`matlab_*_set_mat`) and leave the i8 const_char
+     * unconverted.  We detect it here but DEFER the wrap to the generic
+     * classdef-property / plain-struct paths only — the special-case
+     * intercepts in between (TableBindings, timetable
+     * `.Properties.Description`, struct arrays) consume the raw
+     * const_char Rhs directly, so wrapping it up front would break their
+     * call shapes.  `maybeWrapCharStr()` does the deferred wrap (through
+     * `matlab_string_from_literal` -> a `matlab_string *`, kind=3); the
+     * string read side (`matlab_*_get_mat`) is already kind=3 aware. */
+    bool RhsIsCharStr = false;
+    if (Rhs)
+      if (mlir::Operation *RD = Rhs.getDefiningOp())
+        if (RD->getName().getStringRef() == "matlab.const_char")
+          RhsIsCharStr = true;
+    auto maybeWrapCharStr = [&]() {
+      if (!RhsIsCharStr) return;
+      mlir::NamedAttribute SCal(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, "matlab_string_from_literal"));
+      Rhs = emitUnreg("matlab.call_builtin", {Rhs}, PtrTy,
+                      loc(F.Range), {SCal});
+    };
     /* Phase 5.3: T.<name> = Rhs — Base is a NameExpr in TableBindings.
      * Route to matlab_table_add_column (which auto-creates the column
      * on first write or replaces an existing one). */
@@ -4488,6 +4674,7 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
         return;
       }
       mlir::Value Obj = lowerExpr(*F.Base);
+      maybeWrapCharStr();   // #79.2: classdef string property
       mlir::Value NameV = emitFieldNameChar(F.Field, loc(F.Range));
       bool IsMatRhs = Rhs && (Rhs.getType() == PtrTy ||
                               mlir::isa<mlir::RankedTensorType,
@@ -4516,7 +4703,7 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
        * type-propagation lands).  Without this, matrix RHS values get
        * mis-routed to `matlab_obj_set_f64` which silently drops the
        * payload. */
-      llvm::StringRef Callee = IsStringField        ? "matlab_obj_set_string"
+      llvm::StringRef Callee = (IsStringField || RhsIsCharStr) ? "matlab_obj_set_string"
                               : (IsMatRhs || IsMatField) ? "matlab_obj_set_mat"
                                                           : "matlab_obj_set_f64";
       mlir::NamedAttribute Cal(
@@ -4528,19 +4715,29 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
     }
     mlir::Value SPtr = resolveStructBase(F.Base, loc(F.Range));
     if (!SPtr) return;
+    maybeWrapCharStr();   // #79.2: plain-struct char-string field
     mlir::Value NameV = emitFieldNameChar(F.Field, loc(F.Range));
     bool IsMatRhs2 = Rhs && (Rhs.getType() == PtrTy ||
                              mlir::isa<mlir::RankedTensorType,
                                        mlir::UnrankedTensorType>(Rhs.getType()));
     /* Remember matrix-valued fields of a simple `s.field = M` so the read
-     * side fetches them as a matrix (see MatStructFields). */
+     * side fetches them as a matrix (see MatStructFields).  A char-string
+     * field (kind=3) is read back through the same `matlab_struct_get_mat`
+     * path, so it counts as a "mat" field for read-side routing. */
     if (auto *BN = dynamic_cast<const NameExpr *>(F.Base))
       if (BN->Ref) {
-        if (IsMatRhs2) MatStructFields.insert({BN->Ref, std::string(F.Field)});
-        else           MatStructFields.erase({BN->Ref, std::string(F.Field)});
+        if (IsMatRhs2 || RhsIsCharStr)
+          MatStructFields.insert({BN->Ref, std::string(F.Field)});
+        else
+          MatStructFields.erase({BN->Ref, std::string(F.Field)});
+        if (RhsIsCharStr)
+          StringStructFields.insert({BN->Ref, std::string(F.Field)});
+        else
+          StringStructFields.erase({BN->Ref, std::string(F.Field)});
       }
-    llvm::StringRef Callee = IsMatRhs2 ? "matlab_struct_set_mat"
-                                        : "matlab_struct_set_f64";
+    llvm::StringRef Callee = RhsIsCharStr ? "matlab_struct_set_string"
+                            : IsMatRhs2   ? "matlab_struct_set_mat"
+                                          : "matlab_struct_set_f64";
     mlir::NamedAttribute Cal(
         mlir::StringAttr::get(&MCtx, "callee"),
         mlir::StringAttr::get(&MCtx, Callee));
@@ -4614,6 +4811,51 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
   }
   case NodeKind::NameExpr: {
     auto &N = static_cast<const NameExpr &>(E);
+    /* No-paren constructor on the RHS: `m = occupancyMap;` (#79.1).
+     * A bare name resolving to a classdef invokes the no-arg
+     * constructor, exactly like `occupancyMap()` — call the emitted
+     * `ClassName__ClassName` when the class has an explicit ctor, else
+     * `matlab_obj_new(class_id)` plus any property defaults.  Mirrors
+     * the positional / kwarg ctor paths in the CallOrIndex handler. */
+    if (N.Ref && N.Ref->Kind == BindingKind::Class && N.Ref->ClassDef) {
+      const ClassDef *CD = N.Ref->ClassDef;
+      auto PtrTyC = mlir::LLVM::LLVMPointerType::get(&MCtx);
+      bool HasCtor = false;
+      for (const Function *Mth : CD->Methods)
+        if (Mth && Mth->Name == CD->Name) { HasCtor = true; break; }
+      if (HasCtor) {
+        std::string Callee =
+            std::string(CD->Name) + "__" + std::string(CD->Name);
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, Callee));
+        return emitUnreg("matlab.call", {}, PtrTyC, L, {Cal});
+      }
+      auto I32 = mlir::IntegerType::get(&MCtx, 32);
+      mlir::Value ClsId = mlir::arith::ConstantOp::create(
+          B, L, I32, mlir::IntegerAttr::get(I32, (int64_t)CD->ClassId));
+      mlir::NamedAttribute Cal(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, "matlab_obj_new"));
+      mlir::Value Obj =
+          emitUnreg("matlab.call_builtin", {ClsId}, PtrTyC, L, {Cal});
+      for (const auto &P : CD->Props) {
+        if (!P.Default) continue;
+        mlir::Value DV = lowerExpr(*P.Default);
+        mlir::Value NameV = emitFieldNameChar(P.Name, L);
+        bool IsMat = DV && (DV.getType() == PtrTyC ||
+                            mlir::isa<mlir::RankedTensorType,
+                                      mlir::UnrankedTensorType>(DV.getType()));
+        llvm::StringRef Cn = IsMat ? "matlab_obj_set_mat"
+                                    : "matlab_obj_set_f64";
+        mlir::NamedAttribute Cal2(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, Cn));
+        emitUnregOp("matlab.call_builtin", {Obj, NameV, DV},
+                    {mlir::NoneType::get(&MCtx)}, L, {Cal2});
+      }
+      return Obj;
+    }
     return loadBinding(N.Ref, E.Ty ? E.Ty : TC.any(), L);
   }
   case NodeKind::EndExpr: {
@@ -12109,6 +12351,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             bool isStr = false;
             if (auto *AN = dynamic_cast<const NameExpr *>(E))
               if (AN->Ref && StringBindings.count(AN->Ref)) isStr = true;
+            if (isStringExpr(E)) isStr = true;
             if (const Type *T = E->Ty) {
               if (T->K == Type::Kind::StringArray) isStr = true;
               else if (T->K == Type::Kind::Array &&
@@ -12278,6 +12521,25 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
       return emitUnreg("matlab.call_indirect", Os, RT, L);
     }
     // Index
+    /* #81: a function handle stored in a struct field / classdef property
+     * (`s.h = @inc; v = s.h(5)` or `obj.StepFcn = @step; obj.StepFcn(a)`).
+     * The handle's target was resolved at the store and recorded in
+     * FieldHandleBindings; emit a direct `matlab.call @<name>(args)` —
+     * the same shape a syntactic `inc(5)` lowers to — instead of leaving
+     * an unconverted matlab.subscript on the field-loaded handle value. */
+    if (auto *F = dynamic_cast<const FieldAccess *>(C.Callee))
+      if (auto *BN = dynamic_cast<const NameExpr *>(F->Base))
+        if (BN->Ref) {
+          auto It = FieldHandleBindings.find({BN->Ref, std::string(F->Field)});
+          if (It != FieldHandleBindings.end() && It->second) {
+            llvm::SmallVector<mlir::Value, 4> CArgs;
+            for (const Expr *A : C.Args) if (A) CArgs.push_back(lowerExpr(*A));
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, std::string(It->second->Name)));
+            return emitUnreg("matlab.call", CArgs, RT, L, {Cal});
+          }
+        }
     // Detect the "call through a handle" case: if the callee is a NameExpr
     // whose binding was assigned from @(x)... / @name, emit a
     // matlab.call_indirect instead of a matlab.subscript.
@@ -12459,8 +12721,16 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
      * matlab_subscript3_s; A(:,:,k) whole plane → matlab_subscript3_slice
      * (returns a 2-D matrix). */
     if (C.Args.size() == 3) {
+      /* 3-D base may be a plain variable or a struct field / property
+       * (#78).  Idx[0] is the already-lowered base mat3 ptr in both. */
+      bool Is3DRead = false;
       if (auto *NE = dynamic_cast<const NameExpr *>(C.Callee))
-        if (NE->Ref && ThreeDBindings.count(NE->Ref)) {
+        Is3DRead = NE->Ref && ThreeDBindings.count(NE->Ref);
+      else if (auto *F = dynamic_cast<const FieldAccess *>(C.Callee))
+        if (auto *BN = dynamic_cast<const NameExpr *>(F->Base))
+          Is3DRead = BN->Ref &&
+                     ThreeDStructFields.count({BN->Ref, std::string(F->Field)});
+      if (Is3DRead) {
           bool c0 = dynamic_cast<const ColonExpr *>(C.Args[0]) != nullptr;
           bool c1 = dynamic_cast<const ColonExpr *>(C.Args[1]) != nullptr;
           bool c2 = dynamic_cast<const ColonExpr *>(C.Args[2]) != nullptr;
