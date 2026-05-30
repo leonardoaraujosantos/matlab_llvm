@@ -1451,7 +1451,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
       continue;
     }
     if ((Name == "matlab_struct_set_f64" ||
-         Name == "matlab_struct_set_mat") &&
+         Name == "matlab_struct_set_mat" ||
+         Name == "matlab_struct_set_string") &&
         Call->getNumOperands() == 3) {
       Value Base = Call->getOperand(0);
       Value NameV = Call->getOperand(1);
@@ -1460,7 +1461,12 @@ bool TensorLowering::rewriteBuiltinCalls() {
       int64_t Len = 0;
       Value Ptr = fieldNameAddr(NameV, Len);
       if (!Ptr) continue;
-      bool IsMat = Name == "matlab_struct_set_mat";
+      /* A char-string field store (#79.2) carries a `matlab_string *`
+       * (ptr) value — same call shape as `_set_mat`, distinct runtime
+       * entry (stores with kind=3). Treat its value as ptr-typed but
+       * keep the `_set_string` callee. */
+      bool IsStr = Name == "matlab_struct_set_string";
+      bool IsMat = Name == "matlab_struct_set_mat" || IsStr;
       /* Auto-promote `_f64` callee to `_mat` when the value operand
        * arrived as ptr — the AST-time dispatch in Lowering.cpp
        * picks the callee from the RHS type at lowering time, but
