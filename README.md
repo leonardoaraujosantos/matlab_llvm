@@ -290,8 +290,51 @@ Prerequisites:
 - LLVM 22.x and MLIR
 - CMake 3.20+
 - Ninja
-- a C++20 compiler
+- a C++20 compiler (Clang recommended)
 - Python 3 with NumPy if you want `-emit-python`
+
+### Building on Linux (Ubuntu 24.04)
+
+LLVM 22 + MLIR are not in Ubuntu's default repos. Install from [apt.llvm.org](https://apt.llvm.org/):
+
+```bash
+# Add the LLVM 22 repository
+wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-22 main" \
+    | sudo tee /etc/apt/sources.list.d/llvm-22.list
+
+# Install LLVM 22, MLIR, and build dependencies
+sudo apt-get update
+sudo apt-get install -y \
+    clang-22 lld-22 llvm-22-dev libmlir-22-dev mlir-22-tools \
+    cmake ninja-build libcairo2-dev libzstd-dev
+
+# Configure and build
+cmake -S . -B build -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_C_COMPILER=clang-22 \
+    -DCMAKE_CXX_COMPILER=clang++-22 \
+    -DMATLAB_LLVM_WITH_MLIR=ON \
+    -DMATLAB_LLVM_WITH_PLOT=ON \
+    -DLLVM_DIR=/usr/lib/llvm-22/lib/cmake/llvm \
+    -DMLIR_DIR=/usr/lib/llvm-22/lib/cmake/mlir
+
+ninja -C build
+
+# Run tests
+ctest --test-dir build --output-on-failure
+```
+
+### Building with Docker
+
+If you prefer not to install LLVM 22 system-wide, use Docker:
+
+```bash
+docker build --target builder -t matlab_llvm .
+docker run --rm matlab_llvm ./build/matlabc -emit-llvm your_file.m
+```
+
+### Generic build (macOS / Linux with LLVM 22 already installed)
 
 Build and test:
 
