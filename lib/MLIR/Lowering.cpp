@@ -7035,7 +7035,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         /* rlDQNAgent / rlPGAgent / rlDDPGAgent (obsInfo, actInfo) — auto-build
          * the critic/actor networks from the obs + action specs. */
         if ((CD->Name == "rlDQNAgent" || CD->Name == "rlPGAgent" ||
-             CD->Name == "rlDDPGAgent") && C.Args.size() == 2) {
+             CD->Name == "rlDDPGAgent" || CD->Name == "rlTD3Agent") && C.Args.size() == 2) {
           std::string Ctor = std::string(CD->Name) + "__" + std::string(CD->Name);
           mlir::NamedAttribute CtorCal(
               mlir::StringAttr::get(&MCtx, "callee"),
@@ -7045,6 +7045,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           mlir::Value Ai = lowerExpr(*C.Args[1]);
           const char *rt = (CD->Name == "rlPGAgent")   ? "matlab_rl_pg_init"
                          : (CD->Name == "rlDDPGAgent")  ? "matlab_rl_ddpg_init"
+                         : (CD->Name == "rlTD3Agent")   ? "matlab_rl_td3_init"
                                                         : "matlab_rl_dqn_init";
           mlir::NamedAttribute Cal(
               mlir::StringAttr::get(&MCtx, "callee"),
@@ -10613,13 +10614,14 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         }
         if (Nm == "train" && Cls0 &&
             (Cn0 == "rlQAgent" || Cn0 == "rlSARSAAgent" || Cn0 == "rlDQNAgent" ||
-             Cn0 == "rlPGAgent" || Cn0 == "rlDDPGAgent") && C.Args.size() == 3) {
+             Cn0 == "rlPGAgent" || Cn0 == "rlDDPGAgent" || Cn0 == "rlTD3Agent") && C.Args.size() == 3) {
           mlir::Value Ag = loadObj(C.Args[0]);
           mlir::Value En = loadObj(C.Args[1]);
           mlir::Value Op = loadObj(C.Args[2]);
           const char *rt = (Cn0 == "rlDQNAgent")  ? "matlab_rl_dqn_train"
                          : (Cn0 == "rlPGAgent")   ? "matlab_rl_pg_train"
                          : (Cn0 == "rlDDPGAgent") ? "matlab_rl_ddpg_train"
+                         : (Cn0 == "rlTD3Agent")  ? "matlab_rl_td3_train"
                                                   : "matlab_rl_train";
           mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
               mlir::StringAttr::get(&MCtx, rt));
@@ -10627,12 +10629,13 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         }
         if (Nm == "sim" && Cls0 &&
             (Cn0 == "rlQAgent" || Cn0 == "rlSARSAAgent" || Cn0 == "rlDQNAgent" ||
-             Cn0 == "rlPGAgent" || Cn0 == "rlDDPGAgent") && C.Args.size() == 2) {
+             Cn0 == "rlPGAgent" || Cn0 == "rlDDPGAgent" || Cn0 == "rlTD3Agent") && C.Args.size() == 2) {
           mlir::Value Ag = loadObj(C.Args[0]);
           mlir::Value En = loadObj(C.Args[1]);
           const char *rt = (Cn0 == "rlDQNAgent")  ? "matlab_rl_dqn_sim"
                          : (Cn0 == "rlPGAgent")   ? "matlab_rl_pg_sim"
                          : (Cn0 == "rlDDPGAgent") ? "matlab_rl_ddpg_sim"
+                         : (Cn0 == "rlTD3Agent")  ? "matlab_rl_td3_sim"
                                                   : "matlab_rl_sim";
           mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
               mlir::StringAttr::get(&MCtx, rt));

@@ -1162,6 +1162,178 @@ matlab_mat *matlab_rl_ddpg_sim(matlab_obj *agent, matlab_obj *env) {
 }
 
 // ===========================================================================
+// TD3 — Twin Delayed DDPG.  rlTD3Agent(obsInfo, actInfo)
+// ===========================================================================
+// Three fixes on DDPG that tame the critic's Q-value overestimation:
+//   (1) TWIN critics — the TD target takes the MINIMUM of two target critics,
+//       so an over-optimistic critic can't drive the policy;
+//   (2) TARGET-POLICY SMOOTHING — clipped Gaussian noise is added to the
+//       target action, so the critic can't exploit a sharp Q peak;
+//   (3) DELAYED updates — the actor and all target networks update once every
+//       d critic steps (d=2), letting the critics settle first.
+// Reuses the DDPG actor/critic networks, replay, pendulum env, reward scaling
+// and the shared autodiff tape; only the second critic + the TD-target
+// computation + the update schedule differ.  The actor step (DPG through
+// critic 1) and the greedy sim are the DDPG ones verbatim.
+
+void matlab_rl_td3_init(matlab_obj *agent, matlab_obj *obsInfo, matlab_obj *actInfo) {
+    matlab_rl_ddpg_init(agent, obsInfo, actInfo);   // actor + critic "c" + targets + moments
+    // Add the second critic "c2" + its target copy + Adam moments.
+    int64_t obsDim = static_cast<int64_t>(rl::get_f64(agent, "ObsDim"));
+    int64_t actDim = static_cast<int64_t>(rl::get_f64(agent, "ActDim"));
+    int64_t H = static_cast<int64_t>(rl::get_f64(agent, "HiddenSize"));
+    int64_t cin = obsDim + actDim;
+    auto he = [&](int64_t r, int64_t c) {
+        matlab_mat *m = matlab_randn(static_cast<double>(r), static_cast<double>(c));
+        double s = std::sqrt(2.0 / static_cast<double>(c));
+        for (int64_t k = 0; k < r * c; ++k) m->data[k] *= s; return m; };
+    auto small = [&](int64_t r, int64_t c) {
+        matlab_mat *m = matlab_randn(static_cast<double>(r), static_cast<double>(c));
+        for (int64_t k = 0; k < r * c; ++k) m->data[k] *= 1e-3; return m; };
+    auto z = [&](int64_t r, int64_t c) { return matlab_zeros(static_cast<double>(r), static_cast<double>(c)); };
+    rl::set_mat(agent, "c2W1", he(H, cin));  rl::set_mat(agent, "c2b1", z(H, 1));
+    rl::set_mat(agent, "c2W2", small(1, H)); rl::set_mat(agent, "c2b2", z(1, 1));
+    const char *P[4] = {"c2W1","c2b1","c2W2","c2b2"};
+    for (const char *p : P) {
+        rl::set_mat(agent, (std::string("t")+p).c_str(), rl::clone_mat(rl::get_mat(agent, p)));
+        matlab_mat *pm = rl::get_mat(agent, p);
+        rl::set_mat(agent, (std::string("m")+p).c_str(), z(pm->rows, pm->cols));
+        rl::set_mat(agent, (std::string("v")+p).c_str(), z(pm->rows, pm->cols));
+    }
+}
+
+// One Adam step for the critic with field prefix "c" or "c2", to the shared
+// TD target Y (both twins regress the same min-target).
+static void td3_critic_step(matlab_obj *ag, const char *pfx, matlab_mat *Xsa, matlab_mat *Y, double lr, double t) {
+    auto F = [&](const char *s) { return std::string(pfx) + s; };
+    matlab_obj *W1=rl::dl_leaf(rl::get_mat(ag,F("W1").c_str())), *b1=rl::dl_leaf(rl::get_mat(ag,F("b1").c_str()));
+    matlab_obj *W2=rl::dl_leaf(rl::get_mat(ag,F("W2").c_str())), *b2=rl::dl_leaf(rl::get_mat(ag,F("b2").c_str()));
+    matlab_obj *x=rl::dl_leaf(Xsa);
+    matlab_obj *q=rl::dl_add(rl::dl_mm(W2, rl::dl_relu(rl::dl_add(rl::dl_mm(W1,x),b1))), b2);
+    matlab_obj *loss=rl::dl_mse(q, rl::dl_leaf(Y));
+    rl::adam_step(rl::get_mat(ag,F("W1").c_str()), rl::dl_grad(loss,W1), rl::get_mat(ag,("m"+F("W1")).c_str()), rl::get_mat(ag,("v"+F("W1")).c_str()), lr, t);
+    rl::adam_step(rl::get_mat(ag,F("b1").c_str()), rl::dl_grad(loss,b1), rl::get_mat(ag,("m"+F("b1")).c_str()), rl::get_mat(ag,("v"+F("b1")).c_str()), lr, t);
+    rl::adam_step(rl::get_mat(ag,F("W2").c_str()), rl::dl_grad(loss,W2), rl::get_mat(ag,("m"+F("W2")).c_str()), rl::get_mat(ag,("v"+F("W2")).c_str()), lr, t);
+    rl::adam_step(rl::get_mat(ag,F("b2").c_str()), rl::dl_grad(loss,b2), rl::get_mat(ag,("m"+F("b2")).c_str()), rl::get_mat(ag,("v"+F("b2")).c_str()), lr, t);
+    matlab_dlnet_reset0();
+}
+
+matlab_mat *matlab_rl_td3_train(matlab_obj *agent, matlab_obj *env, matlab_obj *opts) {
+    int64_t obsDim = static_cast<int64_t>(rl::get_f64(agent, "ObsDim"));
+    int64_t actDim = static_cast<int64_t>(rl::get_f64(agent, "ActDim"));
+    double actLimit = rl::get_f64(agent, "ActLimit");
+    double gamma = rl::get_f64(agent, "DiscountFactor"); if (gamma <= 0) gamma = 0.99;
+    double lr    = rl::get_f64(agent, "LearnRate");      if (lr <= 0) lr = 1e-3;
+    double tau   = rl::get_f64(agent, "Tau");            if (tau <= 0) tau = 5e-3;
+    double actorLr = rl::get_f64(agent, "ActorLR");    if (actorLr <= 0) actorLr = lr;
+    double rscale  = rl::get_f64(agent, "RewardScale"); if (rscale <= 0) rscale = 0.1;
+    // TD3-specific knobs (action units): exploration noise, target-smoothing
+    // noise + its clip, and the actor/target update period.
+    double explSigma  = rl::get_f64(agent, "ExplNoise");   if (explSigma  <= 0) explSigma  = 0.2;
+    double polNoise   = rl::get_f64(agent, "PolicyNoise"); if (polNoise   <= 0) polNoise   = 0.2;
+    double noiseClip  = rl::get_f64(agent, "NoiseClip");   if (noiseClip  <= 0) noiseClip  = 0.5;
+    int64_t polDelay  = static_cast<int64_t>(rl::get_f64(agent, "PolicyDelay")); if (polDelay < 1) polDelay = 2;
+
+    int64_t maxEp   = static_cast<int64_t>(rl::get_f64(opts, "MaxEpisodes"));   if (maxEp < 1) maxEp = 1;
+    int64_t maxStep = static_cast<int64_t>(rl::get_f64(opts, "MaxStepsPerEpisode")); if (maxStep < 1) maxStep = 200;
+
+    int prevFreeFwd = matlab_dlnet_set_free_forward(1);   // bounded memory across grad calls
+
+    const int64_t batch = 64, minReplay = batch;
+    const size_t  replayCap = 50000;
+    int64_t Wd = 2 * obsDim + actDim + 2;
+    std::vector<double> replay; size_t rcount = 0, rhead = 0;
+
+    matlab_mat *stats = matlab_zeros(static_cast<double>(maxEp), 1);
+    double tstep = 0.0, atstep = 0.0;
+    auto clip = [](double v, double lo, double hi){ return v < lo ? lo : (v > hi ? hi : v); };
+    std::vector<double> sint(2), obs(static_cast<size_t>(obsDim)), nobs(static_cast<size_t>(obsDim)), act(static_cast<size_t>(actDim));
+
+    const double ouTheta = 0.15;
+    for (int64_t ep = 0; ep < maxEp; ++ep) {
+        sint[0] = M_PI + (rl::urand() * 2 - 1) * 0.1; sint[1] = (rl::urand() * 2 - 1) * 0.1;
+        rl::pendulum_obs(sint.data(), obs.data());
+        std::vector<double> ou(static_cast<size_t>(actDim), 0.0);
+        double epReturn = 0.0;
+        for (int64_t step = 0; step < maxStep; ++step) {
+            rl::actor_forward(rl::get_mat(agent,"aW1"), rl::get_mat(agent,"ab1"),
+                              rl::get_mat(agent,"aW2"), rl::get_mat(agent,"ab2"), obs.data(), actLimit, act.data());
+            // Temporally-correlated (Ornstein-Uhlenbeck) exploration noise —
+            // pumps energy more effectively than i.i.d. Gaussian on the
+            // swing-up, which markedly stabilises convergence across seeds.
+            for (int64_t k = 0; k < actDim; ++k) {
+                ou[static_cast<size_t>(k)] += -ouTheta * ou[static_cast<size_t>(k)] + explSigma * rl::urandn();
+                act[static_cast<size_t>(k)] = clip(act[static_cast<size_t>(k)] + ou[static_cast<size_t>(k)], -actLimit, actLimit);
+            }
+            double r = rl::pendulum_step(sint.data(), act[0], actLimit);
+            rl::pendulum_obs(sint.data(), nobs.data());
+            epReturn += r;
+
+            std::vector<double> tr(static_cast<size_t>(Wd));
+            for (int64_t k = 0; k < obsDim; ++k) tr[static_cast<size_t>(k)] = obs[static_cast<size_t>(k)];
+            for (int64_t k = 0; k < actDim; ++k) tr[static_cast<size_t>(obsDim + k)] = act[static_cast<size_t>(k)];
+            tr[static_cast<size_t>(obsDim + actDim)] = r;
+            for (int64_t k = 0; k < obsDim; ++k) tr[static_cast<size_t>(obsDim + actDim + 1 + k)] = nobs[static_cast<size_t>(k)];
+            tr[static_cast<size_t>(Wd - 1)] = 0.0;
+            if (replay.size() < replayCap * static_cast<size_t>(Wd)) { replay.insert(replay.end(), tr.begin(), tr.end()); rcount++; }
+            else { std::copy(tr.begin(), tr.end(), replay.begin() + static_cast<long>(rhead * static_cast<size_t>(Wd))); rhead = (rhead + 1) % replayCap; }
+
+            if (rcount >= static_cast<size_t>(minReplay)) {
+                matlab_mat *Xsa = matlab_zeros(static_cast<double>(obsDim + actDim), static_cast<double>(batch));
+                matlab_mat *Y   = matlab_zeros(1, static_cast<double>(batch));
+                matlab_mat *S   = matlab_zeros(static_cast<double>(obsDim), static_cast<double>(batch));
+                for (int64_t b = 0; b < batch; ++b) {
+                    size_t idx = static_cast<size_t>(rl::urand() * static_cast<double>(rcount)) % rcount;
+                    double *row = &replay[idx * static_cast<size_t>(Wd)];
+                    double *oj = row, *aj = row + obsDim, rj = row[obsDim + actDim];
+                    double *npj = row + obsDim + actDim + 1;
+                    for (int64_t k = 0; k < obsDim; ++k) { Xsa->data[k*batch+b]=oj[k]; S->data[k*batch+b]=oj[k]; }
+                    for (int64_t k = 0; k < actDim; ++k) Xsa->data[(obsDim+k)*batch+b]=aj[k];
+                    // target action with policy smoothing
+                    std::vector<double> na(static_cast<size_t>(actDim)), sap(static_cast<size_t>(obsDim+actDim));
+                    rl::actor_forward(rl::get_mat(agent,"taW1"), rl::get_mat(agent,"tab1"),
+                                      rl::get_mat(agent,"taW2"), rl::get_mat(agent,"tab2"), npj, actLimit, na.data());
+                    for (int64_t k = 0; k < actDim; ++k) {
+                        double nz = clip(polNoise * rl::urandn(), -noiseClip, noiseClip);
+                        na[static_cast<size_t>(k)] = clip(na[static_cast<size_t>(k)] + nz, -actLimit, actLimit);
+                    }
+                    for (int64_t k = 0; k < obsDim; ++k) sap[static_cast<size_t>(k)] = npj[k];
+                    for (int64_t k = 0; k < actDim; ++k) sap[static_cast<size_t>(obsDim+k)] = na[static_cast<size_t>(k)];
+                    // twin target critics -> min
+                    double q1 = rl::critic_forward(rl::get_mat(agent,"tcW1"), rl::get_mat(agent,"tcb1"),
+                                                   rl::get_mat(agent,"tcW2"), rl::get_mat(agent,"tcb2"), sap.data());
+                    double q2 = rl::critic_forward(rl::get_mat(agent,"tc2W1"), rl::get_mat(agent,"tc2b1"),
+                                                   rl::get_mat(agent,"tc2W2"), rl::get_mat(agent,"tc2b2"), sap.data());
+                    Y->data[b] = rscale * rj + gamma * std::min(q1, q2);
+                }
+                tstep += 1.0;
+                td3_critic_step(agent, "c",  Xsa, Y, lr, tstep);
+                td3_critic_step(agent, "c2", Xsa, Y, lr, tstep);
+                // delayed actor + target update
+                if (static_cast<int64_t>(tstep) % polDelay == 0) {
+                    atstep += 1.0;
+                    ddpg_actor_step(agent, S, actLimit, actorLr, atstep);
+                    const char *P[12] = {"aW1","ab1","aW2","ab2","cW1","cb1","cW2","cb2","c2W1","c2b1","c2W2","c2b2"};
+                    for (const char *p : P)
+                        rl::soft_update(rl::get_mat(agent, (std::string("t")+p).c_str()), rl::get_mat(agent, p), tau);
+                }
+                rl::free_mat(Xsa); rl::free_mat(Y); rl::free_mat(S);
+            }
+            for (int64_t k = 0; k < obsDim; ++k) obs[static_cast<size_t>(k)] = nobs[static_cast<size_t>(k)];
+        }
+        stats->data[ep] = epReturn;
+    }
+    matlab_dlnet_set_free_forward(prevFreeFwd);
+    return stats;
+}
+
+// sim(td3Agent, env) — greedy rollout; identical to the DDPG greedy sim
+// (same deterministic actor field layout).
+matlab_mat *matlab_rl_td3_sim(matlab_obj *agent, matlab_obj *env) {
+    return matlab_rl_ddpg_sim(agent, env);
+}
+
+// ===========================================================================
 // Policy-use accessors — getAction / getMaxQValue / getGreedyPolicy
 // ===========================================================================
 // These query a trained agent (or a greedy policy extracted from it).  They

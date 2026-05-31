@@ -113,8 +113,22 @@ continuous action.
    seeds. The gating test asserts the platform-stable outcome (`return > −900`)
    rather than the chaotic, libm-dependent exact value.
 
-TD3/SAC/PPO (twin critics / entropy / clipped surrogate) layer on top of the
-shipped DDPG.
+**T6 — TD3 SHIPPED** (headline [`examples/rl/pendulum_td3.m`](../examples/rl/pendulum_td3.m),
+test `rl_td3.m`). `rlTD3Agent(obsInfo,actInfo)` reuses the entire DDPG stack —
+deterministic actor, replay, pendulum env, reward scaling, the bounded-memory
+tape — and the actor step + greedy sim are the DDPG ones verbatim. The three
+TD3 fixes that tame Q-overestimation: **twin critics** (a second `c2*` critic;
+the TD target takes `min(Qt1,Qt2)`), **target-policy smoothing** (clipped
+Gaussian noise on the target action), and **delayed updates** (actor + all
+targets update every `PolicyDelay=2` critic steps). Behaviour exploration uses
+OU noise (temporally-correlated — markedly more stable on the swing-up than
+i.i.d. Gaussian across seeds). 200 episodes → greedy return ~**−371**
+(untrained ≈ −1680, slightly better than DDPG as expected); test asserts
+`return > −1000`. TD3 destabilises with over-training, so 200 episodes is the
+sweet spot (250+ regresses some seeds).
+
+SAC (squashed-Gaussian actor + automatic temperature) and PPO (clipped
+surrogate + GAE, on-policy over cart-pole) are the remaining T6 agents.
 
 ---
 

@@ -636,6 +636,7 @@ void Resolver::registerBuiltins() {
     "matlab_rl_dqn_init", "matlab_rl_dqn_train", "matlab_rl_dqn_sim",
     "matlab_rl_pg_init", "matlab_rl_pg_train", "matlab_rl_pg_sim",
     "matlab_rl_pendulum_init", "matlab_rl_ddpg_init", "matlab_rl_ddpg_train", "matlab_rl_ddpg_sim",
+    "matlab_rl_td3_init", "matlab_rl_td3_train", "matlab_rl_td3_sim",
     "matlab_rl_obs_info", "matlab_rl_act_info",
     "matlab_rl_table_init", "matlab_rl_qvf_init", "matlab_rl_agent_init",
     "matlab_rl_get_critic", "matlab_rl_get_params",

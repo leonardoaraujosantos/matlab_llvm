@@ -320,6 +320,32 @@ classdef rlDDPGAgent
     end
 end
 
+% rlTD3Agent — Twin Delayed DDPG.  Same continuous-control interface as DDPG
+% (deterministic actor + Q critic over the pendulum env); the runtime adds a
+% second critic, target-policy smoothing and delayed actor/target updates.
+classdef rlTD3Agent
+    properties
+        ObsDim
+        ActDim
+        ActLimit
+        HiddenSize
+        DiscountFactor
+        LearnRate
+        Tau
+    end
+    methods
+        function obj = rlTD3Agent()
+            obj.ObsDim         = 1;
+            obj.ActDim         = 1;
+            obj.ActLimit       = 1;
+            obj.HiddenSize     = 32;
+            obj.DiscountFactor = 0.99;
+            obj.LearnRate      = 0.001;
+            obj.Tau            = 0.005;
+        end
+    end
+end
+
 % ===== Policy object (Tier 2) =============================================
 % rlMaxQPolicy — the greedy policy extracted from a value-based agent via
 % getGreedyPolicy.  Carries a copy of the agent's network (or Q table), added
