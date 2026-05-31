@@ -343,6 +343,74 @@ void *matlab_ws_get_symmat(const char *name, int64_t len) {
     return nullptr;
 }
 
+/* Function-handle workspace ABI (kind=13).  A REPL/DAP variable holding
+ * a function handle (`f = @sin`, `g = @myFn`, capture-free `@(x) x+1`)
+ * stores a raw function pointer — the address the make_handle / anon
+ * outliner resolved at the assignment site.  Storing it under a distinct
+ * kind (rather than kind=1 matrix) is what lets the next REPL turn /
+ * the whole-program DAP launch recover that the variable is *callable*:
+ * Resolver::applyWorkspaceKind stamps Binding::IsHandle on a kind=13
+ * lookup, and the MLIR lowering then routes `f(x)` through the
+ * matlab_call_handle_s* trampolines below instead of mis-lowering the
+ * pointer into a matrix subscript (which read the code pointer as a
+ * matlab_mat* and crashed).
+ *
+ * Only the function pointer survives the round-trip — anonymous closures
+ * with captured values can't be reconstructed from the pointer alone, so
+ * the lowering only routes capture-free handles here.  The undo record
+ * uses the same meta-kind=2 (ptr-in-slot) shape as obj/sym/string. */
+void matlab_ws_set_handle(const char *name, int64_t len, void *fn) {
+    matlab_ws_init_if_needed();
+    matlab_ws_lock();
+    struct matlab_dbg_undo_rec *r =
+        matlab_ws_push_undo_locked(name, len, /*kind=*/2);
+    int32_t idx = struct_reserve(matlab_ws, name, (int32_t)len);
+    matlab_ws->kinds[idx] = 13;
+    matlab_ws->f64_vals[idx] = 0.0;
+    matlab_ws->ptr_vals[idx] = fn;
+    matlab_dbg_undo_record_set_new_ptr(r, /*new_kind=*/13, fn);
+    matlab_ws_unlock();
+    matlab_ws_check_watch(name, len);
+}
+
+void *matlab_ws_get_handle(const char *name, int64_t len) {
+    matlab_ws_init_if_needed();
+    matlab_ws_lock();
+    void *out = nullptr;
+    for (int32_t i = 0; i < matlab_ws->nfields; ++i) {
+        const char *gn = matlab_ws->names[i];
+        if (!gn) continue;
+        size_t glen = strlen(gn);
+        if (glen != (size_t)len) continue;
+        if (memcmp(gn, name, (size_t)len) != 0) continue;
+        if (matlab_ws->kinds[i] == 13) out = matlab_ws->ptr_vals[i];
+        break;
+    }
+    matlab_ws_unlock();
+    matlab_ws_check_read_watch(name, len);
+    return out;
+}
+
+/* Scalar function-handle trampolines.  The compiler emits one of these
+ * at a `f(args)` call site where `f` is a workspace-backed handle: the
+ * first argument is the stored function pointer, the rest are the
+ * f64 call arguments.  We cast the pointer to the matching scalar
+ * signature and invoke it.  Covers the common `double -> double` math
+ * builtins (matlab_sin_s, matlab_sqrt_s, ...) and capture-free user /
+ * anonymous functions whose monomorphised signature is all-f64. */
+double matlab_call_handle_s1(void *fn, double a) {
+    if (!fn) return 0.0;
+    return ((double (*)(double))fn)(a);
+}
+double matlab_call_handle_s2(void *fn, double a, double b) {
+    if (!fn) return 0.0;
+    return ((double (*)(double, double))fn)(a, b);
+}
+double matlab_call_handle_s3(void *fn, double a, double b, double c) {
+    if (!fn) return 0.0;
+    return ((double (*)(double, double, double))fn)(a, b, c);
+}
+
 /* Forward-declare the heterogeneous types stored as opaque pointers
  * in the workspace. The real layouts live in matlab_runtime.cpp /
  * the runtime_sym module — runtime_debug.cpp only ever round-trips
@@ -528,6 +596,8 @@ void matlab_ws_whos(void) {
             printf("  %-16s %-16s %-8s\n", name, shape, "double");
         } else if (matlab_ws->kinds[i] == 3) {
             printf("  %-16s %-16s %-8s\n", name, "1x1", "string");
+        } else if (matlab_ws->kinds[i] == 13) {
+            printf("  %-16s %-16s %-8s\n", name, "1x1", "function_handle");
         } else {
             printf("  %-16s %-16s %-8s\n", name, "?", "?");
         }

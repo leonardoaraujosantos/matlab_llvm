@@ -59,6 +59,13 @@ struct Binding {
    * (`s.x`) and re-assignments route through the struct-aware path
    * instead of the matrix one. */
   bool IsStruct = false;
+  /* Function handle (kind=13).  Stamped by the Resolver when the REPL
+   * workspace-kind hook reports a prior input bound this name to a
+   * function handle (`f = @sin`).  The MLIR lowering reads it to route
+   * the cross-turn workspace load through matlab_ws_get_handle and the
+   * `f(x)` call through the matlab_call_handle_s* trampoline instead of
+   * a matrix subscript. */
+  bool IsHandle = false;
 };
 
 class Scope {

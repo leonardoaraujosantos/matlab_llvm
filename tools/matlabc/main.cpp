@@ -5270,6 +5270,11 @@ std::string formatVar(int Kind, int WsIdx) {
              matlab_duration_to_seconds(D));
     return Buf;
   }
+  if (Kind == 13) {
+    /* Function handle (kind=13). The stored value is a raw code pointer
+     * — never dereference it as data; render a stable type label. */
+    return "@function_handle";
+  }
   return "<unknown>";
 }
 

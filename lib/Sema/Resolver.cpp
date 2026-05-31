@@ -1656,6 +1656,12 @@ void Resolver::applyWorkspaceKind(Binding *NB, std::string_view Name,
    * StructInitialised on the next compile so `lb.PathLoss` and friends
    * route through the struct-get path. */
   else if (K == 12) NB->IsStruct = true;
+  /* Kind 13 = function handle (`f = @sin` from a prior input).  Tag the
+   * binding so the MLIR lowering loads it via matlab_ws_get_handle and
+   * routes `f(x)` through the matlab_call_handle_s* trampoline instead
+   * of the matrix-subscript path that read the code pointer as a
+   * matlab_mat* and crashed. */
+  else if (K == 13) NB->IsHandle = true;
   /* Kind 2 = matlab_obj* (classdef instance).  Re-pin the binding to
    * the runtime-tracked class so the obj-call sugar / dot-method
    * dispatch / class operator overloads stay live across REPL turns.
