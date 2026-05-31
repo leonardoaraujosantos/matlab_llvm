@@ -491,6 +491,93 @@ if(MATLAB_LLVM_WITH_MLIR)
       "-framework Foundation")
     target_compile_definitions(matlabc PRIVATE MATLAB_LLVM_GPU_METAL=1)
   endif()
+  # GPU Coder — CUDA backend (T3).  Opt-in (default OFF) so existing
+  # CI / macOS builds are unchanged; enable with -DMATLAB_LLVM_GPU_CUDA=ON
+  # on a Linux box with an NVIDIA GPU.  The TU uses only the CUDA driver
+  # API + NVRTC + a few hand-declared cuBLAS prototypes, so it links
+  # against just libcuda (driver, system), libnvrtc, and libcublas — no
+  # full nvcc toolkit needed.  Discovery prefers a system CUDA install
+  # (find_package(CUDAToolkit)); if that's absent it falls back to the
+  # pip-wheel CUDA libs (nvidia-cuda-nvrtc-cu12 / nvidia-cublas-cu12),
+  # which is how this is validated on the dev box.  Override any path
+  # with -DMATLAB_CUDA_INCLUDE_DIRS / -DMATLAB_CUDA_LIBRARIES.
+  option(MATLAB_LLVM_GPU_CUDA "Build CUDA GPU backend" OFF)
+  if(MATLAB_LLVM_GPU_CUDA)
+    if(NOT DEFINED MATLAB_CUDA_LIBRARIES OR MATLAB_CUDA_LIBRARIES STREQUAL "")
+      set(_cuda_inc "")
+      set(_cuda_libs "")
+      set(_cuda_rpath "")
+      # 1. Prefer a system CUDA toolkit.
+      find_package(CUDAToolkit QUIET)
+      # Driver stub (libcuda) — provided by the NVIDIA driver, not the
+      # toolkit; search the usual system locations + any CUDA stubs dir.
+      find_library(MATLAB_CUDA_DRIVER_LIB cuda
+        PATHS /usr/lib/x86_64-linux-gnu /usr/lib64 /usr/lib
+              ${CUDAToolkit_LIBRARY_DIR} ${CUDAToolkit_LIBRARY_DIR}/stubs)
+      if(CUDAToolkit_FOUND)
+        list(APPEND _cuda_inc ${CUDAToolkit_INCLUDE_DIRS})
+        list(APPEND _cuda_libs CUDA::nvrtc CUDA::cublas)
+        message(STATUS "CUDA backend: using system CUDAToolkit "
+                       "${CUDAToolkit_VERSION} (${CUDAToolkit_INCLUDE_DIRS})")
+      else()
+        # 2. Fall back to pip-wheel CUDA libs under a Python site-packages.
+        #    Locate via the active python's site dir, then glob.
+        find_program(_py NAMES python3 python)
+        set(_site "")
+        if(_py)
+          execute_process(COMMAND ${_py} -c
+            "import site,sys;print(next((p for p in site.getsitepackages()+[site.getusersitepackages()] if p),''))"
+            OUTPUT_VARIABLE _site OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+        endif()
+        file(GLOB _nvrtc_lib  "${_site}/nvidia/cuda_nvrtc/lib/libnvrtc.so*")
+        file(GLOB _cublas_lib "${_site}/nvidia/cublas/lib/libcublas.so*")
+        # Driver-API + nvrtc headers: prefer triton's complete include
+        # tree (ships crt/), else the cuda_nvrtc wheel's include.
+        set(_drv_inc "")
+        foreach(_cand
+            "${_site}/triton/backends/nvidia/include"
+            "${_site}/nvidia/cuda_runtime/include")
+          if(EXISTS "${_cand}/cuda.h")
+            set(_drv_inc "${_cand}")
+            break()
+          endif()
+        endforeach()
+        if(_nvrtc_lib AND _cublas_lib AND _drv_inc
+           AND EXISTS "${_site}/nvidia/cuda_nvrtc/include/nvrtc.h")
+          list(GET _nvrtc_lib 0 _nvrtc_lib0)
+          list(GET _cublas_lib 0 _cublas_lib0)
+          list(APPEND _cuda_inc "${_drv_inc}"
+                                "${_site}/nvidia/cuda_nvrtc/include")
+          list(APPEND _cuda_libs "${_nvrtc_lib0}" "${_cublas_lib0}")
+          get_filename_component(_d1 "${_nvrtc_lib0}" DIRECTORY)
+          get_filename_component(_d2 "${_cublas_lib0}" DIRECTORY)
+          list(APPEND _cuda_rpath "${_d1}" "${_d2}")
+          message(STATUS "CUDA backend: using pip-wheel CUDA libs "
+                         "(${_nvrtc_lib0}, ${_cublas_lib0})")
+        endif()
+      endif()
+      if(NOT _cuda_libs OR NOT MATLAB_CUDA_DRIVER_LIB)
+        message(FATAL_ERROR
+          "MATLAB_LLVM_GPU_CUDA=ON but no CUDA toolchain was found.\n"
+          "  Install the CUDA toolkit, or the pip wheels "
+          "(pip install nvidia-cuda-nvrtc-cu12 nvidia-cublas-cu12), or set\n"
+          "  -DMATLAB_CUDA_INCLUDE_DIRS=... -DMATLAB_CUDA_LIBRARIES=... "
+          "and ensure libcuda (driver) is present.")
+      endif()
+      list(APPEND _cuda_libs "${MATLAB_CUDA_DRIVER_LIB}")
+      set(MATLAB_CUDA_INCLUDE_DIRS "${_cuda_inc}" CACHE STRING "CUDA include dirs")
+      set(MATLAB_CUDA_LIBRARIES    "${_cuda_libs}" CACHE STRING "CUDA libraries")
+      set(MATLAB_CUDA_RPATH        "${_cuda_rpath}" CACHE STRING "CUDA rpath dirs")
+    endif()
+    target_sources(matlabc PRIVATE runtime/gpu/cuda/runtime_gpu_cuda.cpp)
+    target_include_directories(matlabc PRIVATE ${MATLAB_CUDA_INCLUDE_DIRS})
+    target_link_libraries(matlabc PRIVATE ${MATLAB_CUDA_LIBRARIES})
+    target_compile_definitions(matlabc PRIVATE MATLAB_LLVM_GPU_CUDA=1)
+    foreach(_rp ${MATLAB_CUDA_RPATH})
+      target_link_options(matlabc PRIVATE "-Wl,-rpath,${_rp}")
+    endforeach()
+  endif()
   # Export the matlab_* symbols so the JIT's dynamic lookup finds them
   # (by default executables hide symbols not referenced internally).
   if(APPLE)

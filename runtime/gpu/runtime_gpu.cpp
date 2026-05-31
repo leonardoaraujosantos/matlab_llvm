@@ -152,6 +152,20 @@ matlab_gpu_launch_cuda(double, double, double, void *, void *, int) {
       "built in.  Reconfigure with -DMATLAB_LLVM_GPU_CUDA=ON.\n");
   std::abort();
 }
+
+/* Tier-3 CUDA cuBLAS gemm hook — defined strongly by
+ * runtime/gpu/cuda/runtime_gpu_cuda.cpp when the CUDA TU is in the link
+ * line; the weak stub returns nullptr so the gemm dispatcher below
+ * falls back to the CPU lane on hosts without CUDA linked in. */
+extern "C" __attribute__((weak)) matlab_mat *
+matlab_gpu_cuda_gemm_double(matlab_mat *, matlab_mat *) {
+  return nullptr;  /* "CUDA backend not linked — fall back" */
+}
+/* Device-name probe — strong in the CUDA TU; weak stub here. */
+extern "C" __attribute__((weak)) const char *
+matlab_gpu_cuda_device_name(void) {
+  return nullptr;  /* "CUDA backend not linked" */
+}
 extern "C" __attribute__((weak)) int
 matlab_gpu_launch_opencl(double, double, double, void *, void *, int) {
   std::fprintf(stderr,
@@ -254,7 +268,12 @@ const char *matlab_gpu_device_name(void) {
   GpuTarget T = activeTarget();
   switch (T) {
     case GpuTarget::Metal:  return "Apple Metal (Tier-2)";
-    case GpuTarget::Cuda:   return "NVIDIA CUDA (Tier-3)";
+    case GpuTarget::Cuda: {
+      /* Real device name when the CUDA backend is linked + a device is
+       * present; otherwise the generic Tier-3 label. */
+      const char *N = matlab_gpu_cuda_device_name();
+      return N ? N : "NVIDIA CUDA (Tier-3)";
+    }
     case GpuTarget::OpenCl: return "OpenCL (Tier-4)";
     case GpuTarget::Cpu:    return "CPU debug lane (Tier-1)";
     default:                return "CPU debug lane (Tier-1)";
@@ -337,6 +356,11 @@ matlab_mat *matlab_gpu_gemm(matlab_mat *A, matlab_mat *B) {
   GpuTarget T = activeTarget();
   if (T == GpuTarget::Metal && big_enough) {
     matlab_mat *C = matlab_gpu_metal_gemm_double(A, B);
+    if (C) return C;
+    /* Backend hook unavailable / failed — fall through to CPU. */
+  }
+  if (T == GpuTarget::Cuda && big_enough) {
+    matlab_mat *C = matlab_gpu_cuda_gemm_double(A, B);
     if (C) return C;
     /* Backend hook unavailable / failed — fall through to CPU. */
   }

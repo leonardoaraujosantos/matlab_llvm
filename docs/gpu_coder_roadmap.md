@@ -299,6 +299,29 @@ Goal: feature-parity with **MathWorks GPU Coder's CUDA lane** — the
 same source code that ran on Metal in Tier-2 now runs on NVIDIA Linux
 through NVRTC + cuBLAS + cuSOLVER + cuFFT.
 
+> **Status (2026-05-31, issue #25): first on-hardware validation.**
+> Validated on an RTX 5060 (sm_120) via `test/Run/run_gpu_cuda_validation.sh`:
+> - **3.1 host driver** (`runtime/gpu/cuda/runtime_gpu_cuda.cpp`) — driver-API
+>   `CUcontext`/`CUdeviceptr` lifecycle + device probe. ✅
+> - **3.3 NVRTC JIT** — `nvrtcCompileProgram` → PTX → `cuModuleLoadData` →
+>   `cuLaunchKernel`, AXPY exact. ✅
+> - **3.4 H2D/D2H** — `cuMemcpyHtoD`/`DtoH`. ✅
+> - **3.5 cuBLAS GEMM** — `cublasDgemm` (fp64) wired into the
+>   `matlab_gpu_gemm` dispatcher; matches the host lane to 0 ULP. ✅
+> - **`-emit-cuda` bundle** — the emitter now translates the scalar AXPY
+>   kernel body fully (was an identity FALLBACK) and emits an **nvcc-free**
+>   NVRTC host driver that JIT-compiles + launches the real kernel; builds
+>   and runs end-to-end. ✅
+>
+> Build is opt-in (`-DMATLAB_LLVM_GPU_CUDA=ON`, default OFF); CMake prefers
+> a system CUDA toolkit and falls back to the pip-wheel CUDA libs. The TU
+> uses only the driver API + NVRTC + hand-declared cuBLAS prototypes, so no
+> full nvcc toolkit is required. Remaining items (3.2 full kernel-body
+> codegen, 3.6 cuSOLVER, 3.7 cuFFT, 3.8 `__half`, 3.9 streams) are future
+> work; `matlab_gpu_launch_cuda` currently uses the host-fallback loop
+> (parity with the Metal backend — AOT-to-JIT kernel-source linkage is not
+> wired for any backend yet).
+
 | # | Surface | Algorithm / notes | Reuses |
 |---|---|---|---|
 | 3.1 | **`runtime/gpu/cuda/` host driver** | Links `libcuda` (driver API) + `libnvrtc` + `libcudart`. Wraps `CUdevice` / `CUcontext` / `CUstream` / `CUdeviceptr` / `CUmodule` / `CUfunction`. Init resolves the first capable device; explicit selection via `gpuDevice(N)`. | — |
@@ -310,7 +333,7 @@ through NVRTC + cuBLAS + cuSOLVER + cuFFT.
 | 3.7 | **cuFFT library replacement (Tier-3c)** | `cfg.GpuConfig.EnableCUFFT = true`: `fft` / `ifft` / `fft2` on `gpuArray` → `cufftPlan1d` / `cufftPlan2d` / `cufftPlanMany` + `cufftExecZ2Z` / `cufftExecD2Z`. 2-D and higher dispatched as batched 1-D (matches UG p. 2-23). | host `fft` |
 | 3.8 | **`__half` half-precision** | `gpuArray(half(X))` → `__half`-typed buffer; emitted kernels use `__half` arithmetic + `__hfma`/`__hadd`/etc. cuBLAS GEMM uses `cublasHgemm`. Required by the Tier-7.2 fp16 demo and the UG's Sobel half-precision example. | half storage |
 | 3.9 | **Streams + concurrency** | Multiple `CUstream` mapped to `coder.gpu.stream()` handles; `cuStreamSynchronize` for explicit sync. Default behaviour matches Tier-2 (synchronous). | — |
-| 3.10 | **Build flag + CI** | CMake `MATLAB_LLVM_GPU_CUDA=ON`; `find_package(CUDAToolkit REQUIRED)`. CI lane `gpu-cuda-gate` runs only on Linux runners with a discoverable GPU (gate at the runner level, no fail when no GPU — emit "skipped, no CUDA device"). | — |
+| 3.10 | **Build flag + CI** ✅ | CMake `MATLAB_LLVM_GPU_CUDA=ON` (default OFF); discovery prefers `find_package(CUDAToolkit)`, falls back to pip-wheel CUDA libs. Validation lane `test/Run/run_gpu_cuda_validation.sh` runs only when an NVIDIA GPU is present (HW-gated, SKIPs cleanly otherwise) — ready to wire behind a self-hosted-runner label. | — |
 
 **Headline-within-tier**: the same `examples/gpu/mandelbrot_gpu.m`
 source running on Linux + NVIDIA, plus
