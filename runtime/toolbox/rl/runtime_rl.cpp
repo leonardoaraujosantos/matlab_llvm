@@ -945,6 +945,178 @@ matlab_mat *matlab_rl_pg_train(matlab_obj *agent, matlab_obj *env, matlab_obj *o
 }
 
 // ===========================================================================
+// PPO — Proximal Policy Optimization.  rlPPOAgent(obsInfo, actInfo)
+// ===========================================================================
+// On-policy actor-critic for the discrete cart-pole.  Each iteration collects
+// a fresh rollout batch (no replay), estimates advantages with GAE(λ) off a
+// learned value baseline, then runs several epochs of a CLIPPED surrogate
+// update on the same batch.  Reuses the REINFORCE softmax-policy actor + its
+// log π tape construction and the cart-pole env; adds a value network (MSE to
+// the GAE returns) and the clip.
+//
+// The clipped objective L = E[min(rₜ·Âₜ, clip(rₜ,1±ε)·Âₜ)] is realised on the
+// tape as a reweighted −Σ coefₜ·log π(aₜ|sₜ): each epoch a host forward gives
+// the current ratio rₜ = exp(logπ_new − logπ_old); the per-sample coefficient
+// is rₜ·Âₜ when the unclipped term is the minimum (so its gradient is live)
+// and 0 when the clipped term wins (flat → zero gradient) — exactly the PPO
+// gradient at the current parameters.
+
+void matlab_rl_ppo_init(matlab_obj *agent, matlab_obj *obsInfo, matlab_obj *actInfo) {
+    matlab_rl_dqn_init(agent, obsInfo, actInfo);   // actor W1/b1/W2/b2 (obs->H->A) + Adam m*/v*
+    // Value baseline net, capital-V names so they don't collide with the
+    // actor's Adam second-moment buffers (vW1…) that dqn_init created.
+    int64_t obsDim = static_cast<int64_t>(rl::get_f64(agent, "ObsDim"));
+    int64_t H = kDqnHidden;
+    matlab_mat *VW1 = matlab_randn(static_cast<double>(H), static_cast<double>(obsDim));
+    double s1 = std::sqrt(2.0 / static_cast<double>(obsDim));
+    for (int64_t k = 0; k < H * obsDim; ++k) VW1->data[k] *= s1;
+    matlab_mat *VW2 = matlab_randn(1, static_cast<double>(H));
+    for (int64_t k = 0; k < H; ++k) VW2->data[k] *= 1e-3;
+    rl::set_mat(agent, "VW1", VW1); rl::set_mat(agent, "Vb1", matlab_zeros(static_cast<double>(H),1));
+    rl::set_mat(agent, "VW2", VW2); rl::set_mat(agent, "Vb2", matlab_zeros(1,1));
+    const char *VP[4] = {"VW1","Vb1","VW2","Vb2"};
+    for (const char *p : VP) { matlab_mat *pm = rl::get_mat(agent, p);
+        rl::set_mat(agent, (std::string("m")+p).c_str(), matlab_zeros(pm->rows, pm->cols));
+        rl::set_mat(agent, (std::string("n")+p).c_str(), matlab_zeros(pm->rows, pm->cols)); }
+}
+
+matlab_mat *matlab_rl_ppo_train(matlab_obj *agent, matlab_obj *env, matlab_obj *opts) {
+    int64_t obsDim = static_cast<int64_t>(rl::get_f64(agent, "ObsDim"));
+    int64_t A      = static_cast<int64_t>(rl::get_f64(agent, "NumActions"));
+    double gamma = rl::get_f64(agent, "DiscountFactor"); if (gamma <= 0) gamma = 0.99;
+    double lr    = rl::get_f64(agent, "LearnRate");      if (lr <= 0) lr = 1e-3;
+    double lambda = rl::get_f64(agent, "GAELambda");  if (lambda <= 0) lambda = 0.95;
+    double clip   = rl::get_f64(agent, "ClipRatio");  if (clip   <= 0) clip   = 0.2;
+    int64_t epochs   = static_cast<int64_t>(rl::get_f64(agent, "NumEpoch"));   if (epochs   < 1) epochs   = 10;
+    // Larger rollout batches markedly stabilise the on-policy update on
+    // cart-pole (short batches plateau); 2048 steps is the sweet spot.
+    int64_t rollout  = static_cast<int64_t>(rl::get_f64(agent, "RolloutLen")); if (rollout  < 1) rollout  = 2048;
+
+    int64_t maxIter = static_cast<int64_t>(rl::get_f64(opts, "MaxEpisodes"));   if (maxIter < 1) maxIter = 1;
+    int64_t maxStep = static_cast<int64_t>(rl::get_f64(opts, "MaxStepsPerEpisode")); if (maxStep < 1) maxStep = 500;
+
+    int prevFreeFwd = matlab_dlnet_set_free_forward(1);
+    matlab_mat *stats = matlab_zeros(static_cast<double>(maxIter), 1);
+    double atstep = 0.0, vtstep = 0.0;
+    std::vector<double> st(static_cast<size_t>(obsDim)), probs(static_cast<size_t>(A));
+
+    for (int64_t it = 0; it < maxIter; ++it) {
+        // ---- collect a rollout batch (>= rollout steps, whole episodes) ----
+        std::vector<double> bS;            // obsDim per step
+        std::vector<int64_t> bA;
+        std::vector<double> bOldlp, bR, bV, bNextV; std::vector<char> bLast;
+        double sumRet = 0.0; int64_t nEp = 0;
+        while (static_cast<int64_t>(bA.size()) < rollout) {
+            for (int64_t k = 0; k < obsDim; ++k) st[static_cast<size_t>(k)] = (rl::urand() * 2 - 1) * 0.05;
+            double epRet = 0.0;
+            for (int64_t step = 0; step < maxStep; ++step) {
+                rl::mlp_policy(rl::get_mat(agent,"W1"), rl::get_mat(agent,"b1"),
+                               rl::get_mat(agent,"W2"), rl::get_mat(agent,"b2"), st.data(), probs.data());
+                double u = rl::urand(), acc = 0; int64_t a = A;
+                for (int64_t j = 0; j < A; ++j) { acc += probs[static_cast<size_t>(j)]; if (u <= acc) { a = j + 1; break; } }
+                double v; rl::mlp_forward(rl::get_mat(agent,"VW1"), rl::get_mat(agent,"Vb1"),
+                                          rl::get_mat(agent,"VW2"), rl::get_mat(agent,"Vb2"), st.data(), &v);
+                for (int64_t k = 0; k < obsDim; ++k) bS.push_back(st[static_cast<size_t>(k)]);
+                bA.push_back(a);
+                bOldlp.push_back(std::log(probs[static_cast<size_t>(a-1)] + 1e-12));
+                bV.push_back(v);
+                double r; bool done;
+                rl::cartpole_step(st.data(), a, &r, &done);   // advances st to next state
+                bR.push_back(r); epRet += r;
+                bool last = done || (step == maxStep - 1);
+                bLast.push_back(last ? 1 : 0);
+                double nv = 0.0;
+                if (!done) rl::mlp_forward(rl::get_mat(agent,"VW1"), rl::get_mat(agent,"Vb1"),
+                                           rl::get_mat(agent,"VW2"), rl::get_mat(agent,"Vb2"), st.data(), &nv);
+                bNextV.push_back(done ? 0.0 : nv);
+                if (last) break;
+            }
+            sumRet += epRet; nEp++;
+        }
+        int64_t N = static_cast<int64_t>(bA.size());
+
+        // ---- GAE(λ) advantages + returns, episode-aware ----
+        std::vector<double> adv(static_cast<size_t>(N)), ret(static_cast<size_t>(N));
+        double aNext = 0.0;
+        for (int64_t t = N - 1; t >= 0; --t) {
+            if (bLast[static_cast<size_t>(t)]) aNext = 0.0;
+            double delta = bR[static_cast<size_t>(t)] + gamma * bNextV[static_cast<size_t>(t)] - bV[static_cast<size_t>(t)];
+            double a_t = delta + gamma * lambda * aNext;
+            adv[static_cast<size_t>(t)] = a_t; aNext = a_t;
+            ret[static_cast<size_t>(t)] = a_t + bV[static_cast<size_t>(t)];
+        }
+        double mean = 0; for (double a : adv) mean += a; mean /= static_cast<double>(N);
+        double var = 0; for (double a : adv) var += (a-mean)*(a-mean); var /= static_cast<double>(N);
+        double sd = std::sqrt(var) + 1e-8;
+        for (int64_t t = 0; t < N; ++t) adv[static_cast<size_t>(t)] = (adv[static_cast<size_t>(t)] - mean) / sd;
+
+        // X (obsDim×N) is shared across epochs; R row (1×N) is the value target.
+        matlab_mat *X = matlab_zeros(static_cast<double>(obsDim), static_cast<double>(N));
+        matlab_mat *Rm = matlab_zeros(1, static_cast<double>(N));
+        for (int64_t t = 0; t < N; ++t) {
+            for (int64_t k = 0; k < obsDim; ++k) X->data[k*N+t] = bS[static_cast<size_t>(t*obsDim+k)];
+            Rm->data[t] = ret[static_cast<size_t>(t)];
+        }
+
+        for (int64_t ep = 0; ep < epochs; ++ep) {
+            // ---- clipped-surrogate actor step ----
+            matlab_mat *Wt = matlab_zeros(static_cast<double>(A), static_cast<double>(N));
+            for (int64_t t = 0; t < N; ++t) {
+                rl::mlp_policy(rl::get_mat(agent,"W1"), rl::get_mat(agent,"b1"),
+                               rl::get_mat(agent,"W2"), rl::get_mat(agent,"b2"),
+                               &bS[static_cast<size_t>(t*obsDim)], probs.data());
+                double newlp = std::log(probs[static_cast<size_t>(bA[static_cast<size_t>(t)]-1)] + 1e-12);
+                double ratio = std::exp(newlp - bOldlp[static_cast<size_t>(t)]);
+                double Aadv = adv[static_cast<size_t>(t)];
+                double unclipped = ratio * Aadv;
+                double rc = ratio < 1.0 - clip ? 1.0 - clip : (ratio > 1.0 + clip ? 1.0 + clip : ratio);
+                double clipped = rc * Aadv;
+                // gradient lives only when the unclipped term is the minimum.
+                double coef = (unclipped <= clipped) ? ratio * Aadv : 0.0;
+                Wt->data[(bA[static_cast<size_t>(t)]-1)*N + t] = -coef;   // minimise -Σ coef·logπ
+            }
+            matlab_obj *W1L=rl::dl_leaf(rl::get_mat(agent,"W1")), *b1L=rl::dl_leaf(rl::get_mat(agent,"b1"));
+            matlab_obj *W2L=rl::dl_leaf(rl::get_mat(agent,"W2")), *b2L=rl::dl_leaf(rl::get_mat(agent,"b2"));
+            matlab_obj *xL=rl::dl_leaf(X);
+            matlab_obj *logits=rl::dl_add(rl::dl_mm(W2L, rl::dl_relu(rl::dl_add(rl::dl_mm(W1L,xL),b1L))), b2L);
+            matlab_obj *logp=rl::dl_log(rl::dl_softmax(logits));
+            matlab_obj *loss=rl::dl_sum(rl::dl_times(logp, rl::dl_leaf(Wt)));
+            atstep += 1.0;
+            rl::adam_step(rl::get_mat(agent,"W1"), rl::dl_grad(loss,W1L), rl::get_mat(agent,"mW1"), rl::get_mat(agent,"vW1"), lr, atstep);
+            rl::adam_step(rl::get_mat(agent,"b1"), rl::dl_grad(loss,b1L), rl::get_mat(agent,"mb1"), rl::get_mat(agent,"vb1"), lr, atstep);
+            rl::adam_step(rl::get_mat(agent,"W2"), rl::dl_grad(loss,W2L), rl::get_mat(agent,"mW2"), rl::get_mat(agent,"vW2"), lr, atstep);
+            rl::adam_step(rl::get_mat(agent,"b2"), rl::dl_grad(loss,b2L), rl::get_mat(agent,"mb2"), rl::get_mat(agent,"vb2"), lr, atstep);
+            matlab_dlnet_reset0();
+            rl::free_mat(Wt);
+
+            // ---- value MSE step ----
+            matlab_obj *vW1L=rl::dl_leaf(rl::get_mat(agent,"VW1")), *vb1L=rl::dl_leaf(rl::get_mat(agent,"Vb1"));
+            matlab_obj *vW2L=rl::dl_leaf(rl::get_mat(agent,"VW2")), *vb2L=rl::dl_leaf(rl::get_mat(agent,"Vb2"));
+            matlab_obj *vh=rl::dl_relu(rl::dl_add(rl::dl_mm(vW1L, rl::dl_leaf(X)), vb1L));
+            matlab_obj *vpred=rl::dl_add(rl::dl_mm(vW2L, vh), vb2L);
+            matlab_obj *vloss=rl::dl_mse(vpred, rl::dl_leaf(Rm));
+            vtstep += 1.0;
+            rl::adam_step(rl::get_mat(agent,"VW1"), rl::dl_grad(vloss,vW1L), rl::get_mat(agent,"mVW1"), rl::get_mat(agent,"nVW1"), lr, vtstep);
+            rl::adam_step(rl::get_mat(agent,"Vb1"), rl::dl_grad(vloss,vb1L), rl::get_mat(agent,"mVb1"), rl::get_mat(agent,"nVb1"), lr, vtstep);
+            rl::adam_step(rl::get_mat(agent,"VW2"), rl::dl_grad(vloss,vW2L), rl::get_mat(agent,"mVW2"), rl::get_mat(agent,"nVW2"), lr, vtstep);
+            rl::adam_step(rl::get_mat(agent,"Vb2"), rl::dl_grad(vloss,vb2L), rl::get_mat(agent,"mVb2"), rl::get_mat(agent,"nVb2"), lr, vtstep);
+            matlab_dlnet_reset0();
+        }
+        rl::free_mat(X); rl::free_mat(Rm);
+        stats->data[it] = sumRet / static_cast<double>(nEp > 0 ? nEp : 1);
+    }
+    matlab_dlnet_set_free_forward(prevFreeFwd);
+    return stats;
+}
+
+// sim(ppoAgent, env) — greedy (argmax) cart-pole rollout; same actor layout as
+// the REINFORCE agent, so the PG greedy sim applies verbatim.
+matlab_mat *matlab_rl_pg_sim(matlab_obj *agent, matlab_obj *env);   // defined below
+matlab_mat *matlab_rl_ppo_sim(matlab_obj *agent, matlab_obj *env) {
+    return matlab_rl_pg_sim(agent, env);
+}
+
+// ===========================================================================
 // Deep Deterministic Policy Gradient (DDPG) — rlDDPGAgent(obsInfo, actInfo)
 // ===========================================================================
 // Continuous control.  Auto-builds a deterministic actor (obsDim → H relu → 1

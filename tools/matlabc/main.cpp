@@ -2601,6 +2601,7 @@ static std::string buildReplPrelude(const std::string &Src) {
     {false, "rlPGAgent",                 "rl_classdefs.m"},
     {false, "rlDDPGAgent",               "rl_classdefs.m"},
     {false, "rlTD3Agent",                "rl_classdefs.m"},
+    {false, "rlPPOAgent",                "rl_classdefs.m"},
     {false, "rlMaxQPolicy",              "rl_classdefs.m"},
     {false, "getAction",                 "rl_classdefs.m"},
     {false, "getMaxQValue",              "rl_classdefs.m"},
@@ -11884,7 +11885,7 @@ int main(int Argc, char **Argv) {
       "rlPredefinedEnv", "rlMDPEnv", "rlFiniteSetSpec", "rlNumericSpec",
       "rlFunctionEnv", "rlTable", "rlQValueFunction", "rlQAgent",
       "rlSARSAAgent", "rlDQNAgent", "rlPGAgent",
-      "rlDDPGAgent", "rlTD3Agent",
+      "rlDDPGAgent", "rlTD3Agent", "rlPPOAgent",
       "rlQAgentOptions", "rlSARSAAgentOptions",
       "rlOptimizerOptions", "rlTrainingOptions", "rlSimulationOptions",
       "rlMaxQPolicy",
@@ -12199,6 +12200,7 @@ int main(int Argc, char **Argv) {
         ClsName == "rlQValueFunction" || ClsName == "rlQAgent" ||
         ClsName == "rlSARSAAgent" || ClsName == "rlDQNAgent" ||
         ClsName == "rlDDPGAgent" || ClsName == "rlTD3Agent" ||
+        ClsName == "rlPPOAgent" ||
         ClsName == "rlPGAgent" || ClsName == "rlQAgentOptions" ||
         ClsName == "rlSARSAAgentOptions" || ClsName == "rlOptimizerOptions" ||
         ClsName == "rlTrainingOptions" || ClsName == "rlSimulationOptions" ||

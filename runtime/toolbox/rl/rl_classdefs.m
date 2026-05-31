@@ -346,6 +346,26 @@ classdef rlTD3Agent
     end
 end
 
+% rlPPOAgent — Proximal Policy Optimization (on-policy actor-critic).  Discrete
+% cart-pole: the runtime collects a rollout batch, estimates GAE advantages off
+% a learned value baseline, and runs several clipped-surrogate epochs per batch.
+classdef rlPPOAgent
+    properties
+        ObsDim
+        NumActions
+        DiscountFactor
+        LearnRate
+    end
+    methods
+        function obj = rlPPOAgent()
+            obj.ObsDim         = 1;
+            obj.NumActions     = 2;
+            obj.DiscountFactor = 0.99;
+            obj.LearnRate      = 0.001;
+        end
+    end
+end
+
 % ===== Policy object (Tier 2) =============================================
 % rlMaxQPolicy — the greedy policy extracted from a value-based agent via
 % getGreedyPolicy.  Carries a copy of the agent's network (or Q table), added

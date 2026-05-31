@@ -11,6 +11,7 @@ control/c2d_zoh_demo.m                             # EMIT  (needs c2d/d2c/step o
 # (timeout-free) run-tests lane via test/Run/rl_ddpg.m.
 rl/pendulum_ddpg.m                                 # TIMEOUT (heavy 200-ep DDPG training; convergence gated by test/Run/rl_ddpg.m)
 rl/pendulum_td3.m                                  # TIMEOUT (heavy 200-ep TD3 training, twin critics; convergence gated by test/Run/rl_td3.m)
+rl/cartpole_ppo.m                                  # TIMEOUT (heavy PPO training, large rollout batches; convergence gated by test/Run/rl_ppo.m)
 pde/clamped_plate_pressure.m                       # EMIT
 pde/poisson_disk.m                                 # EMIT
 pde/tuningfork_modal.m                             # EMIT

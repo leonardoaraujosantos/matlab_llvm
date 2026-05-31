@@ -127,8 +127,25 @@ i.i.d. Gaussian across seeds). 200 episodes → greedy return ~**−371**
 `return > −1000`. TD3 destabilises with over-training, so 200 episodes is the
 sweet spot (250+ regresses some seeds).
 
-SAC (squashed-Gaussian actor + automatic temperature) and PPO (clipped
-surrogate + GAE, on-policy over cart-pole) are the remaining T6 agents.
+**T6 — PPO SHIPPED** (headline [`examples/rl/cartpole_ppo.m`](../examples/rl/cartpole_ppo.m),
+test `rl_ppo.m`). `rlPPOAgent(obsInfo,actInfo)` is the first **on-policy**
+agent and reuses the REINFORCE softmax actor + its log π tape construction +
+the cart-pole env + the PG greedy sim. Each iteration collects a fresh rollout
+batch (no replay), estimates advantages with **GAE(λ)** off a learned value
+baseline (a second MLP, trained by MSE to the GAE returns), then runs several
+epochs of the **clipped surrogate** over the batch. The clip is realised on
+the tape as a reweighted `−Σ coefₜ·log π`: a host forward each epoch gives the
+ratio `rₜ = exp(logπ_new − logπ_old)`; `coefₜ = rₜ·Âₜ` when the unclipped term
+is the minimum (live gradient) and `0` when the clipped term wins (flat) —
+exactly the PPO gradient at the current parameters. Large rollout batches
+(2048) are key to stability; like TD3 it over-trains past its sweet spot.
+80 iterations → greedy balances ~**138–500 steps** across seeds (untrained
+≈ 10–20); test asserts `balanced > 50`.
+
+The remaining T6 agent is **SAC** (squashed-Gaussian actor with the
+reparameterisation trick + automatic temperature toward an entropy target) —
+the most involved, as the actor's log-prob (with the tanh-squash correction)
+must be differentiated through the tape.
 
 ---
 
