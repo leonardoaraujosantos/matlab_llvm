@@ -533,6 +533,13 @@ matlab_mat *matlab_randn(double m, double n) {
     return A;
 }
 
+/* Allocation-free scalar draws off the same rng-seeded stream as
+ * matlab_rand(1,1) / matlab_randn(1,1) — bit-identical consumption, no 1x1
+ * matrix allocated per call.  For hot inner loops (e.g. RL minibatch sampling
+ * and exploration noise) that would otherwise leak millions of tiny matrices. */
+double matlab_rand_scalar(void)  { return rng_uniform(); }
+double matlab_randn_scalar(void) { return rng_normal();  }
+
 /*---------- Linear algebra (pure C, no BLAS) ------------------------------
  *
  * These routines are intentionally library-agnostic: no dependency on

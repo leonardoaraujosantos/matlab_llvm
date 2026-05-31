@@ -50,6 +50,7 @@ extern "C" matlab_mat *matlab_randn(double m, double n);
 // reused.  Only the Adam moment update (optimizer state) lives RL-side.
 extern "C" matlab_obj *matlab_obj_new(int32_t class_id);
 extern "C" matlab_mat *matlab_dlnet_reset0(void);
+extern "C" int         matlab_dlnet_set_free_forward(int on);
 extern "C" matlab_mat *matlab_dlnet_dlarray_init(void *obj, matlab_mat *X);
 extern "C" matlab_mat *matlab_dlnet_extractdata(void *obj);
 extern "C" matlab_mat *matlab_dlnet_mtimes(void *r, void *a, void *b);
@@ -140,11 +141,19 @@ inline matlab_mat *clone_mat(matlab_mat *m) {
     return c;
 }
 
-// A uniform draw in [0,1) honouring the global (rng-seeded) stream.
-inline double urand() {
-    matlab_mat *r = matlab_rand(1, 1);
-    return (r && r->data) ? r->data[0] : 0.0;
-}
+// A uniform draw in [0,1) honouring the global (rng-seeded) stream.  Uses the
+// allocation-free scalar primitive — bit-identical to matlab_rand(1,1) but
+// without leaking a 1x1 matrix on every call (deep-RL loops draw millions).
+inline double urand() { return matlab_rand_scalar(); }
+// A standard-normal draw off the same stream, allocation-free.
+inline double urandn() { return matlab_randn_scalar(); }
+
+// Free a plain (2-D) matrix the RL loops allocate as scratch — minibatch
+// tensors, gradient clones returned by dl_grad, small constant operands.  All
+// such matrices are dense 2-D (data + struct), never the magic-tagged 3-D/N-D
+// descriptors, so a direct free is correct and avoids leaking across the tens
+// of thousands of training steps a deep-RL run takes.
+inline void free_mat(matlab_mat *m) { if (m) { free(m->data); free(m); } }
 
 // argmax over a row of the Q table (S×A, row-major), ties → lowest index.
 inline int64_t argmax_row(const double *Q, int64_t s, int64_t A) {
@@ -210,20 +219,23 @@ inline void mlp_policy(matlab_mat *W1, matlab_mat *b1, matlab_mat *W2,
 }
 
 // Adam in-place update of param P from grad G, with persistent moments M,V.
+// Consumes (frees) G — every caller passes a fresh dl_grad() clone used only
+// here, so freeing it reclaims the per-step gradient instead of leaking it.
 inline void adam_step(matlab_mat *P, matlab_mat *G, matlab_mat *M, matlab_mat *V,
                       double lr, double t) {
-    if (!P || !G || !M || !V) return;
     const double b1 = 0.9, b2 = 0.999, eps = 1e-8;
-    int64_t n = P->rows * P->cols;
-    if (G->rows * G->cols != n) return;   // shape guard
-    double bc1 = 1.0 - std::pow(b1, t), bc2 = 1.0 - std::pow(b2, t);
-    for (int64_t k = 0; k < n; ++k) {
-        double g = G->data[k];
-        M->data[k] = b1 * M->data[k] + (1 - b1) * g;
-        V->data[k] = b2 * V->data[k] + (1 - b2) * g * g;
-        double mhat = M->data[k] / bc1, vhat = V->data[k] / bc2;
-        P->data[k] -= lr * mhat / (std::sqrt(vhat) + eps);
+    if (P && G && M && V && G->rows * G->cols == P->rows * P->cols) {
+        int64_t n = P->rows * P->cols;
+        double bc1 = 1.0 - std::pow(b1, t), bc2 = 1.0 - std::pow(b2, t);
+        for (int64_t k = 0; k < n; ++k) {
+            double g = G->data[k];
+            M->data[k] = b1 * M->data[k] + (1 - b1) * g;
+            V->data[k] = b2 * V->data[k] + (1 - b2) * g * g;
+            double mhat = M->data[k] / bc1, vhat = V->data[k] / bc2;
+            P->data[k] -= lr * mhat / (std::sqrt(vhat) + eps);
+        }
     }
+    free_mat(G);
 }
 
 // Cart-pole dynamics (Barto-Sutton-Anderson).  state = [x, xdot, th, thdot];
@@ -999,7 +1011,7 @@ static void ddpg_critic_step(matlab_obj *ag, matlab_mat *Xsa, matlab_mat *Y, dou
     rl::adam_step(rl::get_mat(ag,"cb1"), rl::dl_grad(loss,b1), rl::get_mat(ag,"mcb1"), rl::get_mat(ag,"vcb1"), lr, t);
     rl::adam_step(rl::get_mat(ag,"cW2"), rl::dl_grad(loss,W2), rl::get_mat(ag,"mcW2"), rl::get_mat(ag,"vcW2"), lr, t);
     rl::adam_step(rl::get_mat(ag,"cb2"), rl::dl_grad(loss,b2), rl::get_mat(ag,"mcb2"), rl::get_mat(ag,"vcb2"), lr, t);
-    matlab_dlnet_reset0();
+    matlab_dlnet_reset0();   // frees non-leaf forward values + adjoints + temps
 }
 
 // One actor Adam step (deterministic policy gradient) on the reused tape:
@@ -1021,7 +1033,8 @@ static void ddpg_actor_step(matlab_obj *ag, matlab_mat *S, double actLimit, doub
     rl::adam_step(rl::get_mat(ag,"ab1"), rl::dl_grad(loss,ab1), rl::get_mat(ag,"mab1"), rl::get_mat(ag,"vab1"), lr, t);
     rl::adam_step(rl::get_mat(ag,"aW2"), rl::dl_grad(loss,aW2), rl::get_mat(ag,"maW2"), rl::get_mat(ag,"vaW2"), lr, t);
     rl::adam_step(rl::get_mat(ag,"ab2"), rl::dl_grad(loss,ab2), rl::get_mat(ag,"mab2"), rl::get_mat(ag,"vab2"), lr, t);
-    matlab_dlnet_reset0();
+    matlab_dlnet_reset0();   // frees non-leaf forward values + adjoints + temps
+    rl::free_mat(lim); rl::free_mat(neg);   // 1x1 leaf constants (not tape-freed)
 }
 
 matlab_mat *matlab_rl_ddpg_train(matlab_obj *agent, matlab_obj *env, matlab_obj *opts) {
@@ -1031,9 +1044,24 @@ matlab_mat *matlab_rl_ddpg_train(matlab_obj *agent, matlab_obj *env, matlab_obj 
     double gamma = rl::get_f64(agent, "DiscountFactor"); if (gamma <= 0) gamma = 0.99;
     double lr    = rl::get_f64(agent, "LearnRate");      if (lr <= 0) lr = 1e-3;
     double tau   = rl::get_f64(agent, "Tau");            if (tau <= 0) tau = 5e-3;
+    // Tunables (default to a sane DDPG recipe when the field is unset/<=0).
+    double actorLr = rl::get_f64(agent, "ActorLR");    if (actorLr <= 0) actorLr = lr;
+    // Reward scaling for the critic target.  With gamma=0.99 and per-step
+    // pendulum rewards up to ~-16, undiscounted returns reach ~-1600, whose
+    // raw TD targets swamp the small critic; scaling by 0.1 keeps Q at O(100)
+    // so the swing-up actually learns (untrained ≈ -1680 → trained ≈ -380).
+    double rscale  = rl::get_f64(agent, "RewardScale"); if (rscale <= 0) rscale = 0.1;
+    double ouSigma = rl::get_f64(agent, "OUSigma");     if (ouSigma <= 0) ouSigma = 0.2;
+    int64_t gradSteps = static_cast<int64_t>(rl::get_f64(agent, "GradSteps")); if (gradSteps < 1) gradSteps = 1;
 
     int64_t maxEp   = static_cast<int64_t>(rl::get_f64(opts, "MaxEpisodes"));   if (maxEp < 1) maxEp = 1;
     int64_t maxStep = static_cast<int64_t>(rl::get_f64(opts, "MaxStepsPerEpisode")); if (maxStep < 1) maxStep = 200;
+
+    // DDPG runs ~maxEp·maxStep·gradSteps grad calls on the reused tape; reclaim
+    // non-leaf forward values on each reset so the run stays bounded (see
+    // matlab_dlnet_set_free_forward).  This loop never holds a non-leaf dlarray
+    // across a reset, so it is safe.  Restored on exit.
+    int prevFreeFwd = matlab_dlnet_set_free_forward(1);
 
     const int64_t batch = 64, minReplay = batch;
     const size_t  replayCap = 50000;
@@ -1043,7 +1071,7 @@ matlab_mat *matlab_rl_ddpg_train(matlab_obj *agent, matlab_obj *env, matlab_obj 
     matlab_mat *stats = matlab_zeros(static_cast<double>(maxEp), 1);
     double tstep = 0.0;
     std::vector<double> sint(2), obs(static_cast<size_t>(obsDim)), nobs(static_cast<size_t>(obsDim)), act(static_cast<size_t>(actDim));
-    const double ouTheta = 0.15, ouSigma = 0.2;
+    const double ouTheta = 0.15;
 
     for (int64_t ep = 0; ep < maxEp; ++ep) {
         // reset: pendulum hanging down (theta=pi) + small noise
@@ -1057,8 +1085,7 @@ matlab_mat *matlab_rl_ddpg_train(matlab_obj *agent, matlab_obj *env, matlab_obj 
                               obs.data(), actLimit, act.data());
             // OU exploration noise
             for (int64_t k = 0; k < actDim; ++k) {
-                matlab_mat *rn = matlab_randn(1, 1);
-                ou[static_cast<size_t>(k)] += -ouTheta * ou[static_cast<size_t>(k)] + ouSigma * rn->data[0];
+                ou[static_cast<size_t>(k)] += -ouTheta * ou[static_cast<size_t>(k)] + ouSigma * rl::urandn();
                 act[static_cast<size_t>(k)] += ou[static_cast<size_t>(k)];
                 if (act[static_cast<size_t>(k)] > actLimit) act[static_cast<size_t>(k)] = actLimit;
                 if (act[static_cast<size_t>(k)] < -actLimit) act[static_cast<size_t>(k)] = -actLimit;
@@ -1076,7 +1103,7 @@ matlab_mat *matlab_rl_ddpg_train(matlab_obj *agent, matlab_obj *env, matlab_obj 
             if (replay.size() < replayCap * static_cast<size_t>(Wd)) { replay.insert(replay.end(), tr.begin(), tr.end()); rcount++; }
             else { std::copy(tr.begin(), tr.end(), replay.begin() + static_cast<long>(rhead * static_cast<size_t>(Wd))); rhead = (rhead + 1) % replayCap; }
 
-            if (rcount >= static_cast<size_t>(minReplay)) {
+            for (int64_t gs = 0; gs < gradSteps && rcount >= static_cast<size_t>(minReplay); ++gs) {
                 matlab_mat *Xsa = matlab_zeros(static_cast<double>(obsDim + actDim), static_cast<double>(batch));
                 matlab_mat *Y   = matlab_zeros(1, static_cast<double>(batch));
                 matlab_mat *S   = matlab_zeros(static_cast<double>(obsDim), static_cast<double>(batch));
@@ -1095,19 +1122,21 @@ matlab_mat *matlab_rl_ddpg_train(matlab_obj *agent, matlab_obj *env, matlab_obj 
                     for (int64_t k = 0; k < actDim; ++k) sap[static_cast<size_t>(obsDim+k)] = na[static_cast<size_t>(k)];
                     double qn = rl::critic_forward(rl::get_mat(agent,"tcW1"), rl::get_mat(agent,"tcb1"),
                                                    rl::get_mat(agent,"tcW2"), rl::get_mat(agent,"tcb2"), sap.data());
-                    Y->data[b] = rj + gamma * qn;
+                    Y->data[b] = rscale * rj + gamma * qn;
                 }
                 tstep += 1.0;
                 ddpg_critic_step(agent, Xsa, Y, lr, tstep);
-                ddpg_actor_step(agent, S, actLimit, lr, tstep);
+                ddpg_actor_step(agent, S, actLimit, actorLr, tstep);
                 const char *P[8] = {"aW1","ab1","aW2","ab2","cW1","cb1","cW2","cb2"};
                 for (const char *p : P)
                     rl::soft_update(rl::get_mat(agent, (std::string("t")+p).c_str()), rl::get_mat(agent, p), tau);
+                rl::free_mat(Xsa); rl::free_mat(Y); rl::free_mat(S);
             }
             for (int64_t k = 0; k < obsDim; ++k) obs[static_cast<size_t>(k)] = nobs[static_cast<size_t>(k)];
         }
         stats->data[ep] = epReturn;
     }
+    matlab_dlnet_set_free_forward(prevFreeFwd);
     return stats;
 }
 

@@ -16,9 +16,9 @@ what Deep Learning shipped along the way.
 
 ---
 
-## 0. Status — Tiers 1–4 SHIPPED; deep agents reuse the dlnet tape (2026-05-29 → 05-30)
+## 0. Status — Tiers 1–5 SHIPPED; deep agents reuse the dlnet tape (2026-05-29 → 05-31)
 
-**T2 (control-env infra) + T3 (DQN) + T4 (REINFORCE) shipped on top of T1.**
+**T2 (control-env infra) + T3 (DQN) + T4 (REINFORCE) + T5 (DDPG) shipped on top of T1.**
 The keystone decision: deep agents do **not** re-implement any autodiff — the
 RL runtime builds each actor/critic forward pass as `dlarray` shells
 (`matlab_obj_new`) and drives the **shipped Deep Learning Toolbox tape**
@@ -72,31 +72,49 @@ live RL-side. Zero dlnet changes, zero forward/backward duplication.
   branch wrongly fire for DQN agents → a 0×1 empty result that printed as a
   literal `%.0f`.)
 
-**T5 (continuous control) — DDPG IMPLEMENTED + wired, but BLOCKED from shipping
-a demo.** `rlPredefinedEnv("Pendulum-Continuous")` (swing-up dynamics, Kind=3,
-continuous-action `getActionInfo`), `rlDDPGAgent(obsInfo,actInfo)` (auto-built
-deterministic actor `obs→H→1 tanh·limit` + Q(s,a) critic `[obs;act]→H→1`,
-target copies + soft `tau` updates, OU exploration), the critic TD-MSE step
-and the **deterministic-policy-gradient actor step (actor gradient flows
-through the critic via tape `vertcat([s; actor(s)])`, grad w.r.t. actor params
-only)** are all built and run end-to-end on the reused tape. `getAction`
-extended to return the continuous action.
+**T5 (continuous control) — DDPG.** `rlPredefinedEnv("Pendulum-Continuous")`
+(swing-up dynamics, Kind=3, continuous-action `getActionInfo`),
+`rlDDPGAgent(obsInfo,actInfo)` (auto-built deterministic actor
+`obs→H→1 tanh·limit` + Q(s,a) critic `[obs;act]→H→1`, target copies + soft
+`tau` updates, OU exploration), the critic TD-MSE step and the
+**deterministic-policy-gradient actor step (actor gradient flows through the
+critic via tape `vertcat([s; actor(s)])`, grad w.r.t. actor params only)** all
+run end-to-end on the reused tape. `getAction` extended to return the
+continuous action.
 
-**Two blockers stop a shippable demo:**
-1. **Autodiff-tape training-scale memory (issue #82).** The tape leaks per
-   grad-call (forward vals on reset, orphaned adjoints across multi-param grad
-   calls, backward contribution temporaries). Fine for one-shot DL / DQN+PG
-   (few grad calls), but DDPG (100 ep × 200 steps × ~8 grad calls) peaks at
-   ~18 GB. Surgical frees cause use-after-free in the conv/CNN backward paths
-   (6 `dl_cnn_*` crashes) — a correct fix needs a tape ownership/arena model,
-   tracked in #82.
-2. **Convergence tuning.** Even bounded, DDPG pendulum swing-up needs more
-   episodes + tuning than the memory ceiling currently allows (the bounded run
-   stays near the untrained return).
+**Both former blockers are now cleared and T5 SHIPS** — headline
+[`examples/rl/pendulum_ddpg.m`](../examples/rl/pendulum_ddpg.m), gating test
+`rl_ddpg.m`.
 
-So the DDPG implementation lives in `runtime/toolbox/rl/` (builds, wired) but
-ships **no example/test** until #82 lands. TD3/SAC/PPO (twin critics / entropy
-/ clipped surrogate) layer on top once DDPG demos cleanly.
+1. **Autodiff-tape training-scale memory — RESOLVED.** Two layers of fix:
+   - *#82 (PR #85, merged):* the tape frees its private matrices on `reset` —
+     orphaned adjoints across multi-param grad calls go to a free list,
+     backward contribution temporaries are recorded and freed, conv2d eager
+     `dW/dX` frees removed. (Forward values stay — each is a live `dlarray`'s
+     `Data`, no object GC.)
+   - *T5 additions (this branch):* PR #85 alone still left DDPG at ~20 GB over
+     ~80k grad calls. The dominant leak was the **per-matmul-backward transpose
+     scratch** in the dlnet gemm helpers (`dlnet_gemm_AtB/_ABt` allocated `Aᵀ`
+     and never freed) — a general dlnet bug; freeing it is numerically inert
+     and helps *all* training. Plus RL-loop hygiene: an **opt-in reset mode**
+     that also reclaims non-leaf forward values (leaves — the externally-owned
+     params — are never touched; the deep-training loops provably hold no
+     non-leaf dlarray across a reset), allocation-free scalar RNG draws
+     (`matlab_rand_scalar`/`_scalar`) instead of leaking a 1×1 per draw, and
+     freeing the per-step minibatch tensors + Adam gradient clones. Net: the
+     200-episode pendulum run dropped **~20 GB → ~810 MB (≈25×)**, all 39
+     `dl_*` autodiff tests still green.
+2. **Convergence — SOLVED via reward scaling.** With `gamma=0.99` and
+   per-step rewards up to ~−16, the undiscounted critic targets reach ~−1600,
+   which swamped the small critic; scaling the critic's reward by **0.1**
+   (baked as the DDPG default) keeps Q at ~O(100) and the swing-up learns.
+   Over 200 episodes the greedy policy reaches ~**−380/−391 return**
+   (untrained ≈ −1680) — a clear convergence with a wide margin, tight across
+   seeds. The gating test asserts the platform-stable outcome (`return > −900`)
+   rather than the chaotic, libm-dependent exact value.
+
+TD3/SAC/PPO (twin critics / entropy / clipped surrogate) layer on top of the
+shipped DDPG.
 
 ---
 

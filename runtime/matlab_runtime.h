@@ -78,6 +78,8 @@ matlab_mat *matlab_eye(double m, double n);
 matlab_mat *matlab_magic(double nd);
 matlab_mat *matlab_rand(double m, double n);
 matlab_mat *matlab_randn(double m, double n);
+double matlab_rand_scalar(void);
+double matlab_randn_scalar(void);
 matlab_mat *matlab_range(double start, double step, double end);
 matlab_mat *matlab_repmat(matlab_mat *A, double m, double n);
 
