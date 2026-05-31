@@ -82,14 +82,30 @@ std::string Parser::unescapeSingleQuoted(std::string_view Raw) {
 // Top-level parseFile
 //===----------------------------------------------------------------------===//
 
-TranslationUnit *Parser::parseFile() {
+TranslationUnit *Parser::parseFile(bool AllowMultipleUnits) {
   auto *TU = Ctx.make<TranslationUnit>();
   SourceLocation Start = cur().Loc;
   TU->Range.Begin = Start;
 
   skipStatementTerminators();
 
-  if (at(TokenKind::kw_classdef)) {
+  if (AllowMultipleUnits &&
+      (at(TokenKind::kw_classdef) || at(TokenKind::kw_function))) {
+    // Prelude buffer: a flat sequence of classdefs + helper functions
+    // (no script body), e.g. the machine-assembled toolbox classdef
+    // prelude the JIT/-dap path merges. MATLAB's one-classdef-per-file
+    // rule doesn't apply — accept any interleaving until EOF.
+    while (at(TokenKind::kw_classdef) || at(TokenKind::kw_function)) {
+      if (at(TokenKind::kw_classdef)) {
+        if (auto *C = parseClassDef()) TU->Classes.push_back(C);
+      } else {
+        if (auto *F = parseFunction()) TU->Functions.push_back(F);
+      }
+      skipStatementTerminators();
+    }
+    if (!at(TokenKind::eof))
+      Diag.error(cur().Loc, "stray tokens in prelude buffer");
+  } else if (at(TokenKind::kw_classdef)) {
     // A class file. MATLAB allows exactly one classdef per file, optionally
     // followed by local functions. We accept the same shape.
     if (auto *C = parseClassDef()) TU->Classes.push_back(C);
