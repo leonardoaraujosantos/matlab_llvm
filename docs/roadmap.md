@@ -774,7 +774,7 @@ folded into the Comm roadmap as priority §3.
 | # | Toolbox | Effort | Notes |
 |---|---|---|---|
 | ~~7~~ | **Deep Learning** | ✅ **SHIPPED 2026-05-28** | All 6 tiers — `dlarray` + reverse-mode autodiff tape, `dlnetwork` carrier + `trainnet` driver + custom-loop API (`adamupdate`/`sgdmupdate`/`rmspropupdate`), full activation/loss/conv2d/conv1d/BN/LN/GN/IN/RMSNorm/dropout surface, LSTM/GRU/BiLSTM/LSTMP + functional MHA + `embed`, residual/transfer-learning/GAN/VAE/Siamese/Neural-ODE patterns, gradCAM (MLP + image-domain)/occlusion/LIME/tsne, classification metrics, dlquantizer calibrate/validate, magnitude pruning, programmatic experiment-sweep harness. **DL HDL H1–H5** ships in the same toolbox: INT8 quant → fi-typed SystemVerilog → cocotb bit-accuracy (`% hdl: precise_fi`) → LSTM-on-FPGA → minimal ONNX inference-graph importer (~56 ops). 39 `dl_*.m` tests + 44 examples. See [`feature_status.md`](feature_status.md) + [`deep_learning_toolbox_roadmap.md`](deep_learning_toolbox_roadmap.md). |
-| 8 | **Reinforcement Learning** | L (~8w) **after DL** | `rlAgent` / DQN / PPO / SAC + env API. Trivial after DL lands. |
+| ~~8~~ | **Reinforcement Learning** | ✅ **SHIPPED 2026-05-31** (PR #83) | All 6 tiers + a beyond-list GRPO bonus. Tabular `rlQAgent`/`rlSARSAAgent` (grid-world/MDP) → DQN → REINFORCE (`rlPGAgent`) → DDPG → **TD3 / PPO / SAC** → **`rlGRPOAgent`** (DeepSeek, critic-free, with a Countdown verifier env). Eight deep agents, all riding the shipped `dlnetwork`/`dlgradient` autodiff tape with zero duplication — the keystone dividend. Surfaced + fixed a general dlnet gemm-transpose memory leak (~20 GB → ~810 MB for DDPG, helps all DL training). 10 gating tests + 10 examples. See [`feature_status.md`](feature_status.md) + [`reinforcement_learning_toolbox_roadmap.md`](reinforcement_learning_toolbox_roadmap.md). Carved: TRPO, SAC auto-temperature, `rlFunctionEnv` classdef, training-monitor/MBPO/deploy infra. |
 | 9 | **Robotics System** | L (6-8w) | `rigidBodyTree`, fwd/inv kinematics, motion planning, collisions. Massive overlap with the quadrotor work. Roadmap drafted ([`robotics_toolbox_roadmap.md`](robotics_toolbox_roadmap.md)). |
 | 10 | **UAV Toolbox** | M (4-5w) **after #1+#6+#9** | Mostly integration — drone flight stack on top of the three above. |
 | 11 | **ROS Toolbox** | M (3-4w) | Plain ROS1/ROS2 marshalling (publish/subscribe + msg types). Self-contained protocol work. |
@@ -827,7 +827,7 @@ If you want **maximum demo value per week**:
 
 If you want **maximum strategic value** for compiler reach (now that Deep Learning has shipped):
 
-> **Reinforcement Learning (L, ~8w)** — rides directly on shipped `dlnetwork`/`dlgradient`/`trainnet`; adds `rlAgent` / DQN / PPO / SAC + env API. Trivial after DL. Pair with **Computer Vision (M)** and **Text Analytics (S–L)** to convert DL into the broader AI demo surface.
+> **Reinforcement Learning** — ✅ **SHIPPED** (PR #83). It rode directly on the shipped `dlnetwork`/`dlgradient` autodiff tape exactly as predicted ("trivial after DL"): all six tiers (tabular → DQN → REINFORCE → DDPG → TD3/PPO/SAC) plus a beyond-list **GRPO** agent with a verifier env. Pair the now-shipped DL+RL with **Computer Vision (M)** and **Text Analytics (S–L)** to convert them into the broader AI demo surface.
 
 If you want **quick wins**:
 

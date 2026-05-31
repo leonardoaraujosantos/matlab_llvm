@@ -14,9 +14,19 @@ Toolbox** ([`deep_learning_toolbox_roadmap.md`](deep_learning_toolbox_roadmap.md
 That dependency is the single most important fact for scoping, because of
 what Deep Learning shipped along the way.
 
+> **✅ SHIPPED & MERGED to `main` (PR #83, 2026-05-31).** All six tiers plus a
+> beyond-the-MathWorks-list **GRPO** agent. Eight deep agents
+> (DQN · REINFORCE · DDPG · TD3 · PPO · SAC · GRPO + tabular Q/SARSA), all
+> riding the one shared Deep Learning autodiff tape with zero duplication.
+> 10 gating tests + 10 examples, CI-green (Smoke + Perf + full ctest gate on
+> Linux). Sections 2–5 below are the original *plan* and are kept as the design
+> record; sections 0/0a/0b are the as-built status. Remaining (carved): SAC
+> automatic-temperature tuning, TRPO, the `rlFunctionEnv` custom-env classdef,
+> and the training-monitor / MBPO / custom-loop / deployment infrastructure.
+
 ---
 
-## 0. Status — Tiers 1–6 SHIPPED; deep agents reuse the dlnet tape (2026-05-29 → 05-31)
+## 0. Status — Tiers 1–6 SHIPPED + GRPO; deep agents reuse the dlnet tape (2026-05-29 → 05-31, merged PR #83)
 
 **T2 (control-env infra) + T3 (DQN) + T4 (REINFORCE) + T5 (DDPG) + T6 (TD3 / PPO / SAC) shipped on top of T1.**
 The keystone decision: deep agents do **not** re-implement any autodiff — the
