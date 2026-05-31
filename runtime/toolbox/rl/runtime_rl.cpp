@@ -64,6 +64,8 @@ extern "C" matlab_mat *matlab_dlnet_vertcat(void *r, void *a, void *b);
 extern "C" matlab_mat *matlab_dlnet_softmax(void *r, void *x);
 extern "C" matlab_mat *matlab_dlnet_log   (void *r, void *x);
 extern "C" matlab_mat *matlab_dlnet_sum   (void *r, void *x);
+extern "C" matlab_mat *matlab_dlnet_exp   (void *r, void *x);
+extern "C" matlab_mat *matlab_dlnet_softplus(void *r, void *x);
 extern "C" matlab_mat *matlab_dlnet_grad  (void *loss, void *var);
 
 namespace rl {
@@ -103,6 +105,15 @@ inline matlab_obj *dl_sum(matlab_obj *a) {
 }
 inline matlab_obj *dl_vcat(matlab_obj *a, matlab_obj *b) {
     matlab_obj *r = matlab_obj_new(0); matlab_dlnet_vertcat(r, a, b); return r;
+}
+inline matlab_obj *dl_sub(matlab_obj *a, matlab_obj *b) {
+    matlab_obj *r = matlab_obj_new(0); matlab_dlnet_minus(r, a, b); return r;
+}
+inline matlab_obj *dl_exp(matlab_obj *a) {
+    matlab_obj *r = matlab_obj_new(0); matlab_dlnet_exp(r, a); return r;
+}
+inline matlab_obj *dl_softplus(matlab_obj *a) {
+    matlab_obj *r = matlab_obj_new(0); matlab_dlnet_softplus(r, a); return r;
 }
 inline matlab_mat *dl_data(matlab_obj *o) {
     return matlab_obj_get_mat(o, "Data", 4);
@@ -1503,6 +1514,215 @@ matlab_mat *matlab_rl_td3_train(matlab_obj *agent, matlab_obj *env, matlab_obj *
 // (same deterministic actor field layout).
 matlab_mat *matlab_rl_td3_sim(matlab_obj *agent, matlab_obj *env) {
     return matlab_rl_ddpg_sim(agent, env);
+}
+
+// ===========================================================================
+// SAC — Soft Actor-Critic (fixed entropy coefficient).  rlSACAgent(obs,act)
+// ===========================================================================
+// Off-policy max-entropy continuous control.  A stochastic SQUASHED-GAUSSIAN
+// actor (shared trunk → mean + log-std heads; a = tanh(μ + σ·ε)·limit via the
+// reparameterisation trick) is trained to maximise Q1(s,a) − α·log π(a|s);
+// twin critics regress the soft TD target
+//   y = r + γ·( min(Qt1,Qt2) − α·log π(a'|s') ),   a' ~ π(·|s').
+// The actor's log-prob (with the tanh-squash change-of-variables correction
+// log(1−tanh²u) = 2(log2 − u − softplus(−2u))) is differentiated through the
+// reused autodiff tape.  The entropy temperature α is fixed — the canonical
+// fixed-coefficient SAC variant (automatic-temperature tuning is carved out).
+
+static const double kSacLogStdMin = -5.0, kSacLogStdMax = 2.0;
+static inline double sac_softplus(double z) {
+    return z > 0 ? z + std::log1p(std::exp(-z)) : std::log1p(std::exp(z));
+}
+// log-std bounded smoothly to [min,max] via tanh (matches the tape path).
+static inline double sac_ls(double raw) {
+    double mid = 0.5 * (kSacLogStdMin + kSacLogStdMax);
+    double half = 0.5 * (kSacLogStdMax - kSacLogStdMin);
+    return mid + half * std::tanh(raw);
+}
+
+// Host squashed-Gaussian forward.  Fills act[]; returns log π(act|s).  When
+// deterministic, uses the mean (greedy) and the returned log-prob is unused.
+static double sac_sample(matlab_obj *ag, const double *x, double actLimit, bool deterministic, double *act) {
+    int64_t obsDim = static_cast<int64_t>(rl::get_f64(ag, "ObsDim"));
+    int64_t actDim = static_cast<int64_t>(rl::get_f64(ag, "ActDim"));
+    matlab_mat *W1=rl::get_mat(ag,"aW1"), *b1=rl::get_mat(ag,"ab1");
+    matlab_mat *Wmu=rl::get_mat(ag,"aWmu"), *bmu=rl::get_mat(ag,"abmu");
+    matlab_mat *Wls=rl::get_mat(ag,"aWls"), *bls=rl::get_mat(ag,"abls");
+    int64_t H = W1->rows;
+    std::vector<double> h(static_cast<size_t>(H));
+    for (int64_t i = 0; i < H; ++i) { double s = b1->data[i];
+        for (int64_t j = 0; j < obsDim; ++j) s += W1->data[i*obsDim+j]*x[j];
+        h[static_cast<size_t>(i)] = s > 0 ? s : 0.0; }
+    const double LOG2 = std::log(2.0), HALF_LOG2PI = 0.5*std::log(2.0*M_PI);
+    double logp = 0.0;
+    for (int64_t k = 0; k < actDim; ++k) {
+        double mu = bmu->data[k], lr = bls->data[k];
+        for (int64_t i = 0; i < H; ++i) { mu += Wmu->data[k*H+i]*h[static_cast<size_t>(i)]; lr += Wls->data[k*H+i]*h[static_cast<size_t>(i)]; }
+        double ls = sac_ls(lr), sd = std::exp(ls);
+        double eps = deterministic ? 0.0 : rl::urandn();
+        double u = mu + sd * eps;
+        act[k] = std::tanh(u) * actLimit;
+        if (!deterministic)
+            logp += -0.5*eps*eps - ls - HALF_LOG2PI - std::log(actLimit) - 2.0*(LOG2 - u - sac_softplus(-2.0*u));
+    }
+    return logp;
+}
+
+void matlab_rl_sac_init(matlab_obj *agent, matlab_obj *obsInfo, matlab_obj *actInfo) {
+    matlab_mat *od = rl::get_mat(obsInfo, "Dimension");
+    int64_t obsDim = (od && od->rows*od->cols) ? static_cast<int64_t>(od->data[0]) : 1;
+    matlab_mat *ad = rl::get_mat(actInfo, "Dimension");
+    int64_t actDim = (ad && ad->rows*ad->cols) ? static_cast<int64_t>(ad->data[0]) : 1;
+    double actLimit = rl::get_f64(actInfo, "Limit"); if (actLimit <= 0) actLimit = 1.0;
+    int64_t H = kDdpgHidden, cin = obsDim + actDim;
+    auto he = [&](int64_t r, int64_t c){ matlab_mat *m=matlab_randn(static_cast<double>(r),static_cast<double>(c)); double s=std::sqrt(2.0/static_cast<double>(c)); for(int64_t k=0;k<r*c;++k) m->data[k]*=s; return m; };
+    auto small=[&](int64_t r,int64_t c){ matlab_mat *m=matlab_randn(static_cast<double>(r),static_cast<double>(c)); for(int64_t k=0;k<r*c;++k) m->data[k]*=1e-3; return m; };
+    auto z=[&](int64_t r,int64_t c){ return matlab_zeros(static_cast<double>(r),static_cast<double>(c)); };
+    // actor: shared trunk + mean head + log-std head
+    rl::set_mat(agent,"aW1",he(H,obsDim));   rl::set_mat(agent,"ab1",z(H,1));
+    rl::set_mat(agent,"aWmu",small(actDim,H)); rl::set_mat(agent,"abmu",z(actDim,1));
+    rl::set_mat(agent,"aWls",small(actDim,H)); rl::set_mat(agent,"abls",z(actDim,1));
+    // twin critics "c","c2" (+ targets + moments) — same layout as TD3.
+    rl::set_mat(agent,"cW1",he(H,cin));  rl::set_mat(agent,"cb1",z(H,1));  rl::set_mat(agent,"cW2",small(1,H)); rl::set_mat(agent,"cb2",z(1,1));
+    rl::set_mat(agent,"c2W1",he(H,cin)); rl::set_mat(agent,"c2b1",z(H,1)); rl::set_mat(agent,"c2W2",small(1,H)); rl::set_mat(agent,"c2b2",z(1,1));
+    const char *AP[6] = {"aW1","ab1","aWmu","abmu","aWls","abls"};
+    for (const char *p : AP) { matlab_mat *pm=rl::get_mat(agent,p);
+        rl::set_mat(agent,(std::string("m")+p).c_str(), z(pm->rows,pm->cols));
+        rl::set_mat(agent,(std::string("v")+p).c_str(), z(pm->rows,pm->cols)); }
+    const char *CP[8] = {"cW1","cb1","cW2","cb2","c2W1","c2b1","c2W2","c2b2"};
+    for (const char *p : CP) { rl::set_mat(agent,(std::string("t")+p).c_str(), rl::clone_mat(rl::get_mat(agent,p)));
+        matlab_mat *pm=rl::get_mat(agent,p);
+        rl::set_mat(agent,(std::string("m")+p).c_str(), z(pm->rows,pm->cols));
+        rl::set_mat(agent,(std::string("v")+p).c_str(), z(pm->rows,pm->cols)); }
+    rl::set_f64(agent,"ObsDim",static_cast<double>(obsDim)); rl::set_f64(agent,"ActDim",static_cast<double>(actDim));
+    rl::set_f64(agent,"ActLimit",actLimit);     rl::set_f64(agent,"HiddenSize",static_cast<double>(H));
+}
+
+// SAC actor step: reparameterised squashed-Gaussian, loss = α·Σlogπ − ΣQ1.
+static void sac_actor_step(matlab_obj *ag, matlab_mat *S, matlab_mat *Eps, double actLimit, double alpha, double lr, double t) {
+    matlab_obj *aW1=rl::dl_leaf(rl::get_mat(ag,"aW1")), *ab1=rl::dl_leaf(rl::get_mat(ag,"ab1"));
+    matlab_obj *aWmu=rl::dl_leaf(rl::get_mat(ag,"aWmu")), *abmu=rl::dl_leaf(rl::get_mat(ag,"abmu"));
+    matlab_obj *aWls=rl::dl_leaf(rl::get_mat(ag,"aWls")), *abls=rl::dl_leaf(rl::get_mat(ag,"abls"));
+    matlab_obj *cW1=rl::dl_leaf(rl::get_mat(ag,"cW1")), *cb1=rl::dl_leaf(rl::get_mat(ag,"cb1"));
+    matlab_obj *cW2=rl::dl_leaf(rl::get_mat(ag,"cW2")), *cb2=rl::dl_leaf(rl::get_mat(ag,"cb2"));
+    matlab_obj *sL=rl::dl_leaf(S), *epsL=rl::dl_leaf(Eps);
+    auto scalar=[&](double v){ matlab_mat *m=matlab_zeros(1,1); m->data[0]=v; return rl::dl_leaf(m); };
+    matlab_obj *h=rl::dl_relu(rl::dl_add(rl::dl_mm(aW1,sL),ab1));
+    matlab_obj *mu=rl::dl_add(rl::dl_mm(aWmu,h),abmu);
+    matlab_obj *lsRaw=rl::dl_add(rl::dl_mm(aWls,h),abls);
+    double mid=0.5*(kSacLogStdMin+kSacLogStdMax), half=0.5*(kSacLogStdMax-kSacLogStdMin);
+    matlab_obj *ls=rl::dl_add(rl::dl_times(rl::dl_tanh(lsRaw), scalar(half)), scalar(mid));
+    matlab_obj *sd=rl::dl_exp(ls);
+    matlab_obj *u=rl::dl_add(mu, rl::dl_times(sd, epsL));
+    matlab_obj *a=rl::dl_times(rl::dl_tanh(u), scalar(actLimit));
+    // logπ variable part (constants dropped): 2u − ls + 2·softplus(−2u)
+    matlab_obj *sp=rl::dl_softplus(rl::dl_times(u, scalar(-2.0)));
+    matlab_obj *logpVar=rl::dl_add(rl::dl_sub(rl::dl_times(u, scalar(2.0)), ls), rl::dl_times(sp, scalar(2.0)));
+    matlab_obj *sa=rl::dl_vcat(sL, a);
+    matlab_obj *q=rl::dl_add(rl::dl_mm(cW2, rl::dl_relu(rl::dl_add(rl::dl_mm(cW1,sa),cb1))), cb2);
+    matlab_obj *loss=rl::dl_sub(rl::dl_times(rl::dl_sum(logpVar), scalar(alpha)), rl::dl_sum(q));
+    const char *AP[6] = {"aW1","ab1","aWmu","abmu","aWls","abls"};
+    matlab_obj *leaves[6] = {aW1,ab1,aWmu,abmu,aWls,abls};
+    for (int i = 0; i < 6; ++i)
+        rl::adam_step(rl::get_mat(ag,AP[i]), rl::dl_grad(loss,leaves[i]), rl::get_mat(ag,(std::string("m")+AP[i]).c_str()), rl::get_mat(ag,(std::string("v")+AP[i]).c_str()), lr, t);
+    matlab_dlnet_reset0();
+}
+
+matlab_mat *matlab_rl_sac_train(matlab_obj *agent, matlab_obj *env, matlab_obj *opts) {
+    int64_t obsDim = static_cast<int64_t>(rl::get_f64(agent, "ObsDim"));
+    int64_t actDim = static_cast<int64_t>(rl::get_f64(agent, "ActDim"));
+    double actLimit = rl::get_f64(agent, "ActLimit");
+    double gamma = rl::get_f64(agent, "DiscountFactor"); if (gamma <= 0) gamma = 0.99;
+    double lr    = rl::get_f64(agent, "LearnRate");      if (lr <= 0) lr = 1e-3;
+    double tau   = rl::get_f64(agent, "Tau");            if (tau <= 0) tau = 5e-3;
+    double rscale = rl::get_f64(agent, "RewardScale"); if (rscale <= 0) rscale = 0.1;
+    double alpha  = rl::get_f64(agent, "EntropyWeight"); if (alpha <= 0) alpha = 0.2;
+
+    int64_t maxEp   = static_cast<int64_t>(rl::get_f64(opts, "MaxEpisodes"));   if (maxEp < 1) maxEp = 1;
+    int64_t maxStep = static_cast<int64_t>(rl::get_f64(opts, "MaxStepsPerEpisode")); if (maxStep < 1) maxStep = 200;
+
+    int prevFreeFwd = matlab_dlnet_set_free_forward(1);
+    const int64_t batch = 64, minReplay = batch;
+    const size_t replayCap = 50000;
+    int64_t Wd = 2*obsDim + actDim + 2;
+    std::vector<double> replay; size_t rcount = 0, rhead = 0;
+    matlab_mat *stats = matlab_zeros(static_cast<double>(maxEp), 1);
+    double tstep = 0.0;
+    std::vector<double> sint(2), obs(static_cast<size_t>(obsDim)), nobs(static_cast<size_t>(obsDim)), act(static_cast<size_t>(actDim));
+
+    for (int64_t ep = 0; ep < maxEp; ++ep) {
+        sint[0] = M_PI + (rl::urand()*2-1)*0.1; sint[1] = (rl::urand()*2-1)*0.1;
+        rl::pendulum_obs(sint.data(), obs.data());
+        double epReturn = 0.0;
+        for (int64_t step = 0; step < maxStep; ++step) {
+            sac_sample(agent, obs.data(), actLimit, false, act.data());   // stochastic policy = exploration
+            double r = rl::pendulum_step(sint.data(), act[0], actLimit);
+            rl::pendulum_obs(sint.data(), nobs.data());
+            epReturn += r;
+            std::vector<double> tr(static_cast<size_t>(Wd));
+            for (int64_t k=0;k<obsDim;++k) tr[static_cast<size_t>(k)]=obs[static_cast<size_t>(k)];
+            for (int64_t k=0;k<actDim;++k) tr[static_cast<size_t>(obsDim+k)]=act[static_cast<size_t>(k)];
+            tr[static_cast<size_t>(obsDim+actDim)]=r;
+            for (int64_t k=0;k<obsDim;++k) tr[static_cast<size_t>(obsDim+actDim+1+k)]=nobs[static_cast<size_t>(k)];
+            tr[static_cast<size_t>(Wd-1)]=0.0;
+            if (replay.size() < replayCap*static_cast<size_t>(Wd)) { replay.insert(replay.end(), tr.begin(), tr.end()); rcount++; }
+            else { std::copy(tr.begin(), tr.end(), replay.begin()+static_cast<long>(rhead*static_cast<size_t>(Wd))); rhead=(rhead+1)%replayCap; }
+
+            if (rcount >= static_cast<size_t>(minReplay)) {
+                matlab_mat *Xsa=matlab_zeros(static_cast<double>(obsDim+actDim),static_cast<double>(batch));
+                matlab_mat *Y=matlab_zeros(1,static_cast<double>(batch));
+                matlab_mat *S=matlab_zeros(static_cast<double>(obsDim),static_cast<double>(batch));
+                matlab_mat *Eps=matlab_randn(static_cast<double>(actDim),static_cast<double>(batch));   // fresh reparam noise for the actor
+                for (int64_t b=0;b<batch;++b) {
+                    size_t idx=static_cast<size_t>(rl::urand()*static_cast<double>(rcount))%rcount;
+                    double *row=&replay[idx*static_cast<size_t>(Wd)];
+                    double *oj=row,*aj=row+obsDim,rj=row[obsDim+actDim];
+                    double *npj=row+obsDim+actDim+1;
+                    for (int64_t k=0;k<obsDim;++k){ Xsa->data[k*batch+b]=oj[k]; S->data[k*batch+b]=oj[k]; }
+                    for (int64_t k=0;k<actDim;++k) Xsa->data[(obsDim+k)*batch+b]=aj[k];
+                    // a' ~ current policy at s'; soft target uses min twin critics − α·logπ'
+                    std::vector<double> na(static_cast<size_t>(actDim)), sap(static_cast<size_t>(obsDim+actDim));
+                    double logpn = sac_sample(agent, npj, actLimit, false, na.data());
+                    for (int64_t k=0;k<obsDim;++k) sap[static_cast<size_t>(k)]=npj[k];
+                    for (int64_t k=0;k<actDim;++k) sap[static_cast<size_t>(obsDim+k)]=na[static_cast<size_t>(k)];
+                    double q1=rl::critic_forward(rl::get_mat(agent,"tcW1"),rl::get_mat(agent,"tcb1"),rl::get_mat(agent,"tcW2"),rl::get_mat(agent,"tcb2"),sap.data());
+                    double q2=rl::critic_forward(rl::get_mat(agent,"tc2W1"),rl::get_mat(agent,"tc2b1"),rl::get_mat(agent,"tc2W2"),rl::get_mat(agent,"tc2b2"),sap.data());
+                    Y->data[b]=rscale*rj + gamma*(std::min(q1,q2) - alpha*logpn);
+                }
+                tstep += 1.0;
+                td3_critic_step(agent,"c", Xsa,Y,lr,tstep);
+                td3_critic_step(agent,"c2",Xsa,Y,lr,tstep);
+                sac_actor_step(agent,S,Eps,actLimit,alpha,lr,tstep);
+                const char *CP[8]={"cW1","cb1","cW2","cb2","c2W1","c2b1","c2W2","c2b2"};
+                for (const char *p:CP) rl::soft_update(rl::get_mat(agent,(std::string("t")+p).c_str()), rl::get_mat(agent,p), tau);
+                rl::free_mat(Xsa); rl::free_mat(Y); rl::free_mat(S); rl::free_mat(Eps);
+            }
+            for (int64_t k=0;k<obsDim;++k) obs[static_cast<size_t>(k)]=nobs[static_cast<size_t>(k)];
+        }
+        stats->data[ep]=epReturn;
+    }
+    matlab_dlnet_set_free_forward(prevFreeFwd);
+    return stats;
+}
+
+// sim(sacAgent, env) — greedy (mean-action, noise-free) pendulum rollout.
+matlab_mat *matlab_rl_sac_sim(matlab_obj *agent, matlab_obj *env) {
+    int64_t obsDim = static_cast<int64_t>(rl::get_f64(agent, "ObsDim"));
+    int64_t actDim = static_cast<int64_t>(rl::get_f64(agent, "ActDim"));
+    double actLimit = rl::get_f64(agent, "ActLimit");
+    int64_t maxStep = static_cast<int64_t>(rl::get_f64(env, "MaxSteps")); if (maxStep < 1) maxStep = 200;
+    matlab_mat *out = matlab_zeros(1,1);
+    std::vector<double> sint(2), obs(static_cast<size_t>(obsDim)), act(static_cast<size_t>(actDim));
+    sint[0] = M_PI; sint[1] = 0.0;
+    rl::pendulum_obs(sint.data(), obs.data());
+    double total = 0.0;
+    for (int64_t step = 0; step < maxStep; ++step) {
+        sac_sample(agent, obs.data(), actLimit, true, act.data());   // deterministic (mean)
+        total += rl::pendulum_step(sint.data(), act[0], actLimit);
+        rl::pendulum_obs(sint.data(), obs.data());
+    }
+    out->data[0] = total;
+    return out;
 }
 
 // ===========================================================================

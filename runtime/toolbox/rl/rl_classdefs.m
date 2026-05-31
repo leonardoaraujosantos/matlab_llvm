@@ -366,6 +366,32 @@ classdef rlPPOAgent
     end
 end
 
+% rlSACAgent — Soft Actor-Critic (max-entropy continuous control).  Stochastic
+% squashed-Gaussian actor + twin Q critics over the pendulum env; trains with a
+% fixed entropy coefficient on the reused autodiff tape.
+classdef rlSACAgent
+    properties
+        ObsDim
+        ActDim
+        ActLimit
+        HiddenSize
+        DiscountFactor
+        LearnRate
+        Tau
+    end
+    methods
+        function obj = rlSACAgent()
+            obj.ObsDim         = 1;
+            obj.ActDim         = 1;
+            obj.ActLimit       = 1;
+            obj.HiddenSize     = 32;
+            obj.DiscountFactor = 0.99;
+            obj.LearnRate      = 0.001;
+            obj.Tau            = 0.005;
+        end
+    end
+end
+
 % ===== Policy object (Tier 2) =============================================
 % rlMaxQPolicy — the greedy policy extracted from a value-based agent via
 % getGreedyPolicy.  Carries a copy of the agent's network (or Q table), added

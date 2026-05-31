@@ -16,9 +16,9 @@ what Deep Learning shipped along the way.
 
 ---
 
-## 0. Status — Tiers 1–5 SHIPPED; deep agents reuse the dlnet tape (2026-05-29 → 05-31)
+## 0. Status — Tiers 1–6 SHIPPED; deep agents reuse the dlnet tape (2026-05-29 → 05-31)
 
-**T2 (control-env infra) + T3 (DQN) + T4 (REINFORCE) + T5 (DDPG) shipped on top of T1.**
+**T2 (control-env infra) + T3 (DQN) + T4 (REINFORCE) + T5 (DDPG) + T6 (TD3 / PPO / SAC) shipped on top of T1.**
 The keystone decision: deep agents do **not** re-implement any autodiff — the
 RL runtime builds each actor/critic forward pass as `dlarray` shells
 (`matlab_obj_new`) and drives the **shipped Deep Learning Toolbox tape**
@@ -142,10 +142,27 @@ exactly the PPO gradient at the current parameters. Large rollout batches
 80 iterations → greedy balances ~**138–500 steps** across seeds (untrained
 ≈ 10–20); test asserts `balanced > 50`.
 
-The remaining T6 agent is **SAC** (squashed-Gaussian actor with the
-reparameterisation trick + automatic temperature toward an entropy target) —
-the most involved, as the actor's log-prob (with the tanh-squash correction)
-must be differentiated through the tape.
+**T6 — SAC SHIPPED** (headline [`examples/rl/pendulum_sac.m`](../examples/rl/pendulum_sac.m),
+test `rl_sac.m`). `rlSACAgent(obsInfo,actInfo)` is the max-entropy
+continuous-control agent. A **stochastic squashed-Gaussian actor** (shared
+trunk → mean + log-std heads; `a = tanh(μ + σ·ε)·limit` via the
+**reparameterisation trick**) is trained to maximise `Q1(s,a) − α·log π(a|s)`;
+twin critics (reusing the TD3 `min`-target critic step) regress the soft TD
+target `y = r + γ(min(Qt1,Qt2) − α·log π(a'|s'))` with `a' ~ π(·|s')`. The
+actor's log-prob — including the **tanh-squash change-of-variables correction**
+`log(1−tanh²u) = 2(log2 − u − softplus(−2u))` — is built and differentiated on
+the reused autodiff tape (the `exp`/`softplus`/`sub` ops were already present;
+log-std is tanh-bounded to `[−5,2]`). The stochastic policy *is* the
+exploration (no OU/ε needed). The entropy temperature `α` is **fixed** (0.2,
+field `EntropyWeight`) — the canonical fixed-coefficient SAC variant.
+200 episodes → greedy return ~**−370**, the **tightest across seeds of all the
+continuous agents** (entropy regularisation + twin critics); test asserts
+`return > −1000`.
+
+**T6 complete: TD3 + PPO + SAC all shipped.** Automatic-temperature tuning
+(learning `α` toward an entropy target) is the one carved-out SAC refinement;
+TRPO and the model-based / custom-loop / deployment surface remain as future
+work.
 
 ---
 
