@@ -14,4 +14,14 @@ trainOpts.MaxEpisodes        = 300;
 trainOpts.MaxStepsPerEpisode = 200;
 stats = train(agent, env, trainOpts);
 balanced = sim(agent, env);
-fprintf('REINFORCE balanced steps: %.0f\n', balanced);
+% The exact balanced-step count is a chaotic function of the learned weights:
+% libm last-ULP differences in exp/log/sin/cos compound over 300 training
+% episodes and through the cart-pole dynamics, so it diverges across platforms
+% (391 on macOS, 352 on Linux).  Assert the platform-stable learning outcome
+% instead — the trained greedy policy holds the pole far past the ~tens of steps
+% an untrained policy manages, with a wide margin on either libm.
+if balanced > 150
+    fprintf('REINFORCE learned to balance the pole\n');
+else
+    fprintf('REINFORCE failed to balance the pole\n');
+end

@@ -53,7 +53,10 @@ live RL-side. Zero dlnet changes, zero forward/backward duplication.
   discounted normalized returns, `−Σ logπ·Ĝ` loss on the tape
   (`softmax`→`log`→masked `sum`). Headline
   [`examples/rl/cartpole_reinforce.m`](../examples/rl/cartpole_reinforce.m):
-  **391 steps**. Test `rl_reinforce.m`.
+  the greedy policy balances the pole **far past the random ≈10–20 baseline**
+  (391 steps on macOS / 352 on Linux — the exact count is a chaotic,
+  libm-dependent value, so the gating test `rl_reinforce.m` asserts the
+  platform-stable learning outcome rather than the raw count).
 
 **Deep-RL traps (carry into T5):**
 - The dlnet tape **leaks per grad-call** — forward values on `reset`, orphaned
