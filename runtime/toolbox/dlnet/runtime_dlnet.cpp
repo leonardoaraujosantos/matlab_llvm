@@ -28,6 +28,7 @@
 #include <filesystem>
 #include <map>
 #include <set>
+#include <unordered_set>
 #include <string>
 
 extern "C" matlab_mat *matlab_obj_get_mat(matlab_obj *o, const char *name, int64_t len);
@@ -246,6 +247,72 @@ struct Node {
 
 static thread_local std::vector<Node> g_tape;
 
+/* ---- #82: tape memory ownership ------------------------------------------
+ * The autodiff tape owns every matrix it allocates: forward values
+ * (Node.val), adjoints (Node.adj), saved BPTT tensors (Node.auxData), and
+ * the backward-sweep contribution temporaries handed to accum().  The tape
+ * was built for one-shot gradients (forward → one dlgradient → exit), so
+ * reset0() only did `g_tape.clear()` — dropping the Node vector but leaking
+ * every matrix.  A training loop that resets and reuses the tape across tens
+ * of thousands of grad calls then grew without bound (DDPG ~18 GB).
+ *
+ * Fix: free the tape-PRIVATE matrices wholesale on reset — adjoints
+ * (Node.adj), saved BPTT tensors (Node.auxData), and the backward
+ * contribution temporaries.  These are never exposed outside the tape
+ * (dlgradient / extractdata return *clones*), so freeing them at reset is
+ * always safe regardless of how long the caller's dlarrays live.  This
+ * fixes the two per-grad-call leaks the issue emphasises: orphaned
+ * adjoints across repeated grad calls, and backward contribution temps.
+ *
+ * Forward VALUES (Node.val) are deliberately NOT freed here.  Every forward
+ * value is also the `Data` of a live dlarray object (set_data), and the
+ * runtime has no object GC, so a dlarray created before a reset — a
+ * constant target, a network parameter — would dangle if its value were
+ * freed (AddressSanitizer confirms the use-after-free).  Reclaiming forward
+ * values needs a dlarray object-lifecycle/GC pass, which is a separate,
+ * runtime-wide change tracked apart from this tape fix.
+ *
+ * Freeing is deferred to reset — never eager — so a contribution lives
+ * until the tape is discarded; there is no use-after-free within a sweep.
+ * The free pass dedups (a contribution may alias a node's adjoint, e.g.
+ * OP_ADD passes the node's own adj), so each descriptor is freed once. */
+static thread_local std::vector<matlab_mat *>  g_tape_temps;
+static thread_local std::unordered_set<void *> g_tape_temp_set;
+
+/* Rank-aware free for any tape-owned descriptor.  Mirrors the explicit
+ * matN / mat3 / plain frees the conv backward already used for its own
+ * scratch (matN_alloc packs descriptor + dims + strides in one block, so a
+ * single free reclaims all but the data buffer). */
+inline void free_mat_any(matlab_mat *m) {
+    if (!m) return;
+    if (mat_is_nd(m))      { free(reinterpret_cast<matlab_matN *>(m)->data); free(m); }
+    else if (mat_is_3d(m)) { free(reinterpret_cast<matlab_mat3 *>(m)->data); free(m); }
+    else                   { free(m->data); free(m); }
+}
+
+/* Remember a backward-sweep contribution temporary so reset frees it.
+ * Deduped so OP_ADD's repeated `accum(p, adj)` and re-orphaned adjoints
+ * don't bloat the list (and so the free pass sees each pointer once). */
+inline void track_temp(matlab_mat *m) {
+    if (m && g_tape_temp_set.insert(m).second) g_tape_temps.push_back(m);
+}
+
+/* Free the entire tape: node values / adjoints / aux tensors + the tracked
+ * backward temporaries, each exactly once, then clear all tape state. */
+inline void free_tape_all() {
+    std::unordered_set<void *> freed;
+    auto fr = [&](matlab_mat *m) { if (m && freed.insert(m).second) free_mat_any(m); };
+    for (Node &n : g_tape) {
+        /* NOT n.val — it is a live dlarray's Data (see note above). */
+        fr(n.adj);
+        for (matlab_mat *a : n.auxData) fr(a);
+    }
+    for (matlab_mat *t : g_tape_temps) fr(t);
+    g_tape_temps.clear();
+    g_tape_temp_set.clear();
+    g_tape.clear();
+}
+
 inline int record(int op, int p0, int p1, matlab_mat *val) {
     Node n; n.op = op; n.p0 = p0; n.p1 = p1; n.val = val; n.adj = nullptr;
     g_tape.push_back(n);
@@ -258,6 +325,10 @@ inline int record(int op, int p0, int p1, matlab_mat *val) {
 // allocated and shorter than `contrib`, we sum-reduce over the broadcast axes.
 inline void accum(int id, const matlab_mat *contrib) {
     if (id < 0 || !contrib) return;
+    /* #82: the contribution is a tape-owned temporary (or a node's own
+     * adjoint, for OP_ADD).  Track it so reset frees it; the dedup in
+     * track_temp / free_tape_all keeps the adjoint-alias case single-free. */
+    track_temp(const_cast<matlab_mat *>(contrib));
     Node &n = g_tape[id];
     if (!n.adj) {
         // Allocate the adj at the parent value's shape (sized by the
@@ -2120,7 +2191,11 @@ matlab_mat *matlab_dlnet_grad(void *lossv, void *varv) {
     using namespace dlnet;
     int lossId = get_id(lossv), varId = get_id(varv);
     int N = static_cast<int>(g_tape.size());
-    for (int i = 0; i < N; ++i) { g_tape[i].adj = nullptr; }
+    /* #82: a fresh backward sweep zeroes every node's adjoint.  Hand the
+     * previous adjoint set to the temp tracker before orphaning it so a
+     * repeated grad on the same tape (e.g. grad(loss, p) per parameter)
+     * doesn't leak a full adjoint set per call — reset frees them. */
+    for (int i = 0; i < N; ++i) { track_temp(g_tape[i].adj); g_tape[i].adj = nullptr; }
     if (lossId < 0 || lossId >= N) return mat_alloc(0, 0);
     // seed — uses nelem/flatdata so a matN-valued loss seeds correctly.
     { matlab_mat *seed = clone(g_tape[lossId].val);
@@ -2830,20 +2905,9 @@ matlab_mat *matlab_dlnet_grad(void *lossv, void *varv) {
             }
             free(dW_2d->data); free(dW_2d);
             accum(n.p1, dW_full);
-            /* Free our temporary (accum cloned the contribution). */
-            { double *dst = flatdata(dW_full); (void)dst;
-              if (mat_is_nd(dW_full)) {
-                  /* matN_alloc allocated the descriptor + dims/strides in one
-                   * block; free the data + the descriptor. */
-                  free(reinterpret_cast<matlab_matN *>(dW_full)->data);
-                  free(dW_full);
-              } else if (mat_is_3d(dW_full)) {
-                  free(reinterpret_cast<matlab_mat3 *>(dW_full)->data);
-                  free(dW_full);
-              } else {
-                  free(dW_full->data); free(dW_full);
-              }
-            }
+            /* #82: dW_full is now a tape-tracked temporary (accum recorded
+             * it) — freed wholesale at reset, not here.  Eager-freeing it
+             * was the kind of surgical free that risked use-after-free. */
 
             /* dX path: W_2d (K x inner) -> W_2d^T (inner x K) -> col_grad
              * (inner x hwn) = W_2d^T * dY_2d.  Then col2im scatters to dX. */
@@ -2910,15 +2974,7 @@ matlab_mat *matlab_dlnet_grad(void *lossv, void *varv) {
             }
             free(col_grad->data); free(col_grad);
             accum(n.p0, dX_full);
-            if (mat_is_nd(dX_full)) {
-                free(reinterpret_cast<matlab_matN *>(dX_full)->data);
-                free(dX_full);
-            } else if (mat_is_3d(dX_full)) {
-                free(reinterpret_cast<matlab_mat3 *>(dX_full)->data);
-                free(dX_full);
-            } else {
-                free(dX_full->data); free(dX_full);
-            }
+            /* #82: dX_full is tape-tracked (accum) — freed at reset. */
         } break;
         case OP_RESHAPE: {
             /* Reshape is an identity on the flat buffer; the gradient
@@ -3826,8 +3882,8 @@ matlab_mat *matlab_dlnet_grad(void *lossv, void *varv) {
 }
 
 // Reset the tape (dlfeval entry / start of a fresh forward pass).
-matlab_mat *matlab_dlnet_reset(double dummy) { (void)dummy; dlnet::g_tape.clear(); return mat_alloc(0,0); }
-matlab_mat *matlab_dlnet_reset0(void) { dlnet::g_tape.clear(); return mat_alloc(0,0); }
+matlab_mat *matlab_dlnet_reset(double dummy) { (void)dummy; dlnet::free_tape_all(); return mat_alloc(0,0); }
+matlab_mat *matlab_dlnet_reset0(void) { dlnet::free_tape_all(); return mat_alloc(0,0); }
 
 // ---- Tape-scoping primitives ----------------------------------------------
 // Without explicit scoping, the dlnet tape grows monotonically across

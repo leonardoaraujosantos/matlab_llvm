@@ -123,6 +123,18 @@ def main():
         ("script_scope_bool_var",
          "x = 25 > 18;\ndisp(x);\n",
          False),
+        # Function handles (issue #77). A workspace-backed handle (`f`
+        # isn't a local slot in the JIT path) round-trips through
+        # matlab_ws_set/get_handle (kind=13). `f(0)` must lower through
+        # the matlab_call_handle_s* trampoline (builtin @sin) and `p(6)`
+        # through a direct call to the user function (@sq) — NOT a matrix
+        # subscript on the code pointer, which used to crash. The whole
+        # program compiles as one module here, so @sq is in scope.
+        ("function_handle_builtin_and_user",
+         "f = @sin;\ndisp(f(0));\n"
+         "p = @sq;\ndisp(p(6));\n"
+         "function y = sq(x)\n  y = x * x;\nend\n",
+         False),
     ]
 
     work = os.path.join("/tmp", "matlabc_jit_userfn_test")
@@ -252,6 +264,45 @@ def main():
         print("FAIL")
         failed.append(("repl_script_scope_bool", f"REPL spawn failed: {e}"))
 
+    # REPL function-handle parity (issue #77). A named handle assigned
+    # on one turn (`f = @sqrt;`) and called on a later turn
+    # (`disp(f(16));`) used to crash: `f` round-tripped through the
+    # workspace as a kind=1 matrix, so the call lowered to
+    # matlab_subscript1_s on the stored code pointer (SIGSEGV / wrong
+    # `0`). With the kind=13 handle ABI + the matlab_call_handle_s*
+    # trampoline the call invokes the pointer directly. We assert the
+    # process exits cleanly (no 139/SIGSEGV) and prints the right value.
+    print(f"\nREPL parity (cross-turn function handle):")
+    sys.stdout.write(f"  repl_handle_cross_turn           ... ")
+    sys.stdout.flush()
+    handle_in = b"f = @sqrt;\ndisp(f(16));\nexit\n"
+    try:
+        proc = subprocess.run([matlabc, "-repl"], input=handle_in,
+                              capture_output=True, timeout=15)
+        combined = (proc.stdout + b"\n" + proc.stderr).decode(
+            "utf-8", "replace")
+        if proc.returncode not in (0,):
+            print("FAIL")
+            failed.append(("repl_handle_cross_turn",
+                           f"non-zero exit {proc.returncode} "
+                           f"(139 = SIGSEGV):\n{combined}"))
+        elif "error:" in combined.lower():
+            print("FAIL")
+            failed.append(("repl_handle_cross_turn",
+                           f"REPL output contains 'error:':\n{combined}"))
+        elif "\n4\n" not in ("\n" + combined + "\n"):
+            print("FAIL")
+            failed.append(("repl_handle_cross_turn",
+                           f"expected sqrt(16)=4 in output:\n{combined}"))
+        else:
+            print("ok")
+    except subprocess.TimeoutExpired:
+        print("FAIL")
+        failed.append(("repl_handle_cross_turn", "REPL timed out"))
+    except Exception as e:
+        print("FAIL")
+        failed.append(("repl_handle_cross_turn", f"REPL spawn failed: {e}"))
+
     # Compile-error visibility: the DAP server used to spawn its
     # stderr-pipe reader at `configurationDone`, so an MLIR diagnostic
     # raised during `launch` got buffered with no reader, and the
@@ -322,7 +373,7 @@ def main():
         print("FAIL")
         failed.append(("diag_visible_on_failed_launch", str(e)))
 
-    total = len(cases) + len(mflows) + 2  # +1 REPL, +1 visibility
+    total = len(cases) + len(mflows) + 3  # +2 REPL, +1 visibility
     print("----")
     print(f"passed: {total - len(failed)}    "
           f"failed: {len(failed)}")

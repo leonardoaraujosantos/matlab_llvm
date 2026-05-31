@@ -810,6 +810,178 @@ static std::string buildReplPrelude(const std::string &Src);
 extern "C" void matlab_ide_emit_all_figures(void);
 #endif
 
+/* #77: shared in-process (JIT) software-lowering pipeline.
+ *
+ * The REPL (`runReplInput`) and the DAP launch (`compileProgram`) both
+ * lower a module for the ExecutionEngine, and each used to carry its own
+ * hand-written copy of the pass list.  The copies drifted from the static
+ * `-emit-*` pipeline — most importantly they never ran `runRefineSlotTypes`,
+ * so `none`-typed slots were never refined to their concrete stored type
+ * and any builtin whose lowering keys off a concrete operand type (e.g.
+ * `disp(f(0))` where `f` is a handle) failed to match, surviving as an
+ * un-lowered `matlab.*` op that `validateAllMatlabOpsLowered` then rejected
+ * ("failed to compile program").  They also lacked the trailing
+ * `LowerTensorOps`+`RefineFuncSigs` convergence loop and `LowerStaticFiArrays`.
+ *
+ * This is the single source of truth for both JIT callers, modelled on the
+ * software portion of the static pipeline's tail (the `WantFullPipeline`
+ * branch in `main`).  It always lowers for software execution (f64 lane,
+ * never the HW integer-width lane) and uses ReplMode anon lowering, which
+ * is what both JIT callers need.  Callers keep their own pre-amble
+ * (`lowerToMLIR` + verify) and post-steps (validate / classdef-method drop /
+ * stripMatlabFuncAttrs / ExecutionEngine create). */
+static void runJitSoftwareLowering(mlir::ModuleOp M) {
+  using namespace mlirgen;
+  runSlotPromotion(M);
+  // fi ops must lower before the generic scalar-to-arith pass (else the
+  // matlab.add/matmul carrying fi attrs fold to plain arith and lose the
+  // spec metadata).  See docs/emit_fixed_point.md.
+  runLowerFixedPoint(M);
+  runLowerScalarsToArith(M);
+  runSlotPromotion(M);
+  // Patch func.func sigs from refined return-op types so the verifier /
+  // func-to-llvm conversion doesn't trip on a body that now produces e.g.
+  // i1 while the signature still declares `-> none`.
+  runRefineFuncSigs(M);
+  runPromoteNoneParams(M);
+  for (int Iter = 0; Iter < 4; ++Iter)
+    if (!runPromoteBinopTypes(M)) break;
+  // #77: seed slot/load types from the now-typed entry-block args before
+  // the outliner — without this RefineSlotTypes (which the JIT copies
+  // omitted) slots stay `none` and the body never gets concretely typed.
+  runRefineSlotTypes(M);
+  // Forward outer-scope literal captures into parfor bodies before the
+  // outliner (issue #20 common case), then outline parfor / GPU kernels.
+  runForwardParforCaptures(M);
+  runOutlineParfor(M);
+  runOutlineGpuKernels(M);
+  runLowerSeqLoops(M);
+  // ReplMode anon lowering — the JIT callers differ from the static path
+  // here (REPL-mode codegen).  Outlines anon bodies so handles become
+  // plain function pointers and call_indirect sites collapse.
+  runLowerAnonCalls(M, /*ReplMode=*/true);
+  for (int Iter = 0; Iter < 8; ++Iter) {
+    bool A = runLowerScalarsToArith(M);
+    bool B = runLowerUserCalls(M);
+    if (!A && !B) break;
+  }
+  // #77: a param-bound for-loop (`for k = 1:n`) couldn't lower in the first
+  // runLowerSeqLoops (the param was still `none`); the fixpoint just refined
+  // it — refine the slot and re-run seq-loop lowering before LowerTensorOps
+  // consumes the matlab.range producer.
+  runRefineSlotTypes(M);
+  runLowerSeqLoops(M);
+  runLowerTensorOps(M);
+  for (int Iter = 0; Iter < 4; ++Iter) {
+    bool A = runLowerScalarsToArith(M);
+    bool B = runLowerUserCalls(M);
+    if (!A && !B) break;
+  }
+  // #77: propagate freshly-typed call results through binops + slot chains
+  // (a chained `gather(a .* x + b)`), iterating to fixpoint.
+  for (int Iter = 0; Iter < 4; ++Iter) {
+    bool Pb = runPromoteBinopTypes(M);
+    runRefineSlotTypes(M);
+    if (!Pb) break;
+  }
+  runLowerTensorOps(M);
+  // Second LowerFixedPoint sweep — picks up matlab_mat_*_slice1 / _concat_row
+  // sites that needed their tensor operand retyped to ptr first.
+  runLowerFixedPoint(M);
+  // Second-chance anon-call rewrite: a matlab.call_indirect that survived the
+  // first LowerAnonCalls because its matrix operands were still tensor-typed
+  // can now match the outlined function's (ptr, ...) signature.  This is what
+  // lowers a vector-objective anon (`@(x) x(1)^2 + x(2)^2`) passed to a
+  // solver; without it the `matlab.subscript` reads of `x(i)` survive.
+  if (runLowerAnonCallsPost(M)) {
+    runLowerTensorOps(M);
+    for (int Iter = 0; Iter < 4; ++Iter) {
+      bool A = runLowerScalarsToArith(M);
+      bool B = runLowerUserCalls(M);
+      if (!A && !B) break;
+    }
+    runLowerTensorOps(M);
+  }
+  // Multi-callsite monomorphisation (matrix-typed / arity-varying /
+  // varargin callees).  compileProgram lacked this entirely.
+  if (runMonomorphiseUserCalls(M)) {
+    for (int Iter = 0; Iter < 4; ++Iter) {
+      bool A = runLowerScalarsToArith(M);
+      bool B = runLowerUserCalls(M);
+      if (!A && !B) break;
+    }
+    runLowerTensorOps(M);
+    // Refresh each func.func signature from the types now flowing through
+    // its func.return (LowerTensorOps rewrote clone bodies, not signatures).
+    M.walk([&](mlir::func::FuncOp Fn) {
+      if (Fn.empty()) return;
+      llvm::SmallVector<mlir::Type, 4> NewResults(
+          Fn.getFunctionType().getResults().begin(),
+          Fn.getFunctionType().getResults().end());
+      bool Changed = false;
+      Fn.walk([&](mlir::func::ReturnOp Ret) {
+        if (Ret.getNumOperands() != NewResults.size()) return;
+        for (unsigned i = 0; i < Ret.getNumOperands(); ++i) {
+          auto Old = NewResults[i];
+          auto New = Ret.getOperand(i).getType();
+          if (mlir::isa<mlir::NoneType>(Old) && Old != New) {
+            NewResults[i] = New;
+            Changed = true;
+          }
+        }
+      });
+      if (Changed)
+        Fn.setFunctionType(mlir::FunctionType::get(
+            Fn.getContext(), Fn.getFunctionType().getInputs(), NewResults));
+    });
+    // Stale func.call result types need patching to match.
+    M.walk([&](mlir::func::CallOp Call) {
+      auto Tgt = M.lookupSymbol<mlir::func::FuncOp>(Call.getCallee());
+      if (!Tgt) return;
+      auto SigR = Tgt.getFunctionType().getResults();
+      if (Call.getNumResults() != SigR.size()) return;
+      bool Mismatch = false;
+      for (unsigned i = 0; i < SigR.size(); ++i)
+        if (Call.getResult(i).getType() != SigR[i]) { Mismatch = true; break; }
+      if (!Mismatch) return;
+      mlir::OpBuilder CB(Call);
+      auto Nc = mlir::func::CallOp::create(CB, Call.getLoc(), SigR,
+                                            Call.getCallee(),
+                                            Call.getOperands());
+      for (unsigned i = 0; i < SigR.size(); ++i)
+        Call.getResult(i).replaceAllUsesWith(Nc.getResult(i));
+      Call.erase();
+    });
+    runLowerTensorOps(M);
+  }
+  runLowerFixedPoint(M);
+  runLowerNarginNargout(M);
+  // #77: refine `none`-typed slots whose stores agree on a concrete type
+  // BEFORE LowerStaticFiArrays / LowerScalarSlots so the retyped slots get
+  // promoted; then rewrite `fi(zeros(1,N),...)` chains to stack allocas.
+  runRefineSlotTypes(M);
+  runLowerStaticFiArrays(M);
+  runRefineFuncSigs(M);
+  // #77: matrix-returning user functions only settle their tensor->ptr
+  // result type in RefineFuncSigs; re-run LowerTensorOps so the caller's
+  // slot (fed by that call) retypes to ptr and its A(i,j)/A+1 uses lower.
+  // Iterate with RefineFuncSigs so chained matrix-returning calls converge.
+  // This loop also re-lowers the REPL's ptr-sticky `matlab_ws_set_obj`
+  // store once its stored value is concretely ptr-typed.
+  for (int Iter = 0; Iter < 4; ++Iter) {
+    bool Changed = runLowerTensorOps(M);
+    runRefineFuncSigs(M);
+    if (!Changed) break;
+  }
+  // Promote any surviving scalar-primitive matlab.alloc to llvm.alloca.
+  runLowerScalarSlots(M);
+#ifdef MATLAB_LLVM_WITH_PLOT
+  runLowerPlot(M);
+#endif
+  runLowerIO(M);
+  if (getenv("MATLABC_JIT_DUMP")) mlirgen::printModule(std::cerr, M);
+}
+
 int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id,
                  std::string *DiagOut = nullptr) {
   /* If the input mentions any CST / Comm classdef name, prepend the
@@ -884,153 +1056,10 @@ int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id,
     return 1;
   }
 
-  mlirgen::runSlotPromotion(M);
-  // Rewrite Fixed-Point Designer (`fi`) ops into integer-shift sequences
-  // BEFORE the generic scalar-to-arith pass — otherwise the matlab.add /
-  // matlab.matmul that carry fi attributes get folded to plain arith.addi
-  // / arith.muli and lose the spec metadata. See docs/emit_fixed_point.md.
-  mlirgen::runLowerFixedPoint(M);
-  mlirgen::runLowerScalarsToArith(M);
-  mlirgen::runSlotPromotion(M);
-  // Patch func.func signatures from refined return-op types so the
-  // verifier (and the func-to-llvm conversion) doesn't trip on user
-  // functions whose body now produces e.g. `i1` while the signature
-  // still declares `-> none`. The static -emit-* paths already run
-  // this; without it, JIT silently fails to convert any user function
-  // that returns a logical / boolean comparison. Idempotent.
-  mlirgen::runRefineFuncSigs(M);
-  mlirgen::runPromoteNoneParams(M);
-  for (int Iter = 0; Iter < 4; ++Iter)
-    if (!mlirgen::runPromoteBinopTypes(M)) break;
-  /* Forward outer-scope literal captures into parfor bodies before the
-   * outliner runs.  Closes the matlab.alloc-capture rejection from
-   * issue #20 for the common case (constant captures like W = 800). */
-  mlirgen::runForwardParforCaptures(M);
-  mlirgen::runOutlineParfor(M);
-  mlirgen::runOutlineGpuKernels(M);
-  mlirgen::runLowerSeqLoops(M);
-  mlirgen::runLowerAnonCalls(M, /*ReplMode=*/true);
-  for (int Iter = 0; Iter < 8; ++Iter) {
-    bool A = mlirgen::runLowerScalarsToArith(M);
-    bool B = mlirgen::runLowerUserCalls(M);
-    if (!A && !B) break;
-  }
-  mlirgen::runLowerTensorOps(M);
-  for (int Iter = 0; Iter < 4; ++Iter) {
-    bool A = mlirgen::runLowerScalarsToArith(M);
-    bool B = mlirgen::runLowerUserCalls(M);
-    if (!A && !B) break;
-  }
-  mlirgen::runLowerTensorOps(M);
-  // Second-chance anon call rewrite — same step the static -emit-*
-  // pipeline runs. A matlab.call_indirect that survived the first
-  // LowerAnonCalls because its matrix operands were still tensor-typed
-  // can now match the outlined function's (ptr, ...) signature after
-  // LowerTensorOps retyped the slots. This is what lowers a vector
-  // objective anon like `@(x) x(1)*x(1) + x(2)*x(2)` passed to
-  // fminunc / fminsearch / lsqnonlin: retypeAnonsForVectorObjective
-  // flips the anon's `x` arg f64 -> ptr, and the post-pass then lowers
-  // the `matlab.subscript` reads of `x(1)` / `x(2)` against the ptr.
-  // Without it those subscripts survive untranslatable into the JIT.
-  if (mlirgen::runLowerAnonCallsPost(M)) {
-    mlirgen::runLowerTensorOps(M);
-    for (int Iter = 0; Iter < 4; ++Iter) {
-      bool A = mlirgen::runLowerScalarsToArith(M);
-      bool B = mlirgen::runLowerUserCalls(M);
-      if (!A && !B) break;
-    }
-    mlirgen::runLowerTensorOps(M);
-  }
-  // Multi-callsite monomorphisation — same step the static -emit-*
-  // pipeline runs (see the `runMonomorphiseUserCalls` block there).
-  // A user function called at more than one arity (or with mixed
-  // scalar / matrix args) is cloned per concrete signature so each
-  // specialisation retypes independently. The problem-based prelude
-  // hits this hard: `OptimizationExpression(a, b)` is an nargin-
-  // dispatched constructor invoked both 1-arg (scalar boxing of a
-  // numeric literal — `2*y`) and 2-arg (wrapping a runtime node id).
-  // Without the monomorphiser the 1-arg call site keeps a
-  // `(f64) -> !llvm.ptr` shape that never matches the 2-arg
-  // `func.func` and survives as an untranslatable `matlab.call`.
-  if (mlirgen::runMonomorphiseUserCalls(M)) {
-    for (int Iter = 0; Iter < 4; ++Iter) {
-      bool A = mlirgen::runLowerScalarsToArith(M);
-      bool B = mlirgen::runLowerUserCalls(M);
-      if (!A && !B) break;
-    }
-    mlirgen::runLowerTensorOps(M);
-    // Refresh each func.func's signature from the types that now flow
-    // through its func.return — LowerTensorOps rewrote clone bodies
-    // but not their enclosing signatures.
-    M.walk([&](mlir::func::FuncOp Fn) {
-      if (Fn.empty()) return;
-      llvm::SmallVector<mlir::Type, 4> NewResults(
-          Fn.getFunctionType().getResults().begin(),
-          Fn.getFunctionType().getResults().end());
-      bool Changed = false;
-      Fn.walk([&](mlir::func::ReturnOp Ret) {
-        if (Ret.getNumOperands() != NewResults.size()) return;
-        for (unsigned i = 0; i < Ret.getNumOperands(); ++i) {
-          auto Old = NewResults[i];
-          auto New = Ret.getOperand(i).getType();
-          if (mlir::isa<mlir::NoneType>(Old) && Old != New) {
-            NewResults[i] = New;
-            Changed = true;
-          }
-        }
-      });
-      if (Changed)
-        Fn.setFunctionType(mlir::FunctionType::get(
-            Fn.getContext(), Fn.getFunctionType().getInputs(), NewResults));
-    });
-    // Stale func.call result types need patching to match.
-    M.walk([&](mlir::func::CallOp Call) {
-      auto Tgt = M.lookupSymbol<mlir::func::FuncOp>(Call.getCallee());
-      if (!Tgt) return;
-      auto SigR = Tgt.getFunctionType().getResults();
-      if (Call.getNumResults() != SigR.size()) return;
-      bool Mismatch = false;
-      for (unsigned i = 0; i < SigR.size(); ++i)
-        if (Call.getResult(i).getType() != SigR[i]) { Mismatch = true; break; }
-      if (!Mismatch) return;
-      mlir::OpBuilder CB(Call);
-      auto Nc = mlir::func::CallOp::create(CB, Call.getLoc(), SigR,
-                                            Call.getCallee(),
-                                            Call.getOperands());
-      for (unsigned i = 0; i < SigR.size(); ++i)
-        Call.getResult(i).replaceAllUsesWith(Nc.getResult(i));
-      Call.erase();
-    });
-    mlirgen::runLowerTensorOps(M);
-  }
-  // Second LowerFixedPoint sweep — picks up matlab.call_builtin
-  // @matlab_mat_*_slice1 / _concat_row sites that needed their tensor
-  // operand retyped to ptr by LowerTensorOps first.
-  mlirgen::runLowerFixedPoint(M);
-  mlirgen::runLowerNarginNargout(M);
-  mlirgen::runLowerScalarSlots(M);
-  // Final signature catch-up: late retypings (RefineSlotTypes /
-  // LowerScalarSlots) may have just rewritten call-site operand
-  // types; refresh func signatures + restamp stale func.call ops so
-  // the func-to-llvm conversion sees consistent types. Same as the
-  // static -emit-* pipeline.
-  mlirgen::runRefineFuncSigs(M);
-  // One more LowerTensorOps sweep: RefineFuncSigs just restamped
-  // call-site result types — in particular a `x = optimvar()` /
-  // `prob = optimproblem()` whose user-defined prelude factory only
-  // had its `-> !llvm.ptr` return type settled here. The REPL's
-  // `matlab.call_builtin @matlab_ws_set_obj` workspace store is
-  // "ptr-sticky": LowerTensorOps deliberately waits until the stored
-  // value is concretely ptr-typed before lowering it. Without this
-  // final sweep that store (and its `matlab.const_char` variable
-  // name) survives into the func-to-llvm conversion and the JIT
-  // rejects the module. The static -emit-* pipeline never hits this
-  // because file-mode top-level vars use local slots, not ws_set_*.
-  mlirgen::runLowerTensorOps(M);
-#ifdef MATLAB_LLVM_WITH_PLOT
-  mlirgen::runLowerPlot(M);
-#endif
-  mlirgen::runLowerIO(M);
+  /* #77: shared in-process software lowering (was an inline copy that
+   * had drifted from the static pipeline — missing runRefineSlotTypes
+   * etc.).  Now the single source of truth for REPL + DAP launch. */
+  runJitSoftwareLowering(M);
 
   /* Drop classdef method bodies that nothing in this TU calls.  The
    * REPL prelude pulls every method of every referenced class into
@@ -2231,8 +2260,8 @@ static std::string buildReplPrelude(const std::string &Src) {
     while ((P = Stripped.find(Name, P)) != std::string::npos) {
       bool LeftWord = (P > 0) && (std::isalnum((unsigned char)Stripped[P-1]) ||
                                     Stripped[P-1] == '_');
-      if (!LeftWord && P + NL < Stripped.size()) {
-        char R = Stripped[P + NL];
+      if (!LeftWord && P + NL <= Stripped.size()) {
+        char R = (P + NL < Stripped.size()) ? Stripped[P + NL] : '\0';
         if (R == Follow1) return true;
         size_t Q = P + NL;
         while (Q < Stripped.size() && (Stripped[Q] == ' ' || Stripped[Q] == '\t'))
@@ -2242,13 +2271,21 @@ static std::string buildReplPrelude(const std::string &Src) {
           if (Follow2 != '=' || Q + 1 >= Stripped.size() ||
               Stripped[Q+1] != '=') return true;
         }
+        /* No-paren constructor on the RHS: `m = occupancyMap;` (#79.1).
+         * A bare class name at end-of-line or followed only by a
+         * statement terminator counts as a mention, mirroring the AOT
+         * prelude scanner. */
+        if (Q >= Stripped.size() || Stripped[Q] == ';' ||
+            Stripped[Q] == ',' || Stripped[Q] == '\n' || Stripped[Q] == '\r')
+          return true;
       }
       P += NL;
     }
     return false;
   };
   auto mentions = [&](const char *Name) -> bool {
-    /* Call shape `Name(` or assignment shape `Name =`. */
+    /* Call shape `Name(`, assignment shape `Name =`, or a bare RHS
+     * mention `Name;` (no-paren constructor, #79.1). */
     return wordHit(Name, '(', '=');
   };
   /* CST prelude classes: tf lives in cst_classdefs.m (shares
@@ -3804,6 +3841,32 @@ bool compileProgram() {
   }
   if (!TU || Diag.hasErrors()) { Diag.printAll(); return false; }
 
+  /* #77: inject the classdef prelude — the same toolbox classdef bodies
+   * (`tf`, `cfit`, `dlnetwork`, ...) that `-emit-*` and the REPL pull in.
+   * Without it a `-dap` launch of any classdef-using example fails to
+   * compile because the class name resolves as undefined, even though the
+   * same file builds and runs via `-emit-llvm`.  Rather than rewrite the
+   * entry-point buffer (which would shift line numbers and break breakpoint
+   * mapping), we parse the prelude as a separate TU and merge its classdefs
+   * / helper functions in — exactly how the sibling-`.m` merge below works.
+   * `.mflow` inputs don't use the MATLAB classdef prelude. */
+  if (!IsFlow) {
+    std::string Src(SM.getBuffer(F));
+    std::string Prelude = buildReplPrelude(Src);
+    if (!Prelude.empty()) {
+      FileID PF = SM.addBuffer("<dap-prelude>", Prelude);
+      DiagnosticEngine PDiag(SM);
+      Lexer PLx(SM, PF, PDiag);
+      auto PToks = PLx.tokenize();
+      Parser PP(std::move(PToks), AstCtx, PDiag);
+      TranslationUnit *PTU = PP.parseFile();
+      if (PTU && !PDiag.hasErrors()) {
+        for (auto *Fn : PTU->Functions) TU->Functions.push_back(Fn);
+        for (auto *Cls : PTU->Classes) TU->Classes.push_back(Cls);
+      }
+    }
+  }
+
   /* Multi-file breakpoints: walk the entry-point's directory for
    * sibling .m files, parse each, and merge any function-only or
    * classdef-only siblings into the main TU. The merge gives Sema /
@@ -4073,56 +4136,12 @@ bool compileProgram() {
     return false;
   }
 
-  mlirgen::runSlotPromotion(M);
-  // Rewrite Fixed-Point Designer (`fi`) ops into integer-shift sequences
-  // BEFORE the generic scalar-to-arith pass — otherwise the matlab.add /
-  // matlab.matmul that carry fi attributes get folded to plain arith.addi
-  // / arith.muli and lose the spec metadata. See docs/emit_fixed_point.md.
-  mlirgen::runLowerFixedPoint(M);
-  mlirgen::runLowerScalarsToArith(M);
-  mlirgen::runSlotPromotion(M);
-  // Patch func.func signatures from refined return-op types so the
-  // verifier (and the func-to-llvm conversion) doesn't trip on user
-  // functions whose body now produces e.g. `i1` while the signature
-  // still declares `-> none`. The static -emit-* paths already run
-  // this; without it, JIT silently fails to convert any user function
-  // that returns a logical / boolean comparison. Idempotent.
-  mlirgen::runRefineFuncSigs(M);
-  mlirgen::runPromoteNoneParams(M);
-  for (int Iter = 0; Iter < 4; ++Iter)
-    if (!mlirgen::runPromoteBinopTypes(M)) break;
-  /* Forward outer-scope literal captures into parfor bodies before the
-   * outliner runs.  Closes the matlab.alloc-capture rejection from
-   * issue #20 for the common case (constant captures like W = 800). */
-  mlirgen::runForwardParforCaptures(M);
-  mlirgen::runOutlineParfor(M);
-  mlirgen::runOutlineGpuKernels(M);
-  mlirgen::runLowerSeqLoops(M);
-  mlirgen::runLowerAnonCalls(M, /*ReplMode=*/true);
-  for (int Iter = 0; Iter < 8; ++Iter) {
-    bool A = mlirgen::runLowerScalarsToArith(M);
-    bool B = mlirgen::runLowerUserCalls(M);
-    if (!A && !B) break;
-  }
-  mlirgen::runLowerTensorOps(M);
-  for (int Iter = 0; Iter < 4; ++Iter) {
-    bool A = mlirgen::runLowerScalarsToArith(M);
-    bool B = mlirgen::runLowerUserCalls(M);
-    if (!A && !B) break;
-  }
-  mlirgen::runLowerTensorOps(M);
-  // Second LowerFixedPoint sweep — picks up matlab.call_builtin
-  // @matlab_mat_*_slice1 / _concat_row sites that needed their tensor
-  // operand retyped to ptr by LowerTensorOps first.
-  mlirgen::runLowerFixedPoint(M);
-  mlirgen::runLowerNarginNargout(M);
-  mlirgen::runLowerScalarSlots(M);
-  // Final signature catch-up — see comment in the REPL path above.
-  mlirgen::runRefineFuncSigs(M);
-#ifdef MATLAB_LLVM_WITH_PLOT
-  mlirgen::runLowerPlot(M);
-#endif
-  mlirgen::runLowerIO(M);
+  /* #77: shared in-process software lowering — same single source of
+   * truth the REPL uses.  Previously compileProgram carried the
+   * thinnest of the three copies (no runRefineSlotTypes, no
+   * runLowerAnonCallsPost, no runMonomorphiseUserCalls), which is why
+   * DAP launch failed to compile 133 AOT-passing examples. */
+  runJitSoftwareLowering(M);
 
   if (getenv("MATLABC_DAP_DUMP")) mlirgen::printModule(std::cerr, M);
   /* Verify after the matlab-pass batch. The check that used to live
@@ -5277,6 +5296,11 @@ std::string formatVar(int Kind, int WsIdx) {
              matlab_duration_to_seconds(D));
     return Buf;
   }
+  if (Kind == 13) {
+    /* Function handle (kind=13). The stored value is a raw code pointer
+     * — never dereference it as data; render a stable type label. */
+    return "@function_handle";
+  }
   return "<unknown>";
 }
 
@@ -5394,6 +5418,20 @@ bool handleRequest(const Object &Msg) {
       sendResponse(ReqSeq, *Cmd, false,
                    Value("no program path supplied"));
       return true;
+    }
+    /* #77: make the program path absolute BEFORE the chdir below.  The
+     * handler chdir's into the program's directory (so the script's
+     * relative file reads behave like build_and_run.sh), but
+     * G.ProgramPath was left relative — so compileProgram's loadFile then
+     * looked for `<dir>/<dir>/<file>` from the new cwd, returned 0, and the
+     * launch failed with the generic "failed to compile program".  This was
+     * the silent root cause behind the DAP-only failures for every example
+     * launched by a relative path. */
+    {
+      std::error_code AbsEC;
+      std::filesystem::path AbsP =
+          std::filesystem::absolute(G.ProgramPath, AbsEC);
+      if (!AbsEC) G.ProgramPath = AbsP.lexically_normal().string();
     }
     /* Resolve the JIT'd program's working directory so relative
      * file reads (readtable("foo.csv") etc.) behave the same way
@@ -11862,14 +11900,22 @@ int main(int Argc, char **Argv) {
       while ((P = Src.find(N, P)) != std::string::npos && !Hit) {
         bool LeftWord = (P > 0) && (std::isalnum((unsigned char)Src[P-1]) ||
                                      Src[P-1] == '_');
-        if (!LeftWord && P + NL < Src.size()) {
-          char Right = Src[P + NL];
+        if (!LeftWord && P + NL <= Src.size()) {
+          char Right = (P + NL < Src.size()) ? Src[P + NL] : '\0';
           if (Right == '(') { Hit = true; break; }
           size_t Q = P + NL;
           while (Q < Src.size() && (Src[Q] == ' ' || Src[Q] == '\t')) Q++;
           if (Q < Src.size() && Src[Q] == '=') {
             if (Q + 1 >= Src.size() || Src[Q+1] != '=') { Hit = true; break; }
           }
+          /* No-paren constructor on the RHS: `m = occupancyMap;` (#79.1).
+           * A bare class name at end-of-source or followed only by a
+           * statement terminator (`;`, `,`, newline) is also a mention,
+           * so the classdef prelude is pulled in. Matching terminators
+           * (not any non-word char) avoids treating `occupancyMap.foo`
+           * as a hit; a spurious prelude load would be harmless anyway. */
+          if (Q >= Src.size() || Src[Q] == ';' || Src[Q] == ',' ||
+              Src[Q] == '\n' || Src[Q] == '\r') { Hit = true; break; }
         }
         P += NL;
       }

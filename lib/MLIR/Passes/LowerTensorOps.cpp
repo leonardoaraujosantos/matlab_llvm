@@ -1451,7 +1451,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
       continue;
     }
     if ((Name == "matlab_struct_set_f64" ||
-         Name == "matlab_struct_set_mat") &&
+         Name == "matlab_struct_set_mat" ||
+         Name == "matlab_struct_set_string") &&
         Call->getNumOperands() == 3) {
       Value Base = Call->getOperand(0);
       Value NameV = Call->getOperand(1);
@@ -1460,7 +1461,12 @@ bool TensorLowering::rewriteBuiltinCalls() {
       int64_t Len = 0;
       Value Ptr = fieldNameAddr(NameV, Len);
       if (!Ptr) continue;
-      bool IsMat = Name == "matlab_struct_set_mat";
+      /* A char-string field store (#79.2) carries a `matlab_string *`
+       * (ptr) value — same call shape as `_set_mat`, distinct runtime
+       * entry (stores with kind=3). Treat its value as ptr-typed but
+       * keep the `_set_string` callee. */
+      bool IsStr = Name == "matlab_struct_set_string";
+      bool IsMat = Name == "matlab_struct_set_mat" || IsStr;
       /* Auto-promote `_f64` callee to `_mat` when the value operand
        * arrived as ptr — the AST-time dispatch in Lowering.cpp
        * picks the callee from the RHS type at lowering time, but
@@ -1817,7 +1823,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
      * runtime). Used only when matlabc is invoked with -repl. */
     if ((Name == "matlab_ws_get_f64" || Name == "matlab_ws_get_mat" ||
          Name == "matlab_ws_get_string" || Name == "matlab_ws_get_sym" ||
-         Name == "matlab_ws_get_symmat") &&
+         Name == "matlab_ws_get_symmat" || Name == "matlab_ws_get_handle") &&
         Call->getNumOperands() == 1 && Call->getNumResults() == 1) {
       Value NameV = Call->getOperand(0);
       int64_t Len = 0;
@@ -1826,7 +1832,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
       bool IsMat = (Name == "matlab_ws_get_mat" ||
                     Name == "matlab_ws_get_string" ||
                     Name == "matlab_ws_get_sym" ||
-                    Name == "matlab_ws_get_symmat");
+                    Name == "matlab_ws_get_symmat" ||
+                    Name == "matlab_ws_get_handle");
       Type Ret = IsMat ? (Type)PtrTy : (Type)F64;
       B.setInsertionPoint(Call);
       Value LenV = LLVM::ConstantOp::create(
@@ -1840,12 +1847,43 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Changed = true;
       continue;
     }
+    /* Scalar function-handle trampoline: matlab_call_handle_s{1,2,3}.
+     * Operand 0 is the stored function pointer (ptr); the remaining
+     * operands are f64 call arguments; the result is f64.  Emitted by
+     * the lowering for `f(x)` where `f` is a workspace-backed handle. */
+    if ((Name == "matlab_call_handle_s1" || Name == "matlab_call_handle_s2" ||
+         Name == "matlab_call_handle_s3") &&
+        Call->getNumResults() == 1 && Call->getNumOperands() >= 2) {
+      Value Fn = Call->getOperand(0);
+      if (Fn.getType() != PtrTy) continue;   /* wait for the ws load to lower */
+      SmallVector<Type, 4> ArgTys;
+      SmallVector<Value, 4> ArgVals;
+      ArgTys.push_back(PtrTy);
+      ArgVals.push_back(Fn);
+      bool Ready = true;
+      for (unsigned i = 1; i < Call->getNumOperands(); ++i) {
+        Value A = Call->getOperand(i);
+        if (A.getType() != F64) { Ready = false; break; }
+        ArgTys.push_back(F64);
+        ArgVals.push_back(A);
+      }
+      if (!Ready) continue;
+      B.setInsertionPoint(Call);
+      auto Fnc = rt(Name, F64, ArgTys);
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fnc, ArgVals);
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+
     if ((Name == "matlab_ws_set_f64" || Name == "matlab_ws_set_mat" ||
          Name == "matlab_ws_set_obj" || Name == "matlab_ws_set_string" ||
          Name == "matlab_ws_set_sym" || Name == "matlab_ws_set_symmat" ||
          Name == "matlab_ws_set_table" || Name == "matlab_ws_set_categorical" ||
          Name == "matlab_ws_set_datetime" || Name == "matlab_ws_set_duration" ||
-         Name == "matlab_ws_set_struct") &&
+         Name == "matlab_ws_set_struct" || Name == "matlab_ws_set_handle") &&
         Call->getNumOperands() == 2) {
       Value NameV = Call->getOperand(0);
       Value Val = Call->getOperand(1);
@@ -1871,9 +1909,10 @@ bool TensorLowering::rewriteBuiltinCalls() {
       bool IsDatetime = (Name == "matlab_ws_set_datetime");
       bool IsDuration = (Name == "matlab_ws_set_duration");
       bool IsStruct   = (Name == "matlab_ws_set_struct");
+      bool IsHandle   = (Name == "matlab_ws_set_handle");
       bool IsPtrSticky = IsObj || IsString || IsSym || IsSymmat ||
                          IsTable || IsCategorical || IsDatetime ||
-                         IsDuration || IsStruct;
+                         IsDuration || IsStruct || IsHandle;
       bool IsMat;
       bool IsInt = mlir::isa<mlir::IntegerType>(Val.getType());
       if (IsPtrSticky) IsMat = true;
@@ -1914,7 +1953,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Value Ptr = fieldNameAddr(NameV, Len);
       if (!Ptr) continue;
       StringRef RuntimeName =
-          IsSymmat       ? "matlab_ws_set_symmat"
+          IsHandle       ? "matlab_ws_set_handle"
+          : (IsSymmat    ? "matlab_ws_set_symmat"
                          : (IsSym ? "matlab_ws_set_sym"
                               : (IsString      ? "matlab_ws_set_string"
                               : (IsObj         ? "matlab_ws_set_obj"
@@ -1924,7 +1964,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
                               : (IsDatetime    ? "matlab_ws_set_datetime"
                               : (IsDuration    ? "matlab_ws_set_duration"
                               : (IsMat         ? "matlab_ws_set_mat"
-                                               : "matlab_ws_set_f64")))))))));
+                                               : "matlab_ws_set_f64"))))))))));
       B.setInsertionPoint(Call);
       Value LenV = LLVM::ConstantOp::create(
           B, Call->getLoc(), I64, B.getI64IntegerAttr(Len));
