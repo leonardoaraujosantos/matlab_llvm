@@ -5,6 +5,11 @@
 # Regenerated: 2026-05-24T16:41:55Z
 
 control/c2d_zoh_demo.m                             # EMIT  (needs c2d/d2c/step on tf class — partial scope of #27, deferred to follow-up)
+# Heavy RL training demo: 200-episode DDPG swing-up runs past the sweep's 15s
+# per-example budget (the sweep compiles at -O0).  It compiles + links + starts
+# running fine — only completion is slow; convergence is gated by the
+# (timeout-free) run-tests lane via test/Run/rl_ddpg.m.
+rl/pendulum_ddpg.m                                 # TIMEOUT (heavy 200-ep DDPG training; convergence gated by test/Run/rl_ddpg.m)
 pde/clamped_plate_pressure.m                       # EMIT
 pde/poisson_disk.m                                 # EMIT
 pde/tuningfork_modal.m                             # EMIT
