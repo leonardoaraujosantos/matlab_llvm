@@ -623,6 +623,27 @@ void Resolver::registerBuiltins() {
     "matlab_nav_pseudoranges", "matlab_nav_receiverposition",
     "matlab_nav_frenet_init", "matlab_nav_frenet_g2f", "matlab_nav_frenet_f2g",
     "matlab_nav_trajgen_init", "matlab_nav_trajgen_connect",
+    /* ===== Reinforcement Learning Toolbox — Tier 1 (tabular) ==============
+     * Class names (rlMDPEnv/rlFiniteSetSpec/rlNumericSpec/rlTable/
+     * rlQValueFunction/rlQAgent/rlSARSAAgent/rl*Options) resolve via the
+     * prelude.  Free functions + methods register here; dispatch keys on
+     * arg-0's pinned class in Lowering.cpp. */
+    "rlPredefinedEnv", "getObservationInfo", "getActionInfo",
+    "train", "getCritic", "getLearnableParameters",
+    "getAction", "getMaxQValue", "getGreedyPolicy",
+    "matlab_rl_get_action", "matlab_rl_get_maxq", "matlab_rl_greedy_policy",
+    "matlab_rl_gridworld_init", "matlab_rl_mdp_init", "matlab_rl_cartpole_init",
+    "matlab_rl_dqn_init", "matlab_rl_dqn_train", "matlab_rl_dqn_sim",
+    "matlab_rl_pg_init", "matlab_rl_pg_train", "matlab_rl_pg_sim",
+    "matlab_rl_pendulum_init", "matlab_rl_ddpg_init", "matlab_rl_ddpg_train", "matlab_rl_ddpg_sim",
+    "matlab_rl_td3_init", "matlab_rl_td3_train", "matlab_rl_td3_sim",
+    "matlab_rl_ppo_init", "matlab_rl_ppo_train", "matlab_rl_ppo_sim",
+    "matlab_rl_sac_init", "matlab_rl_sac_train", "matlab_rl_sac_sim",
+    "matlab_rl_countdown_init", "matlab_rl_grpo_init", "matlab_rl_grpo_train", "matlab_rl_grpo_sim",
+    "matlab_rl_obs_info", "matlab_rl_act_info",
+    "matlab_rl_table_init", "matlab_rl_qvf_init", "matlab_rl_agent_init",
+    "matlab_rl_get_critic", "matlab_rl_get_params",
+    "matlab_rl_train", "matlab_rl_sim",
     /* ===== Deep Learning Toolbox — Tiers 1-2 (dlarray + autodiff) =========
      * `dlarray` is a class (resolves via prelude, NOT registered).  The
      * activation/loss free-function names + extractdata + dlgradient register
@@ -2019,6 +2040,23 @@ void Resolver::resolveStmt(Stmt &St, Scope *S) {
           if (NX->Name == "spline" || NX->Name == "pchip" ||
               NX->Name == "ppmak" || NX->Name == "fnder" || NX->Name == "fnint") {
             if (ClassDef *C = classByName("ppform")) return C;
+          }
+          /* Reinforcement Learning Tier 1: the factory + accessor functions
+           * are builtins (not classdef ctors), so their result class must be
+           * pinned by name here — otherwise the env/spec/critic dispatches
+           * (getObservationInfo / train / sim / getLearnableParameters) can't
+           * see the pin and fall through to "unsupported call shape". */
+          if (NX->Name == "rlPredefinedEnv") {
+            if (ClassDef *C = classByName("rlMDPEnv")) return C;
+          }
+          if (NX->Name == "getObservationInfo" || NX->Name == "getActionInfo") {
+            if (ClassDef *C = classByName("rlFiniteSetSpec")) return C;
+          }
+          if (NX->Name == "getCritic") {
+            if (ClassDef *C = classByName("rlQValueFunction")) return C;
+          }
+          if (NX->Name == "getGreedyPolicy") {
+            if (ClassDef *C = classByName("rlMaxQPolicy")) return C;
           }
           /* User function whose body returns a class-pinned value —
            * propagate that pin to the caller's LHS. */

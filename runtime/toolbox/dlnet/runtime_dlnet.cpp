@@ -67,14 +67,18 @@ static matlab_mat *dlnet_gemm_AtB(matlab_mat *A, matlab_mat *B) {
     for (int64_t i = 0; i < A->rows; ++i)
         for (int64_t j = 0; j < A->cols; ++j)
             AT->data[j * A->rows + i] = A->data[i * A->cols + j];
-    return dlnet_gemm(AT, B);
+    matlab_mat *R = dlnet_gemm(AT, B);
+    free(AT->data); free(AT);   // transpose scratch — gemm read it, owns nothing
+    return R;
 }
 static matlab_mat *dlnet_gemm_ABt(matlab_mat *A, matlab_mat *B) {
     matlab_mat *BT = mat_alloc(B->cols, B->rows);
     for (int64_t i = 0; i < B->rows; ++i)
         for (int64_t j = 0; j < B->cols; ++j)
             BT->data[j * B->rows + i] = B->data[i * B->cols + j];
-    return dlnet_gemm(A, BT);
+    matlab_mat *R = dlnet_gemm(A, BT);
+    free(BT->data); free(BT);   // transpose scratch — gemm read it, owns nothing
+    return R;
 }
 
 extern "C" matlab_mat *matlab_dlnet_gpu_set(double flag) {
@@ -279,6 +283,17 @@ static thread_local std::vector<Node> g_tape;
 static thread_local std::vector<matlab_mat *>  g_tape_temps;
 static thread_local std::unordered_set<void *> g_tape_temp_set;
 
+/* Opt-in: also free NON-LEAF forward values (Node.val) on reset.  A non-leaf
+ * value is tape-allocated by a forward op (mtimes/relu/…); it is never the
+ * Data of a dlarray the caller holds across a reset in a training loop
+ * (forward → loss → dlgradient → param update → reset → repeat).  LEAF values
+ * are left alone — they alias externally-owned matrices (network parameters,
+ * constant targets) and freeing them would dangle the owner.  Default OFF so
+ * general DL code keeps the conservative #82 behaviour; the RL deep-training
+ * loops, which provably never retain a non-leaf dlarray across reset, turn it
+ * on to train across tens of thousands of grad calls in bounded memory. */
+static thread_local bool g_free_fwd_on_reset = false;
+
 /* Rank-aware free for any tape-owned descriptor.  Mirrors the explicit
  * matN / mat3 / plain frees the conv backward already used for its own
  * scratch (matN_alloc packs descriptor + dims + strides in one block, so a
@@ -303,7 +318,10 @@ inline void free_tape_all() {
     std::unordered_set<void *> freed;
     auto fr = [&](matlab_mat *m) { if (m && freed.insert(m).second) free_mat_any(m); };
     for (Node &n : g_tape) {
-        /* NOT n.val — it is a live dlarray's Data (see note above). */
+        /* n.val: a LEAF value aliases externally-owned Data — never free it.
+         * A non-leaf value is tape-allocated; free it only in the opt-in mode
+         * (RL deep training), where no non-leaf dlarray survives the reset. */
+        if (g_free_fwd_on_reset && n.op != OP_LEAF) fr(n.val);
         fr(n.adj);
         for (matlab_mat *a : n.auxData) fr(a);
     }
@@ -3884,6 +3902,14 @@ matlab_mat *matlab_dlnet_grad(void *lossv, void *varv) {
 // Reset the tape (dlfeval entry / start of a fresh forward pass).
 matlab_mat *matlab_dlnet_reset(double dummy) { (void)dummy; dlnet::free_tape_all(); return mat_alloc(0,0); }
 matlab_mat *matlab_dlnet_reset0(void) { dlnet::free_tape_all(); return mat_alloc(0,0); }
+// Opt-in (RL deep training): also reclaim non-leaf forward values on reset so
+// a loop of tens of thousands of grad calls stays bounded.  See the note on
+// g_free_fwd_on_reset.  Returns the previous setting so callers can restore it.
+int matlab_dlnet_set_free_forward(int on) {
+    int prev = dlnet::g_free_fwd_on_reset ? 1 : 0;
+    dlnet::g_free_fwd_on_reset = (on != 0);
+    return prev;
+}
 
 // ---- Tape-scoping primitives ----------------------------------------------
 // Without explicit scoping, the dlnet tape grows monotonically across

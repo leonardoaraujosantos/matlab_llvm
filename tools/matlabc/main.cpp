@@ -2299,7 +2299,7 @@ static std::string buildReplPrelude(const std::string &Src) {
     "comm", "rf", "optim", "mpc", "ident", "gads", "pde", "prop", "sym",
     "stateflow", "antenna", "control", "stats", "images", "curvefit",
     "dsp", "gpu", "finance", "econ", "fusion", "robotics", "navigation",
-    "dlnet",
+    "dlnet", "rl",
   };
   std::vector<std::string> Files;
   auto add = [&](const std::string &Leaf) {
@@ -2587,6 +2587,36 @@ static std::string buildReplPrelude(const std::string &Src) {
     {false, "frenet2global",             "navigation_classdefs.m"},
     {false, "gnssconstellation",         "navigation_classdefs.m"},
     {false, "receiverposition",          "navigation_classdefs.m"},
+    /* Reinforcement Learning Toolbox — `rl_classdefs.m` umbrella (Tier 1). */
+    {false, "rlPredefinedEnv",           "rl_classdefs.m"},
+    {false, "rlMDPEnv",                  "rl_classdefs.m"},
+    {false, "rlFiniteSetSpec",           "rl_classdefs.m"},
+    {false, "rlNumericSpec",             "rl_classdefs.m"},
+    {false, "rlFunctionEnv",             "rl_classdefs.m"},
+    {false, "rlTable",                   "rl_classdefs.m"},
+    {false, "rlQValueFunction",          "rl_classdefs.m"},
+    {false, "rlQAgent",                  "rl_classdefs.m"},
+    {false, "rlSARSAAgent",              "rl_classdefs.m"},
+    {false, "rlDQNAgent",                "rl_classdefs.m"},
+    {false, "rlPGAgent",                 "rl_classdefs.m"},
+    {false, "rlDDPGAgent",               "rl_classdefs.m"},
+    {false, "rlTD3Agent",                "rl_classdefs.m"},
+    {false, "rlPPOAgent",                "rl_classdefs.m"},
+    {false, "rlSACAgent",                "rl_classdefs.m"},
+    {false, "rlGRPOAgent",               "rl_classdefs.m"},
+    {false, "rlMaxQPolicy",              "rl_classdefs.m"},
+    {false, "getAction",                 "rl_classdefs.m"},
+    {false, "getMaxQValue",              "rl_classdefs.m"},
+    {false, "getGreedyPolicy",           "rl_classdefs.m"},
+    {false, "rlQAgentOptions",           "rl_classdefs.m"},
+    {false, "rlSARSAAgentOptions",       "rl_classdefs.m"},
+    {false, "rlOptimizerOptions",        "rl_classdefs.m"},
+    {false, "rlTrainingOptions",         "rl_classdefs.m"},
+    {false, "rlSimulationOptions",       "rl_classdefs.m"},
+    {false, "getObservationInfo",        "rl_classdefs.m"},
+    {false, "getActionInfo",             "rl_classdefs.m"},
+    {false, "getCritic",                 "rl_classdefs.m"},
+    {false, "getLearnableParameters",    "rl_classdefs.m"},
     /* Deep Learning Toolbox — `dlnet_classdefs.m` (dlarray + autodiff). */
     {false, "dlarray",                   "dlnet_classdefs.m"},
     {false, "dlgradient",                "dlnet_classdefs.m"},
@@ -11853,6 +11883,16 @@ int main(int Argc, char **Argv) {
       "conv2d_batch", "conv2d_full", "maxpool2d", "avgpool2d", "batchnorm",
       "layernorm", "batchnorm_eval", "groupnorm", "batchnorm_train",
       "instancenorm", "rmsnorm",
+      /* Reinforcement Learning Toolbox — `rl_classdefs.m` (Tier 1). */
+      "rlPredefinedEnv", "rlMDPEnv", "rlFiniteSetSpec", "rlNumericSpec",
+      "rlFunctionEnv", "rlTable", "rlQValueFunction", "rlQAgent",
+      "rlSARSAAgent", "rlDQNAgent", "rlPGAgent",
+      "rlDDPGAgent", "rlTD3Agent", "rlPPOAgent", "rlSACAgent", "rlGRPOAgent",
+      "rlQAgentOptions", "rlSARSAAgentOptions",
+      "rlOptimizerOptions", "rlTrainingOptions", "rlSimulationOptions",
+      "rlMaxQPolicy",
+      "getObservationInfo", "getActionInfo", "getCritic",
+      "getLearnableParameters", "getAction", "getMaxQValue", "getGreedyPolicy",
       /* GPU Coder T5 design-pattern helpers — runtime entries, no
        * prelude file needed.  Listed here only for the AOT-prelude
        * scanner's awareness (no leaf to map). */
@@ -12156,6 +12196,23 @@ int main(int Argc, char **Argv) {
         ClsName == "batchnorm_train" || ClsName == "instancenorm" ||
         ClsName == "rmsnorm")
       return "dlnet_classdefs.m";
+    if (ClsName == "rlPredefinedEnv" || ClsName == "rlMDPEnv" ||
+        ClsName == "rlFiniteSetSpec" || ClsName == "rlNumericSpec" ||
+        ClsName == "rlFunctionEnv" || ClsName == "rlTable" ||
+        ClsName == "rlQValueFunction" || ClsName == "rlQAgent" ||
+        ClsName == "rlSARSAAgent" || ClsName == "rlDQNAgent" ||
+        ClsName == "rlDDPGAgent" || ClsName == "rlTD3Agent" ||
+        ClsName == "rlPPOAgent" || ClsName == "rlSACAgent" ||
+        ClsName == "rlGRPOAgent" ||
+        ClsName == "rlPGAgent" || ClsName == "rlQAgentOptions" ||
+        ClsName == "rlSARSAAgentOptions" || ClsName == "rlOptimizerOptions" ||
+        ClsName == "rlTrainingOptions" || ClsName == "rlSimulationOptions" ||
+        ClsName == "rlMaxQPolicy" ||
+        ClsName == "getObservationInfo" || ClsName == "getActionInfo" ||
+        ClsName == "getCritic" || ClsName == "getLearnableParameters" ||
+        ClsName == "getAction" || ClsName == "getMaxQValue" ||
+        ClsName == "getGreedyPolicy")
+      return "rl_classdefs.m";
     /* GPU Coder T5 design-pattern helpers are C runtime entries; no
      * classdef file to pull in. */
     return std::string();
@@ -12212,7 +12269,7 @@ int main(int Argc, char **Argv) {
       "comm", "rf", "optim", "mpc", "ident", "gads", "pde", "prop", "sym",
       "stateflow", "antenna", "control", "stats", "images", "curvefit",
       "dsp", "gpu", "finance", "econ", "fusion", "robotics", "navigation",
-      "dlnet",
+      "dlnet", "rl",
     };
     std::vector<std::string> Cands;
     for (const char *Tb : kToolboxDirs) {
