@@ -579,6 +579,45 @@ if(MATLAB_LLVM_WITH_MLIR)
       target_link_options(matlabc PRIVATE "-Wl,-rpath,${_rp}")
     endforeach()
   endif()
+  # GPU Coder — OpenCL backend (T4).  Opt-in (default OFF).  The TU
+  # hand-declares the OpenCL 1.2 API, so it links against just the ICD
+  # loader (libOpenCL) — no OpenCL SDK headers required.  Works against
+  # any vendor ICD (NVIDIA / AMD / Intel).  Override the lib path with
+  # -DMATLAB_OPENCL_LIB= for loaders shipped without an unversioned .so.
+  option(MATLAB_LLVM_GPU_OPENCL "Build OpenCL GPU backend" OFF)
+  if(MATLAB_LLVM_GPU_OPENCL)
+    # Resolve into a throwaway var; rely on CMake treating "...-NOTFOUND"
+    # as false so a stale cache never short-circuits re-discovery.
+    set(_ocl_lib "${MATLAB_OPENCL_LIB}")  # explicit -D override wins
+    if(NOT _ocl_lib)
+      find_library(_ocl_found NAMES OpenCL
+        PATHS /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu /usr/lib64 /usr/lib)
+      if(_ocl_found)
+        set(_ocl_lib "${_ocl_found}")
+      else()
+        # ICD loader without an unversioned symlink (e.g. only libOpenCL.so.1).
+        file(GLOB _ocl_cand
+          "/usr/lib/x86_64-linux-gnu/libOpenCL.so*"
+          "/lib/x86_64-linux-gnu/libOpenCL.so*"
+          "/usr/lib64/libOpenCL.so*")
+        if(_ocl_cand)
+          list(GET _ocl_cand 0 _ocl_lib)
+        endif()
+      endif()
+    endif()
+    if(NOT _ocl_lib)
+      message(FATAL_ERROR
+        "MATLAB_LLVM_GPU_OPENCL=ON but no OpenCL ICD loader (libOpenCL) was "
+        "found.\n  Install an ICD loader (e.g. ocl-icd-libopencl1) or set "
+        "-DMATLAB_OPENCL_LIB=/path/to/libOpenCL.so[.1].")
+    endif()
+    set(MATLAB_OPENCL_LIB "${_ocl_lib}" CACHE FILEPATH
+        "OpenCL ICD loader" FORCE)
+    message(STATUS "OpenCL backend: linking ${_ocl_lib}")
+    target_sources(matlabc PRIVATE runtime/gpu/opencl/runtime_gpu_opencl.cpp)
+    target_link_libraries(matlabc PRIVATE "${_ocl_lib}")
+    target_compile_definitions(matlabc PRIVATE MATLAB_LLVM_GPU_OPENCL=1)
+  endif()
   # Export the matlab_* symbols so the JIT's dynamic lookup finds them
   # (by default executables hide symbols not referenced internally).
   if(APPLE)

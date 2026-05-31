@@ -174,6 +174,19 @@ matlab_gpu_launch_opencl(double, double, double, void *, void *, int) {
   std::abort();
 }
 
+/* Tier-4 OpenCL gemm hook — defined strongly by
+ * runtime/gpu/opencl/runtime_gpu_opencl.cpp when the OpenCL TU is in the
+ * link line; weak stub returns nullptr so the dispatcher falls back to
+ * the CPU lane on hosts without OpenCL linked in. */
+extern "C" __attribute__((weak)) matlab_mat *
+matlab_gpu_opencl_gemm_double(matlab_mat *, matlab_mat *) {
+  return nullptr;  /* "OpenCL backend not linked — fall back" */
+}
+extern "C" __attribute__((weak)) const char *
+matlab_gpu_opencl_device_name(void) {
+  return nullptr;  /* "OpenCL backend not linked" */
+}
+
 }  /* namespace */
 
 extern "C" {
@@ -274,7 +287,10 @@ const char *matlab_gpu_device_name(void) {
       const char *N = matlab_gpu_cuda_device_name();
       return N ? N : "NVIDIA CUDA (Tier-3)";
     }
-    case GpuTarget::OpenCl: return "OpenCL (Tier-4)";
+    case GpuTarget::OpenCl: {
+      const char *N = matlab_gpu_opencl_device_name();
+      return N ? N : "OpenCL (Tier-4)";
+    }
     case GpuTarget::Cpu:    return "CPU debug lane (Tier-1)";
     default:                return "CPU debug lane (Tier-1)";
   }
@@ -361,6 +377,11 @@ matlab_mat *matlab_gpu_gemm(matlab_mat *A, matlab_mat *B) {
   }
   if (T == GpuTarget::Cuda && big_enough) {
     matlab_mat *C = matlab_gpu_cuda_gemm_double(A, B);
+    if (C) return C;
+    /* Backend hook unavailable / failed — fall through to CPU. */
+  }
+  if (T == GpuTarget::OpenCl && big_enough) {
+    matlab_mat *C = matlab_gpu_opencl_gemm_double(A, B);
     if (C) return C;
     /* Backend hook unavailable / failed — fall through to CPU. */
   }
