@@ -4,6 +4,7 @@
 #include "llvm/ADT/SmallVector.h"
 
 #include <string>
+#include <vector>
 
 namespace mlir {
 class ModuleOp;
@@ -194,12 +195,27 @@ unsigned runOutlineGpuKernels(mlir::ModuleOp M);
 /// placeholder body with a `// FALLBACK: <reason>` comment.
 std::string emitMetalKernels(mlir::ModuleOp M, llvm::StringRef Prefix);
 
+/// Descriptor for the first emitted CUDA kernel, so the host-driver
+/// emitter (tools/matlabc) can declare + launch it with the matching
+/// name + signature (NVRTC-based driver).  Populated by emitCudaKernels
+/// when an out-param is supplied.
+struct CudaKernelInfo {
+  std::string name;                     ///< e.g. "scale_kernel_0"
+  bool hasOutput = false;               ///< kernel takes a leading `double *out`
+  std::vector<std::string> scalarArgs;  ///< ordered `const double` capture names
+  bool bailed = false;                  ///< body hit a FALLBACK (identity body)
+  unsigned kernelCount = 0;             ///< total matlab.gpu.kernel ops emitted
+};
+
 /// Emit CUDA-C kernel source for every matlab.gpu.kernel op.  Same
 /// shape as emitMetalKernels — uses __global__ + `T*` + thread-index
-/// macros.  Returns the combined source.  Cannot validate locally on
-/// macOS (no nvcc + no NVIDIA HW); Linux CI runs nvcc on the emitted
-/// bundle when a CUDA-capable runner is available.
-std::string emitCudaKernels(mlir::ModuleOp M, llvm::StringRef Prefix);
+/// macros.  Returns the combined source.  The emitted kernels carry no
+/// `#include` (device builtins like blockIdx are intrinsic to both nvcc
+/// and NVRTC), so the source is NVRTC-compilable as-is.  When `Info` is
+/// non-null it is filled with a descriptor of the first kernel for the
+/// host-driver emitter.
+std::string emitCudaKernels(mlir::ModuleOp M, llvm::StringRef Prefix,
+                            CudaKernelInfo *Info = nullptr);
 
 /// Emit OpenCL-C kernel source for every matlab.gpu.kernel op.  Uses
 /// __kernel + __global + get_global_id(0).  fp64 enabled via
