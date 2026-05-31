@@ -392,6 +392,27 @@ classdef rlSACAgent
     end
 end
 
+% rlGRPOAgent — Group Relative Policy Optimization (DeepSeek).  On-policy and
+% CRITIC-FREE: a group of completions is scored by a rule-based verifier and
+% their group-relative reward is the advantage (no value network, no GAE).
+% Discrete softmax policy; used here on the Countdown arithmetic-puzzle env.
+classdef rlGRPOAgent
+    properties
+        ObsDim
+        NumActions
+        LearnRate
+        GroupSize
+    end
+    methods
+        function obj = rlGRPOAgent()
+            obj.ObsDim     = 1;
+            obj.NumActions = 2;
+            obj.LearnRate  = 0.003;
+            obj.GroupSize  = 24;
+        end
+    end
+end
+
 % ===== Policy object (Tier 2) =============================================
 % rlMaxQPolicy — the greedy policy extracted from a value-based agent via
 % getGreedyPolicy.  Carries a copy of the agent's network (or Q table), added

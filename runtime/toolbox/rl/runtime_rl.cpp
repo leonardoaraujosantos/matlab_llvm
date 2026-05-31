@@ -334,6 +334,26 @@ inline void pendulum_obs(const double *st, double *obs) {
     obs[0] = std::cos(st[0]); obs[1] = std::sin(st[0]); obs[2] = st[1];
 }
 
+// ----- Countdown arithmetic puzzle (discrete reasoning, verifier reward) ----
+// A tiny verifiable "reach the target" task in the spirit of the Countdown
+// numbers game — the natural fit for GRPO (discrete actions, sparse binary
+// outcome reward checked by a rule, cheap parallel resets).  Starting from
+// acc=0, the agent applies kCdSteps operations; each action a∈1..15 selects a
+// digit d∈{1..5} and an op∈{+,−,×}:  d=((a-1)%5)+1, op=(a-1)/5.  The reward is
+// 1 iff the final accumulator exactly equals the target, else 0 (verified by
+// integer equality).  The fixed target set is reachable in two steps.
+static const int64_t kCdSteps = 2, kCdActions = 15, kCdObs = 3;
+inline double countdown_apply(double acc, int64_t a) {
+    int64_t d = ((a - 1) % 5) + 1, op = (a - 1) / 5;
+    if (op == 0) return acc + static_cast<double>(d);
+    if (op == 1) return acc - static_cast<double>(d);
+    return acc * static_cast<double>(d);
+}
+// obs = [acc/10, target/10, stepFraction].
+inline void countdown_obs(double acc, double target, int64_t step, double *obs) {
+    obs[0] = acc / 10.0; obs[1] = target / 10.0; obs[2] = static_cast<double>(step) / static_cast<double>(kCdSteps);
+}
+
 }  // namespace rl
 
 extern "C" {
@@ -449,6 +469,22 @@ void matlab_rl_pendulum_init(matlab_obj *env) {
     rl::set_f64(env, "ActionDim",   1.0);
     rl::set_f64(env, "ActionLimit", 2.0);
     rl::set_f64(env, "MaxSteps",    200.0);
+}
+
+// rlPredefinedEnv("Countdown-Discrete") — the verifier-reward arithmetic
+// puzzle used by the GRPO agent.  Kind=4; obs dim 3, 15 discrete actions,
+// kCdSteps operations per episode.  The fixed reachable target set is stored
+// as the "Targets" row vector.
+void matlab_rl_countdown_init(matlab_obj *env) {
+    rl::set_f64(env, "Kind",       4.0);
+    rl::set_f64(env, "ObsDim",     static_cast<double>(rl::kCdObs));
+    rl::set_f64(env, "NumStates",  static_cast<double>(rl::kCdObs));
+    rl::set_f64(env, "NumActions", static_cast<double>(rl::kCdActions));
+    rl::set_f64(env, "MaxSteps",   static_cast<double>(rl::kCdSteps));
+    const double targets[8] = {4, 5, 6, 7, 8, 9, 10, 12};
+    matlab_mat *T = matlab_zeros(1, 8);
+    for (int i = 0; i < 8; ++i) T->data[i] = targets[i];
+    rl::set_mat(env, "Targets", T);
 }
 
 // ===========================================================================
@@ -1722,6 +1758,154 @@ matlab_mat *matlab_rl_sac_sim(matlab_obj *agent, matlab_obj *env) {
         rl::pendulum_obs(sint.data(), obs.data());
     }
     out->data[0] = total;
+    return out;
+}
+
+// ===========================================================================
+// GRPO — Group Relative Policy Optimization (DeepSeek).  rlGRPOAgent(obs,act)
+// ===========================================================================
+// On-policy, and CRITIC-FREE: the defining trait of GRPO.  For each "prompt"
+// (here a Countdown puzzle / target) the agent samples a GROUP of M parallel
+// completions, scores each with the rule-based verifier reward rᵢ∈{0,1}, and
+// forms a group-relative advantage  Âᵢ = (rᵢ − μ)/σ  shared by every step of
+// completion i — replacing PPO's value network + GAE entirely.  The policy is
+// then updated with the same clipped surrogate as PPO (reused verbatim as a
+// reweighted −Σ coef·log π), plus GRPO's explicit KL-to-reference penalty
+// β·KL(π_θ‖π_ref) folded into the same per-sample host coefficient
+// (k3 estimator: ∂KL/∂logπ_θ = 1 − π_ref/π_θ).  No critic, no GAE, ~half the
+// memory of PPO.
+
+void matlab_rl_grpo_init(matlab_obj *agent, matlab_obj *obsInfo, matlab_obj *actInfo) {
+    matlab_rl_dqn_init(agent, obsInfo, actInfo);   // softmax actor W1/b1/W2/b2 + Adam moments
+    // Frozen reference policy snapshot for the KL penalty.
+    const char *P[4] = {"W1","b1","W2","b2"};
+    for (const char *p : P)
+        rl::set_mat(agent, (std::string("r")+p).c_str(), rl::clone_mat(rl::get_mat(agent, p)));
+}
+
+matlab_mat *matlab_rl_grpo_train(matlab_obj *agent, matlab_obj *env, matlab_obj *opts) {
+    int64_t obsDim = static_cast<int64_t>(rl::get_f64(agent, "ObsDim"));
+    int64_t A      = static_cast<int64_t>(rl::get_f64(agent, "NumActions"));
+    double lr   = rl::get_f64(agent, "LearnRate");      if (lr <= 0) lr = 3e-3;
+    double clip = rl::get_f64(agent, "ClipRatio");      if (clip <= 0) clip = 0.2;
+    double beta = rl::get_f64(agent, "KLWeight");       if (beta < 0) beta = 0.0;
+    int64_t M       = static_cast<int64_t>(rl::get_f64(agent, "GroupSize")); if (M < 2) M = 24;
+    int64_t epochs  = static_cast<int64_t>(rl::get_f64(agent, "NumEpoch"));  if (epochs < 1) epochs = 6;
+    int64_t T       = static_cast<int64_t>(rl::get_f64(env, "MaxSteps"));    if (T < 1) T = rl::kCdSteps;
+    int64_t maxIter = static_cast<int64_t>(rl::get_f64(opts, "MaxEpisodes")); if (maxIter < 1) maxIter = 1;
+    matlab_mat *targets = rl::get_mat(env, "Targets");
+    int64_t K = targets ? targets->rows * targets->cols : 1;
+
+    int prevFreeFwd = matlab_dlnet_set_free_forward(1);
+    matlab_mat *stats = matlab_zeros(static_cast<double>(maxIter), 1);
+    double tstep = 0.0;
+    std::vector<double> obs(static_cast<size_t>(obsDim)), probs(static_cast<size_t>(A));
+
+    for (int64_t it = 0; it < maxIter; ++it) {
+        // A BATCH OF PROMPTS: every target contributes its own group of M
+        // completions, with the advantage normalised WITHIN each group; the
+        // combined batch is updated together so the shared policy fits all
+        // targets at once (no per-target interference).
+        int64_t N = K * M * T;
+        std::vector<double> bS(static_cast<size_t>(N*obsDim));
+        std::vector<int64_t> bA(static_cast<size_t>(N));
+        std::vector<double> bOldlp(static_cast<size_t>(N)), bAdv(static_cast<size_t>(N));
+        std::vector<double> ret(static_cast<size_t>(M));
+        double batchMeanR = 0.0;
+        for (int64_t pi = 0; pi < K; ++pi) {
+            double target = targets ? targets->data[pi] : 10.0;
+            double meanR = 0.0;
+            for (int64_t m = 0; m < M; ++m) {
+                double acc = 0.0;
+                for (int64_t t = 0; t < T; ++t) {
+                    rl::countdown_obs(acc, target, t, obs.data());
+                    rl::mlp_policy(rl::get_mat(agent,"W1"), rl::get_mat(agent,"b1"),
+                                   rl::get_mat(agent,"W2"), rl::get_mat(agent,"b2"), obs.data(), probs.data());
+                    double u = rl::urand(), a2 = 0; int64_t a = A;
+                    for (int64_t j = 0; j < A; ++j) { a2 += probs[static_cast<size_t>(j)]; if (u <= a2) { a = j+1; break; } }
+                    int64_t n = (pi*M + m)*T + t;
+                    for (int64_t k = 0; k < obsDim; ++k) bS[static_cast<size_t>(n*obsDim+k)] = obs[static_cast<size_t>(k)];
+                    bA[static_cast<size_t>(n)] = a;
+                    bOldlp[static_cast<size_t>(n)] = std::log(probs[static_cast<size_t>(a-1)] + 1e-12);
+                    acc = rl::countdown_apply(acc, a);
+                }
+                double r = (std::fabs(acc - target) < 1e-6) ? 1.0 : 0.0;   // verifier
+                ret[static_cast<size_t>(m)] = r; meanR += r;
+            }
+            meanR /= static_cast<double>(M); batchMeanR += meanR;
+            double var = 0; for (double r : ret) var += (r-meanR)*(r-meanR); var /= static_cast<double>(M);
+            double sd = std::sqrt(var) + 1e-8;
+            for (int64_t m = 0; m < M; ++m) { double adv = (ret[static_cast<size_t>(m)]-meanR)/sd;
+                for (int64_t t = 0; t < T; ++t) bAdv[static_cast<size_t>((pi*M+m)*T+t)] = adv; }
+        }
+        stats->data[it] = batchMeanR / static_cast<double>(K);
+
+        matlab_mat *X = matlab_zeros(static_cast<double>(obsDim), static_cast<double>(N));
+        for (int64_t n = 0; n < N; ++n) for (int64_t k = 0; k < obsDim; ++k) X->data[k*N+n] = bS[static_cast<size_t>(n*obsDim+k)];
+
+        for (int64_t ep = 0; ep < epochs; ++ep) {
+            matlab_mat *Wt = matlab_zeros(static_cast<double>(A), static_cast<double>(N));
+            for (int64_t n = 0; n < N; ++n) {
+                rl::mlp_policy(rl::get_mat(agent,"W1"), rl::get_mat(agent,"b1"),
+                               rl::get_mat(agent,"W2"), rl::get_mat(agent,"b2"), &bS[static_cast<size_t>(n*obsDim)], probs.data());
+                double newlp = std::log(probs[static_cast<size_t>(bA[static_cast<size_t>(n)]-1)] + 1e-12);
+                double ratio = std::exp(newlp - bOldlp[static_cast<size_t>(n)]);
+                double Aadv = bAdv[static_cast<size_t>(n)];
+                double rc = ratio < 1.0-clip ? 1.0-clip : (ratio > 1.0+clip ? 1.0+clip : ratio);
+                double surrCoef = (ratio*Aadv <= rc*Aadv) ? ratio*Aadv : 0.0;
+                // GRPO KL-to-reference penalty (k3): gradient coef 1 − π_ref/π_θ.
+                double klCoef = 0.0;
+                if (beta > 0) {
+                    double rlp; { double pr[64]; rl::mlp_policy(rl::get_mat(agent,"rW1"), rl::get_mat(agent,"rb1"),
+                                     rl::get_mat(agent,"rW2"), rl::get_mat(agent,"rb2"), &bS[static_cast<size_t>(n*obsDim)], pr);
+                                  rlp = std::log(pr[bA[static_cast<size_t>(n)]-1] + 1e-12); }
+                    klCoef = beta * (1.0 - std::exp(rlp - newlp));
+                }
+                Wt->data[(bA[static_cast<size_t>(n)]-1)*N + n] = -surrCoef + klCoef;
+            }
+            matlab_obj *W1L=rl::dl_leaf(rl::get_mat(agent,"W1")), *b1L=rl::dl_leaf(rl::get_mat(agent,"b1"));
+            matlab_obj *W2L=rl::dl_leaf(rl::get_mat(agent,"W2")), *b2L=rl::dl_leaf(rl::get_mat(agent,"b2"));
+            matlab_obj *xL=rl::dl_leaf(X);
+            matlab_obj *logits=rl::dl_add(rl::dl_mm(W2L, rl::dl_relu(rl::dl_add(rl::dl_mm(W1L,xL),b1L))), b2L);
+            matlab_obj *logp=rl::dl_log(rl::dl_softmax(logits));
+            matlab_obj *loss=rl::dl_sum(rl::dl_times(logp, rl::dl_leaf(Wt)));
+            tstep += 1.0;
+            rl::adam_step(rl::get_mat(agent,"W1"), rl::dl_grad(loss,W1L), rl::get_mat(agent,"mW1"), rl::get_mat(agent,"vW1"), lr, tstep);
+            rl::adam_step(rl::get_mat(agent,"b1"), rl::dl_grad(loss,b1L), rl::get_mat(agent,"mb1"), rl::get_mat(agent,"vb1"), lr, tstep);
+            rl::adam_step(rl::get_mat(agent,"W2"), rl::dl_grad(loss,W2L), rl::get_mat(agent,"mW2"), rl::get_mat(agent,"vW2"), lr, tstep);
+            rl::adam_step(rl::get_mat(agent,"b2"), rl::dl_grad(loss,b2L), rl::get_mat(agent,"mb2"), rl::get_mat(agent,"vb2"), lr, tstep);
+            matlab_dlnet_reset0();
+            rl::free_mat(Wt);
+        }
+        rl::free_mat(X);
+    }
+    matlab_dlnet_set_free_forward(prevFreeFwd);
+    return stats;
+}
+
+// sim(grpoAgent, env) — greedy (argmax) evaluation over the full target set;
+// returns the number of puzzles the policy solves exactly.
+matlab_mat *matlab_rl_grpo_sim(matlab_obj *agent, matlab_obj *env) {
+    int64_t obsDim = static_cast<int64_t>(rl::get_f64(agent, "ObsDim"));
+    int64_t A = static_cast<int64_t>(rl::get_f64(agent, "NumActions"));
+    int64_t T = static_cast<int64_t>(rl::get_f64(env, "MaxSteps")); if (T < 1) T = rl::kCdSteps;
+    matlab_mat *targets = rl::get_mat(env, "Targets");
+    int64_t K = targets ? targets->rows * targets->cols : 0;
+    matlab_mat *out = matlab_zeros(1,1);
+    std::vector<double> obs(static_cast<size_t>(obsDim)), probs(static_cast<size_t>(A));
+    int64_t solved = 0;
+    for (int64_t p = 0; p < K; ++p) {
+        double target = targets->data[p], acc = 0.0;
+        for (int64_t t = 0; t < T; ++t) {
+            rl::countdown_obs(acc, target, t, obs.data());
+            rl::mlp_policy(rl::get_mat(agent,"W1"), rl::get_mat(agent,"b1"),
+                           rl::get_mat(agent,"W2"), rl::get_mat(agent,"b2"), obs.data(), probs.data());
+            int64_t a = 1; for (int64_t j = 1; j < A; ++j) if (probs[static_cast<size_t>(j)] > probs[static_cast<size_t>(a-1)]) a = j+1;
+            acc = rl::countdown_apply(acc, a);
+        }
+        if (std::fabs(acc - target) < 1e-6) solved++;
+    }
+    out->data[0] = static_cast<double>(solved);
     return out;
 }
 

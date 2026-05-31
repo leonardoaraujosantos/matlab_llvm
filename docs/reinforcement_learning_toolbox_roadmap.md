@@ -164,6 +164,30 @@ continuous agents** (entropy regularisation + twin critics); test asserts
 TRPO and the model-based / custom-loop / deployment surface remain as future
 work.
 
+### GRPO — Group Relative Policy Optimization (DeepSeek)
+
+Beyond the MathWorks tier list, the branch also ships **`rlGRPOAgent`** — the
+critic-free on-policy algorithm DeepSeek introduced for LLM reasoning, on a
+small but faithful analogue: a **Countdown arithmetic-puzzle env**
+(`rlPredefinedEnv("Countdown-Discrete")`, Kind=4) with the properties GRPO is
+built for — discrete actions, cheap parallel resets, and a sparse **outcome
+reward checked by a rule-based verifier** (reward 1 iff two ops from `{+,−,×}`
+on digits `{1..5}` hit the target). GRPO's defining move is to **eliminate the
+critic**: for each target it samples a **group of M completions**, scores them
+with the verifier, and uses the group's own mean/σ as the baseline —
+`Âᵢ = (rᵢ − μ)/σ`, shared across a completion's steps — *replacing PPO's value
+net + GAE entirely*. It processes a **batch of prompts** (all 8 targets, each
+with its own group, advantage normalised within-group) to avoid per-target
+interference, then updates with PPO's clipped surrogate **plus an explicit
+KL-to-reference penalty** `β·KL(π_θ‖π_ref)` — both folded into the same
+host-computed per-sample coefficient on the reused `−Σ coef·logπ` tape step
+(k3 estimator: `∂KL/∂logπ_θ = 1 − π_ref/π_θ`). Headline
+[`examples/rl/countdown_grpo.m`](../examples/rl/countdown_grpo.m), test
+`rl_grpo.m`: 800 iterations → greedy solves **7/8** puzzles (untrained 0/8,
+exactly consistent across seeds); test asserts `solved > 3`. Reuses the
+REINFORCE softmax actor + the PPO clip machinery; no value network is ever
+built — the ~50% memory saving is structural.
+
 ---
 
 ## 0b. Status — Tier 1 SHIPPED (2026-05-29)
