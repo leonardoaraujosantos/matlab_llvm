@@ -12946,7 +12946,7 @@ int main(int Argc, char **Argv) {
     /* Descriptor of the first emitted CUDA kernel — drives the
      * NVRTC-based host driver + Makefile below.  Stays empty (kernelCount
      * 0) for Metal/OpenCL and when no kernel was emitted. */
-    mlirgen::CudaKernelInfo CudaInfo;
+    mlirgen::GpuKernelInfo GpuInfo;
     /* Kernel file. */
     {
       std::string Path = OutDir + "/" + Stem + "_kernel." + KernelExt;
@@ -12972,9 +12972,9 @@ int main(int Argc, char **Argv) {
           if (Opts.Mode == Options::Mode::EmitMetal)
             KernelSource = mlirgen::emitMetalKernels(M, Stem);
           else if (Opts.Mode == Options::Mode::EmitCuda)
-            KernelSource = mlirgen::emitCudaKernels(M, Stem, &CudaInfo);
+            KernelSource = mlirgen::emitCudaKernels(M, Stem, &GpuInfo);
           else if (Opts.Mode == Options::Mode::EmitOpenCL)
-            KernelSource = mlirgen::emitOpenCLKernels(M, Stem);
+            KernelSource = mlirgen::emitOpenCLKernels(M, Stem, &GpuInfo);
         }
       }
       if (!KernelSource.empty()) {
@@ -13033,8 +13033,8 @@ int main(int Argc, char **Argv) {
            << " */\n\n";
       }
       if (Opts.Mode == Options::Mode::EmitCuda) {
-        bool runnable = (CudaInfo.kernelCount == 1 && CudaInfo.hasOutput &&
-                         !CudaInfo.bailed);
+        bool runnable = (GpuInfo.kernelCount == 1 && GpuInfo.hasOutput &&
+                         !GpuInfo.bailed);
         if (!runnable) {
           /* Body not fully translatable (multiple kernels, no output, or
            * a FALLBACK identity body) — emit a compilable stub that says
@@ -13053,7 +13053,7 @@ int main(int Argc, char **Argv) {
         } else {
           /* NVRTC-based driver: read the emitted .cu, JIT-compile it for
            * the local device's compute capability, and launch the real
-           * kernel (" << CudaInfo.name << ") via the driver API.  No nvcc
+           * kernel (" << GpuInfo.name << ") via the driver API.  No nvcc
            * needed.  Scalar captures are set to a demo value (2.0); grid
            * size n comes from argv[1] (default 16). */
           OF << "#include <cstdio>\n"
@@ -13104,16 +13104,16 @@ int main(int Argc, char **Argv) {
              << "  CUmodule mod; ck(cuModuleLoadData(&mod, ptx.data()), "
                 "\"module\");\n"
              << "  CUfunction fn; ck(cuModuleGetFunction(&fn, mod, \""
-             << CudaInfo.name << "\"), \"function\");\n"
+             << GpuInfo.name << "\"), \"function\");\n"
              << "  CUdeviceptr d_out;\n"
              << "  ck(cuMemAlloc(&d_out, (size_t)n * sizeof(double)), "
                 "\"alloc\");\n";
           /* Demo scalar captures. */
-          for (const auto &s : CudaInfo.scalarArgs)
+          for (const auto &s : GpuInfo.scalarArgs)
             OF << "  double " << s << " = 2.0;\n";
           OF << "  int n_grid = n;\n"
              << "  void *args[] = { &d_out";
-          for (const auto &s : CudaInfo.scalarArgs) OF << ", &" << s;
+          for (const auto &s : GpuInfo.scalarArgs) OF << ", &" << s;
           OF << ", &n_grid };\n"
              << "  int block = 256, grid = (n + block - 1) / block;\n"
              << "  ck(cuLaunchKernel(fn, grid, 1, 1, block, 1, 1, 0, 0, "
@@ -13156,43 +13156,137 @@ int main(int Argc, char **Argv) {
            << "  return 0;\n"
            << "}\n";
       } else {  /* OpenCL */
-        OF << "#define CL_TARGET_OPENCL_VERSION 120\n"
-           << "#ifdef __APPLE__\n"
-           << "#include <OpenCL/opencl.h>\n"
-           << "#else\n"
-           << "#include <CL/cl.h>\n"
-           << "#endif\n"
-           << "#include <cstdio>\n"
-           << "#include <cstdlib>\n"
-           << "#include <fstream>\n"
-           << "#include <sstream>\n\n"
-           << "int main(int argc, char **argv) {\n"
-           << "  cl_platform_id plat; clGetPlatformIDs(1, &plat, NULL);\n"
-           << "  cl_device_id dev; clGetDeviceIDs(plat, CL_DEVICE_TYPE_DEFAULT, 1, &dev, NULL);\n"
-           << "  cl_context ctx = clCreateContext(NULL, 1, &dev, NULL, NULL, NULL);\n"
-           << "  cl_command_queue queue = clCreateCommandQueue(ctx, dev, 0, NULL);\n"
-           << "  std::ifstream ifs(\"" << Stem << "_kernel.cl\");\n"
-           << "  std::stringstream ss; ss << ifs.rdbuf();\n"
-           << "  std::string src = ss.str();\n"
-           << "  const char *csrc = src.c_str(); size_t srcLen = src.size();\n"
-           << "  cl_program prog = clCreateProgramWithSource(ctx, 1, &csrc, &srcLen, NULL);\n"
-           << "  clBuildProgram(prog, 1, &dev, \"\", NULL, NULL);\n"
-           << "  cl_kernel kernel = clCreateKernel(prog, \"" << Stem << "_kernel\", NULL);\n"
-           << "  const int n = 16;\n"
-           << "  double h_x[n], h_y[n];\n"
-           << "  for (int i = 0; i < n; ++i) h_x[i] = (double)i;\n"
-           << "  cl_mem bx = clCreateBuffer(ctx, CL_MEM_READ_ONLY  | CL_MEM_COPY_HOST_PTR,\n"
-           << "                              n*sizeof(double), h_x, NULL);\n"
-           << "  cl_mem by = clCreateBuffer(ctx, CL_MEM_WRITE_ONLY,\n"
-           << "                              n*sizeof(double), NULL, NULL);\n"
-           << "  clSetKernelArg(kernel, 0, sizeof(cl_mem), &bx);\n"
-           << "  clSetKernelArg(kernel, 1, sizeof(cl_mem), &by);\n"
-           << "  clSetKernelArg(kernel, 2, sizeof(int),    &n);\n"
-           << LaunchSnippet << "\n"
-           << "  clEnqueueReadBuffer(queue, by, CL_TRUE, 0, n*sizeof(double), h_y, 0, NULL, NULL);\n"
-           << "  for (int i = 0; i < n; ++i) std::printf(\"%g\\n\", h_y[i]);\n"
-           << "  return 0;\n"
-           << "}\n";
+        bool runnable = (GpuInfo.kernelCount == 1 && GpuInfo.hasOutput &&
+                         !GpuInfo.bailed);
+        if (!runnable) {
+          OF << "#include <cstdio>\n\n"
+             << "/* This program's coder.gpu.kernelfun body did not fully\n"
+             << " * translate to a single device kernel (see the FALLBACK\n"
+             << " * note in " << Stem << "_kernel.cl).  The bundle is\n"
+             << " * emission-only for this input. */\n"
+             << "int main() {\n"
+             << "  std::printf(\"" << Stem
+             << ": kernel not fully translated; emission-only bundle.\\n\");\n"
+             << "  return 0;\n"
+             << "}\n";
+        } else {
+          /* Header-free-capable driver: use the platform's OpenCL headers
+           * when present (end users with an SDK), else hand-declare the
+           * minimal OpenCL 1.2 API so the bundle compiles against just the
+           * ICD loader (libOpenCL) with no SDK installed.  Reads the .cl
+           * at runtime, builds it, and launches the real kernel
+           * (" << GpuInfo.name << ").  Scalar captures are set to a demo
+           * value (2.0); grid size n comes from argv[1] (default 16). */
+          OF << "#include <cstdio>\n"
+             << "#include <cstdlib>\n"
+             << "#include <cstddef>\n"
+             << "#include <cstdint>\n"
+             << "#include <fstream>\n"
+             << "#include <sstream>\n"
+             << "#include <string>\n\n"
+             << "#if defined(__has_include)\n"
+             << "#  if __has_include(<CL/cl.h>)\n"
+             << "#    define CL_TARGET_OPENCL_VERSION 120\n"
+             << "#    include <CL/cl.h>\n"
+             << "#    define MATLAB_HAVE_CL_HEADER 1\n"
+             << "#  elif __has_include(<OpenCL/opencl.h>)\n"
+             << "#    include <OpenCL/opencl.h>\n"
+             << "#    define MATLAB_HAVE_CL_HEADER 1\n"
+             << "#  endif\n"
+             << "#endif\n"
+             << "#ifndef MATLAB_HAVE_CL_HEADER\n"
+             << "extern \"C\" {\n"
+             << "typedef int cl_int; typedef unsigned int cl_uint;\n"
+             << "typedef unsigned long cl_ulong;\n"
+             << "typedef void *cl_platform_id; typedef void *cl_device_id;\n"
+             << "typedef void *cl_context; typedef void *cl_command_queue;\n"
+             << "typedef void *cl_program; typedef void *cl_kernel;\n"
+             << "typedef void *cl_mem; typedef cl_ulong cl_mem_flags;\n"
+             << "typedef cl_ulong cl_device_type; typedef cl_uint cl_bool;\n"
+             << "cl_int clGetPlatformIDs(cl_uint, cl_platform_id*, cl_uint*);\n"
+             << "cl_int clGetDeviceIDs(cl_platform_id, cl_device_type, cl_uint, "
+                "cl_device_id*, cl_uint*);\n"
+             << "cl_context clCreateContext(const intptr_t*, cl_uint, "
+                "const cl_device_id*, void*, void*, cl_int*);\n"
+             << "cl_command_queue clCreateCommandQueue(cl_context, cl_device_id, "
+                "cl_ulong, cl_int*);\n"
+             << "cl_program clCreateProgramWithSource(cl_context, cl_uint, "
+                "const char**, const size_t*, cl_int*);\n"
+             << "cl_int clBuildProgram(cl_program, cl_uint, const cl_device_id*, "
+                "const char*, void*, void*);\n"
+             << "cl_int clGetProgramBuildInfo(cl_program, cl_device_id, cl_uint, "
+                "size_t, void*, size_t*);\n"
+             << "cl_kernel clCreateKernel(cl_program, const char*, cl_int*);\n"
+             << "cl_mem clCreateBuffer(cl_context, cl_mem_flags, size_t, void*, "
+                "cl_int*);\n"
+             << "cl_int clSetKernelArg(cl_kernel, cl_uint, size_t, const void*);\n"
+             << "cl_int clEnqueueNDRangeKernel(cl_command_queue, cl_kernel, "
+                "cl_uint, const size_t*, const size_t*, const size_t*, cl_uint, "
+                "const void*, void*);\n"
+             << "cl_int clEnqueueReadBuffer(cl_command_queue, cl_mem, cl_bool, "
+                "size_t, size_t, void*, cl_uint, const void*, void*);\n"
+             << "cl_int clFinish(cl_command_queue);\n"
+             << "}\n"
+             << "#define CL_DEVICE_TYPE_DEFAULT 1UL\n"
+             << "#define CL_MEM_READ_WRITE 1UL\n"
+             << "#define CL_TRUE 1\n"
+             << "#define CL_PROGRAM_BUILD_LOG 0x1183\n"
+             << "#endif\n\n"
+             << "int main(int argc, char **argv) {\n"
+             << "  int n = argc > 1 ? std::atoi(argv[1]) : 16;\n"
+             << "  cl_platform_id plat; cl_uint np = 0;\n"
+             << "  if (clGetPlatformIDs(1, &plat, &np) != 0 || np == 0) {\n"
+             << "    std::fprintf(stderr, \"no OpenCL platform\\n\"); return 1; }\n"
+             << "  cl_device_id dev; cl_uint nd = 0;\n"
+             << "  if (clGetDeviceIDs(plat, CL_DEVICE_TYPE_DEFAULT, 1, &dev, &nd)"
+                " != 0 || nd == 0) {\n"
+             << "    std::fprintf(stderr, \"no OpenCL device\\n\"); return 1; }\n"
+             << "  cl_int err = 0;\n"
+             << "  cl_context ctx = clCreateContext(0, 1, &dev, 0, 0, &err);\n"
+             << "  cl_command_queue queue = clCreateCommandQueue(ctx, dev, 0, "
+                "&err);\n"
+             << "  std::ifstream ifs(\"" << Stem << "_kernel.cl\");\n"
+             << "  std::stringstream ss; ss << ifs.rdbuf();\n"
+             << "  std::string src = ss.str();\n"
+             << "  if (src.empty()) { std::fprintf(stderr, \"cannot read "
+             << Stem << "_kernel.cl — run from the bundle directory\\n\"); "
+                "return 1; }\n"
+             << "  const char *csrc = src.c_str(); size_t slen = src.size();\n"
+             << "  cl_program prog = clCreateProgramWithSource(ctx, 1, &csrc, "
+                "&slen, &err);\n"
+             << "  if (clBuildProgram(prog, 1, &dev, \"\", 0, 0) != 0) {\n"
+             << "    char log[8192] = {0};\n"
+             << "    clGetProgramBuildInfo(prog, dev, CL_PROGRAM_BUILD_LOG, "
+                "sizeof(log), log, 0);\n"
+             << "    std::fprintf(stderr, \"OpenCL build:\\n%s\\n\", log); "
+                "return 1; }\n"
+             << "  cl_kernel kernel = clCreateKernel(prog, \"" << GpuInfo.name
+             << "\", &err);\n"
+             << "  cl_mem d_out = clCreateBuffer(ctx, CL_MEM_READ_WRITE, "
+                "(size_t)n * sizeof(double), 0, &err);\n";
+          for (const auto &s : GpuInfo.scalarArgs)
+            OF << "  double " << s << " = 2.0;\n";
+          OF << "  int n_grid = n;\n"
+             << "  cl_uint ai = 0;\n"
+             << "  clSetKernelArg(kernel, ai++, sizeof(cl_mem), &d_out);\n";
+          for (const auto &s : GpuInfo.scalarArgs)
+            OF << "  clSetKernelArg(kernel, ai++, sizeof(double), &" << s
+               << ");\n";
+          OF << "  clSetKernelArg(kernel, ai++, sizeof(int), &n_grid);\n"
+             << "  size_t gws = (size_t)n;\n"
+             << "  cl_int le = clEnqueueNDRangeKernel(queue, kernel, 1, 0, &gws, "
+                "0, 0, 0, 0);\n"
+             << "  clFinish(queue);\n"
+             << "  if (le != 0) { std::fprintf(stderr, \"launch rc=%d\\n\", le); "
+                "return 1; }\n"
+             << "  double *h_out = new double[n];\n"
+             << "  clEnqueueReadBuffer(queue, d_out, CL_TRUE, 0, "
+                "(size_t)n * sizeof(double), h_out, 0, 0, 0);\n"
+             << "  for (int i = 0; i < n; ++i) std::printf(\"%g\\n\", h_out[i]);\n"
+             << "  delete[] h_out;\n"
+             << "  return 0;\n"
+             << "}\n";
+        }
       }
     }
     /* Makefile. */
@@ -13218,6 +13312,24 @@ int main(int Argc, char **Argv) {
            << "$(TARGET): $(SRC) " << Stem << "_kernel." << KernelExt << "\n"
            << "\t$(CXX) -O2 -std=c++17 $(SRC) $(CUDA_INC) -o $(TARGET) "
               "$(CUDA_LIBS)\n\n"
+           << "clean:\n"
+           << "\trm -f $(TARGET)\n";
+      } else if (Opts.Mode == Options::Mode::EmitOpenCL) {
+        /* The host driver reads + builds the .cl at runtime via the ICD
+         * loader, so it only needs libOpenCL.  No OpenCL SDK headers are
+         * required (the driver hand-declares the API when none are
+         * found).  OPENCL_LIB is overridable for ICD loaders shipped
+         * without an unversioned .so symlink:
+         *   make OPENCL_LIB="/lib/x86_64-linux-gnu/libOpenCL.so.1" */
+        OF << "# SDK-free: host driver builds the .cl via the OpenCL ICD.\n\n"
+           << "CXX        ?= g++\n"
+           << "OPENCL_INC ?=\n"
+           << "OPENCL_LIB ?= -lOpenCL\n\n"
+           << "TARGET = " << Stem << "_" << Target << "\n"
+           << "SRC    = " << Stem << "_main." << HostExt << "\n\n"
+           << "$(TARGET): $(SRC) " << Stem << "_kernel." << KernelExt << "\n"
+           << "\t$(CXX) -O2 -std=c++17 $(SRC) $(OPENCL_INC) -o $(TARGET) "
+              "$(OPENCL_LIB)\n\n"
            << "clean:\n"
            << "\trm -f $(TARGET)\n";
       } else {

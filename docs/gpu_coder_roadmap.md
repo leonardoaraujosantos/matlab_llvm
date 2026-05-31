@@ -357,6 +357,27 @@ Intel / ARM Mali through OpenCL, no vendor lock-in. Matches the GPU
 Coder UG's "Code Generation for Deep Learning Networks Targeting ARM
 Mali GPUs" lane in spirit but generalised to any OpenCL device.
 
+> **Status (2026-05-31, issue #25): first on-hardware validation.**
+> Validated on an RTX 5060 via its NVIDIA OpenCL ICD (vendor-agnostic —
+> the same lane runs on AMD/Intel ICDs) using
+> `test/Run/run_gpu_opencl_validation.sh`:
+> - **4.1 host driver** (`runtime/gpu/opencl/runtime_gpu_opencl.cpp`) —
+>   platform/device/context/queue lifecycle + device probe. ✅
+> - **fp64 GEMM** — `matlab_gpu_opencl_gemm_double` JIT-builds a naive
+>   fp64 kernel and is wired into the `matlab_gpu_gemm` dispatcher;
+>   matches the host lane to 0 ULP. ✅ (clBLAST is a future swap-in,
+>   mirroring cuBLAS on the CUDA side.)
+> - **`-emit-opencl` bundle** — the emitter now translates the scalar
+>   AXPY kernel body fully (was an identity FALLBACK) and emits an
+>   **SDK-free** host driver (hand-declares the OpenCL API when no
+>   `<CL/cl.h>` is installed) that builds + runs end-to-end. ✅
+>
+> Build is opt-in (`-DMATLAB_LLVM_GPU_OPENCL=ON`, default OFF); the TU
+> hand-declares the OpenCL 1.2 API so it links against just the ICD
+> loader (`libOpenCL`) — no SDK headers. `matlab_gpu_launch_opencl` uses
+> the host-fallback loop (parity with the CUDA/Metal backends). The
+> emit-pass fix is shared with CUDA via the `GpuKernelInfo` descriptor.
+
 | # | Surface | Algorithm / notes | Reuses |
 |---|---|---|---|
 | 4.1 | **`runtime/gpu/opencl/` host driver** | Links `libOpenCL`. Wraps `cl_platform_id` / `cl_device_id` / `cl_context` / `cl_command_queue` / `cl_mem` / `cl_program` / `cl_kernel`. Platform selection via `MATLAB_GPU_OPENCL_PLATFORM` env (NVIDIA / AMD / Intel / POCL / Mali). | — |
