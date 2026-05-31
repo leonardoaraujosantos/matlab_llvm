@@ -7040,7 +7040,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         if ((CD->Name == "rlDQNAgent" || CD->Name == "rlPGAgent" ||
              CD->Name == "rlDDPGAgent" || CD->Name == "rlTD3Agent" ||
              CD->Name == "rlPPOAgent" || CD->Name == "rlSACAgent" ||
-             CD->Name == "rlGRPOAgent") && C.Args.size() == 2) {
+             CD->Name == "rlGRPOAgent" || CD->Name == "rlTRPOAgent") && C.Args.size() == 2) {
           std::string Ctor = std::string(CD->Name) + "__" + std::string(CD->Name);
           mlir::NamedAttribute CtorCal(
               mlir::StringAttr::get(&MCtx, "callee"),
@@ -7054,6 +7054,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                          : (CD->Name == "rlPPOAgent")   ? "matlab_rl_ppo_init"
                          : (CD->Name == "rlSACAgent")   ? "matlab_rl_sac_init"
                          : (CD->Name == "rlGRPOAgent")  ? "matlab_rl_grpo_init"
+                         : (CD->Name == "rlTRPOAgent")  ? "matlab_rl_trpo_init"
                                                         : "matlab_rl_dqn_init";
           mlir::NamedAttribute Cal(
               mlir::StringAttr::get(&MCtx, "callee"),
@@ -10624,7 +10625,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             (Cn0 == "rlQAgent" || Cn0 == "rlSARSAAgent" || Cn0 == "rlDQNAgent" ||
              Cn0 == "rlPGAgent" || Cn0 == "rlDDPGAgent" || Cn0 == "rlTD3Agent" ||
              Cn0 == "rlPPOAgent" || Cn0 == "rlSACAgent" ||
-             Cn0 == "rlGRPOAgent") && C.Args.size() == 3) {
+             Cn0 == "rlGRPOAgent" || Cn0 == "rlTRPOAgent") && C.Args.size() == 3) {
           mlir::Value Ag = loadObj(C.Args[0]);
           mlir::Value En = loadObj(C.Args[1]);
           mlir::Value Op = loadObj(C.Args[2]);
@@ -10635,6 +10636,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                          : (Cn0 == "rlPPOAgent")  ? "matlab_rl_ppo_train"
                          : (Cn0 == "rlSACAgent")  ? "matlab_rl_sac_train"
                          : (Cn0 == "rlGRPOAgent") ? "matlab_rl_grpo_train"
+                         : (Cn0 == "rlTRPOAgent") ? "matlab_rl_trpo_train"
                                                   : "matlab_rl_train";
           mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
               mlir::StringAttr::get(&MCtx, rt));
@@ -10644,7 +10646,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             (Cn0 == "rlQAgent" || Cn0 == "rlSARSAAgent" || Cn0 == "rlDQNAgent" ||
              Cn0 == "rlPGAgent" || Cn0 == "rlDDPGAgent" || Cn0 == "rlTD3Agent" ||
              Cn0 == "rlPPOAgent" || Cn0 == "rlSACAgent" ||
-             Cn0 == "rlGRPOAgent") && C.Args.size() == 2) {
+             Cn0 == "rlGRPOAgent" || Cn0 == "rlTRPOAgent") && C.Args.size() == 2) {
           mlir::Value Ag = loadObj(C.Args[0]);
           mlir::Value En = loadObj(C.Args[1]);
           const char *rt = (Cn0 == "rlDQNAgent")  ? "matlab_rl_dqn_sim"
@@ -10654,6 +10656,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                          : (Cn0 == "rlPPOAgent")  ? "matlab_rl_ppo_sim"
                          : (Cn0 == "rlSACAgent")  ? "matlab_rl_sac_sim"
                          : (Cn0 == "rlGRPOAgent") ? "matlab_rl_grpo_sim"
+                         : (Cn0 == "rlTRPOAgent") ? "matlab_rl_trpo_sim"
                                                   : "matlab_rl_sim";
           mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
               mlir::StringAttr::get(&MCtx, rt));
