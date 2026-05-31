@@ -650,6 +650,7 @@ Per-toolbox plan in [`rf_toolbox_plan.md`](rf_toolbox_plan.md).  Two-commit clos
 | Python emission | ✅ | `-emit-python`. NumPy-backed runtime in `runtime/matlab_runtime.py`; see `docs/emit_python.md`. Matrix display uses numpy's bracket repr (`.stdout-python` per-test goldens for the test lane). Multi-return uses native tuple unpacking (`a, b = f(...)`); persistent + isempty-init lowers to `<fn>.<name> = <init>` at module scope. |
 | TypeScript emission | 🟡 | `-emit-typescript`. Same scope as Python; runtime in `runtime/matlab_runtime.ts`. Multi-return uses array destructuring (`const [a, b] = f(...)`); persistent + isempty lowers to `let <fn>_<name>: number = <init>;`. |
 | SystemVerilog (ASIC, synthesizable) emission | ✅ | `-emit-systemverilog`. Vendor-neutral, synthesizable RTL targeting ASIC flows. Tier-1 closure shipped: scalar combinational + FSMs + fixed-point pipeline + persistent fi-arrays + readability polish + bit-slicing `x(hi:lo)` (any width 1..64) + runtime-indexed persistent fi-arrays (auto-decoded regfile pattern) + hierarchical multi-module emission (`func.call` → SV instance with auto-wired clk/rst_n). 77 golden fixtures lint clean under Verilator (incl. `aes_round`, `cic_decimator`, `cordic_pipe`, `crc32`, `fir_asic_pipelined`, `i2c_bit_bang`, `regfile_dyn`, `spi_master`, `uart_rx`, `vector_processor`, plus `hier_combinational` / `hier_sequential` for multi-module). Also covers **mStateflow chart inputs**: a `.mflow` with `settings.kind = "state_chart"` flows through `lib/StateChart/Lowering.cpp`'s HDL target (one-pass tick, per-variable `if isempty(X), X = intW(0); end` resets, integer-typed locals + region codes, inlined `in()` predicates) before re-entering the standard SV pipeline. Moore / Mealy / AND-parallel charts in `examples/stateflow/` produce verilator-clean modules (`traffic_light_moore.sv` 122 lines, `vending_machine_mealy.sv` 106 lines, `model_air_temperature_controller.sv` 208 lines). 7 fi-spec ↔ SV declaration regression tests in `test/EmitSVPorts/`, 2 boolean-port lint-hint tests in `test/EmitSVHint/`, 10 synthesizability-gate diagnostic tests in `test/EmitSVFail/`. Open: 2-D fi matrices, RAM inference, CORDIC for transcendentals. See `docs/sv_supported_subset.md` (supported-subset reference), `docs/emit_systemverilog.md` (backend architecture), and `docs/mStateflow_roadmap.md` (chart → SV pipeline). |
+| GPU kernel emission (CUDA / Metal / OpenCL) | ✅ | `-emit-cuda` / `-emit-metal` / `-emit-opencl`. Standalone GPU Coder bundles (kernel source + host driver + Makefile) from `coder.gpu.kernelfun` MATLAB. CUDA emits an **nvcc-free** NVRTC host driver; OpenCL an **SDK-free** ICD driver; both build + run with just the device driver. The runtime `gpuArray` path also has device backends behind opt-in flags (`-DMATLAB_LLVM_GPU_{CUDA,OPENCL,METAL}=ON`, default OFF): **CUDA** (cuBLAS `Dgemm` fp64 + NVRTC JIT, driver-API only) and **OpenCL** (fp64 GEMM kernel) — **validated end-to-end on NVIDIA hardware** (RTX 5060, sm_120; issue #25) — plus Apple **Metal** (MPS) on Apple silicon. HW-gated validation lanes `test/Run/run_gpu_{cuda,opencl}_validation.sh`. See `docs/gpu_coder_roadmap.md`. |
 
 ### MLIR passes (`lib/MLIR/Passes/`)
 
@@ -795,7 +796,7 @@ deliberate non-goals; see "Out of scope."
   classes (gated on the System-Object lowering fix tracked in CST §12).
 - **MEX interop** — loading compiled `.mex` files; deep binary-ABI lock-in with MathWorks.
 - **Live Scripts** (`.mlx`) — proprietary format; use Jupyter or a documentation toolchain instead.
-- **GPU arrays** (`gpuArray`) — would require a CUDA/ROCm backend; out of scope unless specifically prioritized.
+- **GPU arrays** (`gpuArray`) — **now shipped** (was previously out of scope). The `gpuArray` runtime surface + GPU Coder emit lanes (`-emit-{cuda,metal,opencl}`) have CUDA / Metal / OpenCL device backends; CUDA (cuBLAS + NVRTC) and OpenCL are validated on NVIDIA hardware (issue #25). See the GPU row in §5 and `docs/gpu_coder_roadmap.md`. (AMD ROCm / clBLAST remain follow-ons.)
 - **Code generation toolbox features** (`coder.config`, etc.) — this project *is* a code generator; MATLAB Coder compatibility is a different product.
 - **Bit-exact MATLAB numerics** — LAPACK vs. pure-C linear algebra will disagree in the last few ULPs. Correct to tolerance, not to bit.
 
@@ -871,7 +872,9 @@ toolbox subsets.
   TypeScript (numpy_ts shim) · synthesizable SystemVerilog (ASIC,
   Verilator lint-clean) · Verilog-A (Tier-1 → Tier-10). Plus
   `-emit-matlab` and `-emit-mflow` source-to-source reverse-direction
-  emitters.
+  emitters, and **GPU kernel emit lanes** (`-emit-{cuda,metal,opencl}`)
+  with CUDA / OpenCL device backends validated on NVIDIA hardware
+  (issue #25) + Apple Metal (MPS).
 - **435 `.m` execution tests** in `test/Run/`, each compiled and
   executed across **7 emit lanes** (~3,000 build-and-execute checks).
   **77 SystemVerilog golden fixtures** verilator-lint-clean. **39 HDL

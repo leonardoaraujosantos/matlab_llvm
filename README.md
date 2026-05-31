@@ -5,7 +5,7 @@
 [![CMake](https://img.shields.io/badge/build-CMake_%2B_Ninja-064F8C.svg?logo=cmake&logoColor=white)](https://cmake.org/)
 [![Platform](https://img.shields.io/badge/platform-macOS_%7C_Linux-lightgrey.svg)](#quick-start)
 &nbsp;
-[![Codegen targets](https://img.shields.io/badge/codegen-LLVM_%7C_C_%7C_C%2B%2B_%7C_Python_%7C_TypeScript_%7C_SystemVerilog-7C3AED.svg)](#code-generation)
+[![Codegen targets](https://img.shields.io/badge/codegen-LLVM_%7C_C_%7C_C%2B%2B_%7C_Python_%7C_TypeScript_%7C_SystemVerilog_%7C_GPU-7C3AED.svg)](#code-generation)
 [![Toolboxes](https://img.shields.io/badge/toolboxes-26_shipped-2EA44F.svg)](#shipped-toolboxes-in-the-runtime)
 [![Run-tests](https://img.shields.io/badge/run--tests-663_%E2%9C%93-2EA44F.svg)](test/Run)
 [![SV goldens](https://img.shields.io/badge/SV_goldens-79_%E2%9C%93-2EA44F.svg)](test/EmitSV)
@@ -52,6 +52,11 @@ The project also allows emission from the MLIR:
 - Python
 - TypeScript
 - SystemVerilog (ASIC, synthesizable; vendor-neutral RTL — Verilator lint-clean)
+- GPU kernels via `-emit-{cuda,metal,opencl}` — standalone GPU Coder
+  bundles from `coder.gpu.kernelfun` MATLAB. The CUDA (cuBLAS `Dgemm`
+  + NVRTC) and OpenCL backends are **validated end-to-end on NVIDIA
+  hardware** (RTX 5060); Apple Metal (MPS) on Apple silicon. See
+  [`docs/gpu_coder_roadmap.md`](docs/gpu_coder_roadmap.md).
 
 Plus a frontend-side round-trip: any `.m` or `.mflow` input can emit
 canonical MATLAB source via `-emit-matlab` (pretty-prints from the AST,
@@ -197,7 +202,12 @@ hidden in `runtime/gpu/metal/runtime_gpu_metal.mm`.
 
 Full architectural argument and per-kernel coverage in
 [`docs/lapack_roadmap.md`](docs/lapack_roadmap.md) §4. The CUDA /
-cuBLAS analogue and AMD ROCm / clBLAS are documented follow-ons.
+cuBLAS analogue now ships and is validated on NVIDIA hardware — the
+same fp64 `matlab_gpu_gemm` dispatcher routes to `cublasDgemm` under
+`MATLAB_GPU_TARGET=cuda` and to an OpenCL GEMM kernel under
+`MATLAB_GPU_TARGET=opencl` (see
+[`docs/gpu_coder_roadmap.md`](docs/gpu_coder_roadmap.md) §4); AMD ROCm /
+clBLAST remain documented follow-ons.
 
 ### Reproducing
 

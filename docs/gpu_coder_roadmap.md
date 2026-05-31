@@ -6,6 +6,17 @@ emit lanes) needs to ship in order to faithfully **compile and execute**,
 MathWorks CUDA-only lane to three backends**: NVIDIA **CUDA** + portable
 **OpenCL** on Linux, and **Apple Metal** on macOS.
 
+> **🟢 On-hardware validation (2026-05-31, issue #25).** The CUDA and
+> OpenCL backends are now validated end-to-end on real NVIDIA hardware
+> (RTX 5060, sm_120) — not just emission. CUDA runs cuBLAS `Dgemm` (fp64)
+> + NVRTC-JIT kernels via the driver API; OpenCL runs an fp64 GEMM kernel
+> + the AXPY `-emit-opencl` bundle via the device's ICD. Both are opt-in
+> CMake flags (`-DMATLAB_LLVM_GPU_CUDA=ON` / `-DMATLAB_LLVM_GPU_OPENCL=ON`,
+> default OFF) with HW-gated validation lanes
+> (`test/Run/run_gpu_{cuda,opencl}_validation.sh`). Metal (Tier-2) was
+> already validated on Apple silicon. Details in the Tier-3 / Tier-4
+> status notes below.
+
 Source: *GPU Coder™ User's Guide* (R2026a, 7 chapters): Functions
 Supported for GPU Code Generation · Kernel Creation from MATLAB Code
 (element-wise loops · reductions · library calls · custom CUDA kernels ·
