@@ -1450,7 +1450,27 @@ mlir::Value Lowerer::loadBinding(Binding *Bnd, const Type *ValTy,
      * SymBindings set covers same-TU references. */
     bool IsSymRead = SymBindings.count(Bnd) || Bnd->IsSym;
     bool IsSymmatRead = SymmatBindings.count(Bnd) || Bnd->IsSymmat;
+    /* Function-handle read (kind=13).  Same-turn handles are tracked in
+     * HandleBindings; cross-turn ones carry Binding::IsHandle stamped by
+     * the Resolver from the workspace kind.  Only capture-free handles
+     * round-trip (the stored value is a bare function pointer), so a
+     * HandleBindings entry only counts when its capture list is empty.
+     * Route to matlab_ws_get_handle so the stored pointer comes back
+     * untouched for the call-site trampoline. */
+    bool IsHandleRead = Bnd->IsHandle;
+    if (!IsHandleRead) {
+      auto HIt = HandleBindings.find(Bnd);
+      if (HIt != HandleBindings.end() && HIt->second.empty())
+        IsHandleRead = true;
+    }
     mlir::Value NameV = emitFieldNameChar(Bnd->Name, L);
+    if (IsHandleRead) {
+      auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+      mlir::NamedAttribute Cal(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, "matlab_ws_get_handle"));
+      return emitUnreg("matlab.call_builtin", {NameV}, PtrTy, L, {Cal});
+    }
     if (IsSymmatRead) {
       auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
       mlir::NamedAttribute Cal(
@@ -4289,8 +4309,22 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
       bool IsDuration = DurationBindings.count(N.Ref) != 0;
       bool IsStruct   = (N.Ref &&
                          (StructBindings.count(N.Ref) || N.Ref->IsStruct));
+      /* Function handle: `f = @sin` / `f = @myFn` / capture-free anon.
+       * HandleBindings was populated by the AssignStmt handle-tracking
+       * block just above this store.  Only capture-free handles (empty
+       * spill list) survive a workspace round-trip — the stored value is
+       * a bare function pointer with no closure state — so a captured
+       * anon stays on the matrix path (its same-turn slot still works;
+       * the cross-turn case is a documented follow-up). */
+      bool IsHandle = false;
+      if (N.Ref) {
+        auto HIt = HandleBindings.find(N.Ref);
+        if (HIt != HandleBindings.end() && HIt->second.empty())
+          IsHandle = true;
+      }
       llvm::StringRef Callee =
-          IsSymmat       ? "matlab_ws_set_symmat"
+          IsHandle       ? "matlab_ws_set_handle"
+          : (IsSymmat    ? "matlab_ws_set_symmat"
                          : (IsSym ? "matlab_ws_set_sym"
                               : (IsString ? "matlab_ws_set_string"
                               : (IsObj    ? "matlab_ws_set_obj"
@@ -4300,7 +4334,7 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
                               : (IsDatetime    ? "matlab_ws_set_datetime"
                               : (IsDuration    ? "matlab_ws_set_duration"
                               : (IsMat ? "matlab_ws_set_mat"
-                                       : "matlab_ws_set_f64")))))))));
+                                       : "matlab_ws_set_f64"))))))))));
       mlir::NamedAttribute Cal(
           mlir::StringAttr::get(&MCtx, "callee"),
           mlir::StringAttr::get(&MCtx, Callee));
@@ -12540,6 +12574,91 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             return emitUnreg("matlab.call", CArgs, RT, L, {Cal});
           }
         }
+    /* REPL/DAP workspace-backed function handle: `f(args)` where `f`
+     * round-trips through the workspace as a bare function pointer
+     * (kind=13).  In ReplMode a handle variable isn't a local slot — it
+     * is stored/loaded via matlab_ws_set/get_handle — so the in-memory
+     * call_indirect chain (which traces back to a make_handle/addressof)
+     * is broken by the store→load round-trip.  Instead, load the stored
+     * pointer and invoke it through the matlab_call_handle_s* trampoline,
+     * which takes the function pointer as its first argument.  This is
+     * what stops `f(0)` from mis-lowering into matlab_subscript1_s on the
+     * code pointer (the SIGSEGV in issue #77).
+     *
+     * Scope: all-f64-scalar arguments, arity 1..3 (the common math /
+     * user-function handle shape).  Captured anons and matrix-argument
+     * handles fall through to the existing paths. */
+    if (ReplMode && InScriptBody) {
+      if (auto *NE = dynamic_cast<const NameExpr *>(C.Callee))
+        if (NE->Ref && NE->Ref->Kind == BindingKind::Var &&
+            Slots.find(NE->Ref) == Slots.end()) {
+          /* Named handle to a user function visible in this module
+           * (`p = @mySq; p(6)` — same turn or whole-program DAP launch).
+           * Emit a direct `matlab.call @mySq(args)` so the user-call
+           * refinement / RefineFuncSigs gives the callee a concrete f64
+           * signature and lowers its body — an address-only reference
+           * (@mySq stored in the workspace) never produces a call site,
+           * leaving the body's matmul/const_char unconverted. */
+          auto HTIt = HandleTargetRef.find(NE->Ref);
+          if (HTIt != HandleTargetRef.end() && HTIt->second &&
+              HTIt->second->FuncDef) {
+            llvm::SmallVector<mlir::Value, 4> CArgs;
+            for (const Expr *Arg : C.Args)
+              if (Arg) CArgs.push_back(lowerExpr(*Arg));
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, std::string(HTIt->second->Name)));
+            return emitUnreg("matlab.call", CArgs, RT, L, {Cal});
+          }
+        }
+      if (auto *NE = dynamic_cast<const NameExpr *>(C.Callee))
+        if (NE->Ref && NE->Ref->Kind == BindingKind::Var &&
+            Slots.find(NE->Ref) == Slots.end() &&
+            !C.Args.empty() && C.Args.size() <= 3) {
+          bool WsHandle = NE->Ref->IsHandle;
+          if (!WsHandle) {
+            auto HIt = HandleBindings.find(NE->Ref);
+            if (HIt != HandleBindings.end() && HIt->second.empty())
+              WsHandle = true;
+          }
+          /* Require every argument to be a scalar double in Sema's view
+           * so we can commit to the trampoline before lowering (avoids
+           * double-lowering args with side effects). */
+          auto isScalarDoubleTy = [](const Type *T) {
+            if (!T || T->K != Type::Kind::Array) return false;
+            auto &A = static_cast<const ArrayType &>(*T);
+            return A.Elt == Dtype::Double && A.S.K == Shape::Rank::Scalar;
+          };
+          bool ArgsScalar = WsHandle;
+          for (const Expr *Arg : C.Args)
+            if (!Arg || !isScalarDoubleTy(Arg->Ty)) { ArgsScalar = false; break; }
+          if (WsHandle && ArgsScalar) {
+            auto F64 = mlir::Float64Type::get(&MCtx);
+            mlir::Value Fn = lowerExpr(*C.Callee);   /* matlab_ws_get_handle */
+            llvm::SmallVector<mlir::Value, 4> CallArgs;
+            CallArgs.push_back(Fn);
+            bool AllF64 = true;
+            for (const Expr *Arg : C.Args) {
+              mlir::Value AV = lowerExpr(*Arg);
+              if (AV.getType() != F64) { AllF64 = false; break; }
+              CallArgs.push_back(AV);
+            }
+            /* Only commit if every lowered argument is a native f64 (the
+             * trampoline ABI).  If not, the ops just emitted are dead and
+             * get DCE'd; fall through to the existing handle/subscript
+             * path below. */
+            if (AllF64) {
+              const char *Tramp = C.Args.size() == 1 ? "matlab_call_handle_s1"
+                                : (C.Args.size() == 2 ? "matlab_call_handle_s2"
+                                                      : "matlab_call_handle_s3");
+              mlir::NamedAttribute Cal(
+                  mlir::StringAttr::get(&MCtx, "callee"),
+                  mlir::StringAttr::get(&MCtx, Tramp));
+              return emitUnreg("matlab.call_builtin", CallArgs, F64, L, {Cal});
+            }
+          }
+        }
+    }
     // Detect the "call through a handle" case: if the callee is a NameExpr
     // whose binding was assigned from @(x)... / @name, emit a
     // matlab.call_indirect instead of a matlab.subscript.

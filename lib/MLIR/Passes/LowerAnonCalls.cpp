@@ -334,10 +334,37 @@ bool rewriteMakeHandle(ModuleOp M) {
        * to match. */
       auto FuncSym = M.lookupSymbol<func::FuncOp>(Attr.getValue());
       if (!FuncSym) continue;
+      /* REPL/DAP workspace store of a user-function handle
+       * (`q = @myCube`): the make_handle's only consumer is a
+       * matlab_ws_set_handle call.  The stored pointer is never read for
+       * calling — the call site resolves the target by name and emits a
+       * direct matlab.call (see Lowerer::lowerCallOrIndex), which is what
+       * refines the callee's signature.  Materialising a func.constant
+       * here would instead freeze the callee's *pre-refinement*
+       * `(none)->none` type into the constant; once RefineFuncSigs
+       * rewrites the func to `(f64)->f64` the constant's type no longer
+       * matches the symbol and the module fails to verify.  So when every
+       * use is a workspace-handle store, hand it a null pointer (the
+       * value is inert) and skip the func.constant entirely. */
+      bool AllWsStore = !H->getResult(0).use_empty();
+      for (Operation *U : H->getResult(0).getUsers()) {
+        if (!isMatlabOp(U, "matlab.call_builtin")) { AllWsStore = false; break; }
+        auto Cn = U->getAttrOfType<StringAttr>("callee");
+        if (!Cn || Cn.getValue() != "matlab_ws_set_handle") {
+          AllWsStore = false; break;
+        }
+      }
+      B.setInsertionPoint(H);
+      if (AllWsStore) {
+        auto Zero = LLVM::ZeroOp::create(B, H->getLoc(), PtrTy);
+        H->getResult(0).replaceAllUsesWith(Zero.getResult());
+        H->erase();
+        Changed = true;
+        continue;
+      }
       /* Use func.constant to materialise a function reference to the
        * func.func, then bitcast/unrealized_conversion_cast to ptr for
        * the make_handle's downstream ptr consumers. */
-      B.setInsertionPoint(H);
       auto FuncRef = func::ConstantOp::create(
           B, H->getLoc(), FuncSym.getFunctionType(),
           FuncSym.getSymName());
