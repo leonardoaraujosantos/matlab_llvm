@@ -413,6 +413,28 @@ classdef rlGRPOAgent
     end
 end
 
+% rlTRPOAgent — Trust Region Policy Optimization.  On-policy natural-gradient
+% method with a hard KL trust region: a conjugate-gradient natural-gradient
+% step (Fisher-vector products via the KL gradient) + a KL-constrained
+% backtracking line search.  Discrete softmax policy + a value baseline; used
+% here on the cart-pole env.
+classdef rlTRPOAgent
+    properties
+        ObsDim
+        NumActions
+        LearnRate
+        KLLimit
+    end
+    methods
+        function obj = rlTRPOAgent()
+            obj.ObsDim     = 1;
+            obj.NumActions = 2;
+            obj.LearnRate  = 0.001;
+            obj.KLLimit    = 0.01;
+        end
+    end
+end
+
 % ===== Policy object (Tier 2) =============================================
 % rlMaxQPolicy — the greedy policy extracted from a value-based agent via
 % getGreedyPolicy.  Carries a copy of the agent's network (or Q table), added

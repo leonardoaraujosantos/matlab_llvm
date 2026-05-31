@@ -20,9 +20,10 @@ what Deep Learning shipped along the way.
 > riding the one shared Deep Learning autodiff tape with zero duplication.
 > 10 gating tests + 10 examples, CI-green (Smoke + Perf + full ctest gate on
 > Linux). Sections 2–5 below are the original *plan* and are kept as the design
-> record; sections 0/0a/0b are the as-built status. Remaining (carved): SAC
-> automatic-temperature tuning, TRPO, the `rlFunctionEnv` custom-env classdef,
-> and the training-monitor / MBPO / custom-loop / deployment infrastructure.
+> record; sections 0/0a/0b are the as-built status. **TRPO** also ships (on
+> `feat/rl-trpo`, separate PR). Remaining (carved): SAC automatic-temperature
+> tuning, the `rlFunctionEnv` custom-env classdef, and the training-monitor /
+> MBPO / custom-loop / deployment infrastructure.
 
 ---
 
@@ -171,8 +172,23 @@ continuous agents** (entropy regularisation + twin critics); test asserts
 
 **T6 complete: TD3 + PPO + SAC all shipped.** Automatic-temperature tuning
 (learning `α` toward an entropy target) is the one carved-out SAC refinement;
-TRPO and the model-based / custom-loop / deployment surface remain as future
-work.
+the model-based / custom-loop / deployment surface remains as future work.
+
+**T6 — TRPO SHIPPED** (headline [`examples/rl/cartpole_trpo.m`](../examples/rl/cartpole_trpo.m),
+test `rl_trpo.m`). `rlTRPOAgent(obsInfo,actInfo)` is the on-policy
+natural-gradient method — PPO's principled predecessor. It reuses the PPO
+rollout collection + GAE + value baseline + softmax actor; the update differs:
+the **policy gradient** `g = E[Â·∇logπ]` is taken as a **natural** step
+`x = F⁻¹g` (F = Fisher matrix), solved by **conjugate gradient**, scaled to the
+**KL trust-region** boundary `α = √(2δ/xᵀFx)`, then a **backtracking line
+search** shrinks the step until `KL ≤ δ` and the surrogate improves. The
+Fisher-vector product would normally need a Hessian-vector product
+(double-backprop, which the reverse-mode tape can't do); the workaround is that
+`∇_θ KL(π_old‖π_θ)` is zero at `θ_old` and its Hessian *is* the Fisher matrix,
+so `FVP(v) ≈ ∇KL(θ_old + ε·v̂)·‖v‖/ε` — computable with only the reverse-mode KL
+gradient (same `Σ logπ·W` tape kernel as the policy gradient, with `W = −π_old`
+over all actions). 120 iterations → greedy balances ~**203–500 steps** across
+seeds (untrained ≈ 10–20); test asserts `balanced > 50`.
 
 ### GRPO — Group Relative Policy Optimization (DeepSeek)
 

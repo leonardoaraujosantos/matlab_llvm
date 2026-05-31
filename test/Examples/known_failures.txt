@@ -37,3 +37,4 @@ gpu/test_gpuarray_stencil2d.m                      # EMIT  (stencil patterns, de
 gpu/test_parfor_gpu_batches.m                      # EMIT  (parfor+GPU, deferred — issue #20)
 gpu/test_parfor_multigpu.m                         # EMIT  (multi-GPU, deferred)
 rl/countdown_grpo.m                                # TIMEOUT (heavy GRPO training, group sampling x epochs; convergence gated by test/Run/rl_grpo.m)
+rl/cartpole_trpo.m                                 # TIMEOUT (heavy TRPO training, CG + line search per iter; convergence gated by test/Run/rl_trpo.m)
