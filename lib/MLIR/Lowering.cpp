@@ -9706,6 +9706,82 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           }
         }
 
+        /* §3.2 c2d(tf, Ts [, method]) — discretise a transfer-function
+         * model. The tf carries (Numerator, Denominator); route through the
+         * runtime tf-level discretiser (tf2ss → c2d → ss2tf for 'zoh', exact
+         * bilinear substitution for 'tustin') and rebuild a discrete
+         * tf(num_d, den_d, Ts). Mirrors the ss branch above; the result slot
+         * is tf-pinned by Resolver.cpp's CST short-form block. (#27) */
+        {
+          const CharLiteral *TfC2dMethod =
+              (Nm == "c2d" && C.Args.size() == 3)
+                  ? dynamic_cast<const CharLiteral *>(C.Args[2])
+                  : nullptr;
+          bool TfC2dArityOk = C.Args.size() == 2 ||
+              (C.Args.size() == 3 && TfC2dMethod &&
+               (TfC2dMethod->Value == "zoh" || TfC2dMethod->Value == "tustin"));
+          if (Nm == "c2d" && Cls0 && Cn0 == "tf" && TfC2dArityOk) {
+            bool IsTustin = TfC2dMethod && TfC2dMethod->Value == "tustin";
+            mlir::Value Obj  = loadObj(C.Args[0]);
+            mlir::Value Ts   = lowerExpr(*C.Args[1]);
+            mlir::Value NumV = getProp(Obj, "Numerator");
+            mlir::Value DenV = getProp(Obj, "Denominator");
+            mlir::NamedAttribute CalNum(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx,
+                    IsTustin ? "matlab_c2d_tf_tustin_num" : "matlab_c2d_tf_num"));
+            mlir::NamedAttribute CalDen(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx,
+                    IsTustin ? "matlab_c2d_tf_tustin_den" : "matlab_c2d_tf_den"));
+            mlir::Value NumD = emitUnreg("matlab.call_builtin",
+                                         {NumV, DenV, Ts}, PtrTy, L, {CalNum});
+            mlir::Value DenD = emitUnreg("matlab.call_builtin",
+                                         {NumV, DenV, Ts}, PtrTy, L, {CalDen});
+            mlir::NamedAttribute CtorCal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "tf__tf"));
+            // 3-arg constructor stamps Ts so the result is tagged discrete.
+            return emitUnreg("matlab.call",
+                             {NumD, DenD, Ts}, PtrTy, L, {CtorCal});
+          }
+        }
+
+        /* §3.2 d2c(tf [, method]) — continuous-ise a discrete tf. The sample
+         * time comes from the model's own Ts property (read boxed, unboxed
+         * runtime-side). Routes through matlab_d2c_tf_num/den; the result is
+         * a continuous tf (Ts = 0 via the 2-arg constructor). (#27) */
+        {
+          const CharLiteral *TfD2cMethod =
+              (Nm == "d2c" && C.Args.size() == 2)
+                  ? dynamic_cast<const CharLiteral *>(C.Args[1])
+                  : nullptr;
+          bool TfD2cArityOk = C.Args.size() == 1 ||
+              (C.Args.size() == 2 && TfD2cMethod &&
+               TfD2cMethod->Value == "zoh");
+          if (Nm == "d2c" && Cls0 && Cn0 == "tf" && TfD2cArityOk) {
+            mlir::Value Obj  = loadObj(C.Args[0]);
+            mlir::Value NumV = getProp(Obj, "Numerator");
+            mlir::Value DenV = getProp(Obj, "Denominator");
+            mlir::Value TsV  = getProp(Obj, "Ts");
+            mlir::NamedAttribute CalNum(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_d2c_tf_num"));
+            mlir::NamedAttribute CalDen(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_d2c_tf_den"));
+            mlir::Value NumC = emitUnreg("matlab.call_builtin",
+                                         {NumV, DenV, TsV}, PtrTy, L, {CalNum});
+            mlir::Value DenC = emitUnreg("matlab.call_builtin",
+                                         {NumV, DenV, TsV}, PtrTy, L, {CalDen});
+            mlir::NamedAttribute CtorCal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "tf__tf"));
+            return emitUnreg("matlab.call",
+                             {NumC, DenC}, PtrTy, L, {CtorCal});
+          }
+        }
+
         /* MPC Tier-1 — `mpcmove(obj, st, ym, r)` and `sim(obj, T, r)`
          * class-pinned-first-arg routes.  Bypass the classdef-method
          * function call (which suffers from `none`-typed formal-
@@ -13548,6 +13624,50 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
   case NodeKind::MatrixLiteral: {
     auto &M = static_cast<const MatrixLiteral &>(E);
     bool SingleRow = M.Rows.size() == 1;
+    /* #105: object-array literal `[A; B; C]` / `[A B C]` over classdef
+     * instances builds an object array via the generic runtime carrier
+     * (matlab_dlnet_oa_new + matlab_dlnet_oa_append) — the same form the
+     * explicit objArrayNew/Append API uses — NOT a matlab_vertcat (which
+     * reinterprets the matlab_obj* pointers as matlab_mat* and concatenates
+     * garbage, then crashes when objArrayGet/extractdata read it back).
+     *
+     * LowerTensorOps has an equivalent detector, but it keys off the
+     * operand's *defining op* (a classdef-method func.call or a load from a
+     * class_id-tagged alloc) — which only matches the AOT lane.  In ReplMode
+     * a script-scope classdef var reads through matlab_ws_get_mat (an opaque
+     * call_builtin), so that detector misses it and the literal falls through
+     * to matlab_vertcat → the #105 crash.  Detect here at the AST level where
+     * the Sema-pinned class is visible (Ref->PinnedClass), so the object
+     * array is built identically on both lanes.  Require EVERY element to be
+     * a classdef-pinned NameExpr; a partial / mixed literal falls through.
+     * Require 2+ elements — a single `[A]` is just `A`, not an array. */
+    {
+      llvm::SmallVector<const Expr *, 8> elems;
+      bool allClassdef = true;
+      for (auto &Row : M.Rows)
+        for (const Expr *Cx : Row) {
+          auto *NE = dynamic_cast<const NameExpr *>(Cx);
+          if (!NE || !NE->Ref || NE->Ref->PinnedClass == nullptr) {
+            allClassdef = false;
+          }
+          elems.push_back(Cx);
+        }
+      if (allClassdef && elems.size() >= 2) {
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        mlir::NamedAttribute NewCal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_dlnet_oa_new"));
+        mlir::Value Arr = emitUnreg("matlab.call_builtin", {}, PtrTy, L, {NewCal});
+        for (const Expr *Cx : elems) {
+          mlir::Value Elem = lowerExpr(*Cx);
+          mlir::NamedAttribute AppCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_dlnet_oa_append"));
+          Arr = emitUnreg("matlab.call_builtin", {Arr, Elem}, PtrTy, L, {AppCal});
+        }
+        return Arr;
+      }
+    }
     /* Phase 5.4 (cont.): [TT1 TT2 ... TTN] over timetable bindings —
      * pairwise-reduce through matlab_timetable_horzcat. All entries
      * must be NameExprs in TimetableBindings; mixed-type bracket
