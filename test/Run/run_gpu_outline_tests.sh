@@ -155,6 +155,31 @@ fi
 check "mandelbrot:default-run" "$MBEXP" "$(run_lane "$MB" "" mbdef)"
 check "mandelbrot:outline-run" "$MBEXP" "$(run_lane "$MB" "MATLAB_GPU_OUTLINE=1" mbout)"
 
+# --- Test 3: emitters translate neg / div to a real device body. ------
+# gpu_outline_scale.m uses unary minus (matlab.neg) and division
+# (matlab.matdiv) in the kernel body.  It must outline on the LLVM lane,
+# run bit-exact, AND the -emit-{metal,cuda,opencl} passes must translate
+# the body (no `// FALLBACK: unsupported` placeholder).
+SC="$TESTDIR/gpu_outline_scale.m"
+SCEXP="$(cat "$TESTDIR/gpu_outline_scale.stdout")"
+check "scale:default-run" "$SCEXP" "$(run_lane "$SC" "" scdef)"
+check "scale:outline-run" "$SCEXP" "$(run_lane "$SC" "MATLAB_GPU_OUTLINE=1" scout)"
+
+for tgt in metal cuda opencl; do
+  EMITDIR="$OBJDIR/scale_${tgt}_emit"
+  rm -rf "$EMITDIR"; mkdir -p "$EMITDIR"
+  ( cd "$EMITDIR" && "$MATLABC" -emit-$tgt "$SC" >/dev/null 2>&1 )
+  KSRC="$(find "$EMITDIR" -name 'gpu_outline_scale_kernel.*' 2>/dev/null | head -1)"
+  if [[ -n "$KSRC" ]] && ! grep -q "// FALLBACK: unsupported" "$KSRC" \
+       && grep -q "out\[" "$KSRC"; then
+    echo "PASS scale:emit-$tgt (neg/div translated, no fallback)"
+    pass=$((pass+1))
+  else
+    echo "FAIL scale:emit-$tgt — body not fully translated"
+    fail=$((fail+1))
+  fi
+done
+
 echo "----"
 echo "gpu-outline: $pass passed, $fail failed"
 [[ $fail -eq 0 ]]

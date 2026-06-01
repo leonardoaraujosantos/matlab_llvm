@@ -354,18 +354,29 @@ void emitBody(Block &Body, MetalEmitCtx &Ctx) {
       continue;
     }
 
-    /* matlab.add / matlab.sub / matlab.matmul on f64 scalars. */
+    /* Binary arithmetic on f64 scalars: matlab.{add,sub,mul,div} and the
+     * matrix-spelled scalar forms matlab.{matmul,matdiv}. */
     if ((Name == "matlab.add" || Name == "matlab.sub" ||
-         Name == "matlab.matmul") &&
+         Name == "matlab.mul" || Name == "matlab.div" ||
+         Name == "matlab.matmul" || Name == "matlab.matdiv") &&
         Op.getNumOperands() == 2 &&
         Op.getResult(0).getType() == F64) {
-      const char *Sym = Name == "matlab.add" ? "+"
-                       : Name == "matlab.sub" ? "-"
-                                              : "*";
+      const char *Sym = (Name == "matlab.add")                          ? "+"
+                       : (Name == "matlab.sub")                         ? "-"
+                       : (Name == "matlab.div" || Name == "matlab.matdiv") ? "/"
+                                                                          : "*";
       std::string A = exprFor(Op.getOperand(0), Ctx);
       std::string B = exprFor(Op.getOperand(1), Ctx);
       std::string E = "(" + A + " " + Sym + " " + B + ")";
       Ctx.ValueExpr[Op.getResult(0)] = E;
+      continue;
+    }
+
+    /* matlab.neg — unary minus on an f64 scalar. */
+    if (Name == "matlab.neg" && Op.getNumOperands() == 1 &&
+        Op.getResult(0).getType() == F64) {
+      Ctx.ValueExpr[Op.getResult(0)] =
+          "(-" + exprFor(Op.getOperand(0), Ctx) + ")";
       continue;
     }
 

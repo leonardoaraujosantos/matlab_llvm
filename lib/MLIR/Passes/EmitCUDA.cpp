@@ -234,13 +234,15 @@ void emitBody(Block &Body, CudaEmitCtx &Ctx) {
       continue;
     }
     if ((Name == "matlab.add" || Name == "matlab.sub" ||
-         Name == "matlab.matmul" || Name == "matlab.mul") &&
+         Name == "matlab.matmul" || Name == "matlab.mul" ||
+         Name == "matlab.div" || Name == "matlab.matdiv") &&
         Op.getNumOperands() == 2) {
       /* Inside a per-thread kernel body every value is scalar, so a
-       * MATLAB `*` (matlab.matmul / matlab.mul) is a scalar multiply.
-       * Don't require the result to be typed f64 — unpromoted params
-       * make the result `none` (see collectCaptures).  Only bail if an
-       * operand is genuinely a tensor (an unsupported in-kernel matmul). */
+       * MATLAB `*` (matlab.matmul / matlab.mul) is a scalar multiply and
+       * `/` (matlab.matdiv / matlab.div) a scalar divide.  Don't require
+       * the result to be typed f64 — unpromoted params make the result
+       * `none` (see collectCaptures).  Only bail if an operand is
+       * genuinely a tensor (an unsupported in-kernel matmul). */
       if (mlir::isa<RankedTensorType, UnrankedTensorType>(
               Op.getOperand(0).getType()) ||
           mlir::isa<RankedTensorType, UnrankedTensorType>(
@@ -249,10 +251,18 @@ void emitBody(Block &Body, CudaEmitCtx &Ctx) {
         return;
       }
       const char *Sym = Name == "matlab.add" ? "+"
-                       : Name == "matlab.sub" ? "-" : "*";
+                       : Name == "matlab.sub" ? "-"
+                       : (Name == "matlab.div" || Name == "matlab.matdiv")
+                             ? "/"
+                             : "*";
       Ctx.ValueExpr[Op.getResult(0)] = "(" + exprFor(Op.getOperand(0), Ctx) +
                                        " " + Sym + " " +
                                        exprFor(Op.getOperand(1), Ctx) + ")";
+      continue;
+    }
+    if (Name == "matlab.neg" && Op.getNumOperands() == 1) {
+      Ctx.ValueExpr[Op.getResult(0)] =
+          "(-" + exprFor(Op.getOperand(0), Ctx) + ")";
       continue;
     }
     if (isa<arith::AddFOp, arith::SubFOp, arith::MulFOp, arith::DivFOp>(&Op)) {
