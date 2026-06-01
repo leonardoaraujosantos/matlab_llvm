@@ -5,15 +5,11 @@
 # NOT listed is a regression and fails CI. An entry that now passes is
 # reported as STALE (prune it) but does not fail the gate.
 #
-# The remaining entry is a NON-DETERMINISTIC execution-time crash (SIGSEGV)
-# — a residual object-lifetime bug in a runtime carrier, NOT a compile-time
-# (LAUNCH) divergence. It compiles and launches fine; it intermittently dies
-# mid-run. This is distinct from the pipeline-parity work of issue #77 (which
-# is the compile/launch divergence) and warrants its own focused fix.
-#
 # (The gate retries a CRASH/HANG once before counting it, so a one-off flake
-#  on an otherwise-clean example won't turn CI red — this is the example that
-#  crashes often enough to need an explicit allowance.)
+#  on an otherwise-clean example won't turn CI red.)
+#
+# This file is currently EMPTY — every in-scope example runs clean under the
+# `-dap` JIT lane. Add an entry only for a genuine, reproduced residual.
 #
 # Pruned 2026-06-01 (#77):
 #   - quadrotor/quadrotor_derive_eom.m — was a SymPP-backed `syms` example
@@ -28,11 +24,15 @@
 #     examples whose referenced model file is absent (environment-dependent,
 #     like the sym examples needing SymPP).
 #   - comm/alamouti_diversity.m — no longer reproduces; runs clean.
-
-# dlnet object-array carrier (matlab_dlnet_oa_*): extractdata() on an element
-# fetched from a `[A;B;C]` object-array literal intermittently dereferences a
-# freed dlarray object (matlab_dlnet_extractdata -> get_data ->
-# matlab_obj_get_mat -> struct_find_field, KERN_INVALID_ADDRESS at 0x0). An
-# object-lifetime / use-after-free in the OA carrier, not a workspace-ABI or
-# pipeline divergence. Tracked as a focused follow-up.
-dlnet/dl_classdef_array_literal.m     # intermittent SIGSEGV — dlnet object-array element lifetime (UAF)
+#
+# Pruned 2026-06-01 (#105):
+#   - dlnet/dl_classdef_array_literal.m — NOT an object-lifetime UAF as first
+#     hypothesised. Root cause was a lowering divergence: an `[A; B; C]`
+#     object-array literal over classdef-instance *vars* fell through to
+#     matlab_vertcat in ReplMode (the LowerTensorOps OA-literal detector keys
+#     off the operand's defining op — a classdef-method call or class_id alloc
+#     load — which only matches the AOT lane; in ReplMode the vars read via
+#     matlab_ws_get_mat, so it missed them). The garbage "matrix" was then
+#     deref'd as an obj by objArrayGet/extractdata → intermittent SIGSEGV.
+#     Fixed by an AST-level detector in Lowering (keys off Ref->PinnedClass,
+#     fires on both lanes). Now runs clean + correct (PASS) on AOT/-repl/-dap.
