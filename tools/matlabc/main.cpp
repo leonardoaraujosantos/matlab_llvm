@@ -910,6 +910,18 @@ static void runJitSoftwareLowering(mlir::ModuleOp M) {
     if (!Pb) break;
   }
   runLowerTensorOps(M);
+  // LATE GPU outline (issue #24) — see the AOT path for rationale.
+  if (runOutlineGpuKernelsLate(M)) {
+    runRefineSlotTypes(M);
+    runLowerSeqLoops(M);
+    runLowerTensorOps(M);
+    for (int Iter = 0; Iter < 4; ++Iter) {
+      bool A = runLowerScalarsToArith(M);
+      bool B = runLowerUserCalls(M);
+      if (!A && !B) break;
+    }
+    runLowerTensorOps(M);
+  }
   // Second LowerFixedPoint sweep — picks up matlab_mat_*_slice1 / _concat_row
   // sites that needed their tensor operand retyped to ptr first.
   runLowerFixedPoint(M);
@@ -13005,7 +13017,6 @@ int main(int Argc, char **Argv) {
     std::string KernelDecl;
     std::string KernelBody;
     std::string ThreadIdLine;
-    std::string LaunchSnippet;
     if (Opts.Mode == Options::Mode::EmitCuda) {
       Target = "cuda";   KernelExt = "cu";
       ToolchainComment = "# Requires CUDA Toolkit (nvcc + libcudart + libcublas).";
@@ -13016,9 +13027,6 @@ int main(int Argc, char **Argv) {
           + Stem + "_kernel(const double *X, double *Y, int n)";
       ThreadIdLine =
           "  int tid = blockIdx.x * blockDim.x + threadIdx.x;";
-      LaunchSnippet =
-          "  " + Stem + "_kernel<<<dim3((n + 255) / 256), dim3(256)>>>(d_x, d_y, n);\n"
-          "  cudaDeviceSynchronize();";
     } else if (Opts.Mode == Options::Mode::EmitMetal) {
       Target = "metal";  KernelExt = "metal";  HostExt = "mm";
       ToolchainComment = "# Requires Xcode (xcrun metal / metallib) + clang++.";
@@ -13031,17 +13039,6 @@ int main(int Argc, char **Argv) {
           "  constant uint &n        [[buffer(2)]],\n"
           "  uint tid                [[thread_position_in_grid]])";
       ThreadIdLine = "  /* tid is the kernel param. */";
-      LaunchSnippet =
-          "  id<MTLComputeCommandEncoder> enc = [cmdbuf computeCommandEncoder];\n"
-          "  [enc setComputePipelineState:pso];\n"
-          "  [enc setBuffer:bx offset:0 atIndex:0];\n"
-          "  [enc setBuffer:by offset:0 atIndex:1];\n"
-          "  [enc setBytes:&n length:sizeof(n) atIndex:2];\n"
-          "  [enc dispatchThreads:MTLSizeMake(n, 1, 1)\n"
-          "         threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];\n"
-          "  [enc endEncoding];\n"
-          "  [cmdbuf commit];\n"
-          "  [cmdbuf waitUntilCompleted];";
     } else {  /* EmitOpenCL */
       Target = "opencl"; KernelExt = "cl";
       ToolchainComment = "# Requires OpenCL ICD loader (libOpenCL) + clang++.";
@@ -13053,12 +13050,6 @@ int main(int Argc, char **Argv) {
           "    __global       double *Y,\n"
           "    const int n)";
       ThreadIdLine = "  int tid = get_global_id(0);";
-      LaunchSnippet =
-          "  size_t gws = ((n + 63) / 64) * 64;\n"
-          "  size_t lws = 64;\n"
-          "  clEnqueueNDRangeKernel(queue, kernel, 1, NULL, &gws, &lws,\n"
-          "                          0, NULL, NULL);\n"
-          "  clFinish(queue);";
     }
     /* Pick the output dir. */
     std::string OutDir = Stem + "_" + Target;
@@ -13097,7 +13088,7 @@ int main(int Argc, char **Argv) {
                                        /*DebugMode=*/false);
         if (!TmpDiag.hasErrors()) {
           if (Opts.Mode == Options::Mode::EmitMetal)
-            KernelSource = mlirgen::emitMetalKernels(M, Stem);
+            KernelSource = mlirgen::emitMetalKernels(M, Stem, &GpuInfo);
           else if (Opts.Mode == Options::Mode::EmitCuda)
             KernelSource = mlirgen::emitCudaKernels(M, Stem, &GpuInfo);
           else if (Opts.Mode == Options::Mode::EmitOpenCL)
@@ -13197,7 +13188,9 @@ int main(int Argc, char **Argv) {
              << "    std::exit(1); }\n"
              << "}\n\n"
              << "int main(int argc, char **argv) {\n"
-             << "  int n = argc > 1 ? std::atoi(argv[1]) : 16;\n"
+             // `mlc_n` (not `n`) to avoid colliding with a scalar capture
+             // literally named `n` (e.g. Mandelbrot's grid size).
+             << "  int mlc_n = argc > 1 ? std::atoi(argv[1]) : 16;\n"
              << "  ck(cuInit(0), \"init\");\n"
              << "  CUdevice dev; ck(cuDeviceGet(&dev, 0), \"device\");\n"
              << "  int major = 0, minor = 0;\n"
@@ -13232,56 +13225,123 @@ int main(int Argc, char **Argv) {
                 "\"module\");\n"
              << "  CUfunction fn; ck(cuModuleGetFunction(&fn, mod, \""
              << GpuInfo.name << "\"), \"function\");\n"
+             << "  size_t total = "
+             << (GpuInfo.twoD ? "(size_t)mlc_n * mlc_n" : "(size_t)mlc_n")
+             << ";\n"
              << "  CUdeviceptr d_out;\n"
-             << "  ck(cuMemAlloc(&d_out, (size_t)n * sizeof(double)), "
-                "\"alloc\");\n";
-          /* Demo scalar captures. */
+             << "  ck(cuMemAlloc(&d_out, total * sizeof(double)), \"alloc\");\n";
+          /* Demo scalar captures (const double in the kernel signature). */
           for (const auto &s : GpuInfo.scalarArgs)
-            OF << "  double " << s << " = 2.0;\n";
-          OF << "  int n_grid = n;\n"
-             << "  void *args[] = { &d_out";
-          for (const auto &s : GpuInfo.scalarArgs) OF << ", &" << s;
-          OF << ", &n_grid };\n"
-             << "  int block = 256, grid = (n + block - 1) / block;\n"
-             << "  ck(cuLaunchKernel(fn, grid, 1, 1, block, 1, 1, 0, 0, "
-                "args, 0), \"launch\");\n"
-             << "  ck(cuCtxSynchronize(), \"sync\");\n"
-             << "  std::vector<double> h_out(n);\n"
+            OF << "  double " << s << " = (double)mlc_n;  /* demo capture */\n";
+          if (GpuInfo.twoD) {
+            /* 2-D flattened grid: out, captures, then nrows + ncols. */
+            OF << "  int nrows = mlc_n, ncols = mlc_n;\n"
+               << "  void *args[] = { &d_out";
+            for (const auto &s : GpuInfo.scalarArgs) OF << ", &" << s;
+            OF << ", &nrows, &ncols };\n"
+               << "  unsigned bx = 16, by = 16;\n"
+               << "  unsigned gx = (mlc_n + bx - 1) / bx, "
+                  "gy = (mlc_n + by - 1) / by;\n"
+               << "  ck(cuLaunchKernel(fn, gx, gy, 1, bx, by, 1, 0, 0, "
+                  "args, 0), \"launch\");\n";
+          } else {
+            OF << "  int n_grid = mlc_n;\n"
+               << "  void *args[] = { &d_out";
+            for (const auto &s : GpuInfo.scalarArgs) OF << ", &" << s;
+            OF << ", &n_grid };\n"
+               << "  int block = 256, grid = (mlc_n + block - 1) / block;\n"
+               << "  ck(cuLaunchKernel(fn, grid, 1, 1, block, 1, 1, 0, 0, "
+                  "args, 0), \"launch\");\n";
+          }
+          OF << "  ck(cuCtxSynchronize(), \"sync\");\n"
+             << "  std::vector<double> h_out(total);\n"
              << "  ck(cuMemcpyDtoH(h_out.data(), d_out, "
-                "(size_t)n * sizeof(double)), \"d2h\");\n"
-             << "  for (int i = 0; i < n; ++i) std::printf(\"%g\\n\", "
-                "h_out[i]);\n"
+                "total * sizeof(double)), \"d2h\");\n"
+             << "  double sum = 0;\n"
+             << "  for (size_t i = 0; i < total; ++i) sum += h_out[i];\n"
+             << "  std::printf(\"" << Stem << ": checksum = %.4f\\n\", sum);\n"
              << "  cuMemFree(d_out);\n"
              << "  return 0;\n"
              << "}\n";
         }
       } else if (Opts.Mode == Options::Mode::EmitMetal) {
-        OF << "#import <Metal/Metal.h>\n"
-           << "#import <Foundation/Foundation.h>\n"
-           << "#include <cstdio>\n\n"
-           << "int main(int argc, char **argv) {\n"
-           << "  @autoreleasepool {\n"
-           << "    id<MTLDevice> dev = MTLCreateSystemDefaultDevice();\n"
-           << "    if (!dev) { std::fprintf(stderr, \"no Metal device\\n\"); return 1; }\n"
-           << "    id<MTLCommandQueue> q = [dev newCommandQueue];\n"
-           << "    NSError *err = nil;\n"
-           << "    NSString *src = [NSString stringWithContentsOfFile:@\"" << Stem << "_kernel.metal\"\n"
-           << "                                              encoding:NSUTF8StringEncoding error:&err];\n"
-           << "    id<MTLLibrary> lib = [dev newLibraryWithSource:src options:nil error:&err];\n"
-           << "    id<MTLFunction> fn = [lib newFunctionWithName:@\"" << Stem << "_kernel\"];\n"
-           << "    id<MTLComputePipelineState> pso = [dev newComputePipelineStateWithFunction:fn error:&err];\n"
-           << "    const unsigned n = 16;\n"
-           << "    double h_x[n];\n"
-           << "    for (unsigned i = 0; i < n; ++i) h_x[i] = (double)i;\n"
-           << "    id<MTLBuffer> bx = [dev newBufferWithBytes:h_x length:n*sizeof(double) options:MTLResourceStorageModeShared];\n"
-           << "    id<MTLBuffer> by = [dev newBufferWithLength:n*sizeof(double) options:MTLResourceStorageModeShared];\n"
-           << "    id<MTLCommandBuffer> cmdbuf = [q commandBuffer];\n"
-           << LaunchSnippet << "\n"
-           << "    double *out = (double *)[by contents];\n"
-           << "    for (unsigned i = 0; i < n; ++i) std::printf(\"%g\\n\", out[i]);\n"
-           << "  }\n"
-           << "  return 0;\n"
-           << "}\n";
+        bool runnable = (GpuInfo.kernelCount == 1 && GpuInfo.hasOutput &&
+                         !GpuInfo.bailed);
+        if (!runnable) {
+          /* Body not fully translatable (multiple kernels, no output, or
+           * a FALLBACK identity body) — emit a compilable stub rather
+           * than a driver that would launch garbage. */
+          OF << "#include <cstdio>\n\n"
+             << "/* This program's coder.gpu.kernelfun body did not fully\n"
+             << " * translate to a single device kernel (see the FALLBACK\n"
+             << " * note in " << Stem << "_kernel.metal).  The bundle is\n"
+             << " * emission-only for this input. */\n"
+             << "int main() {\n"
+             << "  std::printf(\"" << Stem
+             << ": kernel not fully translated; emission-only bundle.\\n\");\n"
+             << "  return 0;\n"
+             << "}\n";
+        } else {
+          /* Driver matching the emitted kernel's ABI: out at buffer(0),
+           * scalar captures (set to a demo value 2.0) at buffer(1..N),
+           * dispatched over n (1-D) or n×n (2-D, the flattened
+           * for-i×for-j grid).  n comes from argv[1] (default 16).  The
+           * 2-D leading dimension is the grid's i-extent (gsz.y), so no
+           * extra argument is needed. */
+          OF << "#import <Metal/Metal.h>\n"
+             << "#import <Foundation/Foundation.h>\n"
+             << "#include <cstdio>\n"
+             << "#include <cstdlib>\n\n"
+             << "int main(int argc, char **argv) {\n"
+             << "  @autoreleasepool {\n"
+             // `mlc_n` (not `n`) to avoid colliding with a scalar capture
+             // literally named `n` (e.g. Mandelbrot's grid size).
+             << "    int mlc_n = argc > 1 ? atoi(argv[1]) : 16;\n"
+             << "    id<MTLDevice> dev = MTLCreateSystemDefaultDevice();\n"
+             << "    if (!dev) { std::fprintf(stderr, \"no Metal device\\n\"); return 1; }\n"
+             << "    id<MTLCommandQueue> q = [dev newCommandQueue];\n"
+             << "    NSError *err = nil;\n"
+             << "    NSString *src = [NSString stringWithContentsOfFile:@\""
+             << Stem << "_kernel.metal\"\n"
+             << "                                              encoding:NSUTF8StringEncoding error:&err];\n"
+             << "    id<MTLLibrary> lib = [dev newLibraryWithSource:src options:nil error:&err];\n"
+             << "    if (!lib) { std::fprintf(stderr, \"MSL compile: %s\\n\", err.localizedDescription.UTF8String); return 1; }\n"
+             << "    id<MTLFunction> fn = [lib newFunctionWithName:@\""
+             << GpuInfo.name << "\"];\n"
+             << "    id<MTLComputePipelineState> pso = [dev newComputePipelineStateWithFunction:fn error:&err];\n"
+             << "    size_t total = "
+             << (GpuInfo.twoD ? "(size_t)mlc_n * mlc_n" : "(size_t)mlc_n")
+             << ";\n"
+             << "    id<MTLBuffer> by = [dev newBufferWithLength:total*sizeof(float) options:MTLResourceStorageModeShared];\n";
+          /* Demo scalar captures (constant float& at buffer 1..N). */
+          for (const auto &s : GpuInfo.scalarArgs)
+            OF << "    float " << s << " = (float)mlc_n;  /* demo capture */\n";
+          OF << "    id<MTLCommandBuffer> cmdbuf = [q commandBuffer];\n"
+             << "    id<MTLComputeCommandEncoder> enc = [cmdbuf computeCommandEncoder];\n"
+             << "    [enc setComputePipelineState:pso];\n"
+             << "    [enc setBuffer:by offset:0 atIndex:0];\n";
+          unsigned BufIdx = 1;
+          for (const auto &s : GpuInfo.scalarArgs)
+            OF << "    [enc setBytes:&" << s << " length:sizeof(float) atIndex:"
+               << BufIdx++ << "];\n";
+          if (GpuInfo.twoD)
+            OF << "    [enc dispatchThreads:MTLSizeMake(mlc_n, mlc_n, 1)\n"
+               << "           threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];\n";
+          else
+            OF << "    [enc dispatchThreads:MTLSizeMake(mlc_n, 1, 1)\n"
+               << "           threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];\n";
+          OF << "    [enc endEncoding];\n"
+             << "    [cmdbuf commit];\n"
+             << "    [cmdbuf waitUntilCompleted];\n"
+             << "    float *out = (float *)[by contents];\n"
+             << "    double sum = 0;\n"
+             << "    for (size_t i = 0; i < total; ++i) sum += out[i];\n"
+             << "    std::printf(\"" << Stem
+             << ": checksum = %.4f\\n\", sum);\n"
+             << "  }\n"
+             << "  return 0;\n"
+             << "}\n";
+        }
       } else {  /* OpenCL */
         bool runnable = (GpuInfo.kernelCount == 1 && GpuInfo.hasOutput &&
                          !GpuInfo.bailed);
@@ -13360,7 +13420,9 @@ int main(int Argc, char **Argv) {
              << "#define CL_PROGRAM_BUILD_LOG 0x1183\n"
              << "#endif\n\n"
              << "int main(int argc, char **argv) {\n"
-             << "  int n = argc > 1 ? std::atoi(argv[1]) : 16;\n"
+             // `mlc_n` (not `n`) to avoid colliding with a scalar capture
+             // literally named `n` (e.g. Mandelbrot's grid size).
+             << "  int mlc_n = argc > 1 ? std::atoi(argv[1]) : 16;\n"
              << "  cl_platform_id plat; cl_uint np = 0;\n"
              << "  if (clGetPlatformIDs(1, &plat, &np) != 0 || np == 0) {\n"
              << "    std::fprintf(stderr, \"no OpenCL platform\\n\"); return 1; }\n"
@@ -13389,27 +13451,41 @@ int main(int Argc, char **Argv) {
                 "return 1; }\n"
              << "  cl_kernel kernel = clCreateKernel(prog, \"" << GpuInfo.name
              << "\", &err);\n"
+             << "  size_t total = "
+             << (GpuInfo.twoD ? "(size_t)mlc_n * mlc_n" : "(size_t)mlc_n")
+             << ";\n"
              << "  cl_mem d_out = clCreateBuffer(ctx, CL_MEM_READ_WRITE, "
-                "(size_t)n * sizeof(double), 0, &err);\n";
+                "total * sizeof(double), 0, &err);\n";
           for (const auto &s : GpuInfo.scalarArgs)
-            OF << "  double " << s << " = 2.0;\n";
-          OF << "  int n_grid = n;\n"
+            OF << "  double " << s << " = (double)mlc_n;  /* demo capture */\n";
+          /* The 2-D kernel keeps the trailing n_grid arg (unused in the
+           * body — the leading dim comes from get_global_size(1)), so the
+           * argument list is identical for 1-D and 2-D; only the NDRange
+           * dimensionality and the buffer size differ. */
+          OF << "  int n_grid = mlc_n;\n"
              << "  cl_uint ai = 0;\n"
              << "  clSetKernelArg(kernel, ai++, sizeof(cl_mem), &d_out);\n";
           for (const auto &s : GpuInfo.scalarArgs)
             OF << "  clSetKernelArg(kernel, ai++, sizeof(double), &" << s
                << ");\n";
-          OF << "  clSetKernelArg(kernel, ai++, sizeof(int), &n_grid);\n"
-             << "  size_t gws = (size_t)n;\n"
-             << "  cl_int le = clEnqueueNDRangeKernel(queue, kernel, 1, 0, &gws, "
-                "0, 0, 0, 0);\n"
-             << "  clFinish(queue);\n"
+          OF << "  clSetKernelArg(kernel, ai++, sizeof(int), &n_grid);\n";
+          if (GpuInfo.twoD)
+            OF << "  size_t gws[2] = { (size_t)mlc_n, (size_t)mlc_n };\n"
+               << "  cl_int le = clEnqueueNDRangeKernel(queue, kernel, 2, 0, "
+                  "gws, 0, 0, 0, 0);\n";
+          else
+            OF << "  size_t gws = (size_t)mlc_n;\n"
+               << "  cl_int le = clEnqueueNDRangeKernel(queue, kernel, 1, 0, "
+                  "&gws, 0, 0, 0, 0);\n";
+          OF << "  clFinish(queue);\n"
              << "  if (le != 0) { std::fprintf(stderr, \"launch rc=%d\\n\", le); "
                 "return 1; }\n"
-             << "  double *h_out = new double[n];\n"
+             << "  double *h_out = new double[total];\n"
              << "  clEnqueueReadBuffer(queue, d_out, CL_TRUE, 0, "
-                "(size_t)n * sizeof(double), h_out, 0, 0, 0);\n"
-             << "  for (int i = 0; i < n; ++i) std::printf(\"%g\\n\", h_out[i]);\n"
+                "total * sizeof(double), h_out, 0, 0, 0);\n"
+             << "  double sum = 0;\n"
+             << "  for (size_t i = 0; i < total; ++i) sum += h_out[i];\n"
+             << "  std::printf(\"" << Stem << ": checksum = %.4f\\n\", sum);\n"
              << "  delete[] h_out;\n"
              << "  return 0;\n"
              << "}\n";
@@ -13755,6 +13831,27 @@ int main(int Argc, char **Argv) {
           }
         }
         mlirgen::runLowerTensorOps(M);
+        // LATE GPU outline (issue #24): any matlab.gpu.kernel the early
+        // runOutlineGpuKernels CLAIMED (MATLAB_GPU_OUTLINE=1) was left in
+        // place — array captures are now `ptr` to matlab_mat and scalar
+        // slots are `llvm.alloca`, so the body lifts into a standalone
+        // llvm.func with plain pointer/scalar state (no tensor↔ptr cast).
+        // The lowering passes above do NOT descend into the kernel region
+        // (an unregistered op), so the lifted body can still hold
+        // matlab.for / matlab.load / matlab.store ops; re-run the seq-loop
+        // + tensor + scalar fixpoint so they lower now that the body lives
+        // in a real func.
+        if (mlirgen::runOutlineGpuKernelsLate(M)) {
+          mlirgen::runRefineSlotTypes(M);
+          mlirgen::runLowerSeqLoops(M);
+          mlirgen::runLowerTensorOps(M);
+          for (int Iter = 0; Iter < 4; ++Iter) {
+            bool A = mlirgen::runLowerScalarsToArith(M);
+            bool B = mlirgen::runLowerUserCalls(M);
+            if (!A && !B) break;
+          }
+          mlirgen::runLowerTensorOps(M);
+        }
         // Second LowerFixedPoint sweep — picks up matlab.call_builtin
         // @matlab_mat_*_slice1 / _concat_row sites that needed their
         // tensor operand retyped to ptr by LowerTensorOps first.

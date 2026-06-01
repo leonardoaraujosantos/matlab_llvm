@@ -186,27 +186,43 @@ unsigned runForwardParforCaptures(mlir::ModuleOp M);
 /// sequential loop calling the outlined function directly.
 unsigned runOutlineGpuKernels(mlir::ModuleOp M);
 
-/// Emit Metal Shading Language (MSL) source for every matlab.gpu.kernel
-/// op in `M`.  Returns the combined source string with one MSL
-/// `kernel void` function per op.  Walks read-only (does not mutate
-/// the IR), so it can co-exist with the simple-rewrite CPU lane.
-/// `Prefix` is the user-visible kernel-name prefix (typically the
-/// input file's stem).  Unsupported body shapes fall back to a
-/// placeholder body with a `// FALLBACK: <reason>` comment.
-std::string emitMetalKernels(mlir::ModuleOp M, llvm::StringRef Prefix);
+/// Late phase of the GPU outliner (issue #24, "real array-capture
+/// outliner").  Runs AFTER LowerTensorOps, when captured arrays are
+/// already `!llvm.ptr` to `matlab_mat` descriptors and scalars are
+/// arith/llvm values — so the kernel body can be lifted into a
+/// standalone `llvm.func` with plain pointer/scalar state, no
+/// `unrealized_conversion_cast` at the tensor↔ptr boundary (the gap
+/// that defeated the pre-lowering outliner).  Only fires under
+/// `MATLAB_GPU_OUTLINE=1`; consumes the `matlab.gpu.kernel` ops that
+/// `runOutlineGpuKernels` tagged `matlab.gpu.outline` and left in
+/// place.  Returns the number of kernels outlined.
+unsigned runOutlineGpuKernelsLate(mlir::ModuleOp M);
 
 /// Descriptor for the first emitted GPU kernel, so the host-driver
 /// emitter (tools/matlabc) can declare + launch it with the matching
-/// name + signature.  Shared by the CUDA (NVRTC) and OpenCL host-driver
-/// emitters; populated by emitCudaKernels / emitOpenCLKernels when an
-/// out-param is supplied.
+/// name + signature.  Shared by the Metal / CUDA (NVRTC) / OpenCL
+/// host-driver emitters; populated by emitMetalKernels /
+/// emitCudaKernels / emitOpenCLKernels when an out-param is supplied.
 struct GpuKernelInfo {
   std::string name;                     ///< e.g. "scale_kernel_0"
   bool hasOutput = false;               ///< kernel takes a leading `T *out`
   std::vector<std::string> scalarArgs;  ///< ordered `const double` capture names
   bool bailed = false;                  ///< body hit a FALLBACK (identity body)
   unsigned kernelCount = 0;             ///< total matlab.gpu.kernel ops emitted
+  bool twoD = false;                    ///< kernel is a flattened 2-D grid
 };
+
+/// Emit Metal Shading Language (MSL) source for every matlab.gpu.kernel
+/// op in `M`.  Returns the combined source string with one MSL
+/// `kernel void` function per op.  Walks read-only (does not mutate
+/// the IR), so it can co-exist with the simple-rewrite CPU lane.
+/// `Prefix` is the user-visible kernel-name prefix (typically the
+/// input file's stem).  Unsupported body shapes fall back to a
+/// placeholder body with a `// FALLBACK: <reason>` comment.  When `Info`
+/// is non-null it is filled with a descriptor of the first kernel for
+/// the host-driver emitter.
+std::string emitMetalKernels(mlir::ModuleOp M, llvm::StringRef Prefix,
+                             GpuKernelInfo *Info = nullptr);
 
 /// Emit CUDA-C kernel source for every matlab.gpu.kernel op.  Same
 /// shape as emitMetalKernels — uses __global__ + `T*` + thread-index

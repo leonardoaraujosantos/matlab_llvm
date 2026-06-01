@@ -888,6 +888,18 @@ add_test(
           $<TARGET_FILE:matlabc>
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Run
 )
+# GPU array-capture outliner lane (issue #24) — MATLAB_GPU_OUTLINE=1.
+# Confirms a flat element-wise `coder.gpu.kernelfun` kernel is lifted
+# into a standalone __gpu_kernel_N llvm.func and runs bit-exact vs the
+# default lane through the CPU dispatch fallback, and that an
+# unsupported-class kernel (Mandelbrot) declines cleanly without
+# corrupting the program.  No GPU hardware required.
+add_test(
+  NAME gpu-outline-tests
+  COMMAND ${CMAKE_SOURCE_DIR}/test/Run/run_gpu_outline_tests.sh
+          $<TARGET_FILE:matlabc>
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Run
+)
 # mflowLink §17.5 #6 — cross-dialect composition. Compile a .m
 # that calls `mflowlink_run("model.mflow")` via runtime/
 # runtime_mflowlink_call.cpp and confirm the round-trip works.

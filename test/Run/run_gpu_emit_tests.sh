@@ -106,6 +106,20 @@ if [[ "$(uname)" == "Darwin" && -f "$TMP/gpu_emit_src_metal/gpu_emit_src_main.mm
         -o gpu_emit_src_metal 2>"$TMP/metal_build.err"; then
     echo "PASS metal-bundle-builds"
     pass=$((pass+1))
+    # Run the bundle end-to-end (its host driver JIT-compiles the .metal,
+    # binds out@0 + the scalar captures, dispatches, and prints a
+    # checksum) — proves the driver's kernel-function name + buffer ABI
+    # match the emitted kernel.  Skips cleanly if the runner has no GPU.
+    run_out="$(./gpu_emit_src_metal 2>/dev/null)"
+    if [[ "$run_out" == *"checksum ="* ]]; then
+      echo "PASS metal-bundle-runs ($run_out)"
+      pass=$((pass+1))
+    elif [[ "$run_out" == *"no Metal device"* || -z "$run_out" ]]; then
+      echo "SKIP metal-bundle-runs (no Metal device on this runner)"
+    else
+      echo "FAIL metal-bundle-runs: unexpected output [$run_out]"
+      fail=$((fail+1))
+    fi
   else
     echo "FAIL metal-bundle-builds: clang++ link error"
     sed 's/^/  /' "$TMP/metal_build.err" | head -5

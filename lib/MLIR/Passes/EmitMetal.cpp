@@ -83,6 +83,18 @@ struct MetalEmitCtx {
   Value IV;                                /* induction f64 block arg */
   std::string IVName = "iv";
 
+  /* 2-D kernels (a `coder.gpu.kernelfun` for-i × for-j nest flattened to
+   * a 2-D thread grid): the inner loop's induction var.  TwoD gates the
+   * uint2 thread-id signature, the second IV decl, and the 2-D
+   * subscript-store leading-dim index.  NRowsExpr is the column-major
+   * leading dimension (`(int)gsz.y` — the grid's i-extent). */
+  bool TwoD = false;
+  Value IV2;
+  std::string IV2Name = "j_iv";
+  Value IVSlot2;
+  std::string OuterVarName;                /* outer (i) loop var, 2-D only */
+  std::string NRowsExpr = "(int)gsz.y";
+
   /* Output tensor SLOT — the outer matlab.alloc Value (matched via
    * the matlab.load that feeds __subscript_store).  At most one v1. */
   Value OutputSlot;
@@ -102,6 +114,15 @@ struct MetalEmitCtx {
    * `name = "..."` attribute on the matlab.alloc op when present. */
   llvm::SmallVector<Value> ScalarCaptureOrder;
   llvm::DenseMap<Value, std::string> ScalarCaptureNames;
+
+  /* Outer f64 slots that are WRITTEN inside the body (kernel-local
+   * temporaries hoisted to the enclosing func's entry by the frontend,
+   * e.g. Mandelbrot's `cr`/`zr`/`k`).  They are NOT read-only captures —
+   * each becomes a per-thread MSL local declared at the top of the body.
+   * Their outer value is irrelevant (overwritten before read), so they
+   * are initialised to 0. */
+  llvm::SmallVector<Value> OuterLocalOrder;
+  llvm::DenseMap<Value, std::string> OuterLocalNames;
 
   /* Local-slot bookkeeping — matlab.alloc Values defined INSIDE the
    * kernel body but read/written via matlab.load/store.  Become MSL
@@ -172,85 +193,119 @@ std::string allocName(Operation *Alloc, unsigned Fallback) {
  *     read (but not stored to) inside the body.
  */
 void collectCaptures(Block &Body, MetalEmitCtx &Ctx) {
+  Operation *KernelOp = Body.getParentOp();
+  auto F64 = Float64Type::get(KernelOp->getContext());
+  /* A scalar slot type: f64, or `none` for an unpromoted function param
+   * (no type-promotion pass runs before -emit-metal; inside the
+   * per-thread body it is a scalar).  Matches the CUDA/OpenCL emitters. */
+  auto isScalarSlotTy = [&](Type T) {
+    if (mlir::isa<RankedTensorType, UnrankedTensorType>(T)) return false;
+    return T == F64 || mlir::isa<NoneType>(T);
+  };
+
+  /* Everything defined inside the kernel region (results + nested block
+   * args) — a load/store on one of these is not an outer-slot access. */
   llvm::DenseSet<Value> InsideDefs;
   InsideDefs.insert(Ctx.IV);
-  for (Operation &Op : Body)
-    for (Value R : Op.getResults()) InsideDefs.insert(R);
+  KernelOp->walk([&](Operation *Op) {
+    for (Value R : Op->getResults()) InsideDefs.insert(R);
+    for (Region &Rg : Op->getRegions())
+      for (Block &Bl : Rg)
+        for (Value A : Bl.getArguments()) InsideDefs.insert(A);
+  });
 
-  /* Identify the IV slot — the outer matlab.alloc whose name matches
-   * the kernel op's `var` attribute.  Stores into this slot are
-   * no-ops (IV is the block arg); loads return the IV. */
   StringRef VarName;
-  if (auto VA = Body.getParentOp()->getAttrOfType<StringAttr>("var"))
+  if (auto VA = KernelOp->getAttrOfType<StringAttr>("var"))
     VarName = VA.getValue();
 
-  for (Operation &Op : Body) {
-    if (!isMatlabOp(&Op, "matlab.load") || Op.getNumOperands() != 1) continue;
-    Value Slot = Op.getOperand(0);
-    if (InsideDefs.count(Slot)) continue;
+  /* IV slot(s) — outer matlab.alloc(s) whose name matches the loop
+   * var(s).  In 2-D the inner kernel's `var` names the j slot (IVSlot)
+   * and Ctx.OuterVarName names the i slot (IVSlot2). */
+  KernelOp->walk([&](Operation *Op) {
+    if (!isMatlabOp(Op, "matlab.load") || Op->getNumOperands() != 1) return;
+    Value Slot = Op->getOperand(0);
+    if (InsideDefs.count(Slot)) return;
     Operation *Def = Slot.getDefiningOp();
-    if (!isMatlabOp(Def, "matlab.alloc")) continue;
-    if (auto SA = Def->getAttrOfType<StringAttr>("name")) {
-      if (!VarName.empty() && SA.getValue() == VarName) {
-        Ctx.IVSlot = Slot;
-      }
-    }
-  }
+    if (!isMatlabOp(Def, "matlab.alloc")) return;
+    auto SA = Def->getAttrOfType<StringAttr>("name");
+    if (!SA) return;
+    if (!VarName.empty() && SA.getValue() == VarName) Ctx.IVSlot = Slot;
+    if (Ctx.TwoD && !Ctx.OuterVarName.empty() &&
+        SA.getValue() == Ctx.OuterVarName)
+      Ctx.IVSlot2 = Slot;
+  });
 
-  /* Output slot: tensor-typed outer matlab.alloc whose value is loaded
-   * and that load is the first operand of __subscript_store. */
-  for (Operation &Op : Body) {
-    if (!isMatlabOp(&Op, "matlab.call_builtin")) continue;
-    auto Cal = Op.getAttrOfType<StringAttr>("callee");
-    if (!Cal || Cal.getValue() != "__subscript_store") continue;
-    if (Op.getNumOperands() < 3) continue;
-    Value LoadedTensor = Op.getOperand(0);
+  /* Output slot: tensor-typed outer matlab.alloc feeding __subscript_store. */
+  KernelOp->walk([&](Operation *Op) {
+    if (Ctx.Bailed) return;
+    if (!isMatlabOp(Op, "matlab.call_builtin")) return;
+    auto Cal = Op->getAttrOfType<StringAttr>("callee");
+    if (!Cal || Cal.getValue() != "__subscript_store") return;
+    if (Op->getNumOperands() < 3) return;
+    Value LoadedTensor = Op->getOperand(0);
     Operation *LoadOp = LoadedTensor.getDefiningOp();
-    Value Slot;
-    if (LoadOp && isMatlabOp(LoadOp, "matlab.load") &&
-        LoadOp->getNumOperands() == 1)
-      Slot = LoadOp->getOperand(0);
-    else
-      Slot = LoadedTensor;  /* direct */
-    if (InsideDefs.count(Slot)) continue;
+    Value Slot = (LoadOp && isMatlabOp(LoadOp, "matlab.load") &&
+                  LoadOp->getNumOperands() == 1)
+                     ? LoadOp->getOperand(0)
+                     : LoadedTensor;
+    if (InsideDefs.count(Slot)) return;
     Operation *Def = Slot.getDefiningOp();
-    if (!isMatlabOp(Def, "matlab.alloc")) continue;
+    if (!isMatlabOp(Def, "matlab.alloc")) return;
     if (!mlir::isa<RankedTensorType, UnrankedTensorType>(Slot.getType()))
-      continue;
+      return;
     if (Ctx.OutputSlot && Ctx.OutputSlot != Slot) {
       Ctx.bail("multiple output tensors not supported");
       return;
     }
     Ctx.OutputSlot = Slot;
-  }
+  });
 
-  /* Scalar captures: f64-typed outer matlab.alloc slots read via
-   * matlab.load, excluding the IV slot.  We track the SLOT Value
-   * (matlab.alloc result) — the body's matlab.load on it gets
-   * resolved by exprFor at walk time. */
-  llvm::DenseSet<Value> ScalarSet;
-  for (Operation &Op : Body) {
-    if (!isMatlabOp(&Op, "matlab.load") || Op.getNumOperands() != 1) continue;
-    Value Slot = Op.getOperand(0);
-    if (InsideDefs.count(Slot)) continue;
-    if (Slot == Ctx.IVSlot) continue;
-    if (Slot == Ctx.OutputSlot) continue;
+  /* Outer f64 slots WRITTEN inside the body (excluding the IV slot) are
+   * per-thread locals, not read-only captures.  Collect them first so a
+   * slot that is both read and written is classified as a local. */
+  llvm::DenseSet<Value> StoredSet;
+  KernelOp->walk([&](Operation *Op) {
+    if (!isMatlabOp(Op, "matlab.store") || Op->getNumOperands() != 2) return;
+    Value Slot = Op->getOperand(1);
+    if (InsideDefs.count(Slot) || Slot == Ctx.IVSlot || Slot == Ctx.IVSlot2)
+      return;
     Operation *Def = Slot.getDefiningOp();
-    if (!isMatlabOp(Def, "matlab.alloc")) continue;
-    if (Slot.getType() != Float64Type::get(Op.getContext())) continue;
+    if (!isMatlabOp(Def, "matlab.alloc") || !isScalarSlotTy(Slot.getType())) return;
+    if (StoredSet.insert(Slot).second) {
+      Ctx.OuterLocalOrder.push_back(Slot);
+      Ctx.OuterLocalNames[Slot] =
+          "loc_" + allocName(Def, static_cast<unsigned>(StoredSet.size()));
+    }
+  });
+
+  /* Scalar captures: f64-typed outer matlab.alloc slots that are READ
+   * but never written (and not the IV) — read-only `constant` args. */
+  llvm::DenseSet<Value> ScalarSet;
+  KernelOp->walk([&](Operation *Op) {
+    if (!isMatlabOp(Op, "matlab.load") || Op->getNumOperands() != 1) return;
+    Value Slot = Op->getOperand(0);
+    if (InsideDefs.count(Slot)) return;
+    if (Slot == Ctx.IVSlot || Slot == Ctx.IVSlot2 || Slot == Ctx.OutputSlot)
+      return;
+    if (StoredSet.count(Slot)) return;  /* it's a local */
+    Operation *Def = Slot.getDefiningOp();
+    if (!isMatlabOp(Def, "matlab.alloc") || !isScalarSlotTy(Slot.getType())) return;
     if (ScalarSet.insert(Slot).second) {
       Ctx.ScalarCaptureOrder.push_back(Slot);
       Ctx.ScalarCaptureNames[Slot] =
           allocName(Def, static_cast<unsigned>(ScalarSet.size()));
     }
-  }
+  });
 }
 
 /* Get the MSL expression for a Value.  Handles inlined sub-expressions
  * (ValueExpr map), the induction var, captures, and the output. */
 std::string exprFor(Value V, MetalEmitCtx &Ctx) {
   if (V == Ctx.IV) return Ctx.IVName;
+  if (Ctx.TwoD && V == Ctx.IV2) return Ctx.IV2Name;
   if (V == Ctx.OutputSlot) return Ctx.OutputName;
+  auto OIt = Ctx.OuterLocalNames.find(V);
+  if (OIt != Ctx.OuterLocalNames.end()) return OIt->second;
   auto SIt = Ctx.ScalarCaptureNames.find(V);
   if (SIt != Ctx.ScalarCaptureNames.end()) return SIt->second;
   auto VIt = Ctx.ValueExpr.find(V);
@@ -264,6 +319,12 @@ std::string exprFor(Value V, MetalEmitCtx &Ctx) {
  * order, recognising the supported shapes. */
 void emitBody(Block &Body, MetalEmitCtx &Ctx) {
   auto F64 = Float64Type::get(Body.getParentOp()->getContext());
+  /* A scalar (non-tensor) result: f64, or `none` for an unpromoted
+   * function param flowing through arithmetic (no type-promotion pass
+   * runs before -emit-metal). */
+  auto scalarish = [&](Type T) {
+    return T == F64 || mlir::isa<NoneType>(T);
+  };
   for (Operation &Op : Body) {
     if (Ctx.Bailed) return;
     StringRef Name = Op.getName().getStringRef();
@@ -316,8 +377,8 @@ void emitBody(Block &Body, MetalEmitCtx &Ctx) {
     /* matlab.alloc inside the body — declare an MSL local slot. */
     if (Name == "matlab.alloc") {
       Value R = Op.getResult(0);
-      if (R.getType() != F64) {
-        Ctx.bail("non-f64 local slot");
+      if (!scalarish(R.getType())) {
+        Ctx.bail("non-scalar local slot");
         return;
       }
       std::string LName = "loc_" + allocName(&Op, Ctx.LocalCounter++);
@@ -334,6 +395,8 @@ void emitBody(Block &Body, MetalEmitCtx &Ctx) {
        * Ctx.OutputName directly via exprFor). */
       if (Slot == Ctx.IVSlot) {
         Ctx.ValueExpr[Op.getResult(0)] = Ctx.IVName;
+      } else if (Ctx.TwoD && Slot == Ctx.IVSlot2) {
+        Ctx.ValueExpr[Op.getResult(0)] = Ctx.IV2Name;
       } else {
         Ctx.ValueExpr[Op.getResult(0)] = exprFor(Slot, Ctx);
       }
@@ -341,11 +404,12 @@ void emitBody(Block &Body, MetalEmitCtx &Ctx) {
     }
 
     if (Name == "matlab.store" && Op.getNumOperands() == 2) {
-      /* matlab.store(value, slot) — slot must be a local, the IV slot
+      /* matlab.store(value, slot) — slot must be a local, an IV slot
        * (no-op; IV is the block arg), or the output slot (no-op; we
        * handle output writes via __subscript_store). */
       Value Slot = Op.getOperand(1);
       if (Slot == Ctx.IVSlot) continue;
+      if (Ctx.TwoD && Slot == Ctx.IVSlot2) continue;
       if (Slot == Ctx.OutputSlot) continue;
       std::string SlotE = exprFor(Slot, Ctx);
       std::string ValE = exprFor(Op.getOperand(0), Ctx);
@@ -354,18 +418,33 @@ void emitBody(Block &Body, MetalEmitCtx &Ctx) {
       continue;
     }
 
-    /* matlab.add / matlab.sub / matlab.matmul on f64 scalars. */
+    /* Binary arithmetic on f64 scalars: matlab.{add,sub,mul,div} and the
+     * matrix-spelled scalar forms matlab.{matmul,matdiv}. */
     if ((Name == "matlab.add" || Name == "matlab.sub" ||
-         Name == "matlab.matmul") &&
+         Name == "matlab.mul" || Name == "matlab.div" ||
+         Name == "matlab.matmul" || Name == "matlab.matdiv") &&
         Op.getNumOperands() == 2 &&
-        Op.getResult(0).getType() == F64) {
-      const char *Sym = Name == "matlab.add" ? "+"
-                       : Name == "matlab.sub" ? "-"
-                                              : "*";
+        scalarish(Op.getResult(0).getType()) &&
+        !mlir::isa<RankedTensorType, UnrankedTensorType>(
+            Op.getOperand(0).getType()) &&
+        !mlir::isa<RankedTensorType, UnrankedTensorType>(
+            Op.getOperand(1).getType())) {
+      const char *Sym = (Name == "matlab.add")                          ? "+"
+                       : (Name == "matlab.sub")                         ? "-"
+                       : (Name == "matlab.div" || Name == "matlab.matdiv") ? "/"
+                                                                          : "*";
       std::string A = exprFor(Op.getOperand(0), Ctx);
       std::string B = exprFor(Op.getOperand(1), Ctx);
       std::string E = "(" + A + " " + Sym + " " + B + ")";
       Ctx.ValueExpr[Op.getResult(0)] = E;
+      continue;
+    }
+
+    /* matlab.neg — unary minus on a scalar. */
+    if (Name == "matlab.neg" && Op.getNumOperands() == 1 &&
+        scalarish(Op.getResult(0).getType())) {
+      Ctx.ValueExpr[Op.getResult(0)] =
+          "(-" + exprFor(Op.getOperand(0), Ctx) + ")";
       continue;
     }
 
@@ -382,9 +461,69 @@ void emitBody(Block &Body, MetalEmitCtx &Ctx) {
       continue;
     }
 
-    /* matlab.call_builtin "__subscript_store" — Y(i) = v  in 1-D
-     * shape.  Operands: (output_tensor, i, value).  In MSL we emit
-     * `out[((int)i - 1)] = v;` (MATLAB 1-based → MSL 0-based). */
+    /* Scalar relational ops (result i1): matlab.{lt,le,gt,ge,eq,ne}. */
+    {
+      const char *Rel = nullptr;
+      if (Name == "matlab.lt") Rel = "<";
+      else if (Name == "matlab.le") Rel = "<=";
+      else if (Name == "matlab.gt") Rel = ">";
+      else if (Name == "matlab.ge") Rel = ">=";
+      else if (Name == "matlab.eq") Rel = "==";
+      else if (Name == "matlab.ne") Rel = "!=";
+      if (Rel && Op.getNumOperands() == 2) {
+        Ctx.ValueExpr[Op.getResult(0)] =
+            "(" + exprFor(Op.getOperand(0), Ctx) + " " + Rel + " " +
+            exprFor(Op.getOperand(1), Ctx) + ")";
+        continue;
+      }
+    }
+
+    /* Short-circuit / element-wise logical ops (result i1). */
+    {
+      const char *Lg = nullptr;
+      if (Name == "matlab.short_and" || Name == "matlab.and") Lg = "&&";
+      else if (Name == "matlab.short_or" || Name == "matlab.or") Lg = "||";
+      if (Lg && Op.getNumOperands() == 2) {
+        Ctx.ValueExpr[Op.getResult(0)] =
+            "(" + exprFor(Op.getOperand(0), Ctx) + " " + Lg + " " +
+            exprFor(Op.getOperand(1), Ctx) + ")";
+        continue;
+      }
+      if ((Name == "matlab.not" || Name == "matlab.short_not") &&
+          Op.getNumOperands() == 1) {
+        Ctx.ValueExpr[Op.getResult(0)] =
+            "(!" + exprFor(Op.getOperand(0), Ctx) + ")";
+        continue;
+      }
+    }
+
+    /* matlab.while — condition region (region 0) yields an i1; body
+     * region (region 1) runs while true.  Emit a device-side
+     * `while (cond) { body }`.  The condition's loads reference the
+     * scalar locals, which mutate in the body, so re-evaluating the
+     * inlined expression each iteration is correct. */
+    if (Name == "matlab.while" && Op.getNumRegions() == 2 &&
+        Op.getRegion(0).hasOneBlock() && Op.getRegion(1).hasOneBlock()) {
+      Block &Cond = Op.getRegion(0).front();
+      Block &Loop = Op.getRegion(1).front();
+      emitBody(Cond, Ctx);  // builds ValueExpr for the condition chain
+      if (Ctx.Bailed) return;
+      Operation *Term = Cond.getTerminator();
+      if (!Term || Term->getNumOperands() != 1) {
+        Ctx.bail("matlab.while condition without a yielded value");
+        return;
+      }
+      std::string CondE = exprFor(Term->getOperand(0), Ctx);
+      Ctx.Os << "  while (" << CondE << ") {\n";
+      emitBody(Loop, Ctx);
+      Ctx.Os << "  }\n";
+      continue;
+    }
+
+    /* matlab.call_builtin "__subscript_store" — Y(i) = v (1-D, operands
+     * tensor,i,value) or Y(i,j) = v (2-D, operands tensor,i,j,value).
+     * MATLAB is 1-based + column-major; MSL is 0-based: 1-D →
+     * `out[(int)i - 1]`, 2-D → `out[(int)(i-1) + (int)(j-1)*nrows]`. */
     if (Name == "matlab.call_builtin") {
       auto Cal = Op.getAttrOfType<StringAttr>("callee");
       if (Cal && Cal.getValue() == "__subscript_store" &&
@@ -393,6 +532,16 @@ void emitBody(Block &Body, MetalEmitCtx &Ctx) {
         std::string I = exprFor(Op.getOperand(1), Ctx);
         std::string V = exprFor(Op.getOperand(2), Ctx);
         Ctx.Os << "  " << T << "[(int)(" << I << ") - 1] = " << V << ";\n";
+        continue;
+      }
+      if (Cal && Cal.getValue() == "__subscript_store" &&
+          Op.getNumOperands() == 4 && Ctx.TwoD) {
+        std::string T = exprFor(Op.getOperand(0), Ctx);
+        std::string I = exprFor(Op.getOperand(1), Ctx);
+        std::string J = exprFor(Op.getOperand(2), Ctx);
+        std::string V = exprFor(Op.getOperand(3), Ctx);
+        Ctx.Os << "  " << T << "[((int)(" << I << ") - 1) + ((int)(" << J
+               << ") - 1) * " << Ctx.NRowsExpr << "] = " << V << ";\n";
         continue;
       }
       if (Cal && Cal.getValue() == "__subscript_load" &&
@@ -422,7 +571,8 @@ void emitBody(Block &Body, MetalEmitCtx &Ctx) {
  * function per op, separated by blank lines).  Unsupported kernels
  * emit a `// FALLBACK: <reason>` comment + a placeholder body so the
  * file still compiles. */
-std::string emitMetalKernels(mlir::ModuleOp M, llvm::StringRef Prefix) {
+std::string emitMetalKernels(mlir::ModuleOp M, llvm::StringRef Prefix,
+                             GpuKernelInfo *Info) {
   std::stringstream OS;
   OS << "/* Generated by matlabc -emit-metal.\n"
      << " * Walks matlab.gpu.kernel ops and translates each body op-by-op\n"
@@ -436,6 +586,10 @@ std::string emitMetalKernels(mlir::ModuleOp M, llvm::StringRef Prefix) {
   unsigned KId = 0;
   M.walk([&](mlir::Operation *Op) {
     if (Op->getName().getStringRef() != "matlab.gpu.kernel") return;
+    /* Skip a kernel nested inside another — the enclosing kernel emits
+     * it as part of a flattened multi-dimensional grid. */
+    for (Operation *Anc = Op->getParentOp(); Anc; Anc = Anc->getParentOp())
+      if (isMatlabOp(Anc, "matlab.gpu.kernel")) return;
     if (Op->getNumRegions() != 1) return;
     auto &Body = Op->getRegion(0);
     if (!Body.hasOneBlock()) return;
@@ -443,14 +597,38 @@ std::string emitMetalKernels(mlir::ModuleOp M, llvm::StringRef Prefix) {
     if (BB.getNumArguments() != 1) return;
 
     MetalEmitCtx Ctx;
-    Ctx.IV = BB.getArgument(0);
     Ctx.KernelName = (std::string(Prefix) + "_kernel_" +
                       std::to_string(KId++));
 
-    collectCaptures(BB, Ctx);
+    /* Detect a `coder.gpu.kernelfun` for-i × for-j nest: the body's only
+     * real content is a single nested kernel.  Flatten to a 2-D grid —
+     * the primary IV is the INNER loop (j ← tid.x), the secondary is the
+     * OUTER loop (i ← tid.y), and the column-major leading dimension is
+     * the grid's i-extent. */
+    Operation *Inner = nullptr;
+    for (Operation &O : BB)
+      if (isMatlabOp(&O, "matlab.gpu.kernel")) { Inner = &O; break; }
+    Block *ComputeBB = &BB;
+    if (Inner && Inner->getNumRegions() == 1 &&
+        Inner->getRegion(0).hasOneBlock() &&
+        Inner->getRegion(0).front().getNumArguments() == 1) {
+      ComputeBB = &Inner->getRegion(0).front();
+      Ctx.TwoD = true;
+      Ctx.IV = ComputeBB->getArgument(0);   /* inner loop j */
+      Ctx.IVName = "j_iv";
+      Ctx.IV2 = BB.getArgument(0);          /* outer loop i */
+      Ctx.IV2Name = "i_iv";
+      if (auto VA = Op->getAttrOfType<StringAttr>("var"))
+        Ctx.OuterVarName = std::string(VA.getValue());
+      Ctx.NRowsExpr = "(int)gsz.y";
+    } else {
+      Ctx.IV = BB.getArgument(0);
+    }
+
+    collectCaptures(*ComputeBB, Ctx);
 
     /* Signature.  Output goes to buffer(0), scalar captures take
-     * buffers 1..N, tid is thread_position_in_grid. */
+     * buffers 1..N, tid is thread_position_in_grid (uint2 in 2-D). */
     OS << "kernel void " << Ctx.KernelName << "(\n";
     if (Ctx.OutputSlot)
       OS << "    device float *" << Ctx.OutputName
@@ -460,20 +638,25 @@ std::string emitMetalKernels(mlir::ModuleOp M, llvm::StringRef Prefix) {
       OS << "    constant float &" << Ctx.ScalarCaptureNames[V]
          << " [[buffer(" << BufIdx++ << ")]],\n";
     }
-    OS << "    uint tid [[thread_position_in_grid]])\n"
-       << "{\n"
-       << "  float " << Ctx.IVName << " = float(tid) + 1.0f;\n";
-    if (Ctx.OutputSlot && Ctx.ScalarCaptureOrder.empty()) {
-      /* No length capture — we still need a bound; use a sentinel
-       * value the caller is expected to override at launch.  In
-       * practice the launch site sets dispatchThreads to the
-       * correct size, so the bound check is for safety. */
+    if (Ctx.TwoD) {
+      OS << "    uint2 gtid [[thread_position_in_grid]],\n"
+         << "    uint2 gsz [[threads_per_grid]])\n"
+         << "{\n"
+         << "  float " << Ctx.IVName << " = float(gtid.x) + 1.0f;\n"
+         << "  float " << Ctx.IV2Name << " = float(gtid.y) + 1.0f;\n";
+    } else {
+      OS << "    uint tid [[thread_position_in_grid]])\n"
+         << "{\n"
+         << "  float " << Ctx.IVName << " = float(tid) + 1.0f;\n";
     }
+    /* Declare per-thread locals (outer f64 slots written in the body). */
+    for (Value V : Ctx.OuterLocalOrder)
+      OS << "  float " << Ctx.OuterLocalNames[V] << " = 0.0f;\n";
 
     /* Emit the translated body or the bail placeholder. */
     std::stringstream BodyOS;
     Ctx.Os.swap(BodyOS);
-    emitBody(BB, Ctx);
+    emitBody(*ComputeBB, Ctx);
     Ctx.Os.swap(BodyOS);
 
     if (Ctx.Bailed) {
@@ -485,6 +668,17 @@ std::string emitMetalKernels(mlir::ModuleOp M, llvm::StringRef Prefix) {
       OS << BodyOS.str();
     }
     OS << "}\n\n";
+
+    /* Record the first kernel's shape for the host-driver emitter. */
+    if (Info && Info->kernelCount == 0) {
+      Info->name = Ctx.KernelName;
+      Info->hasOutput = (Ctx.OutputSlot != nullptr);
+      Info->bailed = Ctx.Bailed;
+      Info->twoD = Ctx.TwoD;
+      for (auto V : Ctx.ScalarCaptureOrder)
+        Info->scalarArgs.push_back(Ctx.ScalarCaptureNames[V]);
+    }
+    if (Info) Info->kernelCount++;
   });
 
   if (KId == 0) {
