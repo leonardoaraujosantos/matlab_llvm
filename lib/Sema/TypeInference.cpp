@@ -1110,6 +1110,15 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
       Name == "ftell" || Name == "feof" || Name == "frewind")
     return TC.scalar(Dtype::Double);
 
+  /* Continuous wavelet transform — `[wt, f] = cwt(x, fs)` yields a
+   * coefficient MATRIX (scales x time), not a scalar. Unmodelled it fell
+   * through to `any`, so the first output typed as a scalar; in the
+   * JIT/-dap workspace lane the var then read back via matlab_ws_get_f64
+   * while the store held a real matlab_mat*, and `size(mag, 2)` had no
+   * (f64, dim) lowering. Report a dynamic-shape double matrix. */
+  if (Name == "cwt")
+    return TC.arrayOf(Dtype::Double, Shape::unknown());
+
   /* Propagation Models (docs/comm_toolbox_roadmap.md §3). All scalar-
    * returning closed-form path-loss / Fresnel / diffraction / geographic
    * helpers report `scalar(Double)`. The matrix-returning entries
