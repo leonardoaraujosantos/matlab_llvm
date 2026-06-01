@@ -2634,9 +2634,22 @@ void Lowerer::lowerStmt(const Stmt &St) {
         /* Known struct-returning builtins. struct() is the textbook
          * literal; linkBudget is the PROP-Tier-2b struct return; stepinfo
          * returns the CST step-response-metrics struct. Adding more is a
-         * one-liner per future entry. */
+         * one-liner per future entry.
+         *
+         * #77: the PDE surface/mesh loaders return a matlab_struct* and
+         * can legitimately yield NULL (e.g. pde_load_glb on a missing
+         * file).  Sema lumps them into the matrix-returning block, so
+         * without this tag the REPL/JIT workspace round-trip stores the
+         * struct (or NULL) through matlab_ws_set_mat (kind=1, matrix) and
+         * reads it back mis-typed — a NULL becomes a fresh mat_alloc(0,0)
+         * that the downstream struct accessor dereferences as a
+         * matlab_struct*, a heap-dependent wild crash.  Tagging them
+         * struct routes the store through matlab_ws_set_struct (kind=12),
+         * which round-trips NULL faithfully (matlab_struct_get_mat). */
         if (NE->Name == "struct" || NE->Name == "linkBudget" ||
-            NE->Name == "stepinfo")
+            NE->Name == "stepinfo" ||
+            NE->Name == "pde_load_glb" || NE->Name == "pde_load_stl" ||
+            NE->Name == "pde_voxelize_surface")
           RhsIsStruct = true;
       }
     } else if (A.RHS && A.RHS->Kind == NodeKind::NameExpr) {

@@ -7646,14 +7646,24 @@ matlab_mat *matlab_struct_get_mat(matlab_struct *s, const char *name, int64_t le
      * (height(T) came back as 0 from the all-zero shape, width(T) read
      * past the end of the empty mat into allocator-leak bytes — the
      * `-1.50101e+09` the user saw). */
+    /* kind=12 is matlab_struct* — a plain field-holder, layout-compatible
+     * with matlab_obj*.  Return the stored pointer VERBATIM, including
+     * NULL.  A struct-returning runtime call (e.g. pde_load_glb on a
+     * missing file) can legitimately produce NULL; in the REPL/JIT
+     * workspace round-trip that NULL is stored here (via
+     * matlab_ws_set_struct) and must read back as NULL — not as a fresh
+     * mat_alloc(0, 0).  The empty matrix would otherwise be reinterpreted
+     * as a matlab_struct* by the downstream struct accessor
+     * (matlab_pde_mesh_nodes -> matlab_struct_get_mat -> struct_find_field),
+     * whose layout differs, producing a heap-dependent wild dereference
+     * (issue #77).  Every struct consumer already null-guards (this
+     * function's own `if (!s)` at entry), so a NULL passes through safely. */
+    if (s->kinds[idx] == 12)
+        return (matlab_mat *)s->ptr_vals[idx];
     if ((s->kinds[idx] == 6  ||
          s->kinds[idx] == 9  ||
          s->kinds[idx] == 10 ||
-         s->kinds[idx] == 11 ||
-         /* kind=12 is matlab_struct* — plain field-holder, layout-
-          * compatible with matlab_obj*.  Pass the pointer through so
-          * cross-REPL-turn field accesses see the descriptor. */
-         s->kinds[idx] == 12) && s->ptr_vals[idx])
+         s->kinds[idx] == 11) && s->ptr_vals[idx])
         return (matlab_mat *)s->ptr_vals[idx];
     /* Box a scalar field into a 1x1 matrix. */
     if (s->kinds[idx] == 0) {

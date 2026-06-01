@@ -123,18 +123,36 @@ def skip_scope(rel, path):
     # win worth keeping visible (-> OK). See the runner below.
     try:
         with open(path, "r", errors="ignore") as f:
-            head = "".join(f.readline() for _ in range(20))
+            body = f.read()
+        head = "".join(body.splitlines(keepends=True)[:20])
         if re.search(r"^\s*%\s*hdl:", head, re.M):
             return True
-        # symbolic examples need SymPP linked; skip in this env.
-        if re.search(r"(^|[^\w])(syms|sym)\s*[(]|^\s*syms\s", head, re.M):
+        # symbolic examples need SymPP linked; skip in this env. Scan the
+        # whole body — a `syms` declaration can appear well past the header
+        # comment block (e.g. quadrotor_derive_eom declares it ~line 28).
+        # The pattern matches the symbolic toolbox (`syms a b`, `sym(0)`),
+        # not a plain variable named `sym` (e.g. `sym = pskmod(...)`).
+        if re.search(r"(^|[^\w])(syms|sym)\s*[(]|^\s*syms\s", body, re.M):
             return True
         # interactive examples (keyboard/input/pause-for-key) can't run
-        # headless — they block waiting for stdin. Read the whole file.
-        with open(path, "r", errors="ignore") as f:
-            body = f.read()
+        # headless — they block waiting for stdin.
         if re.search(r"(^|[^\w])(keyboard|input)\s*[(;]", body, re.M):
             return True
+        # Examples that read an external 3-D model / data file by absolute
+        # path (e.g. pde_load_glb("/tmp/antenna.glb")) require an asset
+        # that doesn't ship with the repo (the antenna demos expect a GLB
+        # the user drops in ~/Downloads → /tmp).  When that file is absent
+        # the loader returns NULL and the demo has no meaningful run — it
+        # is environment-dependent, like the sym examples needing SymPP, so
+        # it is out of parity scope rather than a JIT divergence.  Skip only
+        # when the referenced file is genuinely missing, so a developer who
+        # *has* the asset still exercises the example.  (#77)
+        for m in re.finditer(
+                r"""['"](~?/[^'"]*\.(?:glb|gltf|stl|obj|ply|step|stp|igs|iges|3mf))['"]""",
+                body, re.I):
+            fp = os.path.expanduser(m.group(1))
+            if not os.path.exists(fp):
+                return True
     except OSError:
         pass
     return False

@@ -135,6 +135,21 @@ def main():
          "p = @sq;\ndisp(p(6));\n"
          "function y = sq(x)\n  y = x * x;\nend\n",
          False),
+        # Struct-returning runtime call that yields NULL (issue #77).
+        # pde_load_glb on a missing file returns a NULL matlab_struct*.
+        # In the JIT/REPL path `s` is workspace-backed, so it round-trips
+        # through the script-scope store/load. It must store via
+        # matlab_ws_set_struct (kind=12) and read back the NULL faithfully
+        # — NOT as a fresh mat_alloc(0,0) that pde_mesh_nodes then
+        # dereferences as a struct (struct_find_field walking a mat layout
+        # → heap-dependent SIGSEGV). With the fix the program degrades
+        # gracefully: pde_mesh_nodes(NULL) → empty, size → 0, terminates.
+        ("struct_returning_null_roundtrip",
+         "s = pde_load_glb('/tmp/__no_such_model_77__.glb');\n"
+         "n = pde_mesh_nodes(s);\n"
+         "disp(size(n, 1));\n"
+         "disp('ok');\n",
+         False),
     ]
 
     work = os.path.join("/tmp", "matlabc_jit_userfn_test")
