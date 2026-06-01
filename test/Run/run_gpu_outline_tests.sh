@@ -155,6 +155,25 @@ fi
 check "mandelbrot:default-run" "$MBEXP" "$(run_lane "$MB" "" mbdef)"
 check "mandelbrot:outline-run" "$MBEXP" "$(run_lane "$MB" "MATLAB_GPU_OUTLINE=1" mbout)"
 
+# 2c. The nested for-i × for-j kernel must flatten to a 2-D device kernel
+# on every backend — a real body (no FALLBACK) with a 2-D column-major
+# store (the `* <leading-dim>` term).  The Metal kernel is additionally
+# device-validated below via the metal-bundle build in gpu-emit-tests.
+for tgt in metal cuda opencl; do
+  EMITDIR="$OBJDIR/mandelbrot_${tgt}_emit"
+  rm -rf "$EMITDIR"; mkdir -p "$EMITDIR"
+  ( cd "$EMITDIR" && "$MATLABC" -emit-$tgt "$MB" >/dev/null 2>&1 )
+  KSRC="$(find "$EMITDIR" -name 'gpu_mandelbrot_kernel.*' 2>/dev/null | head -1)"
+  if [[ -n "$KSRC" ]] && ! grep -q "// FALLBACK: unsupported" "$KSRC" \
+       && grep -q "while (" "$KSRC" && grep -qE "out\[.*\* " "$KSRC"; then
+    echo "PASS mandelbrot:emit-$tgt (2-D nested kernel flattened, no fallback)"
+    pass=$((pass+1))
+  else
+    echo "FAIL mandelbrot:emit-$tgt — nested 2-D kernel not fully translated"
+    fail=$((fail+1))
+  fi
+done
+
 # --- Test 3: emitters translate neg / div to a real device body. ------
 # gpu_outline_scale.m uses unary minus (matlab.neg) and division
 # (matlab.matdiv) in the kernel body.  It must outline on the LLVM lane,

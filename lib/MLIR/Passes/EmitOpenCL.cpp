@@ -50,6 +50,16 @@ struct OCLEmitCtx {
   Value OutputSlot;
   std::string OutputName = "out";
   Value IVSlot;
+  /* 2-D kernels (a for-i × for-j nest flattened to a 2-D NDRange).
+   * Primary IV = inner j (← dim 0); IV2 = outer i (← dim 1).  NRowsExpr
+   * is the exact NDRange extent in dim 1 (OpenCL global sizes are not
+   * padded). */
+  bool TwoD = false;
+  Value IV2;
+  std::string IV2Name = "i_iv";
+  Value IVSlot2;
+  std::string OuterVarName;
+  std::string NRowsExpr = "(int)get_global_size(1)";
   llvm::SmallVector<Value> ScalarCaptureOrder;
   llvm::DenseMap<Value, std::string> ScalarCaptureNames;
   /* Outer scalar slots WRITTEN inside the body — per-work-item locals. */
@@ -103,9 +113,12 @@ void collectCaptures(Block &Body, OCLEmitCtx &Ctx) {
     if (InsideDefs.count(Slot)) return;
     Operation *Def = Slot.getDefiningOp();
     if (!isMatlabOp(Def, "matlab.alloc")) return;
-    if (auto SA = Def->getAttrOfType<StringAttr>("name"))
-      if (!VarName.empty() && SA.getValue() == VarName)
-        Ctx.IVSlot = Slot;
+    auto SA = Def->getAttrOfType<StringAttr>("name");
+    if (!SA) return;
+    if (!VarName.empty() && SA.getValue() == VarName) Ctx.IVSlot = Slot;
+    if (Ctx.TwoD && !Ctx.OuterVarName.empty() &&
+        SA.getValue() == Ctx.OuterVarName)
+      Ctx.IVSlot2 = Slot;
   });
   KernelOp->walk([&](Operation *Op) {
     if (Ctx.Bailed) return;
@@ -132,7 +145,8 @@ void collectCaptures(Block &Body, OCLEmitCtx &Ctx) {
   KernelOp->walk([&](Operation *Op) {
     if (!isMatlabOp(Op, "matlab.store") || Op->getNumOperands() != 2) return;
     Value Slot = Op->getOperand(1);
-    if (InsideDefs.count(Slot) || Slot == Ctx.IVSlot) return;
+    if (InsideDefs.count(Slot) || Slot == Ctx.IVSlot || Slot == Ctx.IVSlot2)
+      return;
     Operation *Def = Slot.getDefiningOp();
     if (!isMatlabOp(Def, "matlab.alloc") || !isScalarSlotTy(Slot.getType()))
       return;
@@ -147,7 +161,8 @@ void collectCaptures(Block &Body, OCLEmitCtx &Ctx) {
     if (!isMatlabOp(Op, "matlab.load") || Op->getNumOperands() != 1) return;
     Value Slot = Op->getOperand(0);
     if (InsideDefs.count(Slot)) return;
-    if (Slot == Ctx.IVSlot || Slot == Ctx.OutputSlot) return;
+    if (Slot == Ctx.IVSlot || Slot == Ctx.IVSlot2 || Slot == Ctx.OutputSlot)
+      return;
     if (StoredSet.count(Slot)) return;
     Operation *Def = Slot.getDefiningOp();
     if (!isMatlabOp(Def, "matlab.alloc") || !isScalarSlotTy(Slot.getType()))
@@ -162,6 +177,7 @@ void collectCaptures(Block &Body, OCLEmitCtx &Ctx) {
 
 std::string exprFor(Value V, OCLEmitCtx &Ctx) {
   if (V == Ctx.IV) return Ctx.IVName;
+  if (Ctx.TwoD && V == Ctx.IV2) return Ctx.IV2Name;
   if (V == Ctx.OutputSlot) return Ctx.OutputName;
   auto OIt = Ctx.OuterLocalNames.find(V);
   if (OIt != Ctx.OuterLocalNames.end()) return OIt->second;
@@ -218,12 +234,15 @@ void emitBody(Block &Body, OCLEmitCtx &Ctx) {
     if (Name == "matlab.load" && Op.getNumOperands() == 1) {
       Value Slot = Op.getOperand(0);
       if (Slot == Ctx.IVSlot) Ctx.ValueExpr[Op.getResult(0)] = Ctx.IVName;
+      else if (Ctx.TwoD && Slot == Ctx.IVSlot2)
+        Ctx.ValueExpr[Op.getResult(0)] = Ctx.IV2Name;
       else Ctx.ValueExpr[Op.getResult(0)] = exprFor(Slot, Ctx);
       continue;
     }
     if (Name == "matlab.store" && Op.getNumOperands() == 2) {
       Value Slot = Op.getOperand(1);
       if (Slot == Ctx.IVSlot) continue;
+      if (Ctx.TwoD && Slot == Ctx.IVSlot2) continue;
       if (Slot == Ctx.OutputSlot) continue;
       std::string SlotE = exprFor(Slot, Ctx);
       if (SlotE == Ctx.IVName) continue;
@@ -335,6 +354,14 @@ void emitBody(Block &Body, OCLEmitCtx &Ctx) {
                << exprFor(Op.getOperand(2), Ctx) << ";\n";
         continue;
       }
+      if (Cal && Cal.getValue() == "__subscript_store" &&
+          Op.getNumOperands() == 4 && Ctx.TwoD) {
+        Ctx.Os << "  " << exprFor(Op.getOperand(0), Ctx) << "[((int)("
+               << exprFor(Op.getOperand(1), Ctx) << ") - 1) + ((int)("
+               << exprFor(Op.getOperand(2), Ctx) << ") - 1) * " << Ctx.NRowsExpr
+               << "] = " << exprFor(Op.getOperand(3), Ctx) << ";\n";
+        continue;
+      }
       if (Cal && Cal.getValue() == "__subscript_load" &&
           Op.getNumOperands() >= 2) {
         Ctx.ValueExpr[Op.getResult(0)] = exprFor(Op.getOperand(0), Ctx) +
@@ -364,6 +391,8 @@ std::string emitOpenCLKernels(mlir::ModuleOp M, llvm::StringRef Prefix,
   unsigned KId = 0;
   M.walk([&](mlir::Operation *Op) {
     if (Op->getName().getStringRef() != "matlab.gpu.kernel") return;
+    for (Operation *Anc = Op->getParentOp(); Anc; Anc = Anc->getParentOp())
+      if (isMatlabOp(Anc, "matlab.gpu.kernel")) return;  /* inner — skip */
     if (Op->getNumRegions() != 1) return;
     auto &Body = Op->getRegion(0);
     if (!Body.hasOneBlock()) return;
@@ -371,25 +400,52 @@ std::string emitOpenCLKernels(mlir::ModuleOp M, llvm::StringRef Prefix,
     if (BB.getNumArguments() != 1) return;
 
     OCLEmitCtx Ctx;
-    Ctx.IV = BB.getArgument(0);
     Ctx.KernelName = std::string(Prefix) + "_kernel_" + std::to_string(KId++);
 
-    collectCaptures(BB, Ctx);
+    /* Flatten a for-i × for-j nest to a 2-D NDRange (see EmitMetal). */
+    Operation *Inner = nullptr;
+    for (Operation &O : BB)
+      if (isMatlabOp(&O, "matlab.gpu.kernel")) { Inner = &O; break; }
+    Block *ComputeBB = &BB;
+    if (Inner && Inner->getNumRegions() == 1 &&
+        Inner->getRegion(0).hasOneBlock() &&
+        Inner->getRegion(0).front().getNumArguments() == 1) {
+      ComputeBB = &Inner->getRegion(0).front();
+      Ctx.TwoD = true;
+      Ctx.IV = ComputeBB->getArgument(0);   /* inner j */
+      Ctx.IVName = "j_iv";
+      Ctx.IV2 = BB.getArgument(0);          /* outer i */
+      Ctx.IV2Name = "i_iv";
+      if (auto VA = Op->getAttrOfType<StringAttr>("var"))
+        Ctx.OuterVarName = std::string(VA.getValue());
+    } else {
+      Ctx.IV = BB.getArgument(0);
+    }
+
+    collectCaptures(*ComputeBB, Ctx);
 
     OS << "__kernel void " << Ctx.KernelName << "(\n";
     if (Ctx.OutputSlot)
       OS << "    __global double *" << Ctx.OutputName << ",\n";
     for (auto V : Ctx.ScalarCaptureOrder)
       OS << "    const double " << Ctx.ScalarCaptureNames[V] << ",\n";
-    OS << "    const int n_grid)\n{\n"
-       << "  int tid = get_global_id(0);\n"
-       << "  if (tid >= n_grid) return;\n"
-       << "  double " << Ctx.IVName << " = (double)tid + 1.0;\n";
+    if (Ctx.TwoD) {
+      OS << "    const int n_grid)\n{\n"
+         << "  int jx = get_global_id(0);\n"
+         << "  int iy = get_global_id(1);\n"
+         << "  double " << Ctx.IVName << " = (double)jx + 1.0;\n"
+         << "  double " << Ctx.IV2Name << " = (double)iy + 1.0;\n";
+    } else {
+      OS << "    const int n_grid)\n{\n"
+         << "  int tid = get_global_id(0);\n"
+         << "  if (tid >= n_grid) return;\n"
+         << "  double " << Ctx.IVName << " = (double)tid + 1.0;\n";
+    }
     for (Value V : Ctx.OuterLocalOrder)
       OS << "  double " << Ctx.OuterLocalNames[V] << " = 0.0;\n";
     std::stringstream BodyOS;
     Ctx.Os.swap(BodyOS);
-    emitBody(BB, Ctx);
+    emitBody(*ComputeBB, Ctx);
     Ctx.Os.swap(BodyOS);
     if (Ctx.Bailed)
       OS << "  // FALLBACK: " << Ctx.BailReason << ".  Identity body.\n";

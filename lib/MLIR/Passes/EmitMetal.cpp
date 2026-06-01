@@ -83,6 +83,18 @@ struct MetalEmitCtx {
   Value IV;                                /* induction f64 block arg */
   std::string IVName = "iv";
 
+  /* 2-D kernels (a `coder.gpu.kernelfun` for-i × for-j nest flattened to
+   * a 2-D thread grid): the inner loop's induction var.  TwoD gates the
+   * uint2 thread-id signature, the second IV decl, and the 2-D
+   * subscript-store leading-dim index.  NRowsExpr is the column-major
+   * leading dimension (`(int)gsz.y` — the grid's i-extent). */
+  bool TwoD = false;
+  Value IV2;
+  std::string IV2Name = "j_iv";
+  Value IVSlot2;
+  std::string OuterVarName;                /* outer (i) loop var, 2-D only */
+  std::string NRowsExpr = "(int)gsz.y";
+
   /* Output tensor SLOT — the outer matlab.alloc Value (matched via
    * the matlab.load that feeds __subscript_store).  At most one v1. */
   Value OutputSlot;
@@ -199,16 +211,21 @@ void collectCaptures(Block &Body, MetalEmitCtx &Ctx) {
   if (auto VA = KernelOp->getAttrOfType<StringAttr>("var"))
     VarName = VA.getValue();
 
-  /* IV slot — the outer matlab.alloc whose name matches `var`. */
+  /* IV slot(s) — outer matlab.alloc(s) whose name matches the loop
+   * var(s).  In 2-D the inner kernel's `var` names the j slot (IVSlot)
+   * and Ctx.OuterVarName names the i slot (IVSlot2). */
   KernelOp->walk([&](Operation *Op) {
     if (!isMatlabOp(Op, "matlab.load") || Op->getNumOperands() != 1) return;
     Value Slot = Op->getOperand(0);
     if (InsideDefs.count(Slot)) return;
     Operation *Def = Slot.getDefiningOp();
     if (!isMatlabOp(Def, "matlab.alloc")) return;
-    if (auto SA = Def->getAttrOfType<StringAttr>("name"))
-      if (!VarName.empty() && SA.getValue() == VarName)
-        Ctx.IVSlot = Slot;
+    auto SA = Def->getAttrOfType<StringAttr>("name");
+    if (!SA) return;
+    if (!VarName.empty() && SA.getValue() == VarName) Ctx.IVSlot = Slot;
+    if (Ctx.TwoD && !Ctx.OuterVarName.empty() &&
+        SA.getValue() == Ctx.OuterVarName)
+      Ctx.IVSlot2 = Slot;
   });
 
   /* Output slot: tensor-typed outer matlab.alloc feeding __subscript_store. */
@@ -243,7 +260,8 @@ void collectCaptures(Block &Body, MetalEmitCtx &Ctx) {
   KernelOp->walk([&](Operation *Op) {
     if (!isMatlabOp(Op, "matlab.store") || Op->getNumOperands() != 2) return;
     Value Slot = Op->getOperand(1);
-    if (InsideDefs.count(Slot) || Slot == Ctx.IVSlot) return;
+    if (InsideDefs.count(Slot) || Slot == Ctx.IVSlot || Slot == Ctx.IVSlot2)
+      return;
     Operation *Def = Slot.getDefiningOp();
     if (!isMatlabOp(Def, "matlab.alloc") || Slot.getType() != F64) return;
     if (StoredSet.insert(Slot).second) {
@@ -260,7 +278,8 @@ void collectCaptures(Block &Body, MetalEmitCtx &Ctx) {
     if (!isMatlabOp(Op, "matlab.load") || Op->getNumOperands() != 1) return;
     Value Slot = Op->getOperand(0);
     if (InsideDefs.count(Slot)) return;
-    if (Slot == Ctx.IVSlot || Slot == Ctx.OutputSlot) return;
+    if (Slot == Ctx.IVSlot || Slot == Ctx.IVSlot2 || Slot == Ctx.OutputSlot)
+      return;
     if (StoredSet.count(Slot)) return;  /* it's a local */
     Operation *Def = Slot.getDefiningOp();
     if (!isMatlabOp(Def, "matlab.alloc") || Slot.getType() != F64) return;
@@ -276,6 +295,7 @@ void collectCaptures(Block &Body, MetalEmitCtx &Ctx) {
  * (ValueExpr map), the induction var, captures, and the output. */
 std::string exprFor(Value V, MetalEmitCtx &Ctx) {
   if (V == Ctx.IV) return Ctx.IVName;
+  if (Ctx.TwoD && V == Ctx.IV2) return Ctx.IV2Name;
   if (V == Ctx.OutputSlot) return Ctx.OutputName;
   auto OIt = Ctx.OuterLocalNames.find(V);
   if (OIt != Ctx.OuterLocalNames.end()) return OIt->second;
@@ -362,6 +382,8 @@ void emitBody(Block &Body, MetalEmitCtx &Ctx) {
        * Ctx.OutputName directly via exprFor). */
       if (Slot == Ctx.IVSlot) {
         Ctx.ValueExpr[Op.getResult(0)] = Ctx.IVName;
+      } else if (Ctx.TwoD && Slot == Ctx.IVSlot2) {
+        Ctx.ValueExpr[Op.getResult(0)] = Ctx.IV2Name;
       } else {
         Ctx.ValueExpr[Op.getResult(0)] = exprFor(Slot, Ctx);
       }
@@ -369,11 +391,12 @@ void emitBody(Block &Body, MetalEmitCtx &Ctx) {
     }
 
     if (Name == "matlab.store" && Op.getNumOperands() == 2) {
-      /* matlab.store(value, slot) — slot must be a local, the IV slot
+      /* matlab.store(value, slot) — slot must be a local, an IV slot
        * (no-op; IV is the block arg), or the output slot (no-op; we
        * handle output writes via __subscript_store). */
       Value Slot = Op.getOperand(1);
       if (Slot == Ctx.IVSlot) continue;
+      if (Ctx.TwoD && Slot == Ctx.IVSlot2) continue;
       if (Slot == Ctx.OutputSlot) continue;
       std::string SlotE = exprFor(Slot, Ctx);
       std::string ValE = exprFor(Op.getOperand(0), Ctx);
@@ -480,9 +503,10 @@ void emitBody(Block &Body, MetalEmitCtx &Ctx) {
       continue;
     }
 
-    /* matlab.call_builtin "__subscript_store" — Y(i) = v  in 1-D
-     * shape.  Operands: (output_tensor, i, value).  In MSL we emit
-     * `out[((int)i - 1)] = v;` (MATLAB 1-based → MSL 0-based). */
+    /* matlab.call_builtin "__subscript_store" — Y(i) = v (1-D, operands
+     * tensor,i,value) or Y(i,j) = v (2-D, operands tensor,i,j,value).
+     * MATLAB is 1-based + column-major; MSL is 0-based: 1-D →
+     * `out[(int)i - 1]`, 2-D → `out[(int)(i-1) + (int)(j-1)*nrows]`. */
     if (Name == "matlab.call_builtin") {
       auto Cal = Op.getAttrOfType<StringAttr>("callee");
       if (Cal && Cal.getValue() == "__subscript_store" &&
@@ -491,6 +515,16 @@ void emitBody(Block &Body, MetalEmitCtx &Ctx) {
         std::string I = exprFor(Op.getOperand(1), Ctx);
         std::string V = exprFor(Op.getOperand(2), Ctx);
         Ctx.Os << "  " << T << "[(int)(" << I << ") - 1] = " << V << ";\n";
+        continue;
+      }
+      if (Cal && Cal.getValue() == "__subscript_store" &&
+          Op.getNumOperands() == 4 && Ctx.TwoD) {
+        std::string T = exprFor(Op.getOperand(0), Ctx);
+        std::string I = exprFor(Op.getOperand(1), Ctx);
+        std::string J = exprFor(Op.getOperand(2), Ctx);
+        std::string V = exprFor(Op.getOperand(3), Ctx);
+        Ctx.Os << "  " << T << "[((int)(" << I << ") - 1) + ((int)(" << J
+               << ") - 1) * " << Ctx.NRowsExpr << "] = " << V << ";\n";
         continue;
       }
       if (Cal && Cal.getValue() == "__subscript_load" &&
@@ -534,6 +568,10 @@ std::string emitMetalKernels(mlir::ModuleOp M, llvm::StringRef Prefix) {
   unsigned KId = 0;
   M.walk([&](mlir::Operation *Op) {
     if (Op->getName().getStringRef() != "matlab.gpu.kernel") return;
+    /* Skip a kernel nested inside another — the enclosing kernel emits
+     * it as part of a flattened multi-dimensional grid. */
+    for (Operation *Anc = Op->getParentOp(); Anc; Anc = Anc->getParentOp())
+      if (isMatlabOp(Anc, "matlab.gpu.kernel")) return;
     if (Op->getNumRegions() != 1) return;
     auto &Body = Op->getRegion(0);
     if (!Body.hasOneBlock()) return;
@@ -541,14 +579,38 @@ std::string emitMetalKernels(mlir::ModuleOp M, llvm::StringRef Prefix) {
     if (BB.getNumArguments() != 1) return;
 
     MetalEmitCtx Ctx;
-    Ctx.IV = BB.getArgument(0);
     Ctx.KernelName = (std::string(Prefix) + "_kernel_" +
                       std::to_string(KId++));
 
-    collectCaptures(BB, Ctx);
+    /* Detect a `coder.gpu.kernelfun` for-i × for-j nest: the body's only
+     * real content is a single nested kernel.  Flatten to a 2-D grid —
+     * the primary IV is the INNER loop (j ← tid.x), the secondary is the
+     * OUTER loop (i ← tid.y), and the column-major leading dimension is
+     * the grid's i-extent. */
+    Operation *Inner = nullptr;
+    for (Operation &O : BB)
+      if (isMatlabOp(&O, "matlab.gpu.kernel")) { Inner = &O; break; }
+    Block *ComputeBB = &BB;
+    if (Inner && Inner->getNumRegions() == 1 &&
+        Inner->getRegion(0).hasOneBlock() &&
+        Inner->getRegion(0).front().getNumArguments() == 1) {
+      ComputeBB = &Inner->getRegion(0).front();
+      Ctx.TwoD = true;
+      Ctx.IV = ComputeBB->getArgument(0);   /* inner loop j */
+      Ctx.IVName = "j_iv";
+      Ctx.IV2 = BB.getArgument(0);          /* outer loop i */
+      Ctx.IV2Name = "i_iv";
+      if (auto VA = Op->getAttrOfType<StringAttr>("var"))
+        Ctx.OuterVarName = std::string(VA.getValue());
+      Ctx.NRowsExpr = "(int)gsz.y";
+    } else {
+      Ctx.IV = BB.getArgument(0);
+    }
+
+    collectCaptures(*ComputeBB, Ctx);
 
     /* Signature.  Output goes to buffer(0), scalar captures take
-     * buffers 1..N, tid is thread_position_in_grid. */
+     * buffers 1..N, tid is thread_position_in_grid (uint2 in 2-D). */
     OS << "kernel void " << Ctx.KernelName << "(\n";
     if (Ctx.OutputSlot)
       OS << "    device float *" << Ctx.OutputName
@@ -558,23 +620,25 @@ std::string emitMetalKernels(mlir::ModuleOp M, llvm::StringRef Prefix) {
       OS << "    constant float &" << Ctx.ScalarCaptureNames[V]
          << " [[buffer(" << BufIdx++ << ")]],\n";
     }
-    OS << "    uint tid [[thread_position_in_grid]])\n"
-       << "{\n"
-       << "  float " << Ctx.IVName << " = float(tid) + 1.0f;\n";
+    if (Ctx.TwoD) {
+      OS << "    uint2 gtid [[thread_position_in_grid]],\n"
+         << "    uint2 gsz [[threads_per_grid]])\n"
+         << "{\n"
+         << "  float " << Ctx.IVName << " = float(gtid.x) + 1.0f;\n"
+         << "  float " << Ctx.IV2Name << " = float(gtid.y) + 1.0f;\n";
+    } else {
+      OS << "    uint tid [[thread_position_in_grid]])\n"
+         << "{\n"
+         << "  float " << Ctx.IVName << " = float(tid) + 1.0f;\n";
+    }
     /* Declare per-thread locals (outer f64 slots written in the body). */
     for (Value V : Ctx.OuterLocalOrder)
       OS << "  float " << Ctx.OuterLocalNames[V] << " = 0.0f;\n";
-    if (Ctx.OutputSlot && Ctx.ScalarCaptureOrder.empty()) {
-      /* No length capture — we still need a bound; use a sentinel
-       * value the caller is expected to override at launch.  In
-       * practice the launch site sets dispatchThreads to the
-       * correct size, so the bound check is for safety. */
-    }
 
     /* Emit the translated body or the bail placeholder. */
     std::stringstream BodyOS;
     Ctx.Os.swap(BodyOS);
-    emitBody(BB, Ctx);
+    emitBody(*ComputeBB, Ctx);
     Ctx.Os.swap(BodyOS);
 
     if (Ctx.Bailed) {
