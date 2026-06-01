@@ -386,6 +386,70 @@ bool outlineParfor(Operation *Parfor, unsigned Id) {
     CaptureSlots.insert(Slot);
   });
 
+  // --- Write-disjointness gate (issue #33 Phase 3b) -----------------------
+  // A captured matrix that the body element-writes via `__subscript_store`
+  // mutates the SHARED descriptor in place — the runtime slice-store helpers
+  // (matlab_slice_store{1,2}[_scalar]) write A->data directly and never
+  // realloc/rebind — so the write is visible to the outer slot without any
+  // state[] write-back.  That sharing is SOUND under parfor's one-thread-
+  // per-iteration dispatch only when distinct iterations touch distinct
+  // cells.  We can prove that when at least one index of the store is the
+  // loop induction variable itself: identity in the IV maps each iteration
+  // to a distinct row / linear position, so the per-element writes can't
+  // alias across threads (`A(i)=...`, `A(i,i)=...`, `A(i,k)=...`, `A(i,:)=`).
+  //
+  // Anything we can't prove disjoint — a constant index (`A(1)=...`, every
+  // iteration races on the same cell) or a non-injective derived index
+  // (`A(mod(i,3))=...`) — is rejected here with an actionable diagnostic
+  // rather than silently emitting a data race.  (Writes to body-local /
+  // iteration-local matrices are unaffected: each thread owns its own copy,
+  // so their slot is never in CaptureSlots.)
+  {
+    auto indexIsIV = [&](Value Idx) -> bool {
+      if (Idx == IV) return true;  // post-RAUW: the IV-slot load became IV
+      // Defensive: a bare load of the IV-named slot that the RAUW above
+      // somehow didn't reach still counts as the induction variable.
+      if (Operation *D = Idx.getDefiningOp())
+        if (isMatlabOp(D, "matlab.load") && D->getNumOperands() == 1)
+          if (Operation *S = D->getOperand(0).getDefiningOp())
+            if (isMatlabOp(S, "matlab.alloc"))
+              if (auto NA = S->getAttrOfType<StringAttr>("name"))
+                if (!VarName.empty() && NA.getValue() == VarName) return true;
+      return false;
+    };
+    bool RejectWrite = false;
+    ParforRegion.walk([&](Operation *Op) {
+      if (RejectWrite) return;
+      if (!isMatlabOp(Op, "matlab.call_builtin")) return;
+      auto CA = Op->getAttrOfType<StringAttr>("callee");
+      if (!CA || CA.getValue() != "__subscript_store") return;
+      if (Op->getNumOperands() < 3) return;  // base + >=1 index + rhs
+      Operation *BaseDef = Op->getOperand(0).getDefiningOp();
+      if (!isMatlabOp(BaseDef, "matlab.load")) return;
+      Value Slot = BaseDef->getOperand(0);
+      if (!CaptureSlots.count(Slot)) return;  // not an outer captured matrix
+      unsigned NIdx = Op->getNumOperands() - 2;
+      bool DisjointByIV = false;
+      for (unsigned i = 1; i <= NIdx; ++i)
+        if (indexIsIV(Op->getOperand(i))) { DisjointByIV = true; break; }
+      if (DisjointByIV) return;
+      std::string SlotName = "<matrix>";
+      if (Operation *AllocOp = Slot.getDefiningOp())
+        if (auto NA = AllocOp->getAttrOfType<StringAttr>("name"))
+          SlotName = NA.getValue().str();
+      std::string Var = VarName.empty() ? "<iter>" : VarName.str();
+      std::cerr << "parfor: write to captured matrix '" << SlotName
+                << "' is not provably iteration-disjoint — no index uses the "
+                   "loop variable '" << Var << "' directly.\n"
+                   "  parfor requires each iteration to write distinct "
+                   "elements so the writes cannot race across threads.\n"
+                   "  Index the write by the loop variable, e.g. `"
+                << SlotName << "(" << Var << ") = ...`.\n";
+      RejectWrite = true;
+    });
+    if (RejectWrite) return false;
+  }
+
   llvm::SmallVector<Operation *> ExternsToClone;
   llvm::DenseSet<Operation *> ExternSet;
   bool RejectCapture = false;
