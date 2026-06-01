@@ -95,11 +95,41 @@ bool extractRange(Value V, Value &Start, Value &Step, Value &End,
     return false;
   }
 
-  /* All three values must already be f64 (they are, because the frontend
-   * emits matlab.range with f64 operands and LowerTensorOps preserves
-   * the type through the runtime call). */
-  if (Start.getType() != F64 || Step.getType() != F64 ||
-      End.getType() != F64) return false;
+  /* The bounds are usually f64. But a workspace scalar used as a loop bound
+   * (`for i = 1:(nstate-1)`, nstate read back as a boxed matlab_mat*) can
+   * arrive as a ptr or a non-f64 scalar. A range bound is scalar in MATLAB,
+   * so coerce each to f64 — unboxing a ptr via matlab_mat_to_scalar — rather
+   * than leaving the matlab.for unconverted. (#77) */
+  auto PtrTy = LLVM::LLVMPointerType::get(B.getContext());
+  auto coerce = [&](Value &Vv) -> bool {
+    Type T = Vv.getType();
+    if (T == F64) return true;
+    if (T == PtrTy) {
+      auto Mod = Def->getParentOfType<ModuleOp>();
+      auto Fn = Mod.lookupSymbol<LLVM::LLVMFuncOp>("matlab_mat_to_scalar");
+      if (!Fn) {
+        OpBuilder::InsertionGuard G(B);
+        B.setInsertionPointToStart(Mod.getBody());
+        auto Ty = LLVM::LLVMFunctionType::get(F64, {PtrTy});
+        Fn = LLVM::LLVMFuncOp::create(B, Loc, "matlab_mat_to_scalar", Ty);
+        Fn.setLinkage(LLVM::Linkage::External);
+      }
+      Vv = LLVM::CallOp::create(B, Loc, Fn, ValueRange{Vv}).getResult();
+      return true;
+    }
+    if (auto IT = dyn_cast<IntegerType>(T)) {
+      Vv = (IT.getWidth() == 1)
+               ? (Value)arith::UIToFPOp::create(B, Loc, F64, Vv)
+               : (Value)arith::SIToFPOp::create(B, Loc, F64, Vv);
+      return true;
+    }
+    if (isa<Float32Type>(T)) {
+      Vv = arith::ExtFOp::create(B, Loc, F64, Vv);
+      return true;
+    }
+    return false;
+  };
+  if (!coerce(Start) || !coerce(Step) || !coerce(End)) return false;
   return true;
 }
 
