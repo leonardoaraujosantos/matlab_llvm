@@ -458,6 +458,7 @@ std::string emitOpenCLKernels(mlir::ModuleOp M, llvm::StringRef Prefix,
       Info->name = Ctx.KernelName;
       Info->hasOutput = (Ctx.OutputSlot != nullptr);
       Info->bailed = Ctx.Bailed;
+      Info->twoD = Ctx.TwoD;
       for (auto V : Ctx.ScalarCaptureOrder)
         Info->scalarArgs.push_back(Ctx.ScalarCaptureNames[V]);
     }

@@ -13017,7 +13017,6 @@ int main(int Argc, char **Argv) {
     std::string KernelDecl;
     std::string KernelBody;
     std::string ThreadIdLine;
-    std::string LaunchSnippet;
     if (Opts.Mode == Options::Mode::EmitCuda) {
       Target = "cuda";   KernelExt = "cu";
       ToolchainComment = "# Requires CUDA Toolkit (nvcc + libcudart + libcublas).";
@@ -13028,9 +13027,6 @@ int main(int Argc, char **Argv) {
           + Stem + "_kernel(const double *X, double *Y, int n)";
       ThreadIdLine =
           "  int tid = blockIdx.x * blockDim.x + threadIdx.x;";
-      LaunchSnippet =
-          "  " + Stem + "_kernel<<<dim3((n + 255) / 256), dim3(256)>>>(d_x, d_y, n);\n"
-          "  cudaDeviceSynchronize();";
     } else if (Opts.Mode == Options::Mode::EmitMetal) {
       Target = "metal";  KernelExt = "metal";  HostExt = "mm";
       ToolchainComment = "# Requires Xcode (xcrun metal / metallib) + clang++.";
@@ -13043,17 +13039,6 @@ int main(int Argc, char **Argv) {
           "  constant uint &n        [[buffer(2)]],\n"
           "  uint tid                [[thread_position_in_grid]])";
       ThreadIdLine = "  /* tid is the kernel param. */";
-      LaunchSnippet =
-          "  id<MTLComputeCommandEncoder> enc = [cmdbuf computeCommandEncoder];\n"
-          "  [enc setComputePipelineState:pso];\n"
-          "  [enc setBuffer:bx offset:0 atIndex:0];\n"
-          "  [enc setBuffer:by offset:0 atIndex:1];\n"
-          "  [enc setBytes:&n length:sizeof(n) atIndex:2];\n"
-          "  [enc dispatchThreads:MTLSizeMake(n, 1, 1)\n"
-          "         threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];\n"
-          "  [enc endEncoding];\n"
-          "  [cmdbuf commit];\n"
-          "  [cmdbuf waitUntilCompleted];";
     } else {  /* EmitOpenCL */
       Target = "opencl"; KernelExt = "cl";
       ToolchainComment = "# Requires OpenCL ICD loader (libOpenCL) + clang++.";
@@ -13065,12 +13050,6 @@ int main(int Argc, char **Argv) {
           "    __global       double *Y,\n"
           "    const int n)";
       ThreadIdLine = "  int tid = get_global_id(0);";
-      LaunchSnippet =
-          "  size_t gws = ((n + 63) / 64) * 64;\n"
-          "  size_t lws = 64;\n"
-          "  clEnqueueNDRangeKernel(queue, kernel, 1, NULL, &gws, &lws,\n"
-          "                          0, NULL, NULL);\n"
-          "  clFinish(queue);";
     }
     /* Pick the output dir. */
     std::string OutDir = Stem + "_" + Target;
@@ -13109,7 +13088,7 @@ int main(int Argc, char **Argv) {
                                        /*DebugMode=*/false);
         if (!TmpDiag.hasErrors()) {
           if (Opts.Mode == Options::Mode::EmitMetal)
-            KernelSource = mlirgen::emitMetalKernels(M, Stem);
+            KernelSource = mlirgen::emitMetalKernels(M, Stem, &GpuInfo);
           else if (Opts.Mode == Options::Mode::EmitCuda)
             KernelSource = mlirgen::emitCudaKernels(M, Stem, &GpuInfo);
           else if (Opts.Mode == Options::Mode::EmitOpenCL)
@@ -13268,32 +13247,83 @@ int main(int Argc, char **Argv) {
              << "}\n";
         }
       } else if (Opts.Mode == Options::Mode::EmitMetal) {
-        OF << "#import <Metal/Metal.h>\n"
-           << "#import <Foundation/Foundation.h>\n"
-           << "#include <cstdio>\n\n"
-           << "int main(int argc, char **argv) {\n"
-           << "  @autoreleasepool {\n"
-           << "    id<MTLDevice> dev = MTLCreateSystemDefaultDevice();\n"
-           << "    if (!dev) { std::fprintf(stderr, \"no Metal device\\n\"); return 1; }\n"
-           << "    id<MTLCommandQueue> q = [dev newCommandQueue];\n"
-           << "    NSError *err = nil;\n"
-           << "    NSString *src = [NSString stringWithContentsOfFile:@\"" << Stem << "_kernel.metal\"\n"
-           << "                                              encoding:NSUTF8StringEncoding error:&err];\n"
-           << "    id<MTLLibrary> lib = [dev newLibraryWithSource:src options:nil error:&err];\n"
-           << "    id<MTLFunction> fn = [lib newFunctionWithName:@\"" << Stem << "_kernel\"];\n"
-           << "    id<MTLComputePipelineState> pso = [dev newComputePipelineStateWithFunction:fn error:&err];\n"
-           << "    const unsigned n = 16;\n"
-           << "    double h_x[n];\n"
-           << "    for (unsigned i = 0; i < n; ++i) h_x[i] = (double)i;\n"
-           << "    id<MTLBuffer> bx = [dev newBufferWithBytes:h_x length:n*sizeof(double) options:MTLResourceStorageModeShared];\n"
-           << "    id<MTLBuffer> by = [dev newBufferWithLength:n*sizeof(double) options:MTLResourceStorageModeShared];\n"
-           << "    id<MTLCommandBuffer> cmdbuf = [q commandBuffer];\n"
-           << LaunchSnippet << "\n"
-           << "    double *out = (double *)[by contents];\n"
-           << "    for (unsigned i = 0; i < n; ++i) std::printf(\"%g\\n\", out[i]);\n"
-           << "  }\n"
-           << "  return 0;\n"
-           << "}\n";
+        bool runnable = (GpuInfo.kernelCount == 1 && GpuInfo.hasOutput &&
+                         !GpuInfo.bailed);
+        if (!runnable) {
+          /* Body not fully translatable (multiple kernels, no output, or
+           * a FALLBACK identity body) — emit a compilable stub rather
+           * than a driver that would launch garbage. */
+          OF << "#include <cstdio>\n\n"
+             << "/* This program's coder.gpu.kernelfun body did not fully\n"
+             << " * translate to a single device kernel (see the FALLBACK\n"
+             << " * note in " << Stem << "_kernel.metal).  The bundle is\n"
+             << " * emission-only for this input. */\n"
+             << "int main() {\n"
+             << "  std::printf(\"" << Stem
+             << ": kernel not fully translated; emission-only bundle.\\n\");\n"
+             << "  return 0;\n"
+             << "}\n";
+        } else {
+          /* Driver matching the emitted kernel's ABI: out at buffer(0),
+           * scalar captures (set to a demo value 2.0) at buffer(1..N),
+           * dispatched over n (1-D) or n×n (2-D, the flattened
+           * for-i×for-j grid).  n comes from argv[1] (default 16).  The
+           * 2-D leading dimension is the grid's i-extent (gsz.y), so no
+           * extra argument is needed. */
+          OF << "#import <Metal/Metal.h>\n"
+             << "#import <Foundation/Foundation.h>\n"
+             << "#include <cstdio>\n"
+             << "#include <cstdlib>\n\n"
+             << "int main(int argc, char **argv) {\n"
+             << "  @autoreleasepool {\n"
+             // `mlc_n` (not `n`) to avoid colliding with a scalar capture
+             // literally named `n` (e.g. Mandelbrot's grid size).
+             << "    int mlc_n = argc > 1 ? atoi(argv[1]) : 16;\n"
+             << "    id<MTLDevice> dev = MTLCreateSystemDefaultDevice();\n"
+             << "    if (!dev) { std::fprintf(stderr, \"no Metal device\\n\"); return 1; }\n"
+             << "    id<MTLCommandQueue> q = [dev newCommandQueue];\n"
+             << "    NSError *err = nil;\n"
+             << "    NSString *src = [NSString stringWithContentsOfFile:@\""
+             << Stem << "_kernel.metal\"\n"
+             << "                                              encoding:NSUTF8StringEncoding error:&err];\n"
+             << "    id<MTLLibrary> lib = [dev newLibraryWithSource:src options:nil error:&err];\n"
+             << "    if (!lib) { std::fprintf(stderr, \"MSL compile: %s\\n\", err.localizedDescription.UTF8String); return 1; }\n"
+             << "    id<MTLFunction> fn = [lib newFunctionWithName:@\""
+             << GpuInfo.name << "\"];\n"
+             << "    id<MTLComputePipelineState> pso = [dev newComputePipelineStateWithFunction:fn error:&err];\n"
+             << "    size_t total = "
+             << (GpuInfo.twoD ? "(size_t)mlc_n * mlc_n" : "(size_t)mlc_n")
+             << ";\n"
+             << "    id<MTLBuffer> by = [dev newBufferWithLength:total*sizeof(float) options:MTLResourceStorageModeShared];\n";
+          /* Demo scalar captures (constant float& at buffer 1..N). */
+          for (const auto &s : GpuInfo.scalarArgs)
+            OF << "    float " << s << " = (float)mlc_n;  /* demo capture */\n";
+          OF << "    id<MTLCommandBuffer> cmdbuf = [q commandBuffer];\n"
+             << "    id<MTLComputeCommandEncoder> enc = [cmdbuf computeCommandEncoder];\n"
+             << "    [enc setComputePipelineState:pso];\n"
+             << "    [enc setBuffer:by offset:0 atIndex:0];\n";
+          unsigned BufIdx = 1;
+          for (const auto &s : GpuInfo.scalarArgs)
+            OF << "    [enc setBytes:&" << s << " length:sizeof(float) atIndex:"
+               << BufIdx++ << "];\n";
+          if (GpuInfo.twoD)
+            OF << "    [enc dispatchThreads:MTLSizeMake(mlc_n, mlc_n, 1)\n"
+               << "           threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];\n";
+          else
+            OF << "    [enc dispatchThreads:MTLSizeMake(mlc_n, 1, 1)\n"
+               << "           threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];\n";
+          OF << "    [enc endEncoding];\n"
+             << "    [cmdbuf commit];\n"
+             << "    [cmdbuf waitUntilCompleted];\n"
+             << "    float *out = (float *)[by contents];\n"
+             << "    double sum = 0;\n"
+             << "    for (size_t i = 0; i < total; ++i) sum += out[i];\n"
+             << "    std::printf(\"" << Stem
+             << ": checksum = %.4f\\n\", sum);\n"
+             << "  }\n"
+             << "  return 0;\n"
+             << "}\n";
+        }
       } else {  /* OpenCL */
         bool runnable = (GpuInfo.kernelCount == 1 && GpuInfo.hasOutput &&
                          !GpuInfo.bailed);
