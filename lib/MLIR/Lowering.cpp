@@ -323,6 +323,31 @@ private:
   // Empty vector = no captures (plain @name handles or capture-free anons).
   std::unordered_map<Binding *, std::vector<mlir::Value>> HandleBindings;
 
+  // #77: a handle/anon binding ASSIGNED in this compilation unit (an entry
+  // in HandleBindings, capture-free or not) must stay on the local-slot
+  // lane — the same lane the static (AOT) path uses. That lane already
+  // lowers every handle shape correctly: direct calls, matrix-argument
+  // calls (`f(vec)`), passing a handle to a solver builtin (`lsqnonlin(f,…)`),
+  // and captured closures (capture spill slots threaded onto each
+  // call_indirect). In ReplMode the binding would otherwise be routed
+  // through the workspace (matlab_ws_set/get_handle for capture-free
+  // handles — #87 — or _mat for captured ones), which severs the
+  // make_anon→addressof→call_indirect chain and breaks all of the above.
+  // A workspace round-trip is only needed to recover a handle DEFINED in a
+  // PRIOR REPL turn — that binding has no HandleBindings entry this turn
+  // (it carries Binding::IsHandle from the kind=13 workspace lookup
+  // instead), so it correctly stays on the kind=13 path.
+  // Only *anonymous* closures defined this unit take the slot lane. A
+  // NAMED handle (`@sin`, `@myCube`) is tracked in HandleTargetRef and
+  // must keep the #87 path: it resolves the call by callee NAME (a
+  // direct matlab.call for a user function, the kind=13 trampoline for a
+  // builtin) — lowering `@myCube` to a `func.constant` in a slot would
+  // freeze the callee's pre-refinement `(none)->none` type and fail
+  // verification once RefineFuncSigs rewrites it to `(f64)->f64`.
+  bool isLocalHandle(Binding *B) const {
+    return B && HandleBindings.find(B) != HandleBindings.end() &&
+           HandleTargetRef.find(B) == HandleTargetRef.end();
+  }
   // Resolved target binding for a binding that holds a *named* function
   // handle (`h = @inc` -> inc's binding).  Lets a handle stored into a
   // struct field / property be resolved back to its callee (#81), and
@@ -1420,7 +1445,7 @@ mlir::Value Lowerer::loadBinding(Binding *Bnd, const Type *ValTy,
    * refused to lower, surviving into the JIT as an unconvertible
    * matlab.* op. */
   if (ReplMode && InScriptBody && Bnd->Kind == BindingKind::Var &&
-      Slots.find(Bnd) == Slots.end()) {
+      Slots.find(Bnd) == Slots.end() && !isLocalHandle(Bnd)) {
     bool ScalarDouble = false;
     if (ValTy && ValTy->K == Type::Kind::Array) {
       auto &VA = static_cast<const ArrayType &>(*ValTy);
@@ -4255,7 +4280,7 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
      * slot already exists (e.g. for-loop induction variable) — the
      * slot is the canonical store site during that loop. */
     if (ReplMode && InScriptBody && N.Ref->Kind == BindingKind::Var && Rhs &&
-        Slots.find(N.Ref) == Slots.end()) {
+        Slots.find(N.Ref) == Slots.end() && !isLocalHandle(N.Ref)) {
       auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
       mlir::Value NameV = emitFieldNameChar(N.Name, loc(N.Range));
       bool IsMat = (Rhs.getType() == PtrTy ||
