@@ -382,6 +382,26 @@ def scn_classdef_prelude_launches(matlabc, program):
         c.wait_event("terminated", timeout=15.0)
 
 
+def scn_closure_launches(matlabc, program):
+    """Regression for #77: a `-dap` launch of an anonymous-closure program
+    must compile + run (reach `terminated`).
+
+    Uses dap_closure_program.m (sibling fixture): a captured scalar closure
+    (`@(x) x+k`), a capture-free anon passed to a function and called
+    indirectly there (`apply(g, 5)`), and an inline anon literal argument.
+    Before the "anon closures use the local-slot lane in JIT/-dap" fix, the
+    ReplMode workspace round-trip severed the make_anon -> call_indirect
+    chain and `launch` answered "failed to compile program".
+    """
+    cl_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_closure_program.m",
+    )
+    with DapClient(matlabc, cl_program) as c:
+        initialize_and_launch(c, stop_on_entry=False)
+        c.wait_event("terminated", timeout=15.0)
+
+
 def scn_function_locals(matlabc, program):
     """Pausing inside a user function exposes the function's locals.
 
