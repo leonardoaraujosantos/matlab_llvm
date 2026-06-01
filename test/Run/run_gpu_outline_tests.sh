@@ -180,6 +180,31 @@ for tgt in metal cuda opencl; do
   fi
 done
 
+# --- Test 4: inner WHILE loop + scalar temps emit a real device body. -
+# gpu_outline_while.m has a per-element while loop counting halvings, with
+# scalar temporaries v/k.  It must outline + run bit-exact, AND the
+# emitters must translate the matlab.while + relational op into a device
+# while loop (no FALLBACK) with per-thread locals.
+WH="$TESTDIR/gpu_outline_while.m"
+WHEXP="$(cat "$TESTDIR/gpu_outline_while.stdout")"
+check "while:default-run" "$WHEXP" "$(run_lane "$WH" "" whdef)"
+check "while:outline-run" "$WHEXP" "$(run_lane "$WH" "MATLAB_GPU_OUTLINE=1" whout)"
+
+for tgt in metal cuda opencl; do
+  EMITDIR="$OBJDIR/while_${tgt}_emit"
+  rm -rf "$EMITDIR"; mkdir -p "$EMITDIR"
+  ( cd "$EMITDIR" && "$MATLABC" -emit-$tgt "$WH" >/dev/null 2>&1 )
+  KSRC="$(find "$EMITDIR" -name 'gpu_outline_while_kernel.*' 2>/dev/null | head -1)"
+  if [[ -n "$KSRC" ]] && ! grep -q "// FALLBACK: unsupported" "$KSRC" \
+       && grep -q "while (" "$KSRC"; then
+    echo "PASS while:emit-$tgt (while loop translated, no fallback)"
+    pass=$((pass+1))
+  else
+    echo "FAIL while:emit-$tgt — while body not translated"
+    fail=$((fail+1))
+  fi
+done
+
 echo "----"
 echo "gpu-outline: $pass passed, $fail failed"
 [[ $fail -eq 0 ]]

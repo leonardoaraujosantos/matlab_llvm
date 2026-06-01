@@ -103,6 +103,15 @@ struct MetalEmitCtx {
   llvm::SmallVector<Value> ScalarCaptureOrder;
   llvm::DenseMap<Value, std::string> ScalarCaptureNames;
 
+  /* Outer f64 slots that are WRITTEN inside the body (kernel-local
+   * temporaries hoisted to the enclosing func's entry by the frontend,
+   * e.g. Mandelbrot's `cr`/`zr`/`k`).  They are NOT read-only captures —
+   * each becomes a per-thread MSL local declared at the top of the body.
+   * Their outer value is irrelevant (overwritten before read), so they
+   * are initialised to 0. */
+  llvm::SmallVector<Value> OuterLocalOrder;
+  llvm::DenseMap<Value, std::string> OuterLocalNames;
+
   /* Local-slot bookkeeping — matlab.alloc Values defined INSIDE the
    * kernel body but read/written via matlab.load/store.  Become MSL
    * `double local_X = 0.0;` declarations at the top of the body. */
@@ -172,78 +181,95 @@ std::string allocName(Operation *Alloc, unsigned Fallback) {
  *     read (but not stored to) inside the body.
  */
 void collectCaptures(Block &Body, MetalEmitCtx &Ctx) {
+  Operation *KernelOp = Body.getParentOp();
+  auto F64 = Float64Type::get(KernelOp->getContext());
+
+  /* Everything defined inside the kernel region (results + nested block
+   * args) — a load/store on one of these is not an outer-slot access. */
   llvm::DenseSet<Value> InsideDefs;
   InsideDefs.insert(Ctx.IV);
-  for (Operation &Op : Body)
-    for (Value R : Op.getResults()) InsideDefs.insert(R);
+  KernelOp->walk([&](Operation *Op) {
+    for (Value R : Op->getResults()) InsideDefs.insert(R);
+    for (Region &Rg : Op->getRegions())
+      for (Block &Bl : Rg)
+        for (Value A : Bl.getArguments()) InsideDefs.insert(A);
+  });
 
-  /* Identify the IV slot — the outer matlab.alloc whose name matches
-   * the kernel op's `var` attribute.  Stores into this slot are
-   * no-ops (IV is the block arg); loads return the IV. */
   StringRef VarName;
-  if (auto VA = Body.getParentOp()->getAttrOfType<StringAttr>("var"))
+  if (auto VA = KernelOp->getAttrOfType<StringAttr>("var"))
     VarName = VA.getValue();
 
-  for (Operation &Op : Body) {
-    if (!isMatlabOp(&Op, "matlab.load") || Op.getNumOperands() != 1) continue;
-    Value Slot = Op.getOperand(0);
-    if (InsideDefs.count(Slot)) continue;
+  /* IV slot — the outer matlab.alloc whose name matches `var`. */
+  KernelOp->walk([&](Operation *Op) {
+    if (!isMatlabOp(Op, "matlab.load") || Op->getNumOperands() != 1) return;
+    Value Slot = Op->getOperand(0);
+    if (InsideDefs.count(Slot)) return;
     Operation *Def = Slot.getDefiningOp();
-    if (!isMatlabOp(Def, "matlab.alloc")) continue;
-    if (auto SA = Def->getAttrOfType<StringAttr>("name")) {
-      if (!VarName.empty() && SA.getValue() == VarName) {
+    if (!isMatlabOp(Def, "matlab.alloc")) return;
+    if (auto SA = Def->getAttrOfType<StringAttr>("name"))
+      if (!VarName.empty() && SA.getValue() == VarName)
         Ctx.IVSlot = Slot;
-      }
-    }
-  }
+  });
 
-  /* Output slot: tensor-typed outer matlab.alloc whose value is loaded
-   * and that load is the first operand of __subscript_store. */
-  for (Operation &Op : Body) {
-    if (!isMatlabOp(&Op, "matlab.call_builtin")) continue;
-    auto Cal = Op.getAttrOfType<StringAttr>("callee");
-    if (!Cal || Cal.getValue() != "__subscript_store") continue;
-    if (Op.getNumOperands() < 3) continue;
-    Value LoadedTensor = Op.getOperand(0);
+  /* Output slot: tensor-typed outer matlab.alloc feeding __subscript_store. */
+  KernelOp->walk([&](Operation *Op) {
+    if (Ctx.Bailed) return;
+    if (!isMatlabOp(Op, "matlab.call_builtin")) return;
+    auto Cal = Op->getAttrOfType<StringAttr>("callee");
+    if (!Cal || Cal.getValue() != "__subscript_store") return;
+    if (Op->getNumOperands() < 3) return;
+    Value LoadedTensor = Op->getOperand(0);
     Operation *LoadOp = LoadedTensor.getDefiningOp();
-    Value Slot;
-    if (LoadOp && isMatlabOp(LoadOp, "matlab.load") &&
-        LoadOp->getNumOperands() == 1)
-      Slot = LoadOp->getOperand(0);
-    else
-      Slot = LoadedTensor;  /* direct */
-    if (InsideDefs.count(Slot)) continue;
+    Value Slot = (LoadOp && isMatlabOp(LoadOp, "matlab.load") &&
+                  LoadOp->getNumOperands() == 1)
+                     ? LoadOp->getOperand(0)
+                     : LoadedTensor;
+    if (InsideDefs.count(Slot)) return;
     Operation *Def = Slot.getDefiningOp();
-    if (!isMatlabOp(Def, "matlab.alloc")) continue;
+    if (!isMatlabOp(Def, "matlab.alloc")) return;
     if (!mlir::isa<RankedTensorType, UnrankedTensorType>(Slot.getType()))
-      continue;
+      return;
     if (Ctx.OutputSlot && Ctx.OutputSlot != Slot) {
       Ctx.bail("multiple output tensors not supported");
       return;
     }
     Ctx.OutputSlot = Slot;
-  }
+  });
 
-  /* Scalar captures: f64-typed outer matlab.alloc slots read via
-   * matlab.load, excluding the IV slot.  We track the SLOT Value
-   * (matlab.alloc result) — the body's matlab.load on it gets
-   * resolved by exprFor at walk time. */
-  llvm::DenseSet<Value> ScalarSet;
-  for (Operation &Op : Body) {
-    if (!isMatlabOp(&Op, "matlab.load") || Op.getNumOperands() != 1) continue;
-    Value Slot = Op.getOperand(0);
-    if (InsideDefs.count(Slot)) continue;
-    if (Slot == Ctx.IVSlot) continue;
-    if (Slot == Ctx.OutputSlot) continue;
+  /* Outer f64 slots WRITTEN inside the body (excluding the IV slot) are
+   * per-thread locals, not read-only captures.  Collect them first so a
+   * slot that is both read and written is classified as a local. */
+  llvm::DenseSet<Value> StoredSet;
+  KernelOp->walk([&](Operation *Op) {
+    if (!isMatlabOp(Op, "matlab.store") || Op->getNumOperands() != 2) return;
+    Value Slot = Op->getOperand(1);
+    if (InsideDefs.count(Slot) || Slot == Ctx.IVSlot) return;
     Operation *Def = Slot.getDefiningOp();
-    if (!isMatlabOp(Def, "matlab.alloc")) continue;
-    if (Slot.getType() != Float64Type::get(Op.getContext())) continue;
+    if (!isMatlabOp(Def, "matlab.alloc") || Slot.getType() != F64) return;
+    if (StoredSet.insert(Slot).second) {
+      Ctx.OuterLocalOrder.push_back(Slot);
+      Ctx.OuterLocalNames[Slot] =
+          "loc_" + allocName(Def, static_cast<unsigned>(StoredSet.size()));
+    }
+  });
+
+  /* Scalar captures: f64-typed outer matlab.alloc slots that are READ
+   * but never written (and not the IV) — read-only `constant` args. */
+  llvm::DenseSet<Value> ScalarSet;
+  KernelOp->walk([&](Operation *Op) {
+    if (!isMatlabOp(Op, "matlab.load") || Op->getNumOperands() != 1) return;
+    Value Slot = Op->getOperand(0);
+    if (InsideDefs.count(Slot)) return;
+    if (Slot == Ctx.IVSlot || Slot == Ctx.OutputSlot) return;
+    if (StoredSet.count(Slot)) return;  /* it's a local */
+    Operation *Def = Slot.getDefiningOp();
+    if (!isMatlabOp(Def, "matlab.alloc") || Slot.getType() != F64) return;
     if (ScalarSet.insert(Slot).second) {
       Ctx.ScalarCaptureOrder.push_back(Slot);
       Ctx.ScalarCaptureNames[Slot] =
           allocName(Def, static_cast<unsigned>(ScalarSet.size()));
     }
-  }
+  });
 }
 
 /* Get the MSL expression for a Value.  Handles inlined sub-expressions
@@ -251,6 +277,8 @@ void collectCaptures(Block &Body, MetalEmitCtx &Ctx) {
 std::string exprFor(Value V, MetalEmitCtx &Ctx) {
   if (V == Ctx.IV) return Ctx.IVName;
   if (V == Ctx.OutputSlot) return Ctx.OutputName;
+  auto OIt = Ctx.OuterLocalNames.find(V);
+  if (OIt != Ctx.OuterLocalNames.end()) return OIt->second;
   auto SIt = Ctx.ScalarCaptureNames.find(V);
   if (SIt != Ctx.ScalarCaptureNames.end()) return SIt->second;
   auto VIt = Ctx.ValueExpr.find(V);
@@ -393,6 +421,65 @@ void emitBody(Block &Body, MetalEmitCtx &Ctx) {
       continue;
     }
 
+    /* Scalar relational ops (result i1): matlab.{lt,le,gt,ge,eq,ne}. */
+    {
+      const char *Rel = nullptr;
+      if (Name == "matlab.lt") Rel = "<";
+      else if (Name == "matlab.le") Rel = "<=";
+      else if (Name == "matlab.gt") Rel = ">";
+      else if (Name == "matlab.ge") Rel = ">=";
+      else if (Name == "matlab.eq") Rel = "==";
+      else if (Name == "matlab.ne") Rel = "!=";
+      if (Rel && Op.getNumOperands() == 2) {
+        Ctx.ValueExpr[Op.getResult(0)] =
+            "(" + exprFor(Op.getOperand(0), Ctx) + " " + Rel + " " +
+            exprFor(Op.getOperand(1), Ctx) + ")";
+        continue;
+      }
+    }
+
+    /* Short-circuit / element-wise logical ops (result i1). */
+    {
+      const char *Lg = nullptr;
+      if (Name == "matlab.short_and" || Name == "matlab.and") Lg = "&&";
+      else if (Name == "matlab.short_or" || Name == "matlab.or") Lg = "||";
+      if (Lg && Op.getNumOperands() == 2) {
+        Ctx.ValueExpr[Op.getResult(0)] =
+            "(" + exprFor(Op.getOperand(0), Ctx) + " " + Lg + " " +
+            exprFor(Op.getOperand(1), Ctx) + ")";
+        continue;
+      }
+      if ((Name == "matlab.not" || Name == "matlab.short_not") &&
+          Op.getNumOperands() == 1) {
+        Ctx.ValueExpr[Op.getResult(0)] =
+            "(!" + exprFor(Op.getOperand(0), Ctx) + ")";
+        continue;
+      }
+    }
+
+    /* matlab.while — condition region (region 0) yields an i1; body
+     * region (region 1) runs while true.  Emit a device-side
+     * `while (cond) { body }`.  The condition's loads reference the
+     * scalar locals, which mutate in the body, so re-evaluating the
+     * inlined expression each iteration is correct. */
+    if (Name == "matlab.while" && Op.getNumRegions() == 2 &&
+        Op.getRegion(0).hasOneBlock() && Op.getRegion(1).hasOneBlock()) {
+      Block &Cond = Op.getRegion(0).front();
+      Block &Loop = Op.getRegion(1).front();
+      emitBody(Cond, Ctx);  // builds ValueExpr for the condition chain
+      if (Ctx.Bailed) return;
+      Operation *Term = Cond.getTerminator();
+      if (!Term || Term->getNumOperands() != 1) {
+        Ctx.bail("matlab.while condition without a yielded value");
+        return;
+      }
+      std::string CondE = exprFor(Term->getOperand(0), Ctx);
+      Ctx.Os << "  while (" << CondE << ") {\n";
+      emitBody(Loop, Ctx);
+      Ctx.Os << "  }\n";
+      continue;
+    }
+
     /* matlab.call_builtin "__subscript_store" — Y(i) = v  in 1-D
      * shape.  Operands: (output_tensor, i, value).  In MSL we emit
      * `out[((int)i - 1)] = v;` (MATLAB 1-based → MSL 0-based). */
@@ -474,6 +561,9 @@ std::string emitMetalKernels(mlir::ModuleOp M, llvm::StringRef Prefix) {
     OS << "    uint tid [[thread_position_in_grid]])\n"
        << "{\n"
        << "  float " << Ctx.IVName << " = float(tid) + 1.0f;\n";
+    /* Declare per-thread locals (outer f64 slots written in the body). */
+    for (Value V : Ctx.OuterLocalOrder)
+      OS << "  float " << Ctx.OuterLocalNames[V] << " = 0.0f;\n";
     if (Ctx.OutputSlot && Ctx.ScalarCaptureOrder.empty()) {
       /* No length capture — we still need a bound; use a sentinel
        * value the caller is expected to override at launch.  In
