@@ -288,6 +288,32 @@ static mlir::Value coerceToI1(mlir::Value V, mlir::Location Loc,
     return mlir::arith::CmpFOp::create(
         R, Loc, mlir::arith::CmpFPredicate::ONE, V, Zero);
   }
+  // #77 JIT/-dap parity: in ReplMode a scalar script var is boxed as a
+  // matlab_mat* (!llvm.ptr) through the workspace, so a comparison feeding
+  // `&&`/`||`/`~` (e.g. `n_layers == 4 && ...`) leaves a ptr operand here
+  // — the AOT path keeps it a concrete f64/i1. Reduce the boxed value to
+  // its scalar truth via the matlab_mat_truth helper, then cmp ne 0.
+  //
+  // Emit the *unregistered* `matlab.call_builtin matlab_mat_truth` op
+  // (the exact shape Lowerer::coerceCond produces for scf.if conditions)
+  // rather than a hard llvm.call: chained `&&` operands are themselves
+  // short_ands that this same greedy pass folds to i1, so a direct call
+  // would be left with a retyped (i1) operand. Deferring to the late
+  // LowerTensorOps::rewriteMatTruth — which lowers the op after every
+  // short-circuit op has settled and tolerates a ptr OR scalar operand —
+  // keeps the call's operand type consistent with its callee.
+  if (mlir::isa<mlir::LLVM::LLVMPointerType>(T)) {
+    auto I8 = R.getIntegerType(8);
+    mlir::OperationState St(Loc, "matlab.call_builtin");
+    St.addOperands(V);
+    St.addTypes(I8);
+    St.addAttribute("callee", R.getStringAttr("matlab_mat_truth"));
+    mlir::Operation *Call = R.create(St);
+    auto Zero = mlir::arith::ConstantOp::create(
+        R, Loc, I8, mlir::IntegerAttr::get(I8, 0));
+    return mlir::arith::CmpIOp::create(
+        R, Loc, mlir::arith::CmpIPredicate::ne, Call->getResult(0), Zero);
+  }
   return mlir::Value{};
 }
 

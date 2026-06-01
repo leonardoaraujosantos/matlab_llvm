@@ -8808,7 +8808,14 @@ bool TensorLowering::fixupCondOperands() {
 
 /* Lower matlab.call_builtin @matlab_mat_truth(ptr) -> i8 to a direct
  * LLVM call. Emitted by Lowerer::fixupIfCond when a scf.if / matlab.while
- * cond resolves to a matrix pointer (DAP/REPL workspace path). */
+ * cond resolves to a matrix pointer (DAP/REPL workspace path).
+ *
+ * #77 JIT/-dap parity: fixupIfCond stamps the matlab_mat_truth wrapper
+ * while the cond is still a ptr, but LowerScalarsToArith may afterwards
+ * fold the producing op (e.g. `&&` of boxed scalars) down to a concrete
+ * i1/iN/f64, leaving matlab_mat_truth with a non-ptr operand. A scalar's
+ * truth is just `operand != 0`, so coerce it to i8 in-place rather than
+ * calling the (ptr-typed) runtime helper. */
 bool TensorLowering::rewriteMatTruth() {
   SmallVector<Operation *> Calls;
   Mod.walk([&](Operation *Op) {
@@ -8816,18 +8823,42 @@ bool TensorLowering::rewriteMatTruth() {
     auto CA = Op->getAttrOfType<StringAttr>("callee");
     if (!CA || CA.getValue() != "matlab_mat_truth") return;
     if (Op->getNumOperands() != 1) return;
-    if (Op->getOperand(0).getType() != PtrTy) return;
     if (Op->getNumResults() != 1) return;
+    Type OT = Op->getOperand(0).getType();
+    if (OT != PtrTy && !mlir::isa<IntegerType>(OT) &&
+        !mlir::isa<Float32Type, Float64Type>(OT))
+      return;
     Calls.push_back(Op);
   });
   bool Changed = false;
   auto I8 = IntegerType::get(Ctx, 8);
   for (Operation *Op : Calls) {
     B.setInsertionPoint(Op);
-    auto Fn = rt("matlab_mat_truth", I8, {PtrTy});
-    auto NC = LLVM::CallOp::create(B, Op->getLoc(), Fn,
-                                    ValueRange{Op->getOperand(0)});
-    Op->getResult(0).replaceAllUsesWith(NC.getResult());
+    Value Arg = Op->getOperand(0);
+    Type OT = Arg.getType();
+    Value Truth;
+    if (OT == PtrTy) {
+      auto Fn = rt("matlab_mat_truth", I8, {PtrTy});
+      Truth = LLVM::CallOp::create(B, Op->getLoc(), Fn, ValueRange{Arg})
+                  .getResult();
+    } else {
+      // Scalar truth: (arg != 0) -> i1, widened to the i8 the consumers
+      // (a cmpi ne 0 emitted by fixupIfCond) expect.
+      Value NeZero;
+      if (auto IT = mlir::dyn_cast<IntegerType>(OT)) {
+        Value Z = arith::ConstantOp::create(B, Op->getLoc(), IT,
+                                            B.getIntegerAttr(IT, 0));
+        NeZero = arith::CmpIOp::create(B, Op->getLoc(),
+                                       arith::CmpIPredicate::ne, Arg, Z);
+      } else {
+        Value Z = arith::ConstantOp::create(B, Op->getLoc(), OT,
+                                            B.getFloatAttr(OT, 0.0));
+        NeZero = arith::CmpFOp::create(B, Op->getLoc(),
+                                       arith::CmpFPredicate::ONE, Arg, Z);
+      }
+      Truth = arith::ExtUIOp::create(B, Op->getLoc(), I8, NeZero);
+    }
+    Op->getResult(0).replaceAllUsesWith(Truth);
     Op->erase();
     Changed = true;
   }
