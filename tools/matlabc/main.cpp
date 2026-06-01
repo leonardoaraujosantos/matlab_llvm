@@ -2442,6 +2442,15 @@ static std::string buildReplPrelude(const std::string &Src) {
     {false, "mpc",        "mpc_classdefs.m"},
     {false, "mpcstate",   "mpc_classdefs.m"},
     {false, "mpcmove",    "mpc_classdefs.m"},
+    /* Nonlinear MPC (Tier-5) — the `nlmpc` classdef + `nlmpcmove` live in
+     * the same umbrella. A program that only mentions nlmpc/nlmpcmove (not
+     * the linear `mpc`) still needs the file, and `nlmpcmove` does NOT
+     * match the `mpcmove` mention (word-boundary: the `l` prefix). Without
+     * this the nlmpc classdef is absent, the binding never gets a
+     * PinnedClass, and the Tier-5 nlmpcmove lowering hook (which keys on
+     * the `nlmpc` class pin) never fires under -dap/-repl. */
+    {false, "nlmpc",      "mpc_classdefs.m"},
+    {false, "nlmpcmove",  "mpc_classdefs.m"},
     /* System Identification Toolbox Tier-1 — umbrella
      * `ident_classdefs.m` holds the `iddata` + `idpoly` classes; the
      * estimator/method names (arx / ar / compare / ...) pull it in
