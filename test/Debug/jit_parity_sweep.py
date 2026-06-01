@@ -52,6 +52,25 @@ def _load_aot_known_failures():
 
 AOT_KNOWN_FAILURES = _load_aot_known_failures()
 
+# Baseline of in-scope examples that the -dap JIT lane is *known* not to
+# run clean yet (today: a few non-deterministic execution-time crashes —
+# residual JIT materialization races, not compile divergences). A failure
+# listed here is tolerated by --gate; a failure NOT listed is a regression.
+KNOWN_ISSUES_FILE = os.path.join(HERE, "jit_parity_known_issues.txt")
+
+
+def _load_known_issues():
+    s = set()
+    try:
+        with open(KNOWN_ISSUES_FILE, errors="ignore") as f:
+            for line in f:
+                rel = line.split("#", 1)[0].strip()
+                if rel:
+                    s.add(rel)
+    except OSError:
+        pass
+    return s
+
 SKIP_DIRS = ("hdl/", "mflow/", "mflowlink/", "stateflow/", "verilog_a/")
 # Heavy training demos: documented TIMEOUTs even on the AOT lane.
 SKIP_HEAVY = {
@@ -155,12 +174,15 @@ def main():
     only = None
     timeout = 15.0
     quiet = False
+    gate = False
     i = 1
     while i < len(args):
         if args[i] == "--only": only = args[i+1]; i += 2
         elif args[i] == "--timeout": timeout = float(args[i+1]); i += 2
         elif args[i] == "--quiet": quiet = True; i += 1
+        elif args[i] == "--gate": gate = True; i += 1
         else: i += 1
+    known_issues = _load_known_issues()
 
     examples = []
     for dp, _, fns in os.walk(EXDIR):
@@ -179,6 +201,12 @@ def main():
             results[rel] = ("SKIP", "")
             continue
         status, detail = run_one(matlabc, path, timeout)
+        # CRASH/HANG are non-deterministic (JIT exec races). In --gate mode
+        # retry once so a transient flake on an otherwise-clean example
+        # doesn't turn the CI gate red; a deterministic LAUNCH (compile)
+        # failure is not retried.
+        if gate and status in ("CRASH", "HANG"):
+            status, detail = run_one(matlabc, path, timeout)
         # AOT-known-failures aren't parity divergences. If the JIT also
         # fails one, reclassify as SKIP (matched — not a JIT bug). If the
         # JIT *succeeds*, keep the OK: it's a genuine JIT-beyond-AOT win.
@@ -206,6 +234,30 @@ def main():
                 dirs[d] = dirs.get(d, 0) + 1
             summ = ", ".join(f"{d}:{n}" for d, n in sorted(dirs.items(), key=lambda x: -x[1]))
             print(f"  {st}: {len(lst)}  [{summ}]")
+
+    if not gate:
+        return 0
+
+    # --- Regression gate -------------------------------------------------
+    # Any in-scope non-OK example that isn't a documented known-issue is a
+    # regression. Known-issues that now pass are STALE (prune them) — a
+    # warning, not a failure. Mirrors test/Examples/run_sweep.sh.
+    failed = {rel: st for rel, (st, _) in inscope.items() if st != "OK"}
+    regressions = sorted(r for r in failed if r not in known_issues)
+    stale = sorted(r for r in known_issues
+                   if r not in failed and (not only or only in r))
+    if stale:
+        print("\nSTALE jit_parity_known_issues.txt entries (now pass — prune):")
+        for r in stale:
+            print(f"  {r}")
+    if regressions:
+        print("\nREGRESSION — in-scope examples newly failing under -dap "
+              "(not in jit_parity_known_issues.txt):")
+        for r in regressions:
+            print(f"  {failed[r]:7s} {r}  {results[r][1]}")
+        print(f"\n=== GATE FAILED: {len(regressions)} regression(s) ===")
+        return 1
+    print("\n=== GATE OK: no -dap parity regressions ===")
     return 0
 
 if __name__ == "__main__":

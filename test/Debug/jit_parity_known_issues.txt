@@ -1,0 +1,22 @@
+# Known -dap/JIT parity issues — baseline for `jit_parity_sweep.py --gate`.
+#
+# Each line is a path relative to examples/ that the -dap JIT lane does not
+# yet run clean. A failure listed here is tolerated by the gate; a failure
+# NOT listed is a regression and fails CI. An entry that now passes is
+# reported as STALE (prune it) but does not fail the gate.
+#
+# Everything here is a NON-DETERMINISTIC execution-time crash (SIGSEGV/
+# SIGABRT) — a residual race in the ORC JIT's lazy materialization /
+# execution, NOT a compile-time (LAUNCH) divergence. They compile and
+# launch fine; they intermittently die mid-run. Tracked separately from
+# the compile-parity work (issue #77); see memory/jit-dap-parity-77.
+#
+# (The gate retries a CRASH/HANG once before counting it, so a one-off
+#  flake on an otherwise-clean example won't turn CI red — these are the
+#  examples that crash often enough to need an explicit allowance.)
+
+quadrotor/quadrotor_derive_eom.m      # signal 11/6 every run — large symbolic EOM derivation
+pde/antenna_glb_fem.m                 # signal 11 intermittent — FEM assembly
+pde/antenna_wind_stress.m             # signal 11 intermittent — FEM assembly
+comm/alamouti_diversity.m             # signal 11 intermittent
+dlnet/dl_classdef_array_literal.m     # signal 11 intermittent — classdef array literal

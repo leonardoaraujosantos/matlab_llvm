@@ -197,6 +197,15 @@ jobs:
       - name: Examples sweep (compile/run all examples)
         run: bash test/Examples/run_sweep.sh "$PWD/build/matlabc"
 
+      # JIT/-dap parity gate — launch every in-scope example through
+      # `matlabc -dap` and verify it reaches `terminated`, gating on
+      # regressions vs test/Debug/jit_parity_known_issues.txt (issue #77).
+      # Complements the AOT sweep above on the DAP-JIT axis. Deterministic
+      # (serial, absolute paths); known flaky exec-time crashes are
+      # allowlisted in the baseline and retried once.
+      - name: JIT/-dap parity sweep (launch all examples)
+        run: python3 test/Debug/jit_parity_sweep.py "$PWD/build/matlabc" --gate
+
       - name: ccache stats
         if: always()
         run: ccache -s
