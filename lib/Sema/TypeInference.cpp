@@ -1099,6 +1099,17 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
   if (Name == "length" || Name == "numel" || Name == "ndims")
     return TC.scalar(Dtype::Double);
 
+  /* File I/O ids/status are scalar doubles. Without this they fall through
+   * to `any()`, and in the JIT/-dap workspace lane an `any` scalar reads
+   * back as a boxed matlab_mat* (matlab_ws_get_mat) — so `fprintf(fid, …)`
+   * sees a ptr where the file-id lowering needs an f64 and the launch fails
+   * to compile (#77). fopen -> fid (scalar); fclose/fseek/ftell/feof ->
+   * status/position (scalar). (Multi-output `[fid,msg] = fopen(...)` still
+   * types fid scalar via the first-output path.) */
+  if (Name == "fopen" || Name == "fclose" || Name == "fseek" ||
+      Name == "ftell" || Name == "feof" || Name == "frewind")
+    return TC.scalar(Dtype::Double);
+
   /* Propagation Models (docs/comm_toolbox_roadmap.md §3). All scalar-
    * returning closed-form path-loss / Fresnel / diffraction / geographic
    * helpers report `scalar(Double)`. The matrix-returning entries
