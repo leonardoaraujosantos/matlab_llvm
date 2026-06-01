@@ -1684,7 +1684,8 @@ matlab_mat *matlab_diag(matlab_mat *A) {
 matlab_mat *matlab_reshape(matlab_mat *A, double m, double n) {
     int64_t rm = (int64_t)m, cn = (int64_t)n;
     int64_t src; const double *sd;
-    if (mat_is_3d(A)) { matlab_mat3 *A3 = (matlab_mat3 *)A; src = A3->rows * A3->cols * A3->depth; sd = A3->data; }
+    if (mat_is_nd(A)) { matlab_matN *An = (matlab_matN *)A; src = 1; for (uint32_t k = 0; k < An->ndims; ++k) src *= An->dims[k]; sd = An->data; }  /* #93: reshape(matN, m, n) -> 2-D */
+    else if (mat_is_3d(A)) { matlab_mat3 *A3 = (matlab_mat3 *)A; src = A3->rows * A3->cols * A3->depth; sd = A3->data; }
     else              { src = A->rows * A->cols; sd = A->data; }
     if (rm * cn != src) return mat_alloc(0, 0);
     matlab_mat *B = mat_alloc(rm, cn);
@@ -1765,6 +1766,12 @@ matlab_mat *matlab_repmat(matlab_mat *A, double m, double n) {
  * out(i,j,k) = A(i%am, j%an, k%ad).  Result depth 1 collapses to 2-D. */
 matlab_mat3 *matlab_repmat3(matlab_mat *A, double m, double n, double p) {
     if (!A) return (matlab_mat3 *)mat_alloc(0, 0);
+    /* Tier-C guard (#93): tiling a rank>3 input into a 3-D result is
+     * ill-defined; bail cleanly rather than misread the matN header. */
+    if (mat_is_nd(A)) {
+        const char e[] = "repmat: rank>3 input not supported";
+        return (matlab_mat3 *)matlab::runtime::fail_with_msg(e, sizeof(e) - 1);
+    }
     int64_t tm = (int64_t)m, tn = (int64_t)n, tp = (int64_t)p;
     int64_t am, an, ad; const double *sd;
     if (mat_is_3d(A)) { matlab_mat3 *A3 = (matlab_mat3 *)A; am = A3->rows; an = A3->cols; ad = A3->depth; sd = A3->data; }
@@ -2761,6 +2768,21 @@ void matlab_slice_store2(matlab_mat *A, matlab_mat *rows, matlab_mat *cols,
  * static type, so non-matrix pointers should not reach here). */
 void *matlab_mat_clone_cow(void *p) {
     if (!p) return p;
+    /* Tier-C (#93): a rank-N value must deep-copy through its own descriptor.
+     * Without this, `B = A` on a matN fell to the 2-D branch below, read a
+     * garbage rows/cols from the matN header, and corrupted the heap. A live
+     * matN has no trailing-singleton (matN_alloc drops them at creation), so
+     * re-allocating with its dims reproduces the same matN shape. */
+    if (mat_is_nd(p)) {
+        matlab_matN *s = reinterpret_cast<matlab_matN *>(p);
+        void *o = matN_alloc(static_cast<int>(s->ndims), s->dims);
+        int64_t n = 1;
+        for (uint32_t k = 0; k < s->ndims; ++k) n *= s->dims[k];
+        if (n > 0 && mat_is_nd(o))
+            memcpy(reinterpret_cast<matlab_matN *>(o)->data, s->data,
+                   (size_t)n * sizeof(double));
+        return o;
+    }
     if (mat_is_3d(p)) {
         matlab_mat3 *s = reinterpret_cast<matlab_mat3 *>(p);
         matlab_mat3 *o = mat3_alloc(s->rows, s->cols, s->depth);
@@ -7313,6 +7335,20 @@ double matlab_subscript2_s(matlab_mat *A, double i, double j) {
         int64_t n = cj % N, k = cj / N;
         return m->data[k * M * N + ri * N + n];
     }
+    /* #93: fewer-subscript A(i,j) on a rank-N array — i indexes dim 0, j
+     * collapses the trailing dims (dim 1 fastest), mirroring the 3-D rule. */
+    if (mat_is_nd(A)) {
+        matlab_matN *m = (matlab_matN *)A;
+        int64_t d0 = m->dims[0], rest = 1;
+        for (uint32_t k = 1; k < m->ndims; ++k) rest *= m->dims[k];
+        if (ri < 0 || ri >= d0 || cj < 0 || cj >= rest) return 0.0;
+        int64_t off = ri * m->strides[0], rem = cj;
+        for (uint32_t k = 1; k < m->ndims; ++k) {
+            off += (rem % m->dims[k]) * m->strides[k];
+            rem /= m->dims[k];
+        }
+        return m->data[off];
+    }
     if (ri < 0 || ri >= A->rows || cj < 0 || cj >= A->cols) return 0.0;
     return A->data[ri * A->cols + cj];
 }
@@ -9716,8 +9752,15 @@ static int64_t mat3_offset(matlab_mat3 *A, int64_t i, int64_t j, int64_t k) {
  * imread returns a 2-D matlab_mat for grayscale files, each helper falls
  * back to a 2-D matlab_mat view (mat_is_3d == false) so grayscale images
  * still index / size correctly. */
+/* #93: the matlab_subscript3_* family takes a mat3 (or 2-D fallback).  A
+ * matN binding is never routed here (the frontend gates 3-D subscripts on
+ * ThreeDBindings, which is mat3-only — matN element access goes through
+ * subscript4/subscriptN).  These mat_is_nd guards are defense-in-depth: a
+ * matN reaching the raw mat3 cast below would read/write past the header
+ * and corrupt the heap, so bail to a safe no-op instead. */
 double matlab_subscript3_s(matlab_mat3 *A, double i1, double j1, double k1) {
     if (!A) return 0.0;
+    if (mat_is_nd(A)) return 0.0;
     int64_t i = (int64_t)i1 - 1, j = (int64_t)j1 - 1, k = (int64_t)k1 - 1;
     if (!mat_is_3d(A)) {                       /* 2-D: A(i,j,1) */
         matlab_mat *m = (matlab_mat *)A;
@@ -9730,7 +9773,7 @@ double matlab_subscript3_s(matlab_mat3 *A, double i1, double j1, double k1) {
 
 void matlab_subscript3_store(matlab_mat3 *A, double i1, double j1,
                               double k1, double v) {
-    if (!A) return;
+    if (!A || mat_is_nd(A)) return;            /* #93: see subscript3_s note */
     int64_t i = (int64_t)i1 - 1, j = (int64_t)j1 - 1, k = (int64_t)k1 - 1;
     if (!mat_is_3d(A)) {
         matlab_mat *m = (matlab_mat *)A;
@@ -9743,7 +9786,7 @@ void matlab_subscript3_store(matlab_mat3 *A, double i1, double j1,
 
 /* A(:, :, k) read -> the k-th M×N plane as a 2-D matrix (1-based k). */
 matlab_mat *matlab_subscript3_slice(matlab_mat3 *A, double k1) {
-    if (!A) return mat_alloc(0, 0);
+    if (!A || mat_is_nd(A)) return mat_alloc(0, 0);   /* #93: see subscript3_s note */
     int64_t k = (int64_t)k1 - 1;
     if (!mat_is_3d(A)) {                       /* 2-D: A(:,:,1) is the matrix */
         matlab_mat *m = (matlab_mat *)A;
@@ -9760,7 +9803,7 @@ matlab_mat *matlab_subscript3_slice(matlab_mat3 *A, double k1) {
 }
 /* A(:, :, k) = scalar  (broadcast a value across the whole plane). */
 void matlab_subscript3_pstore_s(matlab_mat3 *A, double k1, double v) {
-    if (!A) return;
+    if (!A || mat_is_nd(A)) return;            /* #93: see subscript3_s note */
     int64_t k = (int64_t)k1 - 1;
     if (!mat_is_3d(A)) { matlab_mat *m = (matlab_mat *)A; if (k == 0) for (int64_t t = 0; t < m->rows * m->cols; ++t) m->data[t] = v; return; }
     if (k < 0 || k >= A->depth) return;
@@ -9769,7 +9812,7 @@ void matlab_subscript3_pstore_s(matlab_mat3 *A, double k1, double v) {
 }
 /* A(:, :, k) = M  (copy a 2-D matrix into the k-th plane). */
 void matlab_subscript3_pstore_m(matlab_mat3 *A, double k1, matlab_mat *M) {
-    if (!A || !M) return;
+    if (!A || !M || mat_is_nd(A)) return;      /* #93: see subscript3_s note */
     int64_t k = (int64_t)k1 - 1;
     if (!mat_is_3d(A)) { matlab_mat *m = (matlab_mat *)A; int64_t mn = M->rows * M->cols; if (k == 0) for (int64_t t = 0; t < m->rows * m->cols && t < mn; ++t) m->data[t] = M->data[t]; return; }
     if (k < 0 || k >= A->depth) return;
@@ -9924,6 +9967,8 @@ void *matlab_cat4_4(matlab_mat *A, matlab_mat *B,
 double matlab_size3_dim(matlab_mat3 *A, double d) {
     if (!A) return 0.0;
     int64_t dim = (int64_t)d;
+    /* #93: a matN reaching the *3 helper reports its real per-dim size. */
+    if (mat_is_nd(A)) { matlab_matN *m = (matlab_matN *)A; return (dim >= 1 && dim <= (int64_t)m->ndims) ? (double)m->dims[dim - 1] : 1.0; }
     if (!mat_is_3d(A)) { matlab_mat *m = (matlab_mat *)A; if (dim == 1) return (double)m->rows; if (dim == 2) return (double)m->cols; return 1.0; }
     if (dim == 1) return (double)A->rows;
     if (dim == 2) return (double)A->cols;
@@ -9933,12 +9978,14 @@ double matlab_size3_dim(matlab_mat3 *A, double d) {
 
 double matlab_numel3(matlab_mat3 *A) {
     if (!A) return 0.0;
+    if (mat_is_nd(A)) { matlab_matN *m = (matlab_matN *)A; int64_t n = 1; for (uint32_t k = 0; k < m->ndims; ++k) n *= m->dims[k]; return (double)n; }
     if (!mat_is_3d(A)) { matlab_mat *m = (matlab_mat *)A; return (double)(m->rows * m->cols); }
     return (double)(A->rows * A->cols * A->depth);
 }
 
 double matlab_ndims3(matlab_mat3 *A) {
     if (!A) return 0.0;
+    if (mat_is_nd(A)) return (double)((matlab_matN *)A)->ndims;
     if (!mat_is_3d(A)) return 2.0;
     return A->depth > 1 ? 3.0 : 2.0;
 }
