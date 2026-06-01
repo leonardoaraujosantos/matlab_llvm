@@ -6958,6 +6958,16 @@ bool TensorLowering::rewriteBuiltinCalls() {
        * fits into the ss(_,_,_,_) constructor call. */
       {"matlab_c2d_Ad",        "matlab_c2d_Ad",        1, "ppf"},
       {"matlab_c2d_Bd",        "matlab_c2d_Bd",        1, "ppf"},
+      /* tf-object c2d / d2c (#27) — the tf class-pinned-first-arg sites in
+       * Lowering.cpp emit these to round-trip (num, den) through the
+       * tf2ss → discretise → ss2tf path. c2d takes Ts as an f64 (from the
+       * call arg); d2c reads Ts off the model's Ts property (boxed 1×1). */
+      {"matlab_c2d_tf_num",        "matlab_c2d_tf_num",        1, "ppf"},
+      {"matlab_c2d_tf_den",        "matlab_c2d_tf_den",        1, "ppf"},
+      {"matlab_c2d_tf_tustin_num", "matlab_c2d_tf_tustin_num", 1, "ppf"},
+      {"matlab_c2d_tf_tustin_den", "matlab_c2d_tf_tustin_den", 1, "ppf"},
+      {"matlab_d2c_tf_num",        "matlab_d2c_tf_num",        1, "ppp"},
+      {"matlab_d2c_tf_den",        "matlab_d2c_tf_den",        1, "ppp"},
       /* Sys-form Kalman dispatcher — class-pinned-first-arg site in
        * Lowering.cpp extracts A/B/C off an `ss` and passes Ts (boxed
        * 1×1 matrix, matching the matrix-storage convention for class

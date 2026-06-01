@@ -2109,6 +2109,12 @@ void Resolver::resolveStmt(Stmt &St, Scope *S) {
                   Nm == "sminreal" || Nm == "modred")
                 return Arg0Cls;
             }
+            /* tf-object discretisation round-trip — c2d(tf, Ts [,method]) and
+             * d2c(tf [,method]) return a tf, so downstream disp / step /
+             * tfdata dispatch keys on the tf class. (#27) */
+            if (Arg0Cls && Arg0Cls->Name == "tf" &&
+                (NX->Name == "c2d" || NX->Name == "d2c"))
+              return Arg0Cls;
             /* Econometrics: `EstMdl = estimate(Mdl, y)` returns the same
              * model class as the template, so downstream forecast/infer/
              * simulate dispatch (which keys on the receiver class) fires. */
