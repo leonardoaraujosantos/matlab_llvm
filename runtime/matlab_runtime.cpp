@@ -264,6 +264,16 @@ matlab_mat *matlab_mat_scalar(double v) {
     return m;
 }
 
+/* Inverse of matlab_mat_scalar: the scalar value of a (boxed) matrix.
+ * Used by the JIT/-dap scalar-arith fixup when a workspace-boxed scalar
+ * (matlab_mat*) leaks into an arith op already committed to an f64 result
+ * — such an operand is always a 1x1 box, so element [0] is its value.
+ * Returns 0.0 for a null/empty matrix. */
+double matlab_mat_to_scalar(matlab_mat *m) {
+    if (!m || !m->data || m->rows * m->cols < 1) return 0.0;
+    return m->data[0];
+}
+
 /* Sink-agnostic variadic printf core.  Appends the formatted output to `out`.
  * `vals[i]` is a matlab_mat* when kinds[i]==0 (numeric — every element is
  * consumed, column-major) or a matlab_string* when kinds[i]==1.  The format is

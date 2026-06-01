@@ -148,6 +148,13 @@ private:
   // fail SCF verification. Insert a matlab_mat_truth call + cmpi ne 0
   // at each such use site.
   bool fixupCondOperands();
+  // #77: a scalar float arith op (arith.addf/subf/mulf/divf/negf, f64
+  // result) can be left with a !llvm.ptr operand when an earlier scalar
+  // lowering created it while the operand was f64 and a later pass retyped
+  // that operand to a boxed-scalar matlab_mat* (e.g. `abs(y - ref)` where y
+  // is a workspace scalar read as a ptr). Such an operand is always a 1x1
+  // box, so unbox it to f64 via matlab_mat_to_scalar.
+  bool unboxScalarArithOperands();
 
   // --- Unary neg on tensor ----------------------------------------------
   bool rewriteUnaryNeg();
@@ -7975,6 +7982,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
      * MATLAB (conv(u, gain), filter(b, 1, x), polyval(p, scalar), ...).
      * See docs/runtime.md "Scalar-arg overloads". */
     SmallVector<unsigned, 3> BoxIdx;
+    SmallVector<unsigned, 3> UnboxIdx;
     if (!S) {
       static const llvm::StringSet<> AutoBoxNames = {
         "conv", "conv2", "filter", "xcorr",
@@ -8072,6 +8080,51 @@ bool TensorLowering::rewriteBuiltinCalls() {
       }
     }
 
+    /* Scalar-UNBOX fallback — the mirror of the autobox above. A workspace
+     * scalar computed with element-wise ops (e.g. `snr_dB = EbNo + 10.*..`)
+     * is typed as an array and reaches a builtin as a boxed matlab_mat*
+     * (ptr) in an 'f' (scalar) slot. Pick a Spec where the only mismatches
+     * are 'f' slots receiving a ptr, and unbox each via matlab_mat_to_scalar
+     * at the call site. Allowlisted to builtins whose scalar args are
+     * idiomatically computed this way, so a genuine matrix arg isn't
+     * silently reduced to its first element. */
+    if (!S) {
+      static const llvm::StringSet<> AutoUnboxNames = {
+        "awgn",
+      };
+      if (AutoUnboxNames.contains(Name)) {
+        for (auto &E : Table) {
+          if (E.MLName != Name) continue;
+          if (E.ArgKinds.size() != NOps) continue;
+          bool can_unbox = true;
+          SmallVector<unsigned, 3> idx;
+          for (unsigned i = 0; i < NOps; ++i) {
+            char K = E.ArgKinds[i];
+            Type Got = Call->getOperand(i).getType();
+            if (K == 'f') {
+              if (isFTagOK(Got)) {
+                /* already matches strictly */
+              } else if (Got == PtrTy) {
+                idx.push_back(i);
+              } else {
+                can_unbox = false; break;
+              }
+            } else { /* 'p' */
+              if (Got != PtrTy && !isTensorLike(Got) &&
+                  !mlir::isa<mlir::NoneType>(Got)) {
+                can_unbox = false; break;
+              }
+            }
+          }
+          if (can_unbox && !idx.empty()) {
+            S = &E;
+            UnboxIdx = std::move(idx);
+            break;
+          }
+        }
+      }
+    }
+
     if (!S) {
       // Scalar variants of exp/log/sin/cos/tan/sqrt/abs when the arg is f64
       // already. Fall through to scalar-path below.
@@ -8156,12 +8209,17 @@ bool TensorLowering::rewriteBuiltinCalls() {
       for (unsigned x : BoxIdx) if (x == i) return true;
       return false;
     };
+    auto UnboxSet_count = [&](unsigned i) -> bool {
+      for (unsigned x : UnboxIdx) if (x == i) return true;
+      return false;
+    };
     bool OK = true;
     for (unsigned i = 0; i < S->ArgKinds.size(); ++i) {
       Type Exp = S->ArgKinds[i] == 'f' ? F64 : PtrTy;
       ExpTys.push_back(Exp);
       Type Got = Call->getOperand(i).getType();
       if (BoxSet_count(i)) continue;  /* will be boxed below */
+      if (UnboxSet_count(i)) continue;  /* will be unboxed below */
       // Accept tensor-typed args where we expect ptr (we'll convert via a
       // subsequent retype — but only if the value is actually a ptr at
       // runtime). We'll be strict and require ptr now; tensor-typed inputs
@@ -8204,6 +8262,12 @@ bool TensorLowering::rewriteBuiltinCalls() {
         auto Box = LLVM::CallOp::create(B, Call->getLoc(), FnBox,
                                          ValueRange{V});
         CallOps.push_back(Box.getResult());
+      } else if (UnboxSet_count(i)) {
+        /* Boxed-scalar ptr in an 'f' slot — extract its scalar value. */
+        auto FnUnbox = rt("matlab_mat_to_scalar", F64, {PtrTy});
+        auto Ub = LLVM::CallOp::create(B, Call->getLoc(), FnUnbox,
+                                       ValueRange{V});
+        CallOps.push_back(Ub.getResult());
       } else {
         /* f32 -> f64 widening at every 'f' slot reached via a
          * single() / double() cast.  The runtime entry signature is
@@ -8290,6 +8354,31 @@ bool TensorLowering::rewriteBinaryOps() {
   for (Operation *Op : Binaries) {
     StringRef ML = Op->getName().getStringRef();
     Value A = Op->getOperand(0), BVal = Op->getOperand(1);
+    /* #77: a matrix elementwise op with one matrix (ptr) operand needs its
+     * scalar operand as f64 — the runtime `_ms`/`_sm` entries take a double.
+     * A boxed comparison like `pred == (x > 0.5)` (pred a workspace scalar
+     * boxed as matlab_mat*, the RHS a comparison) arrives as eq(ptr, i1),
+     * which matched none of the mm/ms/sm shapes and survived unconverted.
+     * Promote an i1/iN/f32 scalar operand to f64 when the other side is a
+     * ptr so the _ms/_sm path matches. */
+    {
+      bool aPtr = A.getType() == PtrTy, bPtr = BVal.getType() == PtrTy;
+      auto toF64Scalar = [&](Value V) -> Value {
+        Type T = V.getType();
+        if (T == F64 || T == PtrTy || isTensorLike(T)) return V;
+        B.setInsertionPoint(Op);
+        if (auto IT = mlir::dyn_cast<IntegerType>(T)) {
+          if (IT.getWidth() == 1)
+            return LLVM::UIToFPOp::create(B, Op->getLoc(), F64, V).getResult();
+          return LLVM::SIToFPOp::create(B, Op->getLoc(), F64, V).getResult();
+        }
+        if (mlir::isa<Float32Type>(T))
+          return LLVM::FPExtOp::create(B, Op->getLoc(), F64, V).getResult();
+        return V;
+      };
+      if (aPtr && !bPtr) BVal = toF64Scalar(BVal);
+      else if (bPtr && !aPtr) A = toF64Scalar(A);
+    }
     Type AT = A.getType(), BT = BVal.getType();
     bool AP = AT == PtrTy, BP = BT == PtrTy;
     bool AF = AT == F64,    BF = BT == F64;
@@ -8469,21 +8558,47 @@ bool TensorLowering::rewriteRange() {
   for (Operation *Op : Ranges) {
     unsigned N = Op->getNumOperands();
     if (N != 2 && N != 3) continue;
-    // Accept f64 operands; skip otherwise.
-    for (unsigned i = 0; i < N; ++i)
-      if (Op->getOperand(i).getType() != F64) return false;
-    Value Start = Op->getOperand(0);
+    B.setInsertionPoint(Op);
+    /* #77: matlab_range takes f64 bounds, but a workspace scalar used as a
+     * loop bound (`for i = 1:(nstate-1)`) can arrive as a boxed matlab_mat*
+     * (ptr) or a non-f64 scalar. A range bound is scalar in MATLAB, so
+     * coerce each operand to f64 — unboxing a ptr via matlab_mat_to_scalar
+     * — instead of leaving the matlab.range unconverted. */
+    auto toF64 = [&](Value V) -> Value {
+      Type T = V.getType();
+      if (T == F64) return V;
+      if (T == PtrTy) {
+        auto Fn = rt("matlab_mat_to_scalar", F64, {PtrTy});
+        return LLVM::CallOp::create(B, Op->getLoc(), Fn, ValueRange{V})
+            .getResult();
+      }
+      if (auto IT = mlir::dyn_cast<IntegerType>(T)) {
+        if (IT.getWidth() == 1)
+          return LLVM::UIToFPOp::create(B, Op->getLoc(), F64, V).getResult();
+        return LLVM::SIToFPOp::create(B, Op->getLoc(), F64, V).getResult();
+      }
+      if (mlir::isa<Float32Type>(T))
+        return LLVM::FPExtOp::create(B, Op->getLoc(), F64, V).getResult();
+      return Value{};
+    };
+    SmallVector<Value, 3> Co;
+    bool ok = true;
+    for (unsigned i = 0; i < N; ++i) {
+      Value C = toF64(Op->getOperand(i));
+      if (!C) { ok = false; break; }
+      Co.push_back(C);
+    }
+    if (!ok) continue;  /* an operand we can't coerce — leave for another pass */
+    Value Start = Co[0];
     Value Step, End;
     if (N == 2) {
-      End = Op->getOperand(1);
-      B.setInsertionPoint(Op);
+      End = Co[1];
       Step = LLVM::ConstantOp::create(B, Op->getLoc(), F64,
                                        B.getF64FloatAttr(1.0));
     } else {
-      Step = Op->getOperand(1);
-      End  = Op->getOperand(2);
+      Step = Co[1];
+      End  = Co[2];
     }
-    B.setInsertionPoint(Op);
     auto Fn = rt("matlab_range", PtrTy, {F64, F64, F64});
     auto NC = LLVM::CallOp::create(B, Op->getLoc(), Fn,
                                     ValueRange{Start, Step, End});
@@ -8877,6 +8992,31 @@ bool TensorLowering::fixupCondOperands() {
   return Changed;
 }
 
+bool TensorLowering::unboxScalarArithOperands() {
+  SmallVector<Operation *> Ops;
+  Mod.walk([&](Operation *Op) {
+    if (!isa<arith::AddFOp, arith::SubFOp, arith::MulFOp, arith::DivFOp,
+             arith::NegFOp>(Op))
+      return;
+    for (Value O : Op->getOperands())
+      if (O.getType() == PtrTy) { Ops.push_back(Op); break; }
+  });
+  bool Changed = false;
+  for (Operation *Op : Ops) {
+    B.setInsertionPoint(Op);
+    auto Fn = rt("matlab_mat_to_scalar", F64, {PtrTy});
+    for (unsigned i = 0; i < Op->getNumOperands(); ++i) {
+      if (Op->getOperand(i).getType() != PtrTy) continue;
+      Value S = LLVM::CallOp::create(B, Op->getLoc(), Fn,
+                                     ValueRange{Op->getOperand(i)})
+                    .getResult();
+      Op->setOperand(i, S);
+    }
+    Changed = true;
+  }
+  return Changed;
+}
+
 /* Lower matlab.call_builtin @matlab_mat_truth(ptr) -> i8 to a direct
  * LLVM call. Emitted by Lowerer::fixupIfCond when a scf.if / matlab.while
  * cond resolves to a matrix pointer (DAP/REPL workspace path).
@@ -8976,6 +9116,7 @@ bool TensorLowering::run() {
     Changed |= rewriteDispMatrix();
     Changed |= rewriteMatTruth();
     Changed |= fixupCondOperands();
+    Changed |= unboxScalarArithOperands();
     if (!Changed) break;
     AnyChanged = true;
   }
