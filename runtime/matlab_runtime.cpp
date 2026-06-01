@@ -5927,6 +5927,164 @@ matlab_mat *matlab_c2d_tustin_Bd(matlab_mat *A, matlab_mat *B, double Ts) {
 }
 
 /*-------------------------------------------------------------------------
+ * SISO state-space -> transfer function (ss2tf), used by the tf-object
+ * c2d / d2c round-trip (tf2ss -> discretise -> ss2tf -> tf).
+ *
+ * Faddeev–LeVerrier computes the characteristic polynomial of A together
+ * with the matrix coefficients N_k of the adjugate  adj(sI - A) =
+ * s^{n-1} N_1 + ... + N_n  in one sweep, so we avoid an eigen-solve:
+ *
+ *   N_1 = I
+ *   a_k = trace(A · N_k) / k
+ *   N_{k+1} = A · N_k - a_k I
+ *
+ * den(s) = s^n - a_1 s^{n-1} - ... - a_n   (monic).
+ * For SISO, g_k = C · N_k · B (scalar), and
+ *   H(s) = C·adj(sI-A)·B / det(sI-A) + D
+ *        = num(s) / den(s),  num = D·den + [0, g_1, ..., g_n].
+ * Both num and den come back length n+1 (den monic).
+ *-------------------------------------------------------------------------*/
+static void ss2tf_siso(matlab_mat *A, matlab_mat *B, matlab_mat *C,
+                       matlab_mat *D, matlab_mat **numOut, matlab_mat **denOut) {
+    int64_t n = A ? A->rows : 0;
+    double d0 = (D && D->rows * D->cols > 0) ? D->data[0] : 0.0;
+    if (n < 1 || A->cols != n || !B || !C) {
+        /* Pure static gain: H(s) = D. */
+        matlab_mat *num = mat_alloc(1, 1); num->data[0] = d0;
+        matlab_mat *den = mat_alloc(1, 1); den->data[0] = 1.0;
+        *numOut = num; *denOut = den;
+        return;
+    }
+    std::vector<double> a(n + 1, 0.0);   /* a[k], k = 1..n */
+    std::vector<double> g(n + 1, 0.0);   /* g[k] = C N_k B */
+    matlab_mat *N = mat_alloc(n, n);     /* N_1 = I */
+    for (int64_t i = 0; i < n; ++i) N->data[i * n + i] = 1.0;
+    for (int64_t k = 1; k <= n; ++k) {
+        double gk = 0.0;                 /* C (1×n) · N (n×n) · B (n×1) */
+        for (int64_t i = 0; i < n; ++i) {
+            double NB_i = 0.0;
+            for (int64_t j = 0; j < n; ++j) NB_i += N->data[i * n + j] * B->data[j];
+            gk += C->data[i] * NB_i;
+        }
+        g[k] = gk;
+        matlab_mat *AN = matlab_matmul_mm(A, N);
+        double tr = 0.0;
+        for (int64_t i = 0; i < n; ++i) tr += AN->data[i * n + i];
+        a[k] = tr / (double)k;
+        matlab_mat *Nn = mat_alloc(n, n);   /* N_{k+1} = AN - a_k I */
+        for (int64_t i = 0; i < n * n; ++i) Nn->data[i] = AN->data[i];
+        for (int64_t i = 0; i < n; ++i) Nn->data[i * n + i] -= a[k];
+        N = Nn;
+    }
+    matlab_mat *den = mat_alloc(1, n + 1);
+    den->data[0] = 1.0;
+    for (int64_t k = 1; k <= n; ++k) den->data[k] = -a[k];
+    matlab_mat *num = mat_alloc(1, n + 1);
+    for (int64_t k = 0; k <= n; ++k)
+        num->data[k] = d0 * den->data[k] + (k >= 1 ? g[k] : 0.0);
+    *numOut = num; *denOut = den;
+}
+
+/* (z-1)^a · (z+1)^b expanded into a highest-degree-first coefficient
+ * vector of length a+b+1. Used by the tf-object Tustin substitution. */
+static void poly_zm1_zp1_(int a, int b, std::vector<double> &out) {
+    auto binom = [](int nn, int kk) -> double {
+        double r = 1.0;
+        for (int i = 0; i < kk; ++i) r = r * (nn - i) / (i + 1);
+        return r;
+    };
+    std::vector<double> P(a + 1), Q(b + 1);
+    for (int j = 0; j <= a; ++j) P[j] = binom(a, j) * ((j & 1) ? -1.0 : 1.0);
+    for (int j = 0; j <= b; ++j) Q[j] = binom(b, j);
+    out.assign(a + b + 1, 0.0);
+    for (int i = 0; i <= a; ++i)
+        for (int j = 0; j <= b; ++j) out[i + j] += P[i] * Q[j];
+}
+
+/* Tustin (bilinear) discretisation done directly on the tf polynomials via
+ * s = (2/Ts)·(z-1)/(z+1).  After padding num/den to a common degree M the
+ * shared (z+1)^M denominator cancels, leaving an exact rational map. This is
+ * exact for tf (unlike the ss-Ad/Bd route, which would need the C/D output
+ * map transformed too). */
+static void bilinear_tf_(matlab_mat *num, matlab_mat *den, double Ts,
+                         matlab_mat **numOut, matlab_mat **denOut) {
+    double c = (Ts != 0.0) ? 2.0 / Ts : 0.0;
+    int ln = (int)(num ? num->rows * num->cols : 0);
+    int ld = (int)(den ? den->rows * den->cols : 0);
+    int M = std::max(ln, ld) - 1;
+    if (M < 0) M = 0;
+    std::vector<double> P(M + 1, 0.0), Q(M + 1, 0.0);
+    for (int i = 0; i < ln; ++i) P[M + 1 - ln + i] = num->data[i];
+    for (int i = 0; i < ld; ++i) Q[M + 1 - ld + i] = den->data[i];
+    std::vector<double> Np(M + 1, 0.0), Dp(M + 1, 0.0), term;
+    for (int k = 0; k <= M; ++k) {            /* P[k] = coeff of s^{M-k} */
+        poly_zm1_zp1_(M - k, k, term);        /* (z-1)^{M-k}(z+1)^k, degree M */
+        double sc = std::pow(c, (double)(M - k));
+        for (int t = 0; t <= M; ++t) {
+            Np[t] += P[k] * sc * term[t];
+            Dp[t] += Q[k] * sc * term[t];
+        }
+    }
+    matlab_mat *Nm = mat_alloc(1, M + 1);
+    matlab_mat *Dm = mat_alloc(1, M + 1);
+    for (int i = 0; i <= M; ++i) { Nm->data[i] = Np[i]; Dm->data[i] = Dp[i]; }
+    *numOut = Nm; *denOut = Dm;
+}
+
+/* c2d on a tf object: continuous (num,den) -> discrete (num_d,den_d) at Ts.
+ * ZOH routes tf2ss(CCF) -> matlab_c2d_Ad/Bd -> ss2tf (the output map C,D is
+ * invariant under ZOH); Tustin uses the exact bilinear substitution above.
+ * Two single-return entries (num / den) mirror the matlab_c2d_Ad/Bd shape so
+ * the [num,den] split rides the existing 2-return dispatcher. */
+static void c2d_tf_(matlab_mat *num, matlab_mat *den, double Ts, bool tustin,
+                    matlab_mat **numOut, matlab_mat **denOut) {
+    if (tustin) { bilinear_tf_(num, den, Ts, numOut, denOut); return; }
+    matlab_mat *A, *B, *C, *D;
+    tf2ss_ccf(num, den, &A, &B, &C, &D);
+    matlab_mat *Ad = matlab_c2d_Ad(A, B, Ts);
+    matlab_mat *Bd = matlab_c2d_Bd(A, B, Ts);
+    ss2tf_siso(Ad, Bd, C, D, numOut, denOut);
+}
+
+matlab_mat *matlab_c2d_tf_num(matlab_mat *num, matlab_mat *den, double Ts) {
+    matlab_mat *nd, *dd; c2d_tf_(num, den, Ts, false, &nd, &dd); return nd;
+}
+matlab_mat *matlab_c2d_tf_den(matlab_mat *num, matlab_mat *den, double Ts) {
+    matlab_mat *nd, *dd; c2d_tf_(num, den, Ts, false, &nd, &dd); return dd;
+}
+matlab_mat *matlab_c2d_tf_tustin_num(matlab_mat *num, matlab_mat *den, double Ts) {
+    matlab_mat *nd, *dd; c2d_tf_(num, den, Ts, true, &nd, &dd); return nd;
+}
+matlab_mat *matlab_c2d_tf_tustin_den(matlab_mat *num, matlab_mat *den, double Ts) {
+    matlab_mat *nd, *dd; c2d_tf_(num, den, Ts, true, &nd, &dd); return dd;
+}
+
+/* d2c on a tf object: discrete (num,den) at Ts -> continuous (num_c,den_c).
+ * ZOH inverse via tf2ss(CCF) -> matlab_d2c_A/B (logm) -> ss2tf. Shares the
+ * matrix-logm integrator-pole caveat documented on matlab_d2c_A (a z=1 pole
+ * has no real continuous ZOH preimage). */
+static void d2c_tf_(matlab_mat *num, matlab_mat *den, double Ts,
+                    matlab_mat **numOut, matlab_mat **denOut) {
+    matlab_mat *Ad, *Bd, *C, *D;
+    tf2ss_ccf(num, den, &Ad, &Bd, &C, &D);
+    matlab_mat *A = matlab_d2c_A(Ad, Bd, Ts);
+    matlab_mat *B = matlab_d2c_B(Ad, Bd, Ts);
+    ss2tf_siso(A, B, C, D, numOut, denOut);
+}
+
+/* Ts arrives as a boxed 1×1 matrix — class scalar properties are stored
+ * matrix-boxed (see the kalman `getProp(Obj,"Ts")` precedent in Lowering),
+ * and d2c reads it from the discrete model's Ts property. Unbox here. */
+matlab_mat *matlab_d2c_tf_num(matlab_mat *num, matlab_mat *den, matlab_mat *Tsb) {
+    double Ts = (Tsb && Tsb->rows * Tsb->cols > 0) ? Tsb->data[0] : 0.0;
+    matlab_mat *nc, *dc; d2c_tf_(num, den, Ts, &nc, &dc); return nc;
+}
+matlab_mat *matlab_d2c_tf_den(matlab_mat *num, matlab_mat *den, matlab_mat *Tsb) {
+    double Ts = (Tsb && Tsb->rows * Tsb->cols > 0) ? Tsb->data[0] : 0.0;
+    matlab_mat *nc, *dc; d2c_tf_(num, den, Ts, &nc, &dc); return dc;
+}
+
+/*-------------------------------------------------------------------------
  * Closed-loop assembly for negative feedback (strictly proper).
  *
  *   [Acl, Bcl, Ccl] = feedback_ss(A1, B1, C1, A2, B2, C2)
