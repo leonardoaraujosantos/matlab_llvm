@@ -4587,6 +4587,23 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
         return;
       }
     }
+    /* Rank>=5 scalar store: A(i,j,k,l,m[,...]) = v.  Variadic — routes
+     * through matlab_subscriptN_pstore_s (runtime generic to 16 dims).  The
+     * index-packing into an int64_t[] happens in LowerTensorOps once types
+     * settle to ptr/f64.  #93. */
+    if (C.Args.size() >= 5 && Rhs) {
+      bool anyColon = false;
+      for (size_t a = 0; a < C.Args.size(); ++a)
+        if (dynamic_cast<const ColonExpr *>(C.Args[a])) { anyColon = true; break; }
+      if (!anyColon) {
+        mlir::NamedAttribute CalN(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_subscriptN_pstore_s"));
+        emitUnregOp("matlab.call_builtin", Os,
+                    {mlir::NoneType::get(&MCtx)}, loc(C.Range), {CalN});
+        return;
+      }
+    }
     mlir::NamedAttribute Cal(
         mlir::StringAttr::get(&MCtx, "callee"),
         mlir::StringAttr::get(&MCtx, "__subscript_store"));
