@@ -425,6 +425,25 @@ def scn_closure_launches(matlabc, program):
     _assert_launches_and_terminates(matlabc, cl_program)
 
 
+def scn_fixedpoint_launches(matlabc, program):
+    """Regression for #77: a `-dap` launch of a Fixed-Point Designer (`fi`)
+    program must compile + run (reach `terminated`).
+
+    Uses dap_fixedpoint_program.m (sibling fixture): fi constructors, a
+    scalar fi multiply, and the `(:)` clamp idiom. Before the "fi script
+    vars use the local-slot lane in JIT/-dap" fix, the ReplMode workspace
+    round-trip reloaded the integer-encoded value as a matrix ptr, so a
+    later fi op got `arith.shrsi(!llvm.ptr, i32)` (verifier failure) and
+    `launch` answered "failed to compile program". Reaching `terminated`
+    means every fi op lowered to integer arithmetic cleanly.
+    """
+    fi_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_fixedpoint_program.m",
+    )
+    _assert_launches_and_terminates(matlabc, fi_program)
+
+
 def scn_function_locals(matlabc, program):
     """Pausing inside a user function exposes the function's locals.
 

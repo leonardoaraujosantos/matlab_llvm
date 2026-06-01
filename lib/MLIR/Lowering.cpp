@@ -358,6 +358,31 @@ private:
   // tensor body (llvm.return type mismatch, #4). Tracking the matrix store
   // lets the capture load via matlab_ws_get_mat (ptr) instead.
   std::unordered_set<Binding *> MatrixWsBindings;
+
+  // #77: a fixed-point (`fi`) script var holds an integer-encoded Q-format
+  // value; its arithmetic lowers to integer shifts/muls (LowerFixedPoint).
+  // Routing it through the workspace in ReplMode stores/loads it as a
+  // matrix ptr (matlab_ws_get_mat), so a later fi op gets a !llvm.ptr
+  // operand where it needs an integer (`arith.shrsi(!llvm.ptr, i32)` ->
+  // verifier failure, #77). Like a captured closure, a fi binding has no
+  // workspace representation that round-trips, so keep it on the
+  // local-slot lane (the static/AOT path) in ReplMode.
+  static const FixedSpec *fixedSpecOf(const Type *T) {
+    if (!T || T->K != Type::Kind::Array) return nullptr;
+    auto &AT = static_cast<const ArrayType &>(*T);
+    return (AT.Elt == Dtype::Fixed && AT.FxSpec) ? &(*AT.FxSpec) : nullptr;
+  }
+  // Script vars proven to hold a fixed-point value. A binding's
+  // InferredType/DeclaredType is often NOT fi-typed even for `x = fi(...)`
+  // (Sema leaves it `any`/scalar, same unreliability as the matrix case),
+  // so the spec is only reliably visible on the assignment LHS type (N.Ty)
+  // at the store. We record the binding there and consult this set on the
+  // read side, where N.Ty is unavailable.
+  std::unordered_set<Binding *> FiBindings;
+  bool isFiBinding(Binding *B) const {
+    return B && (FiBindings.count(B) || fixedSpecOf(B->InferredType) ||
+                 fixedSpecOf(B->DeclaredType));
+  }
   // Resolved target binding for a binding that holds a *named* function
   // handle (`h = @inc` -> inc's binding).  Lets a handle stored into a
   // struct field / property be resolved back to its callee (#81), and
@@ -1455,7 +1480,8 @@ mlir::Value Lowerer::loadBinding(Binding *Bnd, const Type *ValTy,
    * refused to lower, surviving into the JIT as an unconvertible
    * matlab.* op. */
   if (ReplMode && InScriptBody && Bnd->Kind == BindingKind::Var &&
-      Slots.find(Bnd) == Slots.end() && !isLocalHandle(Bnd)) {
+      Slots.find(Bnd) == Slots.end() && !isLocalHandle(Bnd) &&
+      !isFiBinding(Bnd)) {
     bool ScalarDouble = false;
     if (ValTy && ValTy->K == Type::Kind::Array) {
       auto &VA = static_cast<const ArrayType &>(*ValTy);
@@ -4285,12 +4311,19 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
                   {mlir::NoneType::get(&MCtx)}, loc(N.Range), Attrs);
       return;
     }
+    /* #77: a `x = fi(...)` store carries its FixedSpec only on the
+     * assignment LHS type (N.Ty); record the binding so the read side
+     * (isFiBinding) keeps it on the local-slot lane too — a workspace
+     * round-trip would reload the integer-encoded value as a matrix ptr
+     * and a later fi op gets `arith.shrsi(!llvm.ptr, i32)`. */
+    if (N.Ref && fixedSpecOf(N.Ty)) FiBindings.insert(N.Ref);
     /* REPL script-level Var writes route through matlab_ws_set_*.
      * Like loadBinding above, skip the workspace path when a local
      * slot already exists (e.g. for-loop induction variable) — the
      * slot is the canonical store site during that loop. */
     if (ReplMode && InScriptBody && N.Ref->Kind == BindingKind::Var && Rhs &&
-        Slots.find(N.Ref) == Slots.end() && !isLocalHandle(N.Ref)) {
+        Slots.find(N.Ref) == Slots.end() && !isLocalHandle(N.Ref) &&
+        !isFiBinding(N.Ref)) {
       auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
       mlir::Value NameV = emitFieldNameChar(N.Name, loc(N.Range));
       bool IsMat = (Rhs.getType() == PtrTy ||
