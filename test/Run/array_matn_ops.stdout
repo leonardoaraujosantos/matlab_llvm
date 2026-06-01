@@ -1,0 +1,4 @@
+matn_ops: reshape ndims=2 numel=32
+matn_ops: A(1,1)  fewer-subscript = 11
+matn_ops: A(2,16) fewer-subscript = 55
+array_matn_ops: PASS

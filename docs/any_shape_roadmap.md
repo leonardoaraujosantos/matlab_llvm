@@ -240,11 +240,36 @@ Gating fixtures: `test/Run/array_tierc.m`, `test/Run/dl_cnn_forward.m`,
 Carve-downs remaining (separate work, not part of Tier C proper):
 - im2col + GEMM-based conv for ~3-5× throughput
 - dlarray over matN (autodiff tape is still 2-D-only, so CNN/MHA
-  *training* is blocked — `dl_cnn_forward.m` is forward-only)
-- rank ≥ 5 element store via a variadic Lowering arm
-- per-toolbox audit of every `mat_is_3d` site — only the high-risk
-  ones (transpose / cat) got defensive guards; toolboxes that produce
-  mat / mat3 only (images, signal) are safe-by-construction
+  *training* is blocked — `dl_cnn_forward.m` is forward-only) — DONE
+  later (`21b85d9` / `6e5fcf3`: dlarray-over-matN autodiff fwd+bwd)
+- rank ≥ 5 element store via a variadic Lowering arm — DONE (#93/#95):
+  read + store packed into a stack `int64_t[]` -> `matlab_subscriptN_*`
+- per-op `mat_is_3d` audit — DONE (#93): the general-purpose ops a matN
+  can reach (`matlab_mat_clone_cow`, `matlab_reshape`, `matlab_subscript2_s`,
+  `matlab_size3_dim`/`numel3`/`ndims3`) now have a matN branch; the
+  ill-defined ones (`matlab_repmat3`, `matlab_subscript3_*`) bail cleanly
+  with `mat_is_nd` guards; toolboxes that produce mat / mat3 only (images,
+  signal) are safe-by-construction. Gating: `test/Run/array_matn_ops.m`.
+  KNOWN SUB-GAP (own follow-up): `B = A` on a matN shallow-aliases —
+  the clone-on-assign gate (`lib/MLIR/Lowering.cpp` ~1342) fires for
+  `Shape::Rank::NDArray`, but Sema does not yet infer that rank for a
+  rank-N constructor result, so `matlab_mat_clone_cow` (now matN-correct)
+  is not reached. Enabling it needs a TypeInference change (rank-N shape
+  on `zeros`/`ones` with ≥4 args), which has its own blast radius.
+
+### Emit-backend support — PERMANENT limitation (matN is LLVM/AOT-only)
+
+The matN lowering targets the LLVM/AOT path only. The source-emitting
+backends (`-emit-c` / `-emit-cpp` / `-emit-python` / `-emit-typescript`)
+cannot lower matN: the rank-N ops introduce a `builtin.unrealized_conversion_cast`
+(tensor↔ptr bridging) for which `lib/MLIR/Passes/EmitC.cpp` has no case, so
+it bails with a clear diagnostic. This is a deliberate, documented carve-out,
+not a bug. Every matN test ships explicit `.skip-emit-{c,cpp,python,typescript}`
+markers (the emit runners echo `SKIP <name> (marked .skip-emit-*)` — the skip
+is visible, not silent), and `test/EmitCFail/tierc_unrealized_cast.m` +
+`.stderr` pin the diagnostic so any drift is caught. Re-enabling a matN test
+on those lanes (delete the marker) would require implementing matN emission
+in each transpiler — out of scope for the LLVM-first project.
 
 Goal: first-class rank-N arrays — `H×W×C×N` batches, RGB video, cubes.
 This is the only path to MATLAB-equivalent N-D. **High blast radius.**
