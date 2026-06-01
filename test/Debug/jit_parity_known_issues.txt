@@ -5,18 +5,34 @@
 # NOT listed is a regression and fails CI. An entry that now passes is
 # reported as STALE (prune it) but does not fail the gate.
 #
-# Everything here is a NON-DETERMINISTIC execution-time crash (SIGSEGV/
-# SIGABRT) — a residual race in the ORC JIT's lazy materialization /
-# execution, NOT a compile-time (LAUNCH) divergence. They compile and
-# launch fine; they intermittently die mid-run. Tracked separately from
-# the compile-parity work (issue #77); see memory/jit-dap-parity-77.
+# The remaining entry is a NON-DETERMINISTIC execution-time crash (SIGSEGV)
+# — a residual object-lifetime bug in a runtime carrier, NOT a compile-time
+# (LAUNCH) divergence. It compiles and launches fine; it intermittently dies
+# mid-run. This is distinct from the pipeline-parity work of issue #77 (which
+# is the compile/launch divergence) and warrants its own focused fix.
 #
-# (The gate retries a CRASH/HANG once before counting it, so a one-off
-#  flake on an otherwise-clean example won't turn CI red — these are the
-#  examples that crash often enough to need an explicit allowance.)
+# (The gate retries a CRASH/HANG once before counting it, so a one-off flake
+#  on an otherwise-clean example won't turn CI red — this is the example that
+#  crashes often enough to need an explicit allowance.)
+#
+# Pruned 2026-06-01 (#77):
+#   - quadrotor/quadrotor_derive_eom.m — was a SymPP-backed `syms` example
+#     wrongly in scope (the sym-skip heuristic only scanned the first 20
+#     lines; its `syms` declaration is ~line 28). Now correctly SKIPped.
+#   - pde/antenna_glb_fem.m, pde/antenna_wind_stress.m — load an external
+#     GLB model from /tmp that doesn't ship with the repo. The "intermittent
+#     crash" was the missing-file path: pde_load_glb returned NULL and the
+#     REPL/JIT workspace round-trip resurrected it as a garbage struct. The
+#     NULL round-trip is now hardened (matlab_ws_set_struct kind=12 +
+#     matlab_struct_get_mat null pass-through), and the sweep now SKIPs
+#     examples whose referenced model file is absent (environment-dependent,
+#     like the sym examples needing SymPP).
+#   - comm/alamouti_diversity.m — no longer reproduces; runs clean.
 
-quadrotor/quadrotor_derive_eom.m      # signal 11/6 every run — large symbolic EOM derivation
-pde/antenna_glb_fem.m                 # signal 11 intermittent — FEM assembly
-pde/antenna_wind_stress.m             # signal 11 intermittent — FEM assembly
-comm/alamouti_diversity.m             # signal 11 intermittent
-dlnet/dl_classdef_array_literal.m     # signal 11 intermittent — classdef array literal
+# dlnet object-array carrier (matlab_dlnet_oa_*): extractdata() on an element
+# fetched from a `[A;B;C]` object-array literal intermittently dereferences a
+# freed dlarray object (matlab_dlnet_extractdata -> get_data ->
+# matlab_obj_get_mat -> struct_find_field, KERN_INVALID_ADDRESS at 0x0). An
+# object-lifetime / use-after-free in the OA carrier, not a workspace-ABI or
+# pipeline divergence. Tracked as a focused follow-up.
+dlnet/dl_classdef_array_literal.m     # intermittent SIGSEGV — dlnet object-array element lifetime (UAF)
