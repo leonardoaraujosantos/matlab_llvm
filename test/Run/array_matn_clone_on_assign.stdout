@@ -1,0 +1,5 @@
+clone: A(1,1,1) = 0
+clone: B(1,1,1) = 99
+clone: A(2,2,2) = 7
+clone: B(2,2,2) = 0
+array_matn_clone_on_assign: PASS
