@@ -37,6 +37,35 @@ def _stop_event(client, timeout=5.0):
     return body
 
 
+def _assert_launches_and_terminates(matlabc, program, attempts=6):
+    """Launch `program` under -dap and assert it compiles + runs to
+    `terminated`. Used by the #77 compile-regression scenarios.
+
+    A *compile* failure ("failed to compile program") raises from
+    `initialize_and_launch` on the FIRST attempt and is re-raised
+    immediately — it's deterministic, so retrying can't mask a real
+    regression. A missing `terminated` is retried: every `-dap` launch
+    currently SIGSEGVs during process *teardown* (a pre-existing,
+    program-independent MLIR/JIT shutdown race — `fibonacci.m` etc. crash
+    identically), and the `terminated` event races that crash closing the
+    pipe. The program itself runs correctly; retrying rides out the race
+    so this stays a deterministic guard for the lowering fix, not a
+    flake on the orthogonal teardown bug.
+    """
+    last = None
+    for _ in range(attempts):
+        try:
+            with DapClient(matlabc, program) as c:
+                initialize_and_launch(c, stop_on_entry=False)
+                c.wait_event("terminated", timeout=15.0)
+            return
+        except DapError as e:
+            if "failed to compile" in str(e).lower():
+                raise  # deterministic compile regression — don't mask
+            last = e   # teardown-race: terminated lost — retry
+    raise last
+
+
 def _vars_by_name(client, ref=1):
     body = client.request("variables", {"variablesReference": ref})
     out = {}
@@ -375,11 +404,7 @@ def scn_classdef_prelude_launches(matlabc, program):
         os.path.dirname(os.path.abspath(program)),
         "dap_classdef_program.m",
     )
-    with DapClient(matlabc, cd_program) as c:
-        initialize_and_launch(c, stop_on_entry=False)
-        # No DapError from launch (would be "failed to compile program")
-        # and the program runs to completion.
-        c.wait_event("terminated", timeout=15.0)
+    _assert_launches_and_terminates(matlabc, cd_program)
 
 
 def scn_closure_launches(matlabc, program):
@@ -397,9 +422,26 @@ def scn_closure_launches(matlabc, program):
         os.path.dirname(os.path.abspath(program)),
         "dap_closure_program.m",
     )
-    with DapClient(matlabc, cl_program) as c:
-        initialize_and_launch(c, stop_on_entry=False)
-        c.wait_event("terminated", timeout=15.0)
+    _assert_launches_and_terminates(matlabc, cl_program)
+
+
+def scn_fixedpoint_launches(matlabc, program):
+    """Regression for #77: a `-dap` launch of a Fixed-Point Designer (`fi`)
+    program must compile + run (reach `terminated`).
+
+    Uses dap_fixedpoint_program.m (sibling fixture): fi constructors, a
+    scalar fi multiply, and the `(:)` clamp idiom. Before the "fi script
+    vars use the local-slot lane in JIT/-dap" fix, the ReplMode workspace
+    round-trip reloaded the integer-encoded value as a matrix ptr, so a
+    later fi op got `arith.shrsi(!llvm.ptr, i32)` (verifier failure) and
+    `launch` answered "failed to compile program". Reaching `terminated`
+    means every fi op lowered to integer arithmetic cleanly.
+    """
+    fi_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_fixedpoint_program.m",
+    )
+    _assert_launches_and_terminates(matlabc, fi_program)
 
 
 def scn_function_locals(matlabc, program):

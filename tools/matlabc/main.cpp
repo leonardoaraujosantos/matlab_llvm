@@ -11235,7 +11235,26 @@ int main(int Argc, char **Argv) {
   // pipeline instead of the scalar AST interpreter. Idempotent.
   matlab::flowchart::installMflowLinkJit();
   if (Opts.Mode == Options::Mode::Repl) return runRepl();
-  if (Opts.Mode == Options::Mode::Dap) return dap::runDap(Opts.InputPath);
+  if (Opts.Mode == Options::Mode::Dap) {
+    int Rc = dap::runDap(Opts.InputPath);
+    /* #77: a one-shot `-dap` session leaves an ORC-JIT compile thread
+     * that may still be lazily materializing a referenced-but-uncalled
+     * symbol in the background. Returning here runs the C++ static
+     * destructors, which tear down LLVM's global state (MCContext, the
+     * ExecutionSession) out from under that worker thread — it then
+     * SIGSEGVs in AsmPrinter/MCContext::getOrCreateSymbol at process
+     * exit (every program does this, e.g. fibonacci.m; the `terminated`
+     * event has already been delivered so the debug session itself is
+     * fine, but the process exits with signal 11 and races launch
+     * tests). The session is fully complete by now — all DAP frames and
+     * program output have been written — so flush and hard-exit,
+     * skipping the racy static teardown entirely. */
+    std::fflush(stdout);
+    std::fflush(stderr);
+    std::cout.flush();
+    std::cerr.flush();
+    std::_Exit(Rc);
+  }
 #else
   if (Opts.Mode == Options::Mode::Repl ||
       Opts.Mode == Options::Mode::Dap) {
