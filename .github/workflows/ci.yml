@@ -215,7 +215,10 @@ jobs:
   # on the PR HEAD and on the merge-base with main, runs the LAPACK +
   # Mandelbrot bench harness on both, and fails the lane if any kernel
   # regressed by more than the threshold (default 30%, set wide because
-  # shared-runner variance on GitHub Actions is ~10-15%).
+  # shared-runner variance on GitHub Actions is ~10-15%) AND by more than
+  # the absolute noise floor (--min-abs-ms, default 1.0ms) — the relative
+  # gate alone false-positives on the sub-2ms kernels (chol/solve/matmul)
+  # where timing jitter dwarfs 30% of ~1ms.  See issue #110.
   #
   # PR label `perf-allowed` downgrades the gate to informational — useful
   # when an intentional algorithmic change moves the numbers.  The full
@@ -330,6 +333,7 @@ jobs:
             --base /tmp/perf_base.json \
             --head /tmp/perf_head.json \
             --threshold 0.30 \
+            --min-abs-ms 1.0 \
             $ALLOW
 
       - name: Upload bench results
