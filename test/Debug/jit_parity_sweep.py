@@ -16,7 +16,9 @@ Outcome per example:
   LAUNCH    launch/compile failed ("failed to compile program" etc.)
   HANG      no `terminated` within the timeout
   CRASH     DAP server process died with a signal (SIGSEGV …)
-  SKIP      out of scope (HDL/flowchart/stateflow/sym/heavy-training)
+  SKIP      out of scope (HDL/flowchart/stateflow/sym/heavy-training;
+            AOT known-failures; function-/classdef-only files with no
+            runnable entry — parity is measured only vs what AOT handles)
 
 Usage: jit_parity_sweep.py <matlabc> [--only SUBSTR] [--timeout S] [--quiet]
 """
@@ -28,6 +30,28 @@ EXDIR = os.path.join(ROOT, "examples")
 sys.path.insert(0, HERE)
 from dap_client import DapClient, DapError, initialize_and_launch
 
+
+def _load_aot_known_failures():
+    """Examples the AOT (-emit-llvm) lane itself can't compile/link/run.
+    They are not JIT-vs-AOT divergences — this sweep only measures what
+    the AOT path handles — so they must be excluded, not counted as
+    LAUNCH failures. Mirrors test/Examples/known_failures.txt (the AOT
+    sweep's own baseline)."""
+    s = set()
+    path = os.path.join(ROOT, "test", "Examples", "known_failures.txt")
+    try:
+        with open(path, errors="ignore") as f:
+            for line in f:
+                rel = line.split("#", 1)[0].strip()
+                if rel:
+                    s.add(rel)
+    except OSError:
+        pass
+    return s
+
+
+AOT_KNOWN_FAILURES = _load_aot_known_failures()
+
 SKIP_DIRS = ("hdl/", "mflow/", "mflowlink/", "stateflow/", "verilog_a/")
 # Heavy training demos: documented TIMEOUTs even on the AOT lane.
 SKIP_HEAVY = {
@@ -35,11 +59,49 @@ SKIP_HEAVY = {
     "rl/pendulum_sac.m", "rl/countdown_grpo.m",
 }
 
+def _is_definition_only(path):
+    """True for a function-only / classdef-only file — its first non-blank,
+    non-comment line is `function` or `classdef`. Such a file has no
+    top-level script body, so there is nothing for `-dap` to launch and run
+    (MATLAB can't run a `function f(...)` file without a caller either; the
+    AOT lane marks these "no main entry"). A script that merely defines
+    trailing local functions starts with script code, so this stays False
+    for it. Handles `%{ %}` block comments."""
+    try:
+        in_block = False
+        with open(path, "r", errors="ignore") as f:
+            for raw in f:
+                s = raw.strip()
+                if not s:
+                    continue
+                if in_block:
+                    if s == "%}":
+                        in_block = False
+                    continue
+                if s == "%{":
+                    in_block = True
+                    continue
+                if s.startswith("%"):
+                    continue
+                tok = re.match(r"([A-Za-z_]\w*)", s)
+                return bool(tok and tok.group(1) in ("function", "classdef"))
+    except OSError:
+        pass
+    return False
+
+
 def skip_scope(rel, path):
     if any(rel.startswith(d) for d in SKIP_DIRS):
         return True
     if rel.endswith("_hdl.m") or rel in SKIP_HEAVY:
         return True
+    # Function-/classdef-only files have no runnable top-level entry, so
+    # there is nothing for -dap to launch (AOT marks these "no main entry").
+    if _is_definition_only(path):
+        return True
+    # AOT-known-failures are handled post-run: a JIT failure there is a
+    # matched non-divergence (-> SKIP), but a JIT *success* is a genuine
+    # win worth keeping visible (-> OK). See the runner below.
     try:
         with open(path, "r", errors="ignore") as f:
             head = "".join(f.readline() for _ in range(20))
@@ -117,6 +179,11 @@ def main():
             results[rel] = ("SKIP", "")
             continue
         status, detail = run_one(matlabc, path, timeout)
+        # AOT-known-failures aren't parity divergences. If the JIT also
+        # fails one, reclassify as SKIP (matched — not a JIT bug). If the
+        # JIT *succeeds*, keep the OK: it's a genuine JIT-beyond-AOT win.
+        if status != "OK" and rel in AOT_KNOWN_FAILURES:
+            status, detail = "SKIP", "AOT known-failure (matched)"
         results[rel] = (status, detail)
         if not quiet and status != "OK":
             print(f"  {status:7s} {rel}  {detail}")
