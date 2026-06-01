@@ -100,6 +100,13 @@ struct Shape {
   static Shape matrix(int64_t R, int64_t C) {
     Shape S; S.K = Rank::Matrix; S.Dims = {R, C}; return S;
   }
+  // Rank >= 3 array. Dims carries one entry per dimension (-1 = unknown
+  // extent). A rank-N constructor result (e.g. zeros(a,b,c)) must carry a
+  // *positive* NDArray rank so the clone-on-assign gate in Lowering keys off
+  // it to deep-copy the matlab_matN buffer on `B = A` (issue #102).
+  static Shape ndarray(std::vector<int64_t> Dims) {
+    Shape S; S.K = Rank::NDArray; S.Dims = std::move(Dims); return S;
+  }
 
   std::string toString() const;
 };

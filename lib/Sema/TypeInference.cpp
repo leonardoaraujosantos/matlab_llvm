@@ -1071,7 +1071,15 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
       int64_t N = foldInt(Args[1]);
       return TC.arrayOf(D, Shape::matrix(M, N));
     }
-    return TC.arrayOf(D, Shape::unknown());
+    // zeros/ones/...(d1, d2, d3, ...) with >= 3 scalar dim args is a rank-N
+    // array. Report a positive NDArray rank (one Dims entry per arg, -1 where
+    // the extent isn't a foldable constant) so the clone-on-assign gate in
+    // Lowering deep-copies the matlab_matN buffer on `B = A` (issue #102).
+    // Unknown rank was excluded from that gate, which let `B = A` alias.
+    std::vector<int64_t> Dims;
+    Dims.reserve(Args.size());
+    for (Expr *A : Args) Dims.push_back(foldInt(A));
+    return TC.arrayOf(D, Shape::ndarray(std::move(Dims)));
   };
 
   if (Name == "zeros" || Name == "ones" || Name == "eye" ||
