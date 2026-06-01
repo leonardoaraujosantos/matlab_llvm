@@ -132,21 +132,26 @@ fi
 check "axpy:default-run"  "$EXP" "$(run_lane "$AXPY" "" axdef)"
 check "axpy:outline-run"  "$EXP" "$(run_lane "$AXPY" "MATLAB_GPU_OUTLINE=1" axout)"
 
-# --- Test 2: unsupported-class kernel declines but stays correct. ------
+# --- Test 2: scalar-temp + nested-loop kernel (Mandelbrot) outlines. ---
+# The canonical coder.gpu.kernelfun demo: nested for-loops, a while
+# loop, scalar temporaries (cr/zr/zi/k) and an output array.  The
+# outliner clones each scalar slot per-invocation (seeded from its outer
+# value) and shares the array slot, so it lifts into a real
+# __gpu_kernel_N and runs bit-exact vs the default lane.
 MB="$TESTDIR/gpu_mandelbrot.m"
 MBEXP="$(cat "$TESTDIR/gpu_mandelbrot.stdout" 2>/dev/null || echo 'mandelbrot checksum = 6336')"
 
-# 2a. The outline lane must NOT emit a kernel (it declines to the rewrite).
+# 2a. The outline lane must emit a kernel.
 if MATLAB_GPU_OUTLINE=1 "$MATLABC" -emit-llvm "$MB" 2>/dev/null \
      | grep -q "define void @__gpu_kernel"; then
-  echo "FAIL mandelbrot:declines — unexpectedly outlined a scalar-temp kernel"
-  fail=$((fail+1))
-else
-  echo "PASS mandelbrot:declines (falls back to matlab.for rewrite)"
+  echo "PASS mandelbrot:outlined (scalar temps cloned, array shared)"
   pass=$((pass+1))
+else
+  echo "FAIL mandelbrot:outlined — no __gpu_kernel_N in MATLAB_GPU_OUTLINE=1 IR"
+  fail=$((fail+1))
 fi
 
-# 2b. Both lanes still run and agree.
+# 2b. Both lanes run and agree.
 check "mandelbrot:default-run" "$MBEXP" "$(run_lane "$MB" "" mbdef)"
 check "mandelbrot:outline-run" "$MBEXP" "$(run_lane "$MB" "MATLAB_GPU_OUTLINE=1" mbout)"
 
