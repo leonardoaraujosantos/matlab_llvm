@@ -3413,6 +3413,46 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Changed = true;
       continue;
     }
+    /* Rank>=5 scalar store: matlab_subscriptN_pstore_s(base, i1..iN, v).
+     * Pack the N indices into a stack int64_t[] and call the variadic
+     * runtime helper matlab_subscriptN_pstore_s(void*, int64_t nidx,
+     * const int64_t*, double v), which is generic to 16 dims.  #93. */
+    if (Name == "matlab_subscriptN_pstore_s" &&
+        Call->getNumOperands() >= 7 &&
+        Call->getOperand(0).getType() == PtrTy) {
+      unsigned NOps = Call->getNumOperands();
+      unsigned NIdx = NOps - 2;
+      bool Ok = (Call->getOperand(NOps - 1).getType() == F64);
+      for (unsigned k = 1; Ok && k <= NIdx; ++k)
+        if (Call->getOperand(k).getType() != F64) Ok = false;
+      if (Ok) {
+        B.setInsertionPoint(Call);
+        Location Loc = Call->getLoc();
+        Value Base = Call->getOperand(0);
+        Value Rhs = Call->getOperand(NOps - 1);
+        Value One = LLVM::ConstantOp::create(B, Loc, I64, B.getI64IntegerAttr(1));
+        auto ArrayTy = LLVM::LLVMArrayType::get(I64, NIdx);
+        Value Buf = LLVM::AllocaOp::create(B, Loc, PtrTy, ArrayTy, One,
+                                            /*alignment=*/0);
+        for (unsigned k = 0; k < NIdx; ++k) {
+          Value Iv = arith::FPToSIOp::create(B, Loc, I64,
+                                              Call->getOperand(k + 1));
+          Value Idx = LLVM::ConstantOp::create(B, Loc, I64,
+                                                B.getI64IntegerAttr(k));
+          Value ElemPtr = LLVM::GEPOp::create(B, Loc, PtrTy, I64, Buf,
+                                               ValueRange{Idx});
+          LLVM::StoreOp::create(B, Loc, Iv, ElemPtr);
+        }
+        Value NIdxV = LLVM::ConstantOp::create(B, Loc, I64,
+                                                B.getI64IntegerAttr(NIdx));
+        auto Fn = rt("matlab_subscriptN_pstore_s", VoidTy,
+                     {PtrTy, I64, PtrTy, F64});
+        LLVM::CallOp::create(B, Loc, Fn, ValueRange{Base, NIdxV, Buf, Rhs});
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+    }
     /* A(:, :, k) = scalar  -> matlab_subscript3_pstore_s(A, k, v). */
     if (Name == "matlab_subscript3_pstore_s" &&
         Call->getNumOperands() == 3 &&
@@ -8510,8 +8550,9 @@ bool TensorLowering::rewriteSubscript() {
   for (Operation *Op : Subs) {
     unsigned N = Op->getNumOperands();
     /* Accept N=2 (one index), N=3 (two indices), N=5 (four indices — Tier C
-     * rank-4 fast path).  Higher arities still fall through. */
-    if (N != 2 && N != 3 && N != 5) continue;
+     * rank-4 fast path), and N>=6 (five-plus indices — rank>=5 variadic
+     * path, #93). */
+    if (N != 2 && N != 3 && N != 5 && N < 6) continue;
     /* Base may be PtrTy (matlab_mat / matlab_mat3 / matlab_matN pointer)
      * or `tensor<*xf64>` from the early-tracking lane.  Both reach the
      * runtime as a plain pointer. */
@@ -8532,7 +8573,32 @@ bool TensorLowering::rewriteSubscript() {
     // All scalar + scalar f64 result => fast path, per-element access.
     if (AllScalar && Op->getNumResults() == 1 &&
         Op->getResult(0).getType() == F64) {
-      if (N == 5) {
+      if (N >= 6) {
+        /* A(i,j,k,l,m[,...]) — rank>=5.  Pack the N-1 scalar indices into a
+         * stack int64_t[] and call the variadic runtime helper
+         * matlab_subscriptN_s(base, nidx, idx_ptr), which is generic to
+         * 16 dims and falls back to lower-rank descriptors.  #93. */
+        Location Loc = Op->getLoc();
+        unsigned NIdx = N - 1;
+        Value One = LLVM::ConstantOp::create(B, Loc, I64, B.getI64IntegerAttr(1));
+        auto ArrayTy = LLVM::LLVMArrayType::get(I64, NIdx);
+        Value Buf = LLVM::AllocaOp::create(B, Loc, PtrTy, ArrayTy, One,
+                                            /*alignment=*/0);
+        for (unsigned k = 0; k < NIdx; ++k) {
+          Value Iv = arith::FPToSIOp::create(B, Loc, I64, Op->getOperand(k + 1));
+          Value Idx = LLVM::ConstantOp::create(B, Loc, I64,
+                                                B.getI64IntegerAttr(k));
+          Value ElemPtr = LLVM::GEPOp::create(B, Loc, PtrTy, I64, Buf,
+                                               ValueRange{Idx});
+          LLVM::StoreOp::create(B, Loc, Iv, ElemPtr);
+        }
+        Value NIdxV = LLVM::ConstantOp::create(B, Loc, I64,
+                                                B.getI64IntegerAttr(NIdx));
+        auto Fn = rt("matlab_subscriptN_s", F64, {PtrTy, I64, PtrTy});
+        auto NC = LLVM::CallOp::create(B, Loc, Fn,
+                                        ValueRange{Base, NIdxV, Buf});
+        Op->getResult(0).replaceAllUsesWith(NC.getResult());
+      } else if (N == 5) {
         /* A(i,j,k,l) on a rank-4 (or higher with implicit trailing dims)
          * array.  Routes through matlab_subscript4_s, which is N-D-aware
          * and falls back to 2-D / 3-D when the descriptor is narrower. */
@@ -8560,6 +8626,11 @@ bool TensorLowering::rewriteSubscript() {
       Changed = true;
       continue;
     }
+
+    /* Slice (non-scalar index) forms for rank>=5 are out of scope (#93
+     * covers scalar element access).  Leave the subscript unconverted
+     * rather than mis-lower it to a 1-D/2-D slice. */
+    if (N >= 6) continue;
 
     // Slow path: any non-scalar index -> matlab_slice{1,2}.
     // Each index needs to reach the runtime as a ptr (row-vector of 1-based

@@ -32,10 +32,8 @@ A2(1, 2, 3, 4) = 23;
 fprintf('array_tierc: A2(1,1,1,1)=%.0f A2(2,3,4,5)=%.0f A2(1,2,3,4)=%.0f\n', ...
         A2(1, 1, 1, 1), A2(2, 3, 4, 5), A2(1, 2, 3, 4));
 
-% Rank-5 construction works; per-element store/read is exercised via
-% the rank-4 path above (the rank-N subscript follows the same shape
-% for arities >= 4 — separate gating test once a variadic Lowering
-% arm wires the index vector).
+% Rank-5 construction works here; per-element store/read for arities >= 5
+% is covered by the variadic Lowering arm in array_tierc_rank5.m (#93).
 
 % reshape(A, d1,d2,d3,d4) -> rank-4 result.  Source can be any rank;
 % here we start from a 2x12 (24 elements) and reshape to 2x3x2x2.
