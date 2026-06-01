@@ -13188,7 +13188,9 @@ int main(int Argc, char **Argv) {
              << "    std::exit(1); }\n"
              << "}\n\n"
              << "int main(int argc, char **argv) {\n"
-             << "  int n = argc > 1 ? std::atoi(argv[1]) : 16;\n"
+             // `mlc_n` (not `n`) to avoid colliding with a scalar capture
+             // literally named `n` (e.g. Mandelbrot's grid size).
+             << "  int mlc_n = argc > 1 ? std::atoi(argv[1]) : 16;\n"
              << "  ck(cuInit(0), \"init\");\n"
              << "  CUdevice dev; ck(cuDeviceGet(&dev, 0), \"device\");\n"
              << "  int major = 0, minor = 0;\n"
@@ -13223,25 +13225,41 @@ int main(int Argc, char **Argv) {
                 "\"module\");\n"
              << "  CUfunction fn; ck(cuModuleGetFunction(&fn, mod, \""
              << GpuInfo.name << "\"), \"function\");\n"
+             << "  size_t total = "
+             << (GpuInfo.twoD ? "(size_t)mlc_n * mlc_n" : "(size_t)mlc_n")
+             << ";\n"
              << "  CUdeviceptr d_out;\n"
-             << "  ck(cuMemAlloc(&d_out, (size_t)n * sizeof(double)), "
-                "\"alloc\");\n";
-          /* Demo scalar captures. */
+             << "  ck(cuMemAlloc(&d_out, total * sizeof(double)), \"alloc\");\n";
+          /* Demo scalar captures (const double in the kernel signature). */
           for (const auto &s : GpuInfo.scalarArgs)
-            OF << "  double " << s << " = 2.0;\n";
-          OF << "  int n_grid = n;\n"
-             << "  void *args[] = { &d_out";
-          for (const auto &s : GpuInfo.scalarArgs) OF << ", &" << s;
-          OF << ", &n_grid };\n"
-             << "  int block = 256, grid = (n + block - 1) / block;\n"
-             << "  ck(cuLaunchKernel(fn, grid, 1, 1, block, 1, 1, 0, 0, "
-                "args, 0), \"launch\");\n"
-             << "  ck(cuCtxSynchronize(), \"sync\");\n"
-             << "  std::vector<double> h_out(n);\n"
+            OF << "  double " << s << " = (double)mlc_n;  /* demo capture */\n";
+          if (GpuInfo.twoD) {
+            /* 2-D flattened grid: out, captures, then nrows + ncols. */
+            OF << "  int nrows = mlc_n, ncols = mlc_n;\n"
+               << "  void *args[] = { &d_out";
+            for (const auto &s : GpuInfo.scalarArgs) OF << ", &" << s;
+            OF << ", &nrows, &ncols };\n"
+               << "  unsigned bx = 16, by = 16;\n"
+               << "  unsigned gx = (mlc_n + bx - 1) / bx, "
+                  "gy = (mlc_n + by - 1) / by;\n"
+               << "  ck(cuLaunchKernel(fn, gx, gy, 1, bx, by, 1, 0, 0, "
+                  "args, 0), \"launch\");\n";
+          } else {
+            OF << "  int n_grid = mlc_n;\n"
+               << "  void *args[] = { &d_out";
+            for (const auto &s : GpuInfo.scalarArgs) OF << ", &" << s;
+            OF << ", &n_grid };\n"
+               << "  int block = 256, grid = (mlc_n + block - 1) / block;\n"
+               << "  ck(cuLaunchKernel(fn, grid, 1, 1, block, 1, 1, 0, 0, "
+                  "args, 0), \"launch\");\n";
+          }
+          OF << "  ck(cuCtxSynchronize(), \"sync\");\n"
+             << "  std::vector<double> h_out(total);\n"
              << "  ck(cuMemcpyDtoH(h_out.data(), d_out, "
-                "(size_t)n * sizeof(double)), \"d2h\");\n"
-             << "  for (int i = 0; i < n; ++i) std::printf(\"%g\\n\", "
-                "h_out[i]);\n"
+                "total * sizeof(double)), \"d2h\");\n"
+             << "  double sum = 0;\n"
+             << "  for (size_t i = 0; i < total; ++i) sum += h_out[i];\n"
+             << "  std::printf(\"" << Stem << ": checksum = %.4f\\n\", sum);\n"
              << "  cuMemFree(d_out);\n"
              << "  return 0;\n"
              << "}\n";
@@ -13402,7 +13420,9 @@ int main(int Argc, char **Argv) {
              << "#define CL_PROGRAM_BUILD_LOG 0x1183\n"
              << "#endif\n\n"
              << "int main(int argc, char **argv) {\n"
-             << "  int n = argc > 1 ? std::atoi(argv[1]) : 16;\n"
+             // `mlc_n` (not `n`) to avoid colliding with a scalar capture
+             // literally named `n` (e.g. Mandelbrot's grid size).
+             << "  int mlc_n = argc > 1 ? std::atoi(argv[1]) : 16;\n"
              << "  cl_platform_id plat; cl_uint np = 0;\n"
              << "  if (clGetPlatformIDs(1, &plat, &np) != 0 || np == 0) {\n"
              << "    std::fprintf(stderr, \"no OpenCL platform\\n\"); return 1; }\n"
@@ -13431,27 +13451,41 @@ int main(int Argc, char **Argv) {
                 "return 1; }\n"
              << "  cl_kernel kernel = clCreateKernel(prog, \"" << GpuInfo.name
              << "\", &err);\n"
+             << "  size_t total = "
+             << (GpuInfo.twoD ? "(size_t)mlc_n * mlc_n" : "(size_t)mlc_n")
+             << ";\n"
              << "  cl_mem d_out = clCreateBuffer(ctx, CL_MEM_READ_WRITE, "
-                "(size_t)n * sizeof(double), 0, &err);\n";
+                "total * sizeof(double), 0, &err);\n";
           for (const auto &s : GpuInfo.scalarArgs)
-            OF << "  double " << s << " = 2.0;\n";
-          OF << "  int n_grid = n;\n"
+            OF << "  double " << s << " = (double)mlc_n;  /* demo capture */\n";
+          /* The 2-D kernel keeps the trailing n_grid arg (unused in the
+           * body — the leading dim comes from get_global_size(1)), so the
+           * argument list is identical for 1-D and 2-D; only the NDRange
+           * dimensionality and the buffer size differ. */
+          OF << "  int n_grid = mlc_n;\n"
              << "  cl_uint ai = 0;\n"
              << "  clSetKernelArg(kernel, ai++, sizeof(cl_mem), &d_out);\n";
           for (const auto &s : GpuInfo.scalarArgs)
             OF << "  clSetKernelArg(kernel, ai++, sizeof(double), &" << s
                << ");\n";
-          OF << "  clSetKernelArg(kernel, ai++, sizeof(int), &n_grid);\n"
-             << "  size_t gws = (size_t)n;\n"
-             << "  cl_int le = clEnqueueNDRangeKernel(queue, kernel, 1, 0, &gws, "
-                "0, 0, 0, 0);\n"
-             << "  clFinish(queue);\n"
+          OF << "  clSetKernelArg(kernel, ai++, sizeof(int), &n_grid);\n";
+          if (GpuInfo.twoD)
+            OF << "  size_t gws[2] = { (size_t)mlc_n, (size_t)mlc_n };\n"
+               << "  cl_int le = clEnqueueNDRangeKernel(queue, kernel, 2, 0, "
+                  "gws, 0, 0, 0, 0);\n";
+          else
+            OF << "  size_t gws = (size_t)mlc_n;\n"
+               << "  cl_int le = clEnqueueNDRangeKernel(queue, kernel, 1, 0, "
+                  "&gws, 0, 0, 0, 0);\n";
+          OF << "  clFinish(queue);\n"
              << "  if (le != 0) { std::fprintf(stderr, \"launch rc=%d\\n\", le); "
                 "return 1; }\n"
-             << "  double *h_out = new double[n];\n"
+             << "  double *h_out = new double[total];\n"
              << "  clEnqueueReadBuffer(queue, d_out, CL_TRUE, 0, "
-                "(size_t)n * sizeof(double), h_out, 0, 0, 0);\n"
-             << "  for (int i = 0; i < n; ++i) std::printf(\"%g\\n\", h_out[i]);\n"
+                "total * sizeof(double), h_out, 0, 0, 0);\n"
+             << "  double sum = 0;\n"
+             << "  for (size_t i = 0; i < total; ++i) sum += h_out[i];\n"
+             << "  std::printf(\"" << Stem << ": checksum = %.4f\\n\", sum);\n"
              << "  delete[] h_out;\n"
              << "  return 0;\n"
              << "}\n";
