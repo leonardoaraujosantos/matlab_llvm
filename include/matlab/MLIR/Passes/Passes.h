@@ -186,6 +186,18 @@ unsigned runForwardParforCaptures(mlir::ModuleOp M);
 /// sequential loop calling the outlined function directly.
 unsigned runOutlineGpuKernels(mlir::ModuleOp M);
 
+/// Late phase of the GPU outliner (issue #24, "real array-capture
+/// outliner").  Runs AFTER LowerTensorOps, when captured arrays are
+/// already `!llvm.ptr` to `matlab_mat` descriptors and scalars are
+/// arith/llvm values — so the kernel body can be lifted into a
+/// standalone `llvm.func` with plain pointer/scalar state, no
+/// `unrealized_conversion_cast` at the tensor↔ptr boundary (the gap
+/// that defeated the pre-lowering outliner).  Only fires under
+/// `MATLAB_GPU_OUTLINE=1`; consumes the `matlab.gpu.kernel` ops that
+/// `runOutlineGpuKernels` tagged `matlab.gpu.outline` and left in
+/// place.  Returns the number of kernels outlined.
+unsigned runOutlineGpuKernelsLate(mlir::ModuleOp M);
+
 /// Emit Metal Shading Language (MSL) source for every matlab.gpu.kernel
 /// op in `M`.  Returns the combined source string with one MSL
 /// `kernel void` function per op.  Walks read-only (does not mutate

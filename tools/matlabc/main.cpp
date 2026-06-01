@@ -910,6 +910,18 @@ static void runJitSoftwareLowering(mlir::ModuleOp M) {
     if (!Pb) break;
   }
   runLowerTensorOps(M);
+  // LATE GPU outline (issue #24) — see the AOT path for rationale.
+  if (runOutlineGpuKernelsLate(M)) {
+    runRefineSlotTypes(M);
+    runLowerSeqLoops(M);
+    runLowerTensorOps(M);
+    for (int Iter = 0; Iter < 4; ++Iter) {
+      bool A = runLowerScalarsToArith(M);
+      bool B = runLowerUserCalls(M);
+      if (!A && !B) break;
+    }
+    runLowerTensorOps(M);
+  }
   // Second LowerFixedPoint sweep — picks up matlab_mat_*_slice1 / _concat_row
   // sites that needed their tensor operand retyped to ptr first.
   runLowerFixedPoint(M);
@@ -13755,6 +13767,27 @@ int main(int Argc, char **Argv) {
           }
         }
         mlirgen::runLowerTensorOps(M);
+        // LATE GPU outline (issue #24): any matlab.gpu.kernel the early
+        // runOutlineGpuKernels CLAIMED (MATLAB_GPU_OUTLINE=1) was left in
+        // place — array captures are now `ptr` to matlab_mat and scalar
+        // slots are `llvm.alloca`, so the body lifts into a standalone
+        // llvm.func with plain pointer/scalar state (no tensor↔ptr cast).
+        // The lowering passes above do NOT descend into the kernel region
+        // (an unregistered op), so the lifted body can still hold
+        // matlab.for / matlab.load / matlab.store ops; re-run the seq-loop
+        // + tensor + scalar fixpoint so they lower now that the body lives
+        // in a real func.
+        if (mlirgen::runOutlineGpuKernelsLate(M)) {
+          mlirgen::runRefineSlotTypes(M);
+          mlirgen::runLowerSeqLoops(M);
+          mlirgen::runLowerTensorOps(M);
+          for (int Iter = 0; Iter < 4; ++Iter) {
+            bool A = mlirgen::runLowerScalarsToArith(M);
+            bool B = mlirgen::runLowerUserCalls(M);
+            if (!A && !B) break;
+          }
+          mlirgen::runLowerTensorOps(M);
+        }
         // Second LowerFixedPoint sweep — picks up matlab.call_builtin
         // @matlab_mat_*_slice1 / _concat_row sites that needed their
         // tensor operand retyped to ptr by LowerTensorOps first.

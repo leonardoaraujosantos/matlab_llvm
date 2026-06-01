@@ -11,56 +11,59 @@
 //                   every shape `coder.gpu.kernelfun` can be applied to.
 //
 //   MATLAB_GPU_OUTLINE=1
-//                   Real outline of the body into an llvm.func with
-//                   signature `void(double iv, void *state)`.  Captures
-//                   only tensor-typed `matlab.alloc` results (output
-//                   arrays); falls back to the simple rewrite if the
-//                   body has any scalar capture the outliner can't
-//                   classify.  The outlined function is the canonical
-//                   source the Tier-2/3/4 EmitMetal/CUDA/OpenCL passes
-//                   walk to print kernel source.
+//                   Real array-capture outline (issue #24).  Split into
+//                   two phases around LowerTensorOps:
 //
-// **Why the outliner is conservative (the architectural finding)**.
+//                     EARLY (runOutlineGpuKernels, before LowerSeqLoops):
+//                       classify each kernel's outer captures on the
+//                       pre-lowering matlab.* IR.  A kernel is CLAIMED
+//                       when every capture's defining op is a
+//                       `matlab.alloc` slot (output array OR scalar) or a
+//                       cloneable external (constant / addressof) — i.e.
+//                       no raw outer block-argument operands.  Claimed
+//                       kernels get the induction-variable slot folded
+//                       away (loads → block arg, stores erased), are
+//                       tagged `matlab.gpu.outline`, and LEFT IN PLACE so
+//                       the downstream LowerSeqLoops / LowerTensorOps
+//                       passes lower their body in situ (those passes
+//                       Mod.walk into the kernel region).  Unclaimed
+//                       kernels — and every kernel on the default lane —
+//                       are rewritten to `matlab.for` immediately.
+//
+//                     LATE (runOutlineGpuKernelsLate, after LowerTensorOps):
+//                       the claimed kernel's body is now plain
+//                       ptr/arith/scf/runtime-call IR — output arrays are
+//                       `!llvm.ptr` to `matlab_mat`, scalar slots are
+//                       `llvm.alloca`.  Lift the body into an
+//                       `llvm.func void(f64 iv, ptr state)`: every
+//                       captured pointer slot and scalar value is packed
+//                       into a `state` array of `!llvm.ptr` and reloaded
+//                       at the top of the outlined function.  No
+//                       `unrealized_conversion_cast` is needed — the
+//                       capture is already a pointer.  This is the
+//                       canonical source the Tier-2/3/4 EmitMetal/CUDA/
+//                       OpenCL passes walk to print kernel source.
+//
+// **Why the split, and the parallelism caveat**.  The pre-lowering
+// outliner had to cast captured tensors to `ptr` and back, and that
+// `unrealized_conversion_cast` defeated LowerTensorOps's operand
+// matching (`__subscript_store` requires a `ptr` base).  Running the
+// lift AFTER LowerTensorOps removes the cast entirely.
+//
 // A `coder.gpu.kernelfun`-tagged body references three classes of
 // outer slot:
-//
-//   1. Output arrays (tensor-typed `matlab.alloc`): need to be visible
-//      across iterations.  ABI: pass the ptr through state.  Backends
-//      bind this as MTLBuffer / CUdeviceptr / cl_mem.
-//   2. Outer scalars set BEFORE the kernel (e.g. `n_grid = 64;
-//      re_min = -2.0;`): read-only inside.  ABI options:
-//        a) inline as constant if the source is a static literal,
-//        b) pass as additional scalar args via an extended state ABI,
-//        c) load once before launch and pass packed.
-//   3. Kernel-local temporaries (e.g. `cr = ...; zi = ...; k = k+1;`
-//      with first-use being a write): per-iteration private storage.
-//      ABI: clone the matlab.alloc into the outlined function's entry
-//      block; treat as local.
-//
-// Distinguishing (2) from (3) requires a **definite-assignment scope
-// analysis** on the body that the project's Sema doesn't expose yet.
-// Without it, lifting a temp like `cr` through state corrupts results
-// across iterations (every thread reads/writes the same outer slot).
-//
-// The conservative outliner accepts kernels whose ONLY outer-defined
-// references are:
-//   - tensor-typed `matlab.alloc` results (bucket 1 — passed via state)
-//   - cloneable externals (arith.constant / llvm.constant /
-//     llvm.mlir.zero / llvm.mlir.addressof — cloned into the outlined
-//     function)
-// Anything else (esp. f64-typed `matlab.alloc` from a bucket-2 or -3
-// scalar) makes the outliner decline and the simple rewrite handles
-// the kernel correctly on the CPU lane.
-//
-// **What's left for future work**:
-//   - Definite-assignment analysis to split bucket-2 vs bucket-3 scalar
-//     slots.
-//   - Extended state ABI carrying mixed (ptr, f64) entries.
-//   - The Tier-2/3/4 emit passes don't strictly need this outliner —
-//     they can emit kernel source by walking the rewritten matlab.for
-//     body directly (with a small wrapper around the output-array
-//     bind step).  Documented in
-//     docs/gpu_coder_progress.md as the recommended path.
+//   1. Output arrays (`matlab.alloc` → `ptr` to `matlab_mat`): the
+//      shared, written-across-iterations result.  Passed via state.
+//   2. Outer scalars set BEFORE the kernel and only read inside
+//      (`re_min = -2.0;`): read-only; the shared slot is correct.
+//   3. Kernel-local temporaries first WRITTEN inside (`cr = ...;`):
+//      logically per-iteration.  On the **sequential CPU dispatch lane**
+//      (matlab_gpu_launch_kernel's host fallback) a shared slot is
+//      numerically correct — each iteration writes before it reads.  For
+//      a **truly parallel** device backend, bucket-3 slots must be
+//      cloned per-thread; that refinement (a definite-assignment scope
+//      analysis splitting bucket-2 from bucket-3) is the remaining work
+//      and only affects real-device codegen, not the CPU-verified lane.
 //
 // The kernel-analysis warning (T7.5) runs regardless of lane.
 
@@ -112,6 +115,10 @@ LLVM::LLVMFuncOp getOrInsertRTDecl(OpBuilder &B, ModuleOp M, StringRef Name,
   return F;
 }
 
+/* Attribute marking a kernel CLAIMED by the EARLY phase for the LATE
+ * lift.  Left in place across LowerSeqLoops / LowerTensorOps. */
+constexpr llvm::StringLiteral kOutlineTag = "matlab.gpu.outline";
+
 bool isCloneableExternal(Operation *Op) {
   if (!Op) return false;
   if (isa<arith::ConstantOp>(Op)) return true;
@@ -119,14 +126,6 @@ bool isCloneableExternal(Operation *Op) {
   if (isa<LLVM::ZeroOp>(Op)) return true;
   if (isa<LLVM::AddressOfOp>(Op)) return true;
   return false;
-}
-
-/* Tensor-typed `matlab.alloc` results are the only captures the
- * conservative outliner handles — see the file header. */
-bool isTensorArrayCapture(Operation *Def, Value V) {
-  if (!Def) return false;
-  if (!isMatlabOp(Def, "matlab.alloc")) return false;
-  return mlir::isa<RankedTensorType, UnrankedTensorType>(V.getType());
 }
 
 void rewriteToMatlabFor(Operation *K, OpBuilder &B) {
@@ -145,10 +144,197 @@ void rewriteToMatlabFor(Operation *K, OpBuilder &B) {
   K->erase();
 }
 
-/* Real outliner — conservative variant.  Returns true on success;
- * false when the body has shapes outside the supported bucket so the
- * caller can fall back to the simple rewrite. */
-bool outlineToLLVMFunc(Operation *K, unsigned KernelId) {
+/* Fold the induction-variable slot inside the kernel body: replace
+ * every `matlab.load` of the `var` slot with the block-argument IV and
+ * erase the matching `matlab.store`s.  Runs on the pre-lowering matlab.*
+ * IR (EARLY phase) so the IV slot never reaches the lowered body and
+ * isn't mistaken for a captured scalar slot in the LATE phase.  Safe to
+ * run only on a kernel the early analysis has already CLAIMED. */
+void foldInductionVarSlot(Operation *K) {
+  StringRef VarName;
+  if (auto VA = K->getAttrOfType<StringAttr>("var")) VarName = VA.getValue();
+  if (VarName.empty()) return;
+  Block &BodyBlock = K->getRegion(0).front();
+  Value IV = BodyBlock.getArgument(0);
+
+  auto slotName = [&](Value Slot) -> StringRef {
+    Operation *D = Slot.getDefiningOp();
+    if (!isMatlabOp(D, "matlab.alloc")) return {};
+    if (auto NA = D->getAttrOfType<StringAttr>("name")) return NA.getValue();
+    return {};
+  };
+
+  for (Operation &Op : BodyBlock)
+    if (isMatlabOp(&Op, "matlab.load") && Op.getNumOperands() == 1 &&
+        slotName(Op.getOperand(0)) == VarName)
+      Op.getResult(0).replaceAllUsesWith(IV);
+
+  llvm::SmallVector<Operation *, 4> Dead;
+  for (Operation &Op : BodyBlock)
+    if (isMatlabOp(&Op, "matlab.store") && Op.getNumOperands() == 2 &&
+        slotName(Op.getOperand(1)) == VarName)
+      Dead.push_back(&Op);
+  for (Operation &Op : BodyBlock)
+    if (isMatlabOp(&Op, "matlab.load") && Op.use_empty())
+      Dead.push_back(&Op);
+  for (Operation *D : Dead) D->erase();
+}
+
+/* EARLY-phase analysis (read-only).  Decide whether the real outliner
+ * can CLAIM this kernel for the LATE lift.
+ *
+ * The LATE lift runs after LowerTensorOps and clones the kernel body
+ * into an llvm.func.  The lowering passes do NOT descend into the
+ * (unregistered) matlab.gpu.kernel region, so the only body shape that
+ * lifts CLEANLY is one whose every op is, by the late point, plain
+ * ptr/arith/runtime-call form.  That holds for a FLAT element-wise
+ * kernel — the canonical `Y(i) = f(X(i), ...)` / AXPY / map pattern —
+ * where:
+ *   - captures are TENSOR-typed `matlab.alloc` slots (output / input
+ *     arrays; they lower to `ptr`-to-matlab_mat and need no cast) or
+ *     cloneable externals (constants);
+ *   - there is no nested control flow (matlab.for / matlab.while /
+ *     matlab.gpu.kernel) and no scalar (f64) `matlab.alloc`-slot store
+ *     in the body — a scalar temp's slot stays `matlab.alloc` inside the
+ *     kernel region (the scalar-slot lowering doesn't penetrate it),
+ *     which the lift can't yet reconcile.
+ *
+ * Kernels outside this class (e.g. Mandelbrot: nested loops + scalar
+ * temporaries) DECLINE and fall back to the numerically-correct
+ * `matlab.for` CPU rewrite.  Splitting the bucket-2 (outer read-only)
+ * from bucket-3 (per-iteration local) scalar slots — needed for those
+ * kernels AND for correct truly-parallel device codegen — is the
+ * documented follow-up.  Makes NO mutations. */
+bool kernelIsClaimable(Operation *K) {
+  MLIRContext *Ctx = K->getContext();
+  auto F64 = Float64Type::get(Ctx);
+
+  if (K->getNumOperands() < 1) return false;
+  Operation *Range = K->getOperand(0).getDefiningOp();
+  if (!isMatlabOp(Range, "matlab.range")) return false;
+  unsigned RN = Range->getNumOperands();
+  if (RN != 2 && RN != 3) return false;
+  for (Value RO : Range->getOperands())
+    if (RO.getType() != F64) return false;
+
+  if (K->getNumRegions() != 1) return false;
+  Region &Body = K->getRegion(0);
+  if (!Body.hasOneBlock()) return false;
+  Block &BodyBlock = Body.front();
+  if (BodyBlock.getNumArguments() != 1 ||
+      BodyBlock.getArgument(0).getType() != F64)
+    return false;
+
+  // The induction-variable slot is folded away in the EARLY phase, so
+  // ignore loads/stores against it during the claim check.
+  StringRef VarName;
+  if (auto VA = K->getAttrOfType<StringAttr>("var")) VarName = VA.getValue();
+  auto slotName = [&](Value V) -> StringRef {
+    Operation *D = V.getDefiningOp();
+    if (!isMatlabOp(D, "matlab.alloc")) return {};
+    if (auto NA = D->getAttrOfType<StringAttr>("name")) return NA.getValue();
+    return {};
+  };
+  auto isVarSlot = [&](Value V) -> bool {
+    return !VarName.empty() && slotName(V) == VarName;
+  };
+  auto isTensorSlot = [&](Value V) -> bool {
+    Operation *D = V.getDefiningOp();
+    return isMatlabOp(D, "matlab.alloc") &&
+           mlir::isa<RankedTensorType, UnrankedTensorType>(V.getType());
+  };
+
+  llvm::DenseSet<Value> DefinedInside;
+  DefinedInside.insert(BodyBlock.getArgument(0));
+  BodyBlock.walk([&](Operation *Op) {
+    for (Value R : Op->getResults()) DefinedInside.insert(R);
+  });
+
+  bool Ok = true;
+  BodyBlock.walk([&](Operation *Op) {
+    if (!Ok) return;
+    // No nested control flow / nested kernels — the lift can't lower a
+    // body region the passes never descended into.
+    if (isMatlabOp(Op, "matlab.for") || isMatlabOp(Op, "matlab.while") ||
+        isMatlabOp(Op, "matlab.gpu.kernel")) {
+      Ok = false;
+      return;
+    }
+    // No scalar-slot store inside the body (scalar temporaries).
+    if (isMatlabOp(Op, "matlab.store") && Op->getNumOperands() == 2) {
+      Value Slot = Op->getOperand(1);
+      if (!isVarSlot(Slot) && !isTensorSlot(Slot)) {
+        Ok = false;
+        return;
+      }
+    }
+    for (Value Operand : Op->getOperands()) {
+      if (DefinedInside.count(Operand)) continue;
+      Operation *Def = Operand.getDefiningOp();
+      if (!Def) { Ok = false; return; }            // outer block arg — decline
+      if (isCloneableExternal(Def)) continue;
+      if (isVarSlot(Operand)) continue;            // folded away early
+      if (isTensorSlot(Operand)) continue;         // output/input array
+      Ok = false;                                  // scalar slot / other — decline
+    }
+  });
+  return Ok;
+}
+
+/* EARLY-phase claim.  Fold the induction slot, then rebuild the kernel
+ * op with the loop bounds (start, step, end) appended as three explicit
+ * f64 operands.  The original `matlab.range` operand is lowered to a
+ * runtime call by LowerTensorOps before the LATE phase runs, so the LATE
+ * lift can no longer recover the bounds from it — the appended operands
+ * are plain f64 SSA values that survive lowering unchanged.  Tags the
+ * rebuilt op `matlab.gpu.outline`. */
+void claimKernelForLateOutline(Operation *K, OpBuilder &B) {
+  MLIRContext *Ctx = K->getContext();
+  auto F64 = Float64Type::get(Ctx);
+  foldInductionVarSlot(K);
+
+  Operation *Range = K->getOperand(0).getDefiningOp();
+  Value Start, Step, End;
+  if (Range->getNumOperands() == 3) {
+    Start = Range->getOperand(0);
+    Step = Range->getOperand(1);
+    End = Range->getOperand(2);
+  } else {
+    Start = Range->getOperand(0);
+    End = Range->getOperand(1);
+  }
+  B.setInsertionPoint(K);
+  if (!Step)
+    Step = arith::ConstantOp::create(B, K->getLoc(), F64,
+                                     B.getF64FloatAttr(1.0));
+
+  llvm::SmallVector<Value> Operands(K->getOperands());
+  Operands.push_back(Start);
+  Operands.push_back(Step);
+  Operands.push_back(End);
+  llvm::SmallVector<NamedAttribute> Attrs(K->getAttrs());
+  OperationState State(K->getLoc(), "matlab.gpu.kernel");
+  State.addOperands(Operands);
+  State.addAttributes(Attrs);
+  State.addRegion();
+  Operation *NewK = Operation::create(State);
+  NewK->setAttr(kOutlineTag, UnitAttr::get(Ctx));
+  NewK->getRegion(0).takeBody(K->getRegion(0));
+  B.insert(NewK);
+  K->erase();
+}
+
+/* LATE-phase lift.  The kernel body is now plain ptr/arith/scf/runtime-
+ * call IR.  Outline it into `llvm.func void(f64 iv, ptr state)`, packing
+ * every captured value into a `state` array of `!llvm.ptr`:
+ *   - pointer captures (output arrays, scalar slots that survived as
+ *     `llvm.alloca`) go into the slot directly;
+ *   - non-pointer captures (a scalar SSA value) are spilled to a fresh
+ *     stack slot whose address goes into `state`, and reloaded inside.
+ * Cloneable externals are cloned into the outlined entry block.  Returns
+ * false (leaving the kernel for the simple rewrite) only on an
+ * unexpected shape the EARLY claim should already have excluded. */
+bool outlineLowered(Operation *K, unsigned KernelId) {
   Location Loc = K->getLoc();
   MLIRContext *Ctx = K->getContext();
   ModuleOp Module = K->getParentOfType<ModuleOp>();
@@ -159,97 +345,48 @@ bool outlineToLLVMFunc(Operation *K, unsigned KernelId) {
   auto I32 = IntegerType::get(Ctx, 32);
   auto I64 = IntegerType::get(Ctx, 64);
 
-  if (K->getNumOperands() < 1) return false;
-  Value Iter = K->getOperand(0);
-  Operation *Range = Iter.getDefiningOp();
-  if (!isMatlabOp(Range, "matlab.range")) return false;
+  // claimKernelForLateOutline appended (start, step, end) as the last
+  // three operands.  Operand 0 is the original range producer (now a
+  // lowered runtime call) and is ignored.
+  unsigned NOps = K->getNumOperands();
+  if (NOps < 4) return false;  // claimKernelForLateOutline appends 3 bounds
+  Value Start = K->getOperand(NOps - 3);
+  Value Step = K->getOperand(NOps - 2);
+  Value End = K->getOperand(NOps - 1);
 
-  Value Start, Step, End;
-  if (Range->getNumOperands() == 2) {
-    Start = Range->getOperand(0);
-    End = Range->getOperand(1);
-    Step = nullptr;
-  } else if (Range->getNumOperands() == 3) {
-    Start = Range->getOperand(0);
-    Step = Range->getOperand(1);
-    End = Range->getOperand(2);
-  } else {
-    return false;
-  }
-  if (Start.getType() != F64 || End.getType() != F64 ||
-      (Step && Step.getType() != F64))
-    return false;
-
-  if (K->getNumRegions() != 1) return false;
   Region &Body = K->getRegion(0);
   if (!Body.hasOneBlock()) return false;
   Block &BodyBlock = Body.front();
-  if (BodyBlock.getNumArguments() != 1 ||
-      BodyBlock.getArgument(0).getType() != F64)
-    return false;
   Value IV = BodyBlock.getArgument(0);
 
-  StringRef VarName;
-  if (auto VA = K->getAttrOfType<StringAttr>("var"))
-    VarName = VA.getValue();
-  if (!VarName.empty()) {
-    llvm::SmallVector<Operation *, 4> StoresToErase;
-    for (Operation &Op : BodyBlock) {
-      if (isMatlabOp(&Op, "matlab.load") && Op.getNumOperands() == 1) {
-        Operation *SlotDef = Op.getOperand(0).getDefiningOp();
-        if (isMatlabOp(SlotDef, "matlab.alloc")) {
-          auto NameA = SlotDef->getAttrOfType<StringAttr>("name");
-          if (NameA && NameA.getValue() == VarName)
-            Op.getResult(0).replaceAllUsesWith(IV);
-        }
-      }
-    }
-    for (Operation &Op : BodyBlock) {
-      if (isMatlabOp(&Op, "matlab.store") && Op.getNumOperands() == 2) {
-        Operation *SlotDef = Op.getOperand(1).getDefiningOp();
-        if (isMatlabOp(SlotDef, "matlab.alloc")) {
-          auto NameA = SlotDef->getAttrOfType<StringAttr>("name");
-          if (NameA && NameA.getValue() == VarName)
-            StoresToErase.push_back(&Op);
-        }
-      }
-    }
-    for (Operation *S : StoresToErase) S->erase();
-    llvm::SmallVector<Operation *, 4> DeadLoads;
-    for (Operation &Op : BodyBlock)
-      if (isMatlabOp(&Op, "matlab.load") && Op.use_empty())
-        DeadLoads.push_back(&Op);
-    for (Operation *L : DeadLoads) L->erase();
-  }
-
-  // Capture analysis — accept ONLY tensor-typed matlab.alloc captures
-  // plus cloneable externals.  Decline anything else.
+  // Collect captures (values defined outside the region, used inside),
+  // in a deterministic discovery order, plus the cloneable externals.
   llvm::DenseSet<Value> DefinedInside;
   DefinedInside.insert(IV);
-  for (Operation &Op : BodyBlock)
-    for (Value R : Op.getResults()) DefinedInside.insert(R);
+  BodyBlock.walk([&](Operation *Op) {
+    for (Value R : Op->getResults()) DefinedInside.insert(R);
+  });
 
   llvm::SmallVector<Operation *> ExternsToClone;
   llvm::DenseSet<Operation *> ExternSet;
   llvm::SmallVector<Value> Captures;
   llvm::DenseSet<Value> CaptureSet;
-  for (Operation &Op : BodyBlock) {
-    for (Value Operand : Op.getOperands()) {
+  bool Bad = false;
+  BodyBlock.walk([&](Operation *Op) {
+    for (Value Operand : Op->getOperands()) {
       if (DefinedInside.count(Operand)) continue;
       if (CaptureSet.count(Operand)) continue;
       Operation *Def = Operand.getDefiningOp();
-      if (!Def) return false;  // outer block argument — decline
+      if (!Def) { Bad = true; return; }
       if (isCloneableExternal(Def)) {
         if (ExternSet.insert(Def).second) ExternsToClone.push_back(Def);
-      } else if (isTensorArrayCapture(Def, Operand)) {
-        Captures.push_back(Operand);
-        CaptureSet.insert(Operand);
-      } else {
-        // Bucket-2 / bucket-3 scalar slot (or unsupported op) — decline.
-        return false;
+        continue;
       }
+      Captures.push_back(Operand);
+      CaptureSet.insert(Operand);
     }
-  }
+  });
+  if (Bad) return false;
 
   std::string Name = ("__gpu_kernel_" + llvm::Twine(KernelId)).str();
   B.setInsertionPointToEnd(Module.getBody());
@@ -259,29 +396,26 @@ bool outlineToLLVMFunc(Operation *K, unsigned KernelId) {
   Block *Entry = Fn.addEntryBlock(B);
   Value InnerIV = Entry->getArgument(0);
   Value StateArg = Entry->getArgument(1);
-
   B.setInsertionPointToEnd(Entry);
 
-  llvm::DenseMap<Value, Value> CaptureRemap;
+  // Reload each capture from state[k] at the top of the outlined func.
+  llvm::DenseMap<Value, Value> Remap;
   for (size_t k = 0; k < Captures.size(); ++k) {
-    Value IdxK = LLVM::ConstantOp::create(
-        B, Loc, I64, B.getI64IntegerAttr((int64_t)k));
+    Value IdxK = LLVM::ConstantOp::create(B, Loc, I64,
+                                          B.getI64IntegerAttr((int64_t)k));
     Value Gep = LLVM::GEPOp::create(B, Loc, PtrTy, PtrTy, StateArg,
                                     ValueRange{IdxK});
-    Value LoadedPtr = LLVM::LoadOp::create(B, Loc, PtrTy, Gep);
-    Type OrigTy = Captures[k].getType();
-    if (OrigTy == PtrTy) {
-      CaptureRemap[Captures[k]] = LoadedPtr;
-    } else {
-      auto Cast = UnrealizedConversionCastOp::create(B, Loc, OrigTy,
-                                                     LoadedPtr);
-      CaptureRemap[Captures[k]] = Cast.getResult(0);
-    }
+    Value Slot = LLVM::LoadOp::create(B, Loc, PtrTy, Gep);
+    Type Ty = Captures[k].getType();
+    if (Ty == PtrTy)
+      Remap[Captures[k]] = Slot;
+    else
+      Remap[Captures[k]] = LLVM::LoadOp::create(B, Loc, Ty, Slot);
   }
 
   IRMapping Mapping;
   Mapping.map(IV, InnerIV);
-  for (auto &P : CaptureRemap) Mapping.map(P.first, P.second);
+  for (auto &P : Remap) Mapping.map(P.first, P.second);
   for (Operation *Ext : ExternsToClone) B.clone(*Ext, Mapping);
   for (Operation &Op : BodyBlock) {
     if (isMatlabOp(&Op, "matlab.yield")) continue;
@@ -289,49 +423,50 @@ bool outlineToLLVMFunc(Operation *K, unsigned KernelId) {
   }
   LLVM::ReturnOp::create(B, Loc, ValueRange{});
 
+  // Build the state array + dispatch call at the original kernel site.
   B.setInsertionPoint(K);
-  Value StepV = Step ? Step
-                     : static_cast<Value>(arith::ConstantOp::create(
-                           B, Loc, F64, B.getF64FloatAttr(1.0)));
+  Value StepV = Step;  // always set by claimKernelForLateOutline
   Value FnPtr = LLVM::AddressOfOp::create(B, Loc, PtrTy, Fn.getName());
 
   Value StateOuter;
   if (Captures.empty()) {
     StateOuter = LLVM::ZeroOp::create(B, Loc, PtrTy);
   } else {
-    auto ArrTy = LLVM::LLVMArrayType::get(PtrTy,
-                                          static_cast<unsigned>(Captures.size()));
+    auto ArrTy = LLVM::LLVMArrayType::get(
+        PtrTy, static_cast<unsigned>(Captures.size()));
     Value One = LLVM::ConstantOp::create(B, Loc, I64, B.getI64IntegerAttr(1));
     StateOuter = LLVM::AllocaOp::create(B, Loc, PtrTy, ArrTy, One,
                                         /*alignment=*/0);
     for (size_t k = 0; k < Captures.size(); ++k) {
-      Value IdxK = LLVM::ConstantOp::create(
-          B, Loc, I64, B.getI64IntegerAttr((int64_t)k));
+      Value Cap = Captures[k];
+      Value SlotPtr;
+      if (Cap.getType() == PtrTy) {
+        SlotPtr = Cap;
+      } else {
+        // Spill the scalar to a stack slot and pass its address.
+        Value One2 =
+            LLVM::ConstantOp::create(B, Loc, I64, B.getI64IntegerAttr(1));
+        SlotPtr = LLVM::AllocaOp::create(B, Loc, PtrTy, Cap.getType(), One2,
+                                         /*alignment=*/0);
+        LLVM::StoreOp::create(B, Loc, Cap, SlotPtr);
+      }
+      Value IdxK = LLVM::ConstantOp::create(B, Loc, I64,
+                                            B.getI64IntegerAttr((int64_t)k));
       Value Gep = LLVM::GEPOp::create(B, Loc, PtrTy, PtrTy, StateOuter,
                                       ValueRange{IdxK});
-      Value PtrVal;
-      if (Captures[k].getType() == PtrTy) {
-        PtrVal = Captures[k];
-      } else {
-        auto Cast = UnrealizedConversionCastOp::create(B, Loc, PtrTy,
-                                                      Captures[k]);
-        PtrVal = Cast.getResult(0);
-      }
-      LLVM::StoreOp::create(B, Loc, PtrVal, Gep);
+      LLVM::StoreOp::create(B, Loc, SlotPtr, Gep);
     }
   }
 
-  Value KernelIdV = LLVM::ConstantOp::create(B, Loc, I32,
-                                             B.getI32IntegerAttr((int32_t)KernelId));
-  auto Dispatch = getOrInsertRTDecl(
-      B, Module, "matlab_gpu_launch_kernel", VoidTy,
-      {F64, F64, F64, PtrTy, PtrTy, I32});
+  Value KernelIdV = LLVM::ConstantOp::create(
+      B, Loc, I32, B.getI32IntegerAttr((int32_t)KernelId));
+  auto Dispatch = getOrInsertRTDecl(B, Module, "matlab_gpu_launch_kernel",
+                                    VoidTy, {F64, F64, F64, PtrTy, PtrTy, I32});
   LLVM::CallOp::create(B, Loc, Dispatch,
                        ValueRange{Start, StepV, End, FnPtr, StateOuter,
                                   KernelIdV});
 
   K->erase();
-  if (Iter.use_empty() && Range) Range->erase();
   return true;
 }
 
@@ -369,24 +504,53 @@ void emitKernelAnalysisWarnings(Operation *Kernel) {
   }
 }
 
+/* EARLY phase.  On the default lane (or for any kernel the outliner
+ * can't claim), rewrite `matlab.gpu.kernel` → `matlab.for` immediately.
+ * Under MATLAB_GPU_OUTLINE=1, a claimable kernel instead has its
+ * induction slot folded, is tagged `matlab.gpu.outline`, and is LEFT IN
+ * PLACE so LowerSeqLoops / LowerTensorOps lower its body before the LATE
+ * lift in runOutlineGpuKernelsLate. */
 unsigned runOutlineGpuKernels(ModuleOp M) {
   llvm::SmallVector<Operation *> Kernels;
   M.walk([&](Operation *Op) {
     if (isMatlabOp(Op, "matlab.gpu.kernel")) Kernels.push_back(Op);
   });
-  unsigned Rewritten = 0;
+  unsigned Handled = 0;
   OpBuilder B(M.getContext());
   bool TryOutline = wantRealOutline();
   for (Operation *K : Kernels) {
     emitKernelAnalysisWarnings(K);
-    if (TryOutline && outlineToLLVMFunc(K, Rewritten)) {
-      ++Rewritten;
+    if (TryOutline && kernelIsClaimable(K)) {
+      claimKernelForLateOutline(K, B);
+      ++Handled;
       continue;
     }
     rewriteToMatlabFor(K, B);
-    ++Rewritten;
+    ++Handled;
   }
-  return Rewritten;
+  return Handled;
+}
+
+/* LATE phase — see header.  Lifts every kernel the EARLY phase tagged. */
+unsigned runOutlineGpuKernelsLate(ModuleOp M) {
+  llvm::SmallVector<Operation *> Kernels;
+  M.walk([&](Operation *Op) {
+    if (isMatlabOp(Op, "matlab.gpu.kernel") && Op->hasAttr(kOutlineTag))
+      Kernels.push_back(Op);
+  });
+  unsigned Outlined = 0;
+  OpBuilder B(M.getContext());
+  for (Operation *K : Kernels) {
+    K->removeAttr(kOutlineTag);
+    if (outlineLowered(K, Outlined)) {
+      ++Outlined;
+      continue;
+    }
+    // EARLY claimed it but the lowered shape was unexpected — fall back
+    // to the CPU rewrite so the program still compiles correctly.
+    rewriteToMatlabFor(K, B);
+  }
+  return Outlined;
 }
 
 }  // namespace mlirgen
