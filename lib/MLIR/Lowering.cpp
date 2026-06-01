@@ -13548,6 +13548,50 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
   case NodeKind::MatrixLiteral: {
     auto &M = static_cast<const MatrixLiteral &>(E);
     bool SingleRow = M.Rows.size() == 1;
+    /* #105: object-array literal `[A; B; C]` / `[A B C]` over classdef
+     * instances builds an object array via the generic runtime carrier
+     * (matlab_dlnet_oa_new + matlab_dlnet_oa_append) — the same form the
+     * explicit objArrayNew/Append API uses — NOT a matlab_vertcat (which
+     * reinterprets the matlab_obj* pointers as matlab_mat* and concatenates
+     * garbage, then crashes when objArrayGet/extractdata read it back).
+     *
+     * LowerTensorOps has an equivalent detector, but it keys off the
+     * operand's *defining op* (a classdef-method func.call or a load from a
+     * class_id-tagged alloc) — which only matches the AOT lane.  In ReplMode
+     * a script-scope classdef var reads through matlab_ws_get_mat (an opaque
+     * call_builtin), so that detector misses it and the literal falls through
+     * to matlab_vertcat → the #105 crash.  Detect here at the AST level where
+     * the Sema-pinned class is visible (Ref->PinnedClass), so the object
+     * array is built identically on both lanes.  Require EVERY element to be
+     * a classdef-pinned NameExpr; a partial / mixed literal falls through.
+     * Require 2+ elements — a single `[A]` is just `A`, not an array. */
+    {
+      llvm::SmallVector<const Expr *, 8> elems;
+      bool allClassdef = true;
+      for (auto &Row : M.Rows)
+        for (const Expr *Cx : Row) {
+          auto *NE = dynamic_cast<const NameExpr *>(Cx);
+          if (!NE || !NE->Ref || NE->Ref->PinnedClass == nullptr) {
+            allClassdef = false;
+          }
+          elems.push_back(Cx);
+        }
+      if (allClassdef && elems.size() >= 2) {
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        mlir::NamedAttribute NewCal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_dlnet_oa_new"));
+        mlir::Value Arr = emitUnreg("matlab.call_builtin", {}, PtrTy, L, {NewCal});
+        for (const Expr *Cx : elems) {
+          mlir::Value Elem = lowerExpr(*Cx);
+          mlir::NamedAttribute AppCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_dlnet_oa_append"));
+          Arr = emitUnreg("matlab.call_builtin", {Arr, Elem}, PtrTy, L, {AppCal});
+        }
+        return Arr;
+      }
+    }
     /* Phase 5.4 (cont.): [TT1 TT2 ... TTN] over timetable bindings —
      * pairwise-reduce through matlab_timetable_horzcat. All entries
      * must be NameExprs in TimetableBindings; mixed-type bracket

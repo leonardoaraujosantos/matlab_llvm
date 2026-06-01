@@ -150,6 +150,29 @@ def main():
          "disp(size(n, 1));\n"
          "disp('ok');\n",
          False),
+        # Object-array literal over classdef-instance vars (issue #105).
+        # `[A; B; C]` of dlarray vars must build an object array via the
+        # runtime carrier (matlab_dlnet_oa_new/_append), NOT a matlab_vertcat
+        # that reinterprets the matlab_obj* pointers as matlab_mat* and
+        # concatenates garbage — which objArrayGet/extractdata then deref as
+        # an obj (struct_find_field on a mat layout → heap-dependent SIGSEGV).
+        # In ReplMode the vars read through matlab_ws_get_mat, so the
+        # LowerTensorOps detector (keyed on the operand's defining op) misses
+        # them; the AST-level detector in Lowering keys off Ref->PinnedClass
+        # and fires on both lanes. Reaching termination is the regression
+        # guard (pre-fix: intermittent crash in extractdata).
+        ("classdef_object_array_literal",
+         "dlreset();\n"
+         "A = dlarray(zeros(2, 2));\n"
+         "B = dlarray(ones(2, 2));\n"
+         "C = dlarray([1 2; 3 4]);\n"
+         "arr = [A; B; C];\n"
+         "obj1 = objArrayGet(arr, 1);\n"
+         "D1 = extractdata(obj1);\n"
+         "disp(D1(1, 1));\n"
+         "disp(objArrayLen(arr));\n"
+         "disp('ok');\n",
+         False),
     ]
 
     work = os.path.join("/tmp", "matlabc_jit_userfn_test")
