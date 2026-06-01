@@ -15,7 +15,18 @@ class Parser {
 public:
   Parser(std::vector<Token> Tokens, ASTContext &Ctx, DiagnosticEngine &Diag);
 
-  TranslationUnit *parseFile();
+  /// Parse a whole `.m` file. The default form distinguishes a script
+  /// file, a function file, and a (single) classdef file — matching
+  /// MATLAB's one-classdef-per-file rule.
+  ///
+  /// `AllowMultipleUnits` relaxes that rule for **prelude buffers** — a
+  /// machine-assembled concatenation of several toolbox classdefs +
+  /// helper functions (no script body), parsed standalone. Without it,
+  /// such a buffer errors with "stray tokens after classdef" the moment
+  /// a second classdef appears, and the caller drops the entire prelude
+  /// (see the `-dap` classdef-prelude merge in tools/matlabc). It does
+  /// not affect normal file parsing.
+  TranslationUnit *parseFile(bool AllowMultipleUnits = false);
 
 private:
   std::vector<Token> Toks;

@@ -830,6 +830,31 @@ extern "C" void matlab_ide_emit_all_figures(void);
  * is what both JIT callers need.  Callers keep their own pre-amble
  * (`lowerToMLIR` + verify) and post-steps (validate / classdef-method drop /
  * stripMatlabFuncAttrs / ExecutionEngine create). */
+/* Iteratively erase classdef method `func.func`s that have no remaining
+ * symbol uses. Shared by the JIT/REPL/-dap lowering (runJitSoftwareLowering)
+ * and mirrors the identical strip the AOT path runs in lowerToLLVMIR.
+ * Only `matlab.class_name`-tagged funcs are considered, so ordinary
+ * library/helper functions are never removed; the fixpoint loop drops
+ * methods reachable only from other (already-dead) methods. */
+static void dropUncalledClassMethods(mlir::ModuleOp M) {
+  auto SymTbl = mlir::SymbolTable(M);
+  bool Changed = true;
+  while (Changed) {
+    Changed = false;
+    llvm::SmallVector<mlir::Operation *> Drop;
+    M.walk([&](mlir::func::FuncOp F) {
+      if (!F->hasAttr("matlab.class_name")) return;
+      auto Sym = F.getSymNameAttr();
+      if (auto Uses = SymTbl.getSymbolUses(Sym, M))
+        if (Uses->empty()) Drop.push_back(F);
+    });
+    for (auto *Op : Drop) {
+      SymTbl.erase(Op);
+      Changed = true;
+    }
+  }
+}
+
 static void runJitSoftwareLowering(mlir::ModuleOp M) {
   using namespace mlirgen;
   runSlotPromotion(M);
@@ -979,6 +1004,47 @@ static void runJitSoftwareLowering(mlir::ModuleOp M) {
   runLowerPlot(M);
 #endif
   runLowerIO(M);
+  /* #77: drop uncalled classdef method bodies before the leftover-op
+   * validation + LLVM conversion. The merged toolbox classdef prelude
+   * pulls *every* method of a referenced class into the module, but
+   * Sema only refines a method's param types when a call site drives
+   * them — an uncalled method (e.g. dlarray's `conv2d` when the program
+   * only uses `relu`/`softmax`) keeps `none`-typed args, so its internal
+   * runtime calls never match a lowering shape and would trip the
+   * conversion as "unsupported call shape". The AOT path strips these in
+   * lowerToLLVMIR; the JIT/REPL/-dap path needs the same. Iterates so a
+   * method only reachable from another dead method also drops. Internal
+   * sibling calls keep transitively-reachable methods live; non-classdef
+   * library functions don't carry `matlab.class_name`, so they're never
+   * touched. */
+  dropUncalledClassMethods(M);
+  /* #77: DebugMode mirrors every named store to the per-frame LOCALS
+   * table via `matlab_dbg_frame_set(name, value)` (emitStore). With the
+   * toolbox classdef prelude now merged for `-dap`, those mirrors are
+   * also emitted inside library classdef method bodies, where many
+   * internal temporaries stay `none`-typed (matlab_obj-flavoured values
+   * that never refine to f64/ptr/int). Such a mirror has no runtime
+   * variant and nothing to display, but it survives LowerTensorOps'
+   * type-dispatch (which punts none-typed operands) all the way to the
+   * conversion pipeline, where it dies as "unsupported call shape".
+   * Drop these residual un-typeable mirrors — user-visible locals
+   * resolve to concrete types and lower normally above. The mirror's
+   * result is an unused void token, so erasing is safe. */
+  {
+    llvm::SmallVector<mlir::Operation *, 16> Dead;
+    M.walk([&](mlir::Operation *Op) {
+      if (Op->getName().getStringRef() != "matlab.call_builtin") return;
+      auto C = Op->getAttrOfType<mlir::StringAttr>("callee");
+      if (!C || C.getValue() != "matlab_dbg_frame_set") return;
+      if (Op->getNumOperands() < 2) return;
+      if (!mlir::isa<mlir::NoneType>(Op->getOperand(1).getType())) return;
+      bool ResultsUnused = true;
+      for (mlir::Value R : Op->getResults())
+        if (!R.use_empty()) { ResultsUnused = false; break; }
+      if (ResultsUnused) Dead.push_back(Op);
+    });
+    for (mlir::Operation *Op : Dead) Op->erase();
+  }
   if (getenv("MATLABC_JIT_DUMP")) mlirgen::printModule(std::cerr, M);
 }
 
@@ -1060,41 +1126,8 @@ int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id,
    * had drifted from the static pipeline — missing runRefineSlotTypes
    * etc.).  Now the single source of truth for REPL + DAP launch. */
   runJitSoftwareLowering(M);
-
-  /* Drop classdef method bodies that nothing in this TU calls.  The
-   * REPL prelude pulls every method of every referenced class into
-   * the module, but Sema's type-inference only refines a method's
-   * parameter types when there's a call site forcing them.  An
-   * uncalled method body keeps `none`-typed args and survives all
-   * the LowerScalars/Tensor sweeps unchanged — then trips the LLVM
-   * translation step because `func.func` with `none` args has no
-   * registered conversion.
-   *
-   * For a typical REPL session that creates an instance on turn 0
-   * and only calls `step` on turn 1, this drops `step` / `reset` /
-   * etc. from turn 0's TU (they'd be unused there) and pulls them
-   * back in on turn 1 when the call site fires.  Symbol uses are
-   * checked relative to the module — internal sibling calls between
-   * methods stay live transitively as long as some ancestor caller
-   * exists. */
-  {
-    auto SymTbl = mlir::SymbolTable(M);
-    bool Changed = true;
-    while (Changed) {
-      Changed = false;
-      llvm::SmallVector<mlir::Operation *> Drop;
-      M.walk([&](mlir::func::FuncOp F) {
-        if (!F->hasAttr("matlab.class_name")) return;
-        auto Sym = F.getSymNameAttr();
-        if (auto Uses = SymTbl.getSymbolUses(Sym, M))
-          if (Uses->empty()) Drop.push_back(F);
-      });
-      for (auto *Op : Drop) {
-        SymTbl.erase(Op);
-        Changed = true;
-      }
-    }
-  }
+  /* (Uncalled classdef methods are dropped inside runJitSoftwareLowering
+   * via dropUncalledClassMethods — see #77.) */
 
   if (mlir::failed(mlir::verify(M))) {
     std::cerr << "error: REPL MLIR verification failed after passes\n";
@@ -3864,7 +3897,15 @@ bool compileProgram() {
       Lexer PLx(SM, PF, PDiag);
       auto PToks = PLx.tokenize();
       Parser PP(std::move(PToks), AstCtx, PDiag);
-      TranslationUnit *PTU = PP.parseFile();
+      /* The prelude is a flat concatenation of several toolbox classdefs
+       * (+ helper functions) with no script body. Parse it in
+       * multiple-unit mode — the default one-classdef-per-file rule
+       * would error "stray tokens after classdef" at the 2nd classdef
+       * and `!PDiag.hasErrors()` below would then silently drop the
+       * *entire* prelude, leaving every classdef method unlowered and
+       * collapsing operator/method dispatch (the root cause of the #77
+       * "-dap can't launch classdef-using examples" failures). */
+      TranslationUnit *PTU = PP.parseFile(/*AllowMultipleUnits=*/true);
       if (PTU && !PDiag.hasErrors()) {
         for (auto *Fn : PTU->Functions) TU->Functions.push_back(Fn);
         for (auto *Cls : PTU->Classes) TU->Classes.push_back(Cls);

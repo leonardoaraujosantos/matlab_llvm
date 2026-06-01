@@ -359,6 +359,49 @@ def scn_error_backtrace(matlabc, program):
         f"frames out of order: deeper={deeper_pos}, fail={fail_pos}, script={script_pos}; stderr={err!r}"
 
 
+def scn_classdef_prelude_launches(matlabc, program):
+    """Regression for #77: a `-dap` launch of a toolbox-classdef program
+    must compile + run (reach `terminated`).
+
+    Uses dap_classdef_program.m (sibling fixture), which exercises
+    dlarray method dispatch (`relu`), operator overloads (`*`/`+`), and
+    `extractdata`. Before the classdef-prelude parse + dead-strip fix the
+    merged prelude was silently dropped (it parsed standalone as a single
+    classdef file and errored at the 2nd classdef), method/operator
+    dispatch collapsed, and `launch` answered "failed to compile program".
+    Reaching `terminated` here means the whole prelude lowered cleanly.
+    """
+    cd_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_classdef_program.m",
+    )
+    with DapClient(matlabc, cd_program) as c:
+        initialize_and_launch(c, stop_on_entry=False)
+        # No DapError from launch (would be "failed to compile program")
+        # and the program runs to completion.
+        c.wait_event("terminated", timeout=15.0)
+
+
+def scn_closure_launches(matlabc, program):
+    """Regression for #77: a `-dap` launch of an anonymous-closure program
+    must compile + run (reach `terminated`).
+
+    Uses dap_closure_program.m (sibling fixture): a captured scalar closure
+    (`@(x) x+k`), a capture-free anon passed to a function and called
+    indirectly there (`apply(g, 5)`), and an inline anon literal argument.
+    Before the "anon closures use the local-slot lane in JIT/-dap" fix, the
+    ReplMode workspace round-trip severed the make_anon -> call_indirect
+    chain and `launch` answered "failed to compile program".
+    """
+    cl_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_closure_program.m",
+    )
+    with DapClient(matlabc, cl_program) as c:
+        initialize_and_launch(c, stop_on_entry=False)
+        c.wait_event("terminated", timeout=15.0)
+
+
 def scn_function_locals(matlabc, program):
     """Pausing inside a user function exposes the function's locals.
 
