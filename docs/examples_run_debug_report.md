@@ -206,6 +206,17 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
 
 ## Changelog
 
+- **2026-06-02 — #136 (✅ fixed).** `end` in single-subscript indexing resolved
+  to `size(base, dim)` with `dim` = the 1-based subscript position, so a lone
+  subscript used `dim=1` (row count). For a row vector that is `1`, not `numel`,
+  so `v(end)` returned the **first** element instead of the last (and `v(end+1)`
+  pointed at index 2). The lowering now pushes a sentinel `dim=0` for
+  single-subscript indexing (both the store and load paths in `Lowering.cpp`),
+  and `matlab_end_of_dim` maps `dim==0` → `matlab_numel` (mirrored in the
+  Python/TS shims). Multi-subscript `A(end,end)` is unchanged (per-dimension).
+  Together with #135 this makes the `v(end+1)=x` append idiom work. Regression
+  `test/Run/regress_end_single_subscript.m` (verified to print first-element /
+  garbage without the fix, across all backends).
 - **2026-06-02 — #122 (✅ fixed).** `pde/poisson_disk.m` SIGSEGV under `-dap`.
   `matlab_pde_solve_femodel` read `MaterialProperties` via
   `matlab_struct_get_mat`, which returns a non-NULL **empty matrix** for a
