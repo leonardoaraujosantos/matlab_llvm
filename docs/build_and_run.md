@@ -19,7 +19,7 @@ The build produces (in `build/`):
 | Artefact | Always | Notes |
 |---|---|---|
 | `matlabc` | ✅ | the compiler / REPL |
-| `libMatlabRuntime.a` | ✅ | every shipped runtime TU (core + 19 toolboxes + GPU dispatcher) consolidated into one static archive, compiled with `-ffunction-sections -fdata-sections` so external link can dead-strip per-symbol. The Cairo plot TUs (`c_api.cpp.o`, `figure.cpp.o`, `cairo_render.cpp.o`, `cairo_dl.cpp.o`, `colormap.cpp.o`, `contour.cpp.o`) are folded into the same archive **only when configured with `-DMATLAB_LLVM_WITH_PLOT=ON`** (#54); a runtime built without that flag can link non-plot programs only. Verify with `ar -t build/libMatlabRuntime.a \| grep cairo`. |
+| `libMatlabRuntime.a` | ✅ | every shipped runtime TU (core + 19 toolboxes + GPU dispatcher) consolidated into one static archive, compiled with `-ffunction-sections -fdata-sections` so external link can dead-strip per-symbol. The Cairo plot TUs (`c_api.cpp.o`, `figure.cpp.o`, `cairo_render.cpp.o`, `cairo_dl.cpp.o`, `colormap.cpp.o`, `contour.cpp.o`, `videowriter.cpp.o`) are folded into the same archive **only when configured with `-DMATLAB_LLVM_WITH_PLOT=ON`** (#54); a runtime built without that flag can link non-plot programs only. Verify with `ar -t build/libMatlabRuntime.a \| grep cairo`. |
 | `libmatlab_sym.dylib` (or `.so`) | only if `MATLAB_LLVM_WITH_SYM=ON` | SymPP-backed shared library — `dlopen`'d on first sym call by the stub layer baked into `libMatlabRuntime.a` |
 
 ## Compile + run
