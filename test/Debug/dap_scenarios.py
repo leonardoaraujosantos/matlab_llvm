@@ -2807,16 +2807,25 @@ def scn_watch_void_promotion(matlabc, program):
             f"watch-mode disp(A) should auto-promote to <void>: {resp!r}"
 
         # The actual matrix bytes flow through the stdout pipe →
-        # DAP output events. Wait for one that contains matrix cells.
-        ev = c.wait_event(
-            "output",
-            timeout=5.0,
-            predicate=lambda m: (
-                (m.get("body") or {}).get("category") == "stdout"
-                and "1" in ((m.get("body") or {}).get("output") or "")
-            ),
-        )
-        out = (ev.get("body") or {}).get("output", "")
+        # DAP output events.  disp() of the 2x3 may arrive as ONE event
+        # (`1 2 3\n4 5 6\n`) or be split across several stdout events under
+        # load (the worker's fwrite/flush boundaries are timing-dependent —
+        # CI saw just `1 2 3` and the old single-event grab missed cell 6).
+        # Accumulate stdout events until both cells are present, rather than
+        # asserting on the first matching event.
+        out = ""
+        while not ("1" in out and "6" in out):
+            try:
+                ev = c.wait_event(
+                    "output",
+                    timeout=5.0,
+                    predicate=lambda m: (
+                        (m.get("body") or {}).get("category") == "stdout"
+                    ),
+                )
+            except Exception:
+                break
+            out += (ev.get("body") or {}).get("output", "")
         for cell in ("1", "6"):
             assert cell in out, \
                 f"disp output missing cell {cell!r}: {out!r}"
