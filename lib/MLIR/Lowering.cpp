@@ -4491,6 +4491,65 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
   }
   case NodeKind::CallOrIndex: {
     auto &C = static_cast<const CallOrIndex &>(LHS);
+    /* PDE Toolbox (#28): `model.FaceBC(ids) = faceBC(Constraint="fixed")`
+     * and `model.FaceLoad(ids) = faceLoad(Pressure=p)` — wire the
+     * indexed-property assignment into the solver's flat FixedFaces /
+     * PressureFaces tables (the generic __subscript_store below would
+     * stash the BC object in an unread property array, leaving the solve
+     * unconstrained / unloaded).  v1 enumerates literal scalar / range
+     * indices and treats faceBC as a fixed constraint; the pressure
+     * value is read off the faceLoad object at runtime. */
+    if (auto *FA = dynamic_cast<const FieldAccess *>(C.Callee))
+      if (auto *BN = dynamic_cast<const NameExpr *>(FA->Base))
+        if (BN->Ref && BN->Ref->PinnedClass &&
+            BN->Ref->PinnedClass->Name == "femodel" && C.Args.size() == 1 &&
+            (FA->Field == "FaceBC" || FA->Field == "FaceLoad") && Rhs) {
+          /* Enumerate literal scalar / a:b range face ids. */
+          llvm::SmallVector<int64_t, 8> Ids;
+          const Expr *Ix = C.Args[0];
+          if (auto *RE = dynamic_cast<const RangeExpr *>(Ix)) {
+            if (RE->Start && RE->End && !RE->Step) {
+              int64_t a = foldInt(RE->Start), b = foldInt(RE->End);
+              for (int64_t v = a; v <= b; ++v) Ids.push_back(v);
+            }
+          } else if (Ix) {
+            Ids.push_back(foldInt(Ix));
+          }
+          if (!Ids.empty()) {
+            auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+            auto F64 = mlir::Float64Type::get(&MCtx);
+            bool IsLoad = (FA->Field == "FaceLoad");
+            mlir::Value Pressure;
+            if (IsLoad) {
+              mlir::Value NameV = emitFieldNameChar("Pressure", loc(C.Range));
+              mlir::NamedAttribute GCal(
+                  mlir::StringAttr::get(&MCtx, "callee"),
+                  mlir::StringAttr::get(&MCtx, "matlab_obj_get_f64"));
+              Pressure = emitUnreg("matlab.call_builtin", {Rhs, NameV}, F64,
+                                   loc(C.Range), {GCal});
+            }
+            for (int64_t Id : Ids) {
+              mlir::Value Model = lowerExpr(*FA->Base);
+              mlir::NamedAttribute VA(
+                  mlir::StringAttr::get(&MCtx, "value"),
+                  mlir::FloatAttr::get(F64, (double)Id));
+              mlir::Value Fid = emitUnreg("matlab.const_float", {}, F64,
+                                          loc(C.Range), {VA});
+              mlir::NamedAttribute Cal(
+                  mlir::StringAttr::get(&MCtx, "callee"),
+                  mlir::StringAttr::get(
+                      &MCtx, IsLoad ? "pde_set_face_pressure"
+                                    : "pde_set_face_fixed"));
+              if (IsLoad)
+                emitUnreg("matlab.call_builtin", {Model, Fid, Pressure}, PtrTy,
+                          loc(C.Range), {Cal});
+              else
+                emitUnreg("matlab.call_builtin", {Model, Fid}, PtrTy,
+                          loc(C.Range), {Cal});
+            }
+            return;
+          }
+        }
     /* Phase 4: m(k) = rhs on a dict binding. Detect via DictBindings,
      * dispatch to matlab_dict_set_<str|num>_<f64|mat>. Single key
      * arg only for v1 (multi-dim keying isn't a MATLAB idiom).
