@@ -3860,6 +3860,56 @@ void Lowerer::lowerStmt(const Stmt &St) {
     else ForOpName = "matlab.for";
     mlir::Operation *ForOp = emitUnregOp(
         ForOpName, ForOperands, {}, loc(F.Range), {VarAttr}, /*NumRegions=*/1);
+
+    /* Issue #33 Phase 3b — `% matlab_llvm: write-disjoint(A, j)` escape hatch.
+     * For a parfor whose body element-writes a captured matrix through an
+     * index the structural disjointness check (OutlineParfor) can't prove
+     * injective in the loop variable — e.g. `A(perm(j)) = ...` where `perm`
+     * is a permutation — the user asserts the writes don't alias across
+     * iterations.  We scan the source lines the loop spans (plus the line
+     * just above its header, the conventional pragma placement) for the
+     * directive and record each named matrix as a discardable
+     * `matlab.write_disjoint` string-array attr on the parfor op.  The
+     * outliner reads it and trusts the assertion for those slots.
+     *
+     * Scanning the source text here — where the Lowerer already holds the
+     * SourceManager and the loop's SourceRange — attaches the attr at parfor
+     * creation, so it is uniformly visible to every lowering path (AOT, JIT,
+     * REPL, -dap) without threading the SourceManager into the shared
+     * software-lowering core. */
+    if (F.IsParfor && SM && F.Range.Begin.isValid()) {
+      matlab::FileID FID = F.Range.Begin.File;
+      uint32_t BeginLine = SM->getLineColumn(F.Range.Begin).Line;
+      uint32_t EndLine = F.Range.End.isValid()
+          ? SM->getLineColumn(F.Range.End).Line : BeginLine;
+      uint32_t ScanFrom = BeginLine > 1 ? BeginLine - 1 : 1;
+      llvm::SmallVector<mlir::Attribute, 2> Disjoint;
+      for (uint32_t Ln = ScanFrom; Ln <= EndLine; ++Ln) {
+        std::string_view Line = SM->getLineText(FID, Ln);
+        llvm::StringRef LR(Line.data(), Line.size());
+        // Locate `% matlab_llvm:` (or `%matlab_llvm:`), tolerating spaces.
+        size_t Pct = LR.find('%');
+        if (Pct == llvm::StringRef::npos) continue;
+        llvm::StringRef Tail = LR.drop_front(Pct + 1).ltrim();
+        if (!Tail.consume_front("matlab_llvm:")) continue;
+        Tail = Tail.ltrim();
+        if (!Tail.consume_front("write-disjoint")) continue;
+        Tail = Tail.ltrim();
+        if (!Tail.consume_front("(")) continue;
+        size_t RP = Tail.find(')');
+        if (RP == llvm::StringRef::npos) continue;
+        // First comma-separated argument is the matrix variable name.
+        llvm::StringRef Args = Tail.take_front(RP);
+        llvm::StringRef Name = Args.split(',').first.trim();
+        if (Name.empty()) continue;
+        auto NameAttr = mlir::StringAttr::get(&MCtx, Name);
+        if (!llvm::is_contained(Disjoint, mlir::Attribute(NameAttr)))
+          Disjoint.push_back(NameAttr);
+      }
+      if (!Disjoint.empty())
+        ForOp->setAttr("matlab.write_disjoint",
+                       mlir::ArrayAttr::get(&MCtx, Disjoint));
+    }
     auto &Region = ForOp->getRegion(0);
     mlir::Block *Body = B.createBlock(&Region, Region.end(), {ElemTy}, {loc(F.Range)});
 
