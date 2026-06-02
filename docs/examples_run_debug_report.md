@@ -150,12 +150,23 @@ AOT/DAP resolve these because the defining op is visible.
    crashes from 23→10. Guarded by `test/Repl/run_tests.sh`
    (`xturn_anon_handle_scalar`, `xturn_anon_handle_to_solver`).
 
-   **Still open (carved out of this fix):** *captured* anons (`@(s) M*s`,
-   the 6 remaining `globaloptim` crashes) need the closure environment
-   serialized too; `table` round-trips (`csv_*`, 2 crashes); and one example
-   (`optim/blade_pitch_opt`) now surfaces a *separate, pre-existing*
-   per-statement bug (a scalar-from-indexed-matrix value used as an `scf.if`
-   condition) that the earlier crash had masked.
+   **Still open (carved out of this fix, each tracked separately):**
+   - **Direct cross-turn handle call with a matrix arg → SIGSEGV (#119).**
+     The kind=13 call trampolines are scalar-only; calling a recovered handle
+     directly with a vector (`rastrigin(xlocal)`) lowers to a subscript on the
+     code pointer. This is what still crashes the 6 `globaloptim/*` demos
+     (their solver calls now succeed; their `fprintf` self-reports don't).
+     Needs the kind=13 ABI to carry arity + return-kind plus matrix
+     trampolines.
+   - **Scalar-from-workspace-matrix → `tensor<*xi1>` in `if` (#120).** A 1×1
+     builtin result round-tripped as a matrix stays tensor-typed; a scalar
+     comparison on it fails `scf.if` verification. ReplMode-specific (AOT is
+     fine). Surfaced in `optim/blade_pitch_opt` once the preceding crash was
+     fixed.
+   - **Captured anons** (`@(s) M*s`) need the closure environment serialized,
+     not just the function pointer — the other open piece of #116.
+   - **`table` round-trips** (`csv_*`, 2 crashes) — stored untyped, crash at
+     use-site (#116).
 
 4. **Second REPL fix — shape-carrying workspace reads (fixes ~20 errors).**
    Persist the inferred class/shape of a workspace variable alongside its
