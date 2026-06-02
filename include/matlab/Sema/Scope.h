@@ -81,6 +81,13 @@ struct Binding {
    * `disp(T)` dispatches to the table runtime entries instead of the
    * generic matrix path (which fails the call-shape detector / crashes). */
   bool IsTable = false;
+  /* Struct array (kind=14).  Stamped by the Resolver when the REPL
+   * workspace-kind hook reports a prior input bound this name to a
+   * matlab_struct_arr* (`a(i).x = v`).  The MLIR lowering reads it to
+   * re-populate StructArrayBindings and rehydrate the array pointer from
+   * the workspace, so a cross-turn `a(i).x` / `length(a)` dispatches to
+   * the struct-array path instead of allocating a fresh empty array. */
+  bool IsStructArray = false;
 };
 
 class Scope {

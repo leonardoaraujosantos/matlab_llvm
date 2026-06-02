@@ -1687,6 +1687,10 @@ void Resolver::applyWorkspaceKind(Binding *NB, std::string_view Name,
    * instead of the generic matrix path (which fails the call-shape
    * detector or crashes) — #116. */
   else if (K == 6) NB->IsTable = true;
+  /* Kind 14 = matlab_struct_arr* (Phase 2).  Stamp IsStructArray so the
+   * MLIR lowering re-populates StructArrayBindings and rehydrates the
+   * array from the workspace for a cross-turn `a(i).x` (#133). */
+  else if (K == 14) NB->IsStructArray = true;
   /* Kind 12 = matlab_struct* (plain field-holder, not a classdef
    * instance).  Stamping IsStruct lets the MLIR lowering re-populate
    * StructInitialised on the next compile so `lb.PathLoss` and friends

@@ -227,6 +227,26 @@ void matlab_ws_set_struct(const char *name, int64_t len, matlab_struct *s) {
     matlab_ws_check_watch(name, len);
 }
 
+/* Struct-array assignment to the script-level workspace (kind=14, #133).
+ * `a(i).x = v` builds a matlab_struct_arr* in a local slot; without this
+ * store the array is discarded at end of REPL turn and a later-turn
+ * `a(i).x` reads an empty array. Mirrors matlab_ws_set_struct (kind=12);
+ * the read side returns the pointer verbatim via matlab_struct_get_mat's
+ * kind=14 pass-through. */
+void matlab_ws_set_struct_arr(const char *name, int64_t len, void *arr) {
+    matlab_ws_init_if_needed();
+    matlab_ws_lock();
+    struct matlab_dbg_undo_rec *r =
+        matlab_ws_push_undo_locked(name, len, /*kind=*/14);
+    int32_t idx = struct_reserve(matlab_ws, name, (int32_t)len);
+    matlab_ws->kinds[idx] = 14;
+    matlab_ws->f64_vals[idx] = 0.0;
+    matlab_ws->ptr_vals[idx] = arr;
+    matlab_dbg_undo_record_set_new_ptr(r, /*new_kind=*/14, arr);
+    matlab_ws_unlock();
+    matlab_ws_check_watch(name, len);
+}
+
 /* Class-instance assignment to the script-level workspace. Stores
  * the obj pointer with kind=2 so matlab_dbg_ws_kind reports it as
  * an object — the DAP formatter then routes through the obj path

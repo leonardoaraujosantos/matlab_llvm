@@ -1961,7 +1961,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
          Name == "matlab_ws_set_sym" || Name == "matlab_ws_set_symmat" ||
          Name == "matlab_ws_set_table" || Name == "matlab_ws_set_categorical" ||
          Name == "matlab_ws_set_datetime" || Name == "matlab_ws_set_duration" ||
-         Name == "matlab_ws_set_struct" || Name == "matlab_ws_set_handle") &&
+         Name == "matlab_ws_set_struct" || Name == "matlab_ws_set_handle" ||
+         Name == "matlab_ws_set_struct_arr") &&
         Call->getNumOperands() == 2) {
       Value NameV = Call->getOperand(0);
       Value Val = Call->getOperand(1);
@@ -1988,9 +1989,10 @@ bool TensorLowering::rewriteBuiltinCalls() {
       bool IsDuration = (Name == "matlab_ws_set_duration");
       bool IsStruct   = (Name == "matlab_ws_set_struct");
       bool IsHandle   = (Name == "matlab_ws_set_handle");
+      bool IsStructArr = (Name == "matlab_ws_set_struct_arr");
       bool IsPtrSticky = IsObj || IsString || IsSym || IsSymmat ||
                          IsTable || IsCategorical || IsDatetime ||
-                         IsDuration || IsStruct || IsHandle;
+                         IsDuration || IsStruct || IsHandle || IsStructArr;
       bool IsMat;
       bool IsInt = mlir::isa<mlir::IntegerType>(Val.getType());
       if (IsPtrSticky) IsMat = true;
@@ -2031,7 +2033,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Value Ptr = fieldNameAddr(NameV, Len);
       if (!Ptr) continue;
       StringRef RuntimeName =
-          IsHandle       ? "matlab_ws_set_handle"
+          IsStructArr    ? "matlab_ws_set_struct_arr"
+          : (IsHandle    ? "matlab_ws_set_handle"
           : (IsSymmat    ? "matlab_ws_set_symmat"
                          : (IsSym ? "matlab_ws_set_sym"
                               : (IsString      ? "matlab_ws_set_string"
@@ -2042,7 +2045,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
                               : (IsDatetime    ? "matlab_ws_set_datetime"
                               : (IsDuration    ? "matlab_ws_set_duration"
                               : (IsMat         ? "matlab_ws_set_mat"
-                                               : "matlab_ws_set_f64"))))))))));
+                                               : "matlab_ws_set_f64")))))))))));
       B.setInsertionPoint(Call);
       Value LenV = LLVM::ConstantOp::create(
           B, Call->getLoc(), I64, B.getI64IntegerAttr(Len));
