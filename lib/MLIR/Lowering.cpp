@@ -3569,6 +3569,25 @@ void Lowerer::lowerStmt(const Stmt &St) {
        * a documented follow-up (#116), so they stay matrix-path here. */
       if (ReplMode && InScriptBody && Rhs && Caps.empty() &&
           A.RHS->Kind == NodeKind::AnonFunction) {
+        /* #119: classify the anon's return-kind so a cross-turn `f(vec)`
+         * with a matrix argument can pick the right matrix trampoline /
+         * result type: 1 = matrix, 0 = scalar.  Sema reliably types a
+         * non-scalar Array body (a matrix-literal residual `@(x) [..;..]`,
+         * a `M*x` product) as matrix; a scalar-arithmetic body over indexed
+         * params (`@(x) x(1)+x(2)`) is often left `any` because indexing a
+         * param array isn't scalarised — so anything NOT proven matrix is
+         * treated as scalar, which matches the dominant objective shape.
+         * (A matrix-returning anon whose body Sema can't type — e.g.
+         * `@(x) reshape(x,2,2)` — would misdispatch; that residual corner is
+         * noted in #119.) */
+        int32_t RetKind = 0;
+        if (auto *AF = static_cast<const AnonFunction *>(A.RHS)) {
+          const Type *BT = AF->Body ? AF->Body->Ty : nullptr;
+          if (BT && BT->K == Type::Kind::Array) {
+            auto &AT = static_cast<const ArrayType &>(*BT);
+            if (AT.S.K != Shape::Rank::Scalar) RetKind = 1;
+          }
+        }
         for (const Expr *L : A.LHS) {
           auto *N = dynamic_cast<const NameExpr *>(L);
           if (!N || !N->Ref) continue;
@@ -3578,6 +3597,16 @@ void Lowerer::lowerStmt(const Stmt &St) {
               mlir::StringAttr::get(&MCtx, "matlab_ws_set_handle"));
           emitUnregOp("matlab.call_builtin", {NameV, Rhs},
                       {mlir::NoneType::get(&MCtx)}, loc(A.Range), {Cal});
+          /* Record the return-kind side-channel (#119). */
+          auto I32 = mlir::IntegerType::get(&MCtx, 32);
+          mlir::Value RkV = mlir::arith::ConstantOp::create(
+              B, loc(A.Range), I32,
+              mlir::IntegerAttr::get(I32, (int64_t)RetKind));
+          mlir::NamedAttribute SCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_ws_set_handle_sig"));
+          emitUnregOp("matlab.call_builtin", {NameV, RkV},
+                      {mlir::NoneType::get(&MCtx)}, loc(A.Range), {SCal});
         }
       }
     }
@@ -13294,6 +13323,43 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                   mlir::StringAttr::get(&MCtx, "callee"),
                   mlir::StringAttr::get(&MCtx, Tramp));
               return emitUnreg("matlab.call_builtin", CallArgs, F64, L, {Cal});
+            }
+          }
+          /* #119: MATRIX-argument cross-turn handle call.  When the args
+           * aren't all scalar doubles and the recovered handle carries a
+           * known return-kind (HandleRetKind, stamped by the Resolver from
+           * the kind=13 signature side-channel), dispatch to the matrix
+           * trampoline with the matching result type — scalar return
+           * (matlab_call_handle_m{1,2}) or matrix return (..._mm{1,2}).
+           * Without this the call falls through to a subscript on the code
+           * pointer and SIGSEGVs.  Arity 1..2 (the objective / residual
+           * shapes); commit only when every arg lowers to a matlab_mat*
+           * pointer. */
+          if (WsHandle && !ArgsScalar && NE->Ref->HandleRetKind >= 0 &&
+              !C.Args.empty() && C.Args.size() <= 2) {
+            auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+            mlir::Value Fn = lowerExpr(*C.Callee);   /* matlab_ws_get_handle */
+            llvm::SmallVector<mlir::Value, 4> CallArgs;
+            CallArgs.push_back(Fn);
+            bool AllPtr = (Fn.getType() == PtrTy);
+            for (const Expr *Arg : C.Args) {
+              mlir::Value AV = lowerExpr(*Arg);
+              if (AV.getType() != PtrTy) { AllPtr = false; break; }
+              CallArgs.push_back(AV);
+            }
+            if (AllPtr) {
+              bool Scalar = (NE->Ref->HandleRetKind == 0);
+              const char *Tramp =
+                  Scalar ? (C.Args.size() == 1 ? "matlab_call_handle_m1"
+                                               : "matlab_call_handle_m2")
+                         : (C.Args.size() == 1 ? "matlab_call_handle_mm1"
+                                               : "matlab_call_handle_mm2");
+              mlir::Type ResTy = Scalar ? (mlir::Type)mlir::Float64Type::get(&MCtx)
+                                        : (mlir::Type)PtrTy;
+              mlir::NamedAttribute Cal(
+                  mlir::StringAttr::get(&MCtx, "callee"),
+                  mlir::StringAttr::get(&MCtx, Tramp));
+              return emitUnreg("matlab.call_builtin", CallArgs, ResTy, L, {Cal});
             }
           }
         }

@@ -173,6 +173,44 @@ if [[ "$got_rc" != "0" ]]; then
   echo "FAIL  xturn_anon_handle_to_solver (rc=$got_rc)"
 fi
 
+# 7. Cross-turn handle called DIRECTLY with a MATRIX argument (issue #119).
+#    Before the fix the recovered kind=13 pointer was subscripted as a
+#    matrix — SIGSEGV (and, when the garbage dimension was huge, a multi-GB
+#    runaway allocation).  Scalar-return objective shape:
+run_case "xturn_anon_handle_matrix_arg_scalar" "$(cat <<'EOF'
+f = @(x) x(1) + x(2);
+v = [3; 4];
+disp(f(v))
+exit
+EOF
+)" "7"
+
+# 7b. Matrix-RETURN handle called cross-turn with a matrix arg (the
+#     vector->vector residual shape — dispatches to matlab_call_handle_mm*).
+run_case "xturn_anon_handle_matrix_arg_matrix" "$(cat <<'EOF'
+r = @(x) [x(1); x(2) * 2];
+v = [3; 4];
+s = r(v);
+fprintf('MM %.0f %.0f\n', s(1), s(2));
+exit
+EOF
+)" "MM 3 8"
+
+# 7c. The headline #119 flow + no-runaway guard: define an objective, run a
+#     solver on it (cross-turn), THEN call the handle directly with the
+#     solver's matrix result.  Asserts a clean exit — a non-zero rc here
+#     means either the SIGSEGV came back or the bogus-dimension allocation
+#     blew up (the multi-GB hang the fix removes).
+got_rc="$(printf '%s\n' \
+  'rastrigin = @(x) 20 + (x(1)*x(1) - 10*cos(2*pi*x(1))) + (x(2)*x(2) - 10*cos(2*pi*x(2)));' \
+  'xs = fminunc(rastrigin, [3.1; 2.9]);' \
+  'fprintf("f=%.4f\n", rastrigin(xs));' "exit" | "$MATLABC" -repl >/dev/null 2>&1; echo $?)"
+if [[ "$got_rc" != "0" ]]; then
+  fail=$((fail+1))
+  fails+=("xturn_anon_handle_matrix_arg_solver (exit rc=$got_rc, expected 0 — SIGSEGV / runaway regression?)")
+  echo "FAIL  xturn_anon_handle_matrix_arg_solver (rc=$got_rc)"
+fi
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 if (( fail > 0 )); then

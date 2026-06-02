@@ -58,6 +58,15 @@ public:
     WorkspaceClassNameHook = H;
   }
 
+  // REPL workspace function-handle signature hook (#119) — for kind=13
+  // bindings, returns the stored return-kind (-1 unknown, 0 scalar,
+  // 1 matrix) so a cross-turn `f(vec)` with a matrix argument can dispatch
+  // to the matrix-argument trampoline with the right result type.
+  using WorkspaceHandleSigHookT = int (*)(const char *name, int64_t len);
+  void setWorkspaceHandleSigHook(WorkspaceHandleSigHookT H) {
+    WorkspaceHandleSigHook = H;
+  }
+
 private:
   SemaContext &Sema;
   TypeContext &TC;
@@ -66,6 +75,7 @@ private:
   bool ReplMode = false;
   WorkspaceKindHookT WorkspaceKindHook = nullptr;
   WorkspaceClassNameHookT WorkspaceClassNameHook = nullptr;
+  WorkspaceHandleSigHookT WorkspaceHandleSigHook = nullptr;
 
   void registerBuiltins();
   void registerBuiltin(std::string_view Name);

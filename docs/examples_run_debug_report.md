@@ -150,14 +150,20 @@ AOT/DAP resolve these because the defining op is visible.
    crashes from 23→10. Guarded by `test/Repl/run_tests.sh`
    (`xturn_anon_handle_scalar`, `xturn_anon_handle_to_solver`).
 
-   **Still open (carved out of this fix, each tracked separately):**
-   - **Direct cross-turn handle call with a matrix arg → SIGSEGV (#119).**
-     The kind=13 call trampolines are scalar-only; calling a recovered handle
-     directly with a vector (`rastrigin(xlocal)`) lowers to a subscript on the
-     code pointer. This is what still crashes the 6 `globaloptim/*` demos
-     (their solver calls now succeed; their `fprintf` self-reports don't).
-     Needs the kind=13 ABI to carry arity + return-kind plus matrix
-     trampolines.
+   **Follow-ups:**
+   - **Direct cross-turn handle call with a matrix arg (✅ LANDED — #119).**
+     The kind=13 call trampolines were scalar-only; calling a recovered handle
+     directly with a vector (`rastrigin(xlocal)`) lowered to a *subscript on
+     the code pointer* — SIGSEGV, and when the garbage matrix dimension read
+     off the code pointer was large, a multi-GB runaway allocation. Fixed by
+     carrying the handle's return-kind in the kind=13 signature side-channel
+     (`matlab_ws_set/get_handle_sig`), a Resolver hook that stamps
+     `Binding::HandleRetKind`, and matrix trampolines
+     (`matlab_call_handle_m{1,2}` → scalar, `_mm{1,2}` → matrix). Cleared the
+     6 `globaloptim/*` crashes plus `ode_solver` and `lsqnonlin_curvefit`
+     (REPL lane 238→246 OK, crashes 10→2). Residual corner: a matrix-returning
+     anon whose body Sema can't type (e.g. `@(x) reshape(x,2,2)`) would
+     misdispatch — noted in #119. Guarded by `xturn_anon_handle_matrix_arg_*`.
    - **Scalar-from-workspace-matrix → `tensor<*xi1>` in `if` (#120).** A 1×1
      builtin result round-tripped as a matrix stays tensor-typed; a scalar
      comparison on it fails `scf.if` verification. ReplMode-specific (AOT is

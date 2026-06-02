@@ -759,6 +759,9 @@ extern "C" int replWorkspaceKindHook(const char *name, int64_t len);
 extern "C" const char *replWorkspaceClassNameHook(const char *name,
                                                    int64_t len,
                                                    int64_t *len_out);
+/* Companion hook for kind=13 bindings — returns the handle's stored
+ * return-kind (#119).  Defined alongside replWorkspaceKindHook below. */
+extern "C" int replWorkspaceHandleSigHook(const char *name, int64_t len);
 
 /* matlabc binary directory — captured once in main() so the REPL
  * prelude-search helpers can find runtime/*.m files relative to the
@@ -1119,6 +1122,7 @@ int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id,
   R.setReplMode(true);
   R.setWorkspaceKindHook(&replWorkspaceKindHook);
   R.setWorkspaceClassNameHook(&replWorkspaceClassNameHook);
+  R.setWorkspaceHandleSigHook(&replWorkspaceHandleSigHook);
   R.resolve(*TU);
   TypeInference Inf(Sema, TC, Diag);
   Inf.run(*TU);
@@ -2264,6 +2268,15 @@ extern "C" const char *replWorkspaceClassNameHook(const char *name,
     return matlab_dbg_class_name(cid, len_out);
   }
   return nullptr;
+}
+
+/* Resolver workspace function-handle signature hook (#119) — returns the
+ * stored return-kind (-1 unknown / 0 scalar / 1 matrix) for a kind=13
+ * binding so a cross-turn `f(vec)` with a matrix argument dispatches to
+ * the matrix-argument trampoline with the right result type. */
+extern "C" int32_t matlab_ws_get_handle_sig(const char *name, int64_t len);
+extern "C" int replWorkspaceHandleSigHook(const char *name, int64_t len) {
+  return (int)matlab_ws_get_handle_sig(name, len);
 }
 
 /* Definition of the forward declaration earlier in this file — kept
@@ -4184,6 +4197,7 @@ bool compileProgram() {
   R.setReplMode(true);
   R.setWorkspaceKindHook(&replWorkspaceKindHook);
   R.setWorkspaceClassNameHook(&replWorkspaceClassNameHook);
+  R.setWorkspaceHandleSigHook(&replWorkspaceHandleSigHook);
   R.resolve(*TU);
   TypeInference Inf(Sema, TC, Diag);
   Inf.run(*TU);
