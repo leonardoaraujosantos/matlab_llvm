@@ -405,6 +405,17 @@ bool outlineParfor(Operation *Parfor, unsigned Id) {
   // iteration-local matrices are unaffected: each thread owns its own copy,
   // so their slot is never in CaptureSlots.)
   {
+    // `% matlab_llvm: write-disjoint(A, j)` escape hatch (issue #33): the
+    // user asserts that writes to the named matrix don't alias across
+    // iterations even though no index is the bare loop variable (e.g.
+    // `A(perm(j)) = ...`).  The frontend records the asserted names in a
+    // `matlab.write_disjoint` string-array attr at parfor creation.
+    llvm::DenseSet<StringRef> PragmaDisjoint;
+    if (auto WD = Parfor->getAttrOfType<ArrayAttr>("matlab.write_disjoint"))
+      for (Attribute A : WD)
+        if (auto S = dyn_cast<StringAttr>(A))
+          PragmaDisjoint.insert(S.getValue());
+
     auto indexIsIV = [&](Value Idx) -> bool {
       if (Idx == IV) return true;  // post-RAUW: the IV-slot load became IV
       // Defensive: a bare load of the IV-named slot that the RAUW above
@@ -437,6 +448,8 @@ bool outlineParfor(Operation *Parfor, unsigned Id) {
       if (Operation *AllocOp = Slot.getDefiningOp())
         if (auto NA = AllocOp->getAttrOfType<StringAttr>("name"))
           SlotName = NA.getValue().str();
+      // User-asserted disjoint via the write-disjoint pragma — trust it.
+      if (PragmaDisjoint.count(SlotName)) return;
       std::string Var = VarName.empty() ? "<iter>" : VarName.str();
       std::cerr << "parfor: write to captured matrix '" << SlotName
                 << "' is not provably iteration-disjoint — no index uses the "
@@ -444,7 +457,11 @@ bool outlineParfor(Operation *Parfor, unsigned Id) {
                    "  parfor requires each iteration to write distinct "
                    "elements so the writes cannot race across threads.\n"
                    "  Index the write by the loop variable, e.g. `"
-                << SlotName << "(" << Var << ") = ...`.\n";
+                << SlotName << "(" << Var << ") = ...`.\n"
+                   "  If the writes are disjoint by construction (e.g. a "
+                   "permutation index), assert it with a pragma above the "
+                   "loop:\n  `% matlab_llvm: write-disjoint(" << SlotName
+                << ", " << Var << ")`.\n";
       RejectWrite = true;
     });
     if (RejectWrite) return false;
