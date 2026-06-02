@@ -279,3 +279,16 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
   returns empty instead of being walked. Deterministic regression
   `test/Runtime/test_struct_cell.c::test_obj_get_mat_on_empty`, verified to
   SIGSEGV without the fix.
+- **2026-06-02 — #131 (✅ fixed).** A struct created/mutated by a field
+  assignment (`s.x = v`) wasn't persisted to the ReplMode workspace, so a
+  later REPL turn read an empty `s` and `s.x` came back `0` (silent wrong
+  value — not in #116's enumerated crash/error set, and AOT/`-dap`/same-turn
+  `-repl` are all correct). The field store wrote only into `s`'s local struct
+  slot and emitted no `matlab_ws_set_struct`. Fixed in `Lowering.cpp` by
+  persisting the (plain-struct) base to the workspace after a FieldAccess-LHS
+  store in ReplMode — same store-side round-trip pattern as the anon-handle
+  (#118) and table (#127) fixes. Deterministic regression
+  `test/Repl/run_tests.sh` (`xturn_struct_field`, `xturn_struct_field_nested`),
+  verified to read `0` without the fix. While investigating, also confirmed
+  **#124 is deterministic, not a race** — `-dap` deterministically yields
+  `FEM u(0) = 0.000000` (18/18) vs `-repl` `0.248873`; the issue was updated.
