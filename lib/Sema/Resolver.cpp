@@ -945,6 +945,9 @@ void Resolver::registerBuiltins() {
     "solvepde", "solvepdeeig",
     "pdegplot", "pdemesh",
     "specifyCoefficients", "applyBoundaryCondition",
+    /* Issue #28 — 2-D/3-D geometry + mesher surface. */
+    "multicuboid", "generateMesh", "decsg", "createpde",
+    "geometryFromEdges", "interpolateSolution",
     "pde_assemble_poisson_3d_sparse", "pde_apply_dirichlet_3d_sparse",
     "pde_face_scalar_load_3d",
     /* pdeplot3D rendering — Cairo unstructured-mesh painter. */
