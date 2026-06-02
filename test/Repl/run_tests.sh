@@ -252,6 +252,28 @@ disp(s.a.b)
 exit
 EOF
 )" "7"
+# 8. Cross-turn struct-array persistence (issue #133). A struct array built by
+#    indexed field-assignment (`a(i).x = v`) must round-trip the workspace:
+#    before the fix the array lived only in a local slot (no
+#    matlab_ws_set_struct_arr), so `a` never entered the workspace and a
+#    later-turn `a(i).x` / `length(a)` read an empty array. Distinct from the
+#    plain-struct case (#131): struct arrays use matlab_struct_arr* (kind=14).
+run_case "xturn_struct_array_field" "$(cat <<'EOF'
+a(1).x = 5;
+a(2).x = 9;
+disp(a(2).x)
+exit
+EOF
+)" "9"
+
+# 8b. length() of a cross-turn struct array.
+run_case "xturn_struct_array_length" "$(cat <<'EOF'
+a(1).x = 5;
+a(2).x = 9;
+disp(length(a))
+exit
+EOF
+)" "2"
 
 echo "----"
 echo "passed: $pass    failed: $fail"

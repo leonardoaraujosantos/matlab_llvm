@@ -7831,7 +7831,8 @@ matlab_mat *matlab_struct_get_mat(matlab_struct *s, const char *name, int64_t le
     if ((s->kinds[idx] == 6  ||
          s->kinds[idx] == 9  ||
          s->kinds[idx] == 10 ||
-         s->kinds[idx] == 11) && s->ptr_vals[idx])
+         s->kinds[idx] == 11 ||
+         s->kinds[idx] == 14) && s->ptr_vals[idx])   /* 14 = struct array (#133) */
         return (matlab_mat *)s->ptr_vals[idx];
     /* Box a scalar field into a 1x1 matrix. */
     if (s->kinds[idx] == 0) {

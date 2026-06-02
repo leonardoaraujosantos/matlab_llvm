@@ -535,6 +535,14 @@ private:
    * presence in this set switches read paths (`s(i).x`, `length(s)`,
    * `numel(s)`) over to the struct_arr runtime entries. */
   std::unordered_set<Binding *> StructArrayBindings;
+  /* True if a binding holds a struct array — same-turn (in
+   * StructArrayBindings, set by the `a(i).x = v` store) OR cross-turn
+   * (Binding::IsStructArray, stamped by the Resolver from the kind=14
+   * workspace lookup, #133). Lets the dispatch / rehydrate sites recover
+   * the struct-array-ness a later REPL turn would otherwise lose. */
+  bool isStructArrayBinding(Binding *B) const {
+    return B && (StructArrayBindings.count(B) || B->IsStructArray);
+  }
   /* Phase 4: bindings holding a matlab_dict * (assigned from
    * `containers.Map()` or `dictionary(...)`). Indexing reads /
    * writes route through the matlab_dict_* runtime entries. */
@@ -1303,11 +1311,36 @@ mlir::Value Lowerer::ensureStructArraySlot(Binding *Bnd,
     mlir::OpBuilder::InsertionGuard G(B);
     auto *SlotOp = Slot.getDefiningOp();
     if (SlotOp) B.setInsertionPointAfter(SlotOp);
-    mlir::NamedAttribute Cal(
-        mlir::StringAttr::get(&MCtx, "callee"),
-        mlir::StringAttr::get(&MCtx, "matlab_struct_arr_new"));
-    mlir::Value NewPtr = emitUnreg("matlab.call_builtin", {}, PtrTy, L, {Cal});
-    emitStore(NewPtr, Slot, L);
+    /* #133: in ReplMode, a struct array bound in a prior turn
+     * (Bnd->IsStructArray, kind=14) — or same-input, already in
+     * StructArrayBindings — must rehydrate its pointer from the
+     * workspace (matlab_ws_get_mat, kind=14 pass-through) rather than
+     * allocate a fresh empty array that would shadow the stored value.
+     * Mirrors the ensureStructSlot rehydrate. */
+    /* Only rehydrate for a CROSS-TURN array (Resolver-stamped IsStructArray
+     * from a prior input's kind=14).  NOT same-turn StructArrayBindings: the
+     * `a(i).x = v` store inserts that set *before* calling this, so on the
+     * defining turn `a` isn't in the workspace yet — loading it would pull an
+     * empty matrix and corrupt the store.  StructArrayInitialised guards
+     * re-init within a turn, so a fresh matlab_struct_arr_new() on first
+     * touch is correct for the defining turn. */
+    bool LoadFromWorkspace =
+        ReplMode && InScriptBody && Bnd->Kind == BindingKind::Var &&
+        Bnd->IsStructArray;
+    if (LoadFromWorkspace) {
+      mlir::Value NameV = emitFieldNameChar(Name, L);
+      mlir::NamedAttribute Cal(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, "matlab_ws_get_mat"));
+      mlir::Value Ptr = emitUnreg("matlab.call_builtin", {NameV}, PtrTy, L, {Cal});
+      emitStore(Ptr, Slot, L);
+    } else {
+      mlir::NamedAttribute Cal(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, "matlab_struct_arr_new"));
+      mlir::Value NewPtr = emitUnreg("matlab.call_builtin", {}, PtrTy, L, {Cal});
+      emitStore(NewPtr, Slot, L);
+    }
   }
   return Slot;
 }
@@ -5032,6 +5065,20 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
             mlir::StringAttr::get(&MCtx, Callee));
         emitUnregOp("matlab.call_builtin", {Elem, NameV, Rhs},
                     {mlir::NoneType::get(&MCtx)}, loc(F.Range), {SCal});
+        /* #133: persist the struct array to the workspace so a later REPL
+         * turn sees the element/field just written. The store above only
+         * mutated the local-slot array; without this the array is discarded
+         * at end of turn and a cross-turn `a(i).x` reads an empty array.
+         * Arr (the matlab_struct_arr* itself) is stable across
+         * get_or_create's internal growth, so it's the live array. */
+        if (ReplMode && InScriptBody && NE->Ref->Kind == BindingKind::Var) {
+          mlir::Value NameV2 = emitFieldNameChar(NE->Ref->Name, loc(F.Range));
+          mlir::NamedAttribute PCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_ws_set_struct_arr"));
+          emitUnregOp("matlab.call_builtin", {NameV2, Arr},
+                      {mlir::NoneType::get(&MCtx)}, loc(F.Range), {PCal});
+        }
         return;
       }
     }
@@ -12926,7 +12973,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           (N->Name == "numel" || N->Name == "length") &&
           C.Args.size() == 1) {
         if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]))
-          if (ArgN->Ref && StructArrayBindings.count(ArgN->Ref)) {
+          if (ArgN->Ref && isStructArrayBinding(ArgN->Ref)) {
             auto F64 = mlir::Float64Type::get(&MCtx);
             mlir::Value Slot = ensureStructArraySlot(ArgN->Ref,
                                                      ArgN->Name, L);
@@ -12942,7 +12989,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
       if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
           N->Name == "size" && C.Args.size() == 2) {
         if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]))
-          if (ArgN->Ref && StructArrayBindings.count(ArgN->Ref)) {
+          if (ArgN->Ref && isStructArrayBinding(ArgN->Ref)) {
             auto F64 = mlir::Float64Type::get(&MCtx);
             auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
             mlir::Value Slot = ensureStructArraySlot(ArgN->Ref,
@@ -13757,7 +13804,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
      * matlab_struct_arr_get and field-get on the result. */
     if (auto *CI = dynamic_cast<const CallOrIndex *>(F.Base)) {
       auto *NE = dynamic_cast<const NameExpr *>(CI->Callee);
-      if (NE && NE->Ref && StructArrayBindings.count(NE->Ref) &&
+      if (NE && NE->Ref && isStructArrayBinding(NE->Ref) &&
           CI->Args.size() == 1 && CI->Args[0]) {
         mlir::Value Slot = ensureStructArraySlot(NE->Ref, NE->Name, L);
         mlir::Value Arr = emitLoad(Slot, PtrTy, L);

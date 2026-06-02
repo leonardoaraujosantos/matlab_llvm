@@ -292,3 +292,17 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
   verified to read `0` without the fix. While investigating, also confirmed
   **#124 is deterministic, not a race** — `-dap` deterministically yields
   `FEM u(0) = 0.000000` (18/18) vs `-repl` `0.248873`; the issue was updated.
+- **2026-06-02 — #133 (✅ fixed).** A struct array built by indexed
+  field-assignment (`a(i).x = v`) wasn't persisted to the ReplMode workspace,
+  so a cross-turn `a(i).x` / `length(a)` read an empty array (silent wrong
+  value; AOT/same-turn correct). The array lived only in a local slot —
+  `matlab_ws_set_struct_arr` / `_get_struct_arr` were referenced in a comment
+  but never implemented. Fixed by adding the workspace ABI: new kind=14 +
+  `matlab_ws_set_struct_arr` (read via `matlab_struct_get_mat`'s kind=14
+  pass-through), `Binding::IsStructArray` stamped by the Resolver, and Lowering
+  that persists the array after an `a(i).x=v` store and rehydrates it
+  cross-turn — same kind-preserving pattern as handles (#118) / tables (#127) /
+  plain structs (#131), distinct because struct arrays use `matlab_struct_arr*`.
+  Deterministic regression `test/Repl/run_tests.sh`
+  (`xturn_struct_array_field`, `xturn_struct_array_length`), verified empty
+  without the fix.
