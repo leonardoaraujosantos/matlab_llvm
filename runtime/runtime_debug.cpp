@@ -398,6 +398,10 @@ void *matlab_ws_get_handle(const char *name, int64_t len) {
  * signature and invoke it.  Covers the common `double -> double` math
  * builtins (matlab_sin_s, matlab_sqrt_s, ...) and capture-free user /
  * anonymous functions whose monomorphised signature is all-f64. */
+double matlab_call_handle_s0(void *fn) {
+    if (!fn) return 0.0;
+    return ((double (*)())fn)();
+}
 double matlab_call_handle_s1(void *fn, double a) {
     if (!fn) return 0.0;
     return ((double (*)(double))fn)(a);

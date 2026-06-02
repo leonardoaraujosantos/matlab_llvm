@@ -3548,6 +3548,34 @@ void Lowerer::lowerStmt(const Stmt &St) {
           }
         }
       }
+      /* #116: also PERSIST a capture-free anonymous handle to the ReplMode
+       * workspace (kind=13) so a LATER REPL turn can recover it. The binding
+       * stays on the local-slot lane above for SAME-turn calls (isLocalHandle
+       * keeps `f(vec)` / `fminunc(f,..)` lowering correct in this unit, #77),
+       * and that lane emits no workspace store — so without this extra store
+       * `f = @(x) ..` is lost at end of turn: the next turn reads `f` back as
+       * an empty matrix and a solver that invokes it jumps through a bogus
+       * pointer (SIGBUS). Named handles already persist via the lowerLValueStore
+       * kind=13 path; anon handles were diverted to the slot lane by #77 and
+       * dropped their cross-turn store. Only capture-free anons round-trip — the
+       * stored value is just the function pointer (matlab_ws_set_handle's ABI,
+       * runtime_debug.cpp); the per-session g_ReplEngines vector keeps this
+       * turn's JIT'd anon code resident so the pointer stays valid across turns.
+       * Captured closures (`@(s) M*s`) need their environment serialized too —
+       * a documented follow-up (#116), so they stay matrix-path here. */
+      if (ReplMode && InScriptBody && Rhs && Caps.empty() &&
+          A.RHS->Kind == NodeKind::AnonFunction) {
+        for (const Expr *L : A.LHS) {
+          auto *N = dynamic_cast<const NameExpr *>(L);
+          if (!N || !N->Ref) continue;
+          mlir::Value NameV = emitFieldNameChar(N->Ref->Name, loc(A.Range));
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_ws_set_handle"));
+          emitUnregOp("matlab.call_builtin", {NameV, Rhs},
+                      {mlir::NoneType::get(&MCtx)}, loc(A.Range), {Cal});
+        }
+      }
     }
     /* #81: a named function handle stored into a struct field / classdef
      * property — `s.h = @inc` (FuncHandle RHS) or `h = @inc; s.h = h`
@@ -13122,7 +13150,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
       if (auto *NE = dynamic_cast<const NameExpr *>(C.Callee))
         if (NE->Ref && NE->Ref->Kind == BindingKind::Var &&
             Slots.find(NE->Ref) == Slots.end() &&
-            !C.Args.empty() && C.Args.size() <= 3) {
+            C.Args.size() <= 3) {
           bool WsHandle = NE->Ref->IsHandle;
           if (!WsHandle) {
             auto HIt = HandleBindings.find(NE->Ref);
@@ -13156,9 +13184,10 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
              * get DCE'd; fall through to the existing handle/subscript
              * path below. */
             if (AllF64) {
-              const char *Tramp = C.Args.size() == 1 ? "matlab_call_handle_s1"
+              const char *Tramp = C.Args.empty() ? "matlab_call_handle_s0"
+                                : (C.Args.size() == 1 ? "matlab_call_handle_s1"
                                 : (C.Args.size() == 2 ? "matlab_call_handle_s2"
-                                                      : "matlab_call_handle_s3");
+                                                      : "matlab_call_handle_s3"));
               mlir::NamedAttribute Cal(
                   mlir::StringAttr::get(&MCtx, "callee"),
                   mlir::StringAttr::get(&MCtx, Tramp));

@@ -125,6 +125,54 @@ if [[ "$got_rc" != "0" ]]; then
   echo "FAIL  plot_handle_assign_no_crash (rc=$got_rc)"
 fi
 
+# 6. Cross-turn anonymous-handle persistence (issue #116).  An anonymous
+#    function handle defined in one REPL turn must survive into the next:
+#    before the fix, `f = @(x) ...` was kept on the local-slot lane and
+#    emitted NO workspace store (capture-free anons were diverted past the
+#    kind=13 persistence by #77), so a later turn read `f` back as an empty
+#    matrix — yielding wrong values for a scalar call and a hard SIGBUS when
+#    a solver invoked the empty pointer as a closure.  Named handles (`@sin`)
+#    already persisted; these guard the anonymous case specifically.
+run_case "xturn_anon_handle_scalar" "$(cat <<'EOF'
+f = @(x) x + 1;
+disp(f(5))
+exit
+EOF
+)" "6"
+
+# 6a. Zero-argument anon (`@() ...`) recovered + called across a turn — the
+#     simplest capture-free handle, exercises the matlab_call_handle_s0 path.
+run_case "xturn_anon_handle_zeroarg" "$(cat <<'EOF'
+g = @() 42;
+disp(g())
+exit
+EOF
+)" "42"
+
+# 6b. The headline crash: a capture-free anon defined one turn, passed to a
+#     solver the next.  `fminunc` on the Rosenbrock banana converges to the
+#     minimiser [1; 1]; the sentinel only prints if the cross-turn solver
+#     call ran to completion (i.e. the handle round-tripped) — pre-fix this
+#     SIGBUS'd and the substring was absent.
+run_case "xturn_anon_handle_to_solver" "$(cat <<'EOF'
+ros = @(x) 100*(x(2) - x(1)*x(1))*(x(2) - x(1)*x(1)) + (1 - x(1))*(1 - x(1));
+r = fminunc(ros, [-1.2; 1]);
+fprintf('ROS_OK %.0f %.0f\n', round(r(1)), round(r(2)));
+exit
+EOF
+)" "ROS_OK 1 1"
+# (Belt + braces: a SIGBUS would leak a shell signal and a non-zero rc even
+#  though 2>&1 captured no sentinel.  Assert the process exits clean.)
+got_rc="$(printf '%s\n' \
+  'ros = @(x) 100*(x(2) - x(1)*x(1))*(x(2) - x(1)*x(1)) + (1 - x(1))*(1 - x(1));' \
+  'r = fminunc(ros, [-1.2; 1]);' \
+  'disp(r(1));' "exit" | "$MATLABC" -repl >/dev/null 2>&1; echo $?)"
+if [[ "$got_rc" != "0" ]]; then
+  fail=$((fail+1))
+  fails+=("xturn_anon_handle_to_solver (exit rc=$got_rc, expected 0 — SIGBUS regression?)")
+  echo "FAIL  xturn_anon_handle_to_solver (rc=$got_rc)"
+fi
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 if (( fail > 0 )); then
