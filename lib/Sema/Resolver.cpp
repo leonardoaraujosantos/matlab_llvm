@@ -945,6 +945,9 @@ void Resolver::registerBuiltins() {
     "solvepde", "solvepdeeig",
     "pdegplot", "pdemesh",
     "specifyCoefficients", "applyBoundaryCondition",
+    /* Issue #28 — 2-D/3-D geometry + mesher surface. */
+    "multicuboid", "generateMesh", "decsg", "createpde",
+    "geometryFromEdges", "interpolateSolution",
     "pde_assemble_poisson_3d_sparse", "pde_apply_dirichlet_3d_sparse",
     "pde_face_scalar_load_3d",
     /* pdeplot3D rendering — Cairo unstructured-mesh painter. */
@@ -1038,6 +1041,11 @@ void Resolver::registerBuiltins() {
     "xline", "yline",
     "xticks", "yticks", "xticklabels", "yticklabels",
     "yyaxis", "contourf", "quiver",
+    /* Animation capture & video export (docs/plotting.md §4 Tier A/B).
+     * getframe captures the current figure; VideoWriter/open/writeVideo
+     * encode a frame sequence to a video file via libav. `close` (above)
+     * doubles as close(VideoWriter). */
+    "getframe", "VideoWriter", "open", "writeVideo",
     /* IDE / REPL actions accepted as no-ops outside the REPL so
      * scripts that include them still compile. Roadmap-tracked in
      * docs/plotting.md / docs/roadmap.md. */

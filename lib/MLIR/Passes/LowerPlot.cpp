@@ -133,6 +133,10 @@ const llvm::StringSet<> &plotBuiltins() {
     "grid", "hold", "axis", "box", "xlim", "ylim", "view",
     "loglog", "semilogx", "semilogy",
     "subplot", "saveas", "print",
+    /* Animation capture & video export (docs/plotting.md §4 Tier A/B).
+     * getframe -> matlab_getframe; VideoWriter/open/writeVideo lower to
+     * matlab_videowriter_*; close(v) reuses the existing close branch. */
+    "getframe", "VideoWriter", "open", "writeVideo",
     /* No-op stubs for headless mode: IDE actions + Tier-5 3-D
      * rasterizer features (lighting / shading / materials). Scripts
      * that include them compile and run, but the visual effects
@@ -419,12 +423,79 @@ bool rewriteCallee(Operation *Op, StringRef Callee, Helper &H,
   if (Callee == "close") {
     if (N == 0) return rewriteVoidNoArg(Op, H, "matlab_close_all");
     if (N == 1) {
+      /* close(v) on an opaque handle finalises a VideoWriter. There's no
+       * other opaque handle a script closes today (figure-handle close
+       * isn't distinguished yet), so a single PtrTy arg means the writer. */
+      if (Op->getOperand(0).getType() == H.PtrTy) {
+        H.B.setInsertionPoint(Op);
+        H.callVoid(L, "matlab_videowriter_close", {H.PtrTy},
+                   {Op->getOperand(0)});
+        return true;
+      }
       auto Pair = materializeStringArg(Op->getOperand(0), H.B, S);
       if (Pair && Pair->first) {
         H.B.setInsertionPoint(Op);
         H.callVoid(L, "matlab_close_all", {}, {});
         return true;
       }
+    }
+    return false;
+  }
+
+  // ---- Animation capture & video export (docs/plotting.md §4 Tier A/B) ----
+  if (Callee == "getframe") {
+    /* getframe() / getframe(h): always capture the current figure. A
+     * handle argument (e.g. `gcf`) is ignored and swept as a dead
+     * make_handle. */
+    H.B.setInsertionPoint(Op);
+    Value V = H.callRet(L, "matlab_getframe", H.PtrTy, {}, {});
+    if (Op->getNumResults() == 1) Op->getResult(0).replaceAllUsesWith(V);
+    return true;
+  }
+  if (Callee == "VideoWriter") {
+    if (N == 1) {
+      auto P = materializeStringArg(Op->getOperand(0), H.B, S);
+      if (!P) return false;
+      auto [Ptr, Len] = *P;
+      H.B.setInsertionPoint(Op);
+      Value V = H.callRet(L, "matlab_videowriter_new", H.PtrTy,
+                          {H.PtrTy, H.I64}, {Ptr, H.i64Const(L, Len)});
+      if (Op->getNumResults() == 1) Op->getResult(0).replaceAllUsesWith(V);
+      return true;
+    }
+    if (N == 2) {
+      auto P = materializeStringArg(Op->getOperand(0), H.B, S);
+      auto Pr = materializeStringArg(Op->getOperand(1), H.B, S);
+      if (!P || !Pr) return false;
+      auto [Ptr, Len] = *P;
+      auto [PrPtr, PrLen] = *Pr;
+      H.B.setInsertionPoint(Op);
+      Value V = H.callRet(
+          L, "matlab_videowriter_new_profile", H.PtrTy,
+          {H.PtrTy, H.I64, H.PtrTy, H.I64},
+          {Ptr, H.i64Const(L, Len), PrPtr, H.i64Const(L, PrLen)});
+      if (Op->getNumResults() == 1) Op->getResult(0).replaceAllUsesWith(V);
+      return true;
+    }
+    return false;
+  }
+  if (Callee == "open") {
+    /* open(v): only the single-handle VideoWriter shape is ours. */
+    if (N == 1 && Op->getOperand(0).getType() == H.PtrTy) {
+      H.B.setInsertionPoint(Op);
+      H.callVoid(L, "matlab_videowriter_open", {H.PtrTy},
+                 {Op->getOperand(0)});
+      return true;
+    }
+    return false;
+  }
+  if (Callee == "writeVideo") {
+    if (N == 2 && Op->getOperand(0).getType() == H.PtrTy &&
+                  Op->getOperand(1).getType() == H.PtrTy) {
+      H.B.setInsertionPoint(Op);
+      H.callVoid(L, "matlab_videowriter_write", {H.PtrTy, H.PtrTy},
+                 {Op->getOperand(0), Op->getOperand(1)});
+      return true;
     }
     return false;
   }

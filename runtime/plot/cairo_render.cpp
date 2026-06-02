@@ -1613,6 +1613,40 @@ RenderResult render(const Figure &fig, Format fmt) {
     return sink_to_result(sink);
 }
 
+RawFrame render_raw(const Figure &fig) {
+    RawFrame out;
+    cairo_surface_t *surface =
+        cairo_image_surface_create(CAIRO_FORMAT_ARGB32, fig.width_px,
+                                   fig.height_px);
+    if (!surface || cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS) {
+        if (surface) cairo_surface_destroy(surface);
+        return out;
+    }
+    cairo_t *cr = cairo_create(surface);
+    draw_figure(cr, fig);
+    cairo_destroy(cr);
+    cairo_surface_flush(surface);
+
+    const int w = fig.width_px;
+    const int h = fig.height_px;
+    const int src_stride = cairo_image_surface_get_stride(surface);
+    const unsigned char *src = cairo_image_surface_get_data(surface);
+    const int dst_stride = w * 4;
+    if (src && w > 0 && h > 0) {
+        out.data = static_cast<uint8_t *>(std::malloc((size_t)dst_stride * h));
+        if (out.data) {
+            for (int row = 0; row < h; ++row)
+                std::memcpy(out.data + (size_t)row * dst_stride,
+                            src + (size_t)row * src_stride, dst_stride);
+            out.width = w;
+            out.height = h;
+            out.stride = dst_stride;
+        }
+    }
+    cairo_surface_destroy(surface);
+    return out;
+}
+
 int render_to_file(const Figure &fig, Format fmt, const char *path) {
     cairo_surface_t *surface = make_surface(fmt, nullptr, fig, path);
     if (!surface || cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS) {

@@ -1457,6 +1457,26 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Changed = true;
       continue;
     }
+    if ((Name == "matlab_videowriter_set_framerate" ||
+         Name == "matlab_videowriter_set_quality") &&
+        Call->getNumOperands() == 2) {
+      Value Vw = Call->getOperand(0);
+      Value Val = Call->getOperand(1);
+      if (Vw.getType() != PtrTy) continue;
+      B.setInsertionPoint(Call);
+      /* The runtime setter takes a double; coerce an integer RHS. */
+      if (auto IT = mlir::dyn_cast<IntegerType>(Val.getType())) {
+        (void)IT;
+        Val = LLVM::SIToFPOp::create(B, Call->getLoc(), F64, Val);
+      } else if (Val.getType() != F64) {
+        continue;   // unexpected RHS type — leave for a later pass / error
+      }
+      auto Fn = rt(Name, VoidTy, {PtrTy, F64});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{Vw, Val});
+      Call->erase();
+      Changed = true;
+      continue;
+    }
     if ((Name == "matlab_struct_set_f64" ||
          Name == "matlab_struct_set_mat" ||
          Name == "matlab_struct_set_string") &&

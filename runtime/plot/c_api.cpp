@@ -10,7 +10,9 @@
 #include "colormap.h"
 #include "contour.h"
 #include "figure.h"
+#include "frame.h"
 
+#include <memory>
 #include <string_view>
 
 #include <algorithm>
@@ -178,7 +180,32 @@ matlab_figure *matlab_gcf(void) {
     return reinterpret_cast<matlab_figure *>(matlab_plot::current_figure());
 }
 
-void matlab_close_all(void) { matlab_plot::close_all(); }
+namespace {
+/* Per-thread frame registry. getframe() hands MATLAB an opaque pointer; the
+ * runtime owns the storage so scripts never free frames. Cleared on
+ * close_all / thread exit, matching figure lifetime. */
+thread_local std::vector<std::unique_ptr<matlab_frame>> g_frames;
+}  // namespace
+
+void matlab_close_all(void) {
+    g_frames.clear();
+    matlab_plot::close_all();
+}
+
+matlab_frame *matlab_getframe(void) {
+    matlab_plot::RawFrame raw =
+        matlab_plot::render_raw(*matlab_plot::current_figure());
+    if (!raw.data) return nullptr;
+    auto f = std::make_unique<matlab_frame>();
+    f->width = raw.width;
+    f->height = raw.height;
+    f->stride = raw.stride;
+    f->pixels.assign(raw.data, raw.data + (size_t)raw.stride * raw.height);
+    std::free(raw.data);
+    matlab_frame *raw_ptr = f.get();
+    g_frames.push_back(std::move(f));
+    return raw_ptr;
+}
 
 void matlab_subplot(double rows, double cols, double i) {
     matlab_plot::subplot(static_cast<int>(rows),
