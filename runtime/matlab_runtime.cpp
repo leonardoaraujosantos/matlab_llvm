@@ -2841,10 +2841,32 @@ void matlab_slice_store1(matlab_mat *A, matlab_mat *idx, matlab_mat *V) {
 
 void matlab_slice_store1_scalar(matlab_mat *A, matlab_mat *idx, double v) {
     int64_t N = idx ? idx->rows * idx->cols : A->rows * A->cols;
-    int64_t m = A->rows, n = A->cols;
     for (int64_t k = 0; k < N; ++k) {
         int64_t lin = idx ? ((int64_t)idx->data[k] - 1) : k;
-        if (lin < 0 || lin >= m * n) continue;
+        if (lin < 0) continue;
+        int64_t m = A->rows, n = A->cols;
+        if (lin >= m * n) {
+            /* #135: auto-grow on out-of-bounds linear assignment, MATLAB-style.
+             * A column vector grows its rows; a row vector / scalar / empty
+             * grows its columns.  A genuine 2-D matrix (m>1 && n>1) indexed
+             * past its end by a single linear index is a MATLAB error — leave
+             * it untouched (skip) rather than guess a reshape.  For any vector
+             * the element storage is contiguous (logical index == buffer
+             * offset), so the existing values copy across verbatim. */
+            if (m > 1 && n > 1) continue;
+            int64_t newm, newn;
+            if (n == 1 && m > 1) { newm = lin + 1; newn = 1; }  /* column vector */
+            else                 { newm = 1;       newn = lin + 1; }  /* row/scalar/empty */
+            int64_t oldlen = m * n;
+            double *nd = (double *)calloc((size_t)(newm * newn + 1), sizeof(double));
+            for (int64_t i = 0; i < oldlen; ++i) nd[i] = A->data[i];
+            free(A->data);
+            A->data = nd;
+            A->rows = newm;
+            A->cols = newn;
+            m = newm;
+            n = newn;
+        }
         int64_t col = lin / m;
         int64_t row = lin - col * m;
         A->data[row * n + col] = v;

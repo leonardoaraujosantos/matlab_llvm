@@ -306,3 +306,17 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
   Deterministic regression `test/Repl/run_tests.sh`
   (`xturn_struct_array_field`, `xturn_struct_array_length`), verified empty
   without the fix.
+- **2026-06-02 — #135 (✅ fixed).** A numeric matrix/vector didn't auto-grow on
+  an out-of-bounds indexed assignment (`v(5) = 10` on a 1×3 left it 1×3, the
+  write silently dropped) — inconsistent with cells / struct arrays, which do
+  grow. AOT-level (all lanes). Fixed in `matlab_slice_store1_scalar`
+  (runtime): an OOB linear index now grows the vector (col vector → rows,
+  row/scalar/empty → cols), zero-filling the gap; a genuine 2-D matrix
+  linear-OOB stays a no-op (MATLAB errors there). Regression
+  `test/Run/regress_matrix_autogrow.m`, verified the write is dropped without
+  the fix. (Skipped on emit-python / emit-typescript: their array shims can't
+  grow a referenced array in place — a separate backend-codegen limitation;
+  the emit-c/cpp lanes use the real runtime and grow correctly.) Found while
+  fixing this: **#136** — `end` in single-subscript indexing resolves to
+  `size(,1)` not `numel`, so `v(end)`/`v(end+1)` are wrong for row vectors
+  (independent bug; together they make the `v(end+1)=x` append idiom work).
