@@ -58,6 +58,22 @@ clang++ -std=c++20 -O2 -Wno-override-module \
 
 The binary has **no `LC_LOAD_DYLIB` for libcairo** (`otool -L /tmp/hello | grep -i cairo` is empty). The first `plot` / `figure` / `savefig` call inside the binary `dlopen`s `libcairo.dylib` from Homebrew / system paths. A program that never plots launches even on hosts without Cairo installed.
 
+### VideoWriter (FFmpeg)
+
+When the runtime archive was built with `-DMATLAB_LLVM_WITH_PLOT_FFMPEG=ON`, a program that calls `VideoWriter` pulls in `videowriter.cpp.o`, which references libav **directly** — unlike libcairo, it is not `dlopen`'d. The final link must therefore put the libav libraries on the line, after the archive:
+
+```bash
+build/matlabc -emit-llvm examples/plot/animation_orbit.m > /tmp/orbit.ll
+clang++ -std=c++20 -O2 -Wno-override-module \
+    /tmp/orbit.ll build/libMatlabRuntime.a \
+    -ldl -lpthread \
+    $(pkg-config --libs libavcodec libavformat libavutil libswscale) \
+    -Wl,-dead_strip -o /tmp/orbit
+/tmp/orbit                                  # writes /tmp/plot_orbit.mp4
+```
+
+The flags are harmless for non-video programs (`-Wl,-dead_strip` drops the unreferenced dylibs) and can be omitted entirely for a runtime built without the `…_FFMPEG` flag.
+
 ## Sym example
 
 ```bash

@@ -253,6 +253,36 @@ void warn_disabled_once() {
         "dev libraries: libavcodec/libavformat/libavutil/libswscale).\n");
 }
 
+#ifdef MATLAB_LLVM_WITH_PLOT_FFMPEG
+/* Same env gate the figure-emit path uses (figure.cpp / c_api.cpp). Kept
+ * local instead of shared so videowriter.cpp doesn't reach into c_api's
+ * anonymous namespace — it's a one-line getenv either way. */
+bool ide_video_enabled() {
+    const char *v = std::getenv("MATLAB_LLVM_IDE_FIGURES");
+    return v && v[0] == '1';
+}
+
+/* Announce a finished video file to the IDE, mirroring the figure-emit
+ * protocol but for an on-disk artifact rather than an inline bitmap:
+ *
+ *   ___MF_VID___ w=<px> h=<px> fps=<rate> path=<absolute path>
+ *
+ * `path=` is emitted LAST and runs to end-of-line so paths containing
+ * spaces survive intact (the IDE parser splits the w/h/fps tokens, then
+ * takes everything after `path=` verbatim). Only called once the trailer
+ * has been written, so the file is complete and playable when this lands.
+ * No-op unless the IDE env gate is set. */
+void emit_ide_video(const matlab_videowriter *v) {
+    if (!ide_video_enabled()) return;
+    char *resolved = ::realpath(v->path.c_str(), nullptr);
+    const char *p = resolved ? resolved : v->path.c_str();
+    std::fprintf(stdout, "___MF_VID___ w=%d h=%d fps=%g path=%s\n",
+                 v->width, v->height, v->fps, p);
+    std::fflush(stdout);
+    if (resolved) std::free(resolved);
+}
+#endif  // MATLAB_LLVM_WITH_PLOT_FFMPEG
+
 }  // namespace
 
 extern "C" {
@@ -342,6 +372,7 @@ int matlab_videowriter_close(matlab_videowriter *v) {
     if (v->started && !v->failed) {
         if (drain(v, nullptr) != 0) rc = 1;           // flush encoder
         if (av_write_trailer(v->fmt) < 0) rc = 1;
+        if (rc == 0) emit_ide_video(v);               // surface to the IDE
     } else if (v->started) {
         rc = 1;
     }
