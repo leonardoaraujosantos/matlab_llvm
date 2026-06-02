@@ -385,7 +385,7 @@ Discrete files animation/interactivity must extend:
 - `tools/matlabc/main.cpp` — sentinel `kind=` extension; optional DAP figure event; optional SDL window event loop (remaining).
 - `CMakeLists.txt` — **Done:** `MATLAB_LLVM_WITH_PLOT_FFMPEG` (off by default; `WITH_PLOT` umbrella). **Remaining:** `…_GIF`, `…_WINDOW`, `…_WEBSOCKET`.
 - `test/Runtime/test_plot_video.cpp` — **Done:** getframe + VideoWriter direct-ABI test (encode assertions gated on the flag, disabled-path asserted otherwise).
-- `examples/plot/videowriter_sine.m` — **Done.** `examples/plot/animatedline_*.m`, `examples/plot/comet_*.m` — remaining.
+- `examples/plot/{videowriter_sine,animation_orbit,animation_fourbar,animation_surf_wave}.m` — **Done** (MP4 + Motion JPEG AVI; 2-D motion, four-bar mechanism, animated 3-D surf). `examples/plot/animatedline_*.m`, `examples/plot/comet_*.m` — remaining.
 
 ### Tier G — Explicitly out of scope
 

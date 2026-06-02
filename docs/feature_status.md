@@ -21,7 +21,9 @@ Out of scope:
 
 In scope (subsets shipped, covered by dedicated docs):
 - **Plotting**: headless Cairo-backed `plot` / `bar` / `surf` / etc. with
-  PNG/SVG/PDF output. See [`plotting.md`](plotting.md).
+  PNG/SVG/PDF output, plus `getframe` + `VideoWriter` animation capture to
+  MP4 (H.264) / AVI (MJPEG) via libav, opt-in behind
+  `-DMATLAB_LLVM_WITH_PLOT_FFMPEG=ON`. See [`plotting.md`](plotting.md).
 - **Toolboxes (thirteen shipped surfaces)** — earlier revisions of this
   doc listed toolboxes as out of scope; that scope has expanded. The
   runtime now ships practical subsets of:
@@ -686,7 +688,7 @@ All implemented; see `docs/emit_c_cpp.md` for pipeline diagram.
 | `flowchart-dap-tests` (`matlabc -dap` on `.mflow`: bp verify, stop, frame source) | 3 | ✅ 3/3 |
 | `flowchart-emit-mflow-tests` (`-emit-mflow` idempotency: `.m` → `.mflow` → `.m` → `.mflow` byte-identical) | 11 | ✅ 11/11 |
 
-Examples gallery: 213 `.m` programs under `examples/` (31 top-level + dedicated subdirectories per toolbox: `examples/optim/`, `examples/comm/`, `examples/rf/`, `examples/control/`, `examples/signal/`, `examples/pde/`, `examples/plot/`, `examples/antenna/`, `examples/verilog_a/`, `examples/hdl/`, `examples/mflow/`, `examples/mflowlink/`, `examples/stateflow/`). They exercise matrix ops,
+Examples gallery: 380 `.m` programs under `examples/` (31 top-level + dedicated subdirectories per toolbox: `examples/optim/`, `examples/comm/`, `examples/rf/`, `examples/control/`, `examples/signal/`, `examples/pde/`, `examples/plot/` — incl. `getframe`/`VideoWriter` animation demos, `examples/antenna/`, `examples/verilog_a/`, `examples/hdl/`, `examples/mflow/`, `examples/mflowlink/`, `examples/stateflow/`). They exercise matrix ops,
 recursion, anonymous functions, function handles, parfor, linear
 algebra, logical masks, struct/cell usage, OOP (`bank_account.m`
 — classdef with inheritance, `Dependent` properties, operator
@@ -774,8 +776,9 @@ deliberate non-goals; see "Out of scope."
 ### Out of scope (deliberate non-goals)
 
 - **Interactive UI / GUIs** — no live windows, mouse picking, App Designer.
-  Headless plotting (`plot`, `surf`, `bar`, ... → PNG/SVG/PDF) is shipped;
-  see [`plotting.md`](plotting.md).
+  Headless plotting (`plot`, `surf`, `bar`, ... → PNG/SVG/PDF, plus
+  `getframe` / `VideoWriter` → MP4/AVI) is shipped; see
+  [`plotting.md`](plotting.md).
 - **Simulink** — full block-library + simulation engine + Coder + RT
   workshop is its own product. A practical subset ships under a
   different name as the **mflowLink** (signal-flow `.mflow`) dialect +

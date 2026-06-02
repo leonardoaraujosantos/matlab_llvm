@@ -39,6 +39,26 @@ cmake -B build -DMATLAB_LLVM_WITH_PLOT=ON
 | `plot3_helix.m` | `plot3(x, y, z)` — 3-D line via software projection (orthographic, MATLAB's default `view(-37.5°, 30°)`). |
 | `surf_mesh.m` | `mesh(Z)` and `surf(Z)` — wireframe and filled 3-D surface via tessellation + painter's algorithm depth sort, shaded by colormap. |
 
+### Animation & video (`getframe` + `VideoWriter`)
+
+These capture a figure each step and encode a video file. They need video
+support at configure time (links libav):
+
+```sh
+cmake -B build -DMATLAB_LLVM_WITH_PLOT=ON -DMATLAB_LLVM_WITH_PLOT_FFMPEG=ON
+```
+
+Without that flag the scripts still run, but `VideoWriter` reports that video
+support is disabled instead of writing a file. See
+[`../../docs/plotting.md`](../../docs/plotting.md) §4.
+
+| File | Demonstrates |
+|---|---|
+| `videowriter_sine.m` | The minimal video loop: `VideoWriter('out.mp4','MPEG-4')` → `v.FrameRate=30` → `open` → per-frame `plot` + `writeVideo(v, getframe(gcf))` → `close`. Fixed `xlim`/`ylim` keep frame size constant. |
+| `animation_orbit.m` | Dynamic-property animation pattern: a marker travels a Lissajous curve over a static path, fixed `axis equal` limits, encoded to MP4. |
+| `animation_fourbar.m` | A four-bar linkage (crank-rocker) — vector-loop closure solved per frame via circle-circle intersection, four bars + joints redrawn each step, encoded to MP4. |
+| `animation_surf_wave.m` | An animated 3-D `surf` (radial ripple) encoded as **Motion JPEG AVI** — exercises the second profile and the `v.Quality` property. |
+
 ## Output formats
 
 Every example writes a PNG. Swap the extension to `.svg` or `.pdf` in
