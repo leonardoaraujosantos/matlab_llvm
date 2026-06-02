@@ -177,10 +177,10 @@ end
 
 classdef pdeDisplacement
     properties
-        ux
-        uy
-        uz
-        Magnitude
+        ux matrix
+        uy matrix
+        uz matrix
+        Magnitude matrix
     end
     methods
         function obj = pdeDisplacement()
@@ -188,11 +188,32 @@ classdef pdeDisplacement
     end
 end
 
-classdef StaticStructuralResults
+% Mode-shape sub-object for modal results (issue #28): each component
+% is a node-by-mode matrix, like pdeDisplacement.
+classdef pdeModeShapes
     properties
-        Displacement
-        VonMisesStress
-        Mesh
+        ux matrix
+        uy matrix
+        uz matrix
+        Magnitude matrix
+    end
+    methods
+        function obj = pdeModeShapes()
+        end
+    end
+end
+
+classdef StaticStructuralResults
+    % solve(model) pins its result here as a unified read-routing façade
+    % (issue #28): Sema can't see the model's AnalysisType, so this class
+    % carries the union of structural-static and modal result fields with
+    % their type annotations.  Fields absent at runtime read back empty.
+    properties
+        Displacement pdeDisplacement
+        VonMisesStress matrix
+        NaturalFrequencies matrix
+        ModeShapes pdeModeShapes
+        Mesh matrix
     end
     methods
         function obj = StaticStructuralResults()
@@ -202,8 +223,8 @@ end
 
 classdef StationaryResults
     properties
-        NodalSolution
-        Mesh
+        NodalSolution matrix
+        Mesh matrix
     end
     methods
         function obj = StationaryResults()
@@ -270,9 +291,9 @@ end
 
 classdef ModalStructuralResults
     properties
-        NaturalFrequencies
-        ModeShapes
-        Mesh
+        NaturalFrequencies matrix
+        ModeShapes pdeModeShapes
+        Mesh matrix
     end
     methods
         function obj = ModalStructuralResults()

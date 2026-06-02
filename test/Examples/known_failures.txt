@@ -12,9 +12,6 @@ rl/pendulum_ddpg.m                                 # TIMEOUT (heavy 200-ep DDPG 
 rl/pendulum_td3.m                                  # TIMEOUT (heavy 200-ep TD3 training, twin critics; convergence gated by test/Run/rl_td3.m)
 rl/cartpole_ppo.m                                  # TIMEOUT (heavy PPO training, large rollout batches; convergence gated by test/Run/rl_ppo.m)
 rl/pendulum_sac.m                                  # TIMEOUT (heavy 200-ep SAC training, twin critics + reparam actor; convergence gated by test/Run/rl_sac.m)
-pde/clamped_plate_pressure.m                       # EMIT
-pde/poisson_disk.m                                 # EMIT
-pde/tuningfork_modal.m                             # EMIT
 # GPU Coder T1-T7 — the validation suite at examples/gpu/ exercises advanced
 # patterns (stencil, parfor+GPU, multi-GPU, full benchmark) that are deferred
 # per docs/gpu_coder_roadmap.md.  The simpler GPU examples (mandelbrot.m,

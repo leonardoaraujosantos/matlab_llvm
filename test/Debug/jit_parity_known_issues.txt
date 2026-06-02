@@ -36,3 +36,16 @@
 #     deref'd as an obj by objArrayGet/extractdata → intermittent SIGSEGV.
 #     Fixed by an AST-level detector in Lowering (keys off Ref->PinnedClass,
 #     fires on both lanes). Now runs clean + correct (PASS) on AOT/-repl/-dap.
+
+# Added 2026-06-02 (#28): the PDE geometry/mesher front door landed on the
+# AOT lane (examples sweep), but the model-form result API it relies on
+# isn't wired through the -dap/ReplMode JIT lowering yet:
+#   - struct('f', v, ...) field reads default to f64 in ReplMode (so
+#     numel(s.a) etc. fail), unlike the AOT struct-binding tracking;
+#   - solve(femodel) + nested result reads (R.Displacement.Magnitude) leave
+#     unconverted matlab.subscript / call_builtin ops under the JIT pipeline.
+# poisson_disk.m runs clean under -dap (it uses solvepde + function-form
+# API), so only these two are listed.  Wiring the model-form API through
+# the shared JIT lowering is a #77/#28 follow-up.
+pde/clamped_plate_pressure.m
+pde/tuningfork_modal.m

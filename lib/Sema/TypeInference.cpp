@@ -1350,6 +1350,9 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
       Name == "solvepde" || Name == "solvepdeeig" ||
       Name == "specifyCoefficients" ||
       Name == "applyBoundaryCondition" ||
+      /* Issue #28 — geometry + mesher front door (struct-returning). */
+      Name == "multicuboid" || Name == "decsg" || Name == "createpde" ||
+      Name == "geometryFromEdges" || Name == "generateMesh" ||
       Name == "pde_assemble_poisson_3d_sparse" ||
       Name == "pde_apply_dirichlet_3d_sparse" ||
       Name == "pde_face_scalar_load_3d" ||

@@ -845,11 +845,50 @@ bool rewriteCallee(Operation *Op, StringRef Callee, Helper &H,
     return false;
   }
 
-  /* pdeplot — 2-D version, accepts (nodes, triangles) or
-   * (nodes, triangles, data).  pdegplot / pdemesh forward here at
-   * the v1 surface (same painter; labels-only / wireframe-only
-   * variants are follow-ups). */
+  /* Coerce an operand to an llvm.ptr for the struct-form plot wrappers:
+   * a struct/mesh (none / tensor / ptr) bridges via a no-op cast; a
+   * scalar/int means the value isn't a real matrix (e.g. a field read
+   * that defaulted to f64) — pass NULL so the painter renders uncoloured
+   * rather than dereferencing a double. */
+  auto toPtrOrNull = [&](Value V) -> Value {
+    Type T = V.getType();
+    if (T == H.PtrTy) return V;
+    if (mlir::isa<mlir::NoneType>(T) || mlir::isa<mlir::TensorType>(T))
+      return mlir::UnrealizedConversionCastOp::create(H.B, L, H.PtrTy, V)
+          .getResult(0);
+    return mlir::LLVM::ZeroOp::create(H.B, L, H.PtrTy);  /* f64/int → NULL */
+  };
+  /* Find a kwarg value by name in the trailing `'Name', value` pairs
+   * starting at operand `from`; returns null Value if absent. */
+  auto kwargValue = [&](unsigned from, StringRef want) -> Value {
+    for (unsigned i = from; i + 1 < N; i += 2)
+      if (auto K = getLiteralString(Op->getOperand(i)))
+        if (K->size() == want.size() &&
+            StringRef(*K).equals_insensitive(want))
+          return Op->getOperand(i + 1);
+    return {};
+  };
+  /* Model/mesh-struct call form?  Operand 1 is a string key (vs. a
+   * triangles matrix in the positional form). */
+  bool PdeModelForm = (Callee == "pdeplot" || Callee == "pdegplot" ||
+                       Callee == "pdemesh" || Callee == "pdeplot3d" ||
+                       Callee == "pdeplot3D") &&
+                      N >= 3 && (bool)getLiteralString(Op->getOperand(1));
+
+  /* pdeplot — 2-D version, accepts (nodes, triangles), (nodes,
+   * triangles, data), or the model form `pdeplot(model, XYData=..)`.
+   * pdegplot / pdemesh forward here at the v1 surface. */
   if (Callee == "pdeplot" || Callee == "pdegplot" || Callee == "pdemesh") {
+    if (PdeModelForm) {
+      H.B.setInsertionPoint(Op);
+      Value Model = toPtrOrNull(Op->getOperand(0));
+      Value Data  = kwargValue(1, "XYData");
+      Value DataP = Data ? toPtrOrNull(Data)
+                         : (Value)mlir::LLVM::ZeroOp::create(H.B, L, H.PtrTy);
+      H.callVoid(L, "matlab_pdeplot_struct", {H.PtrTy, H.PtrTy},
+                 {Model, DataP});
+      return true;
+    }
     if (N == 2) {
       H.B.setInsertionPoint(Op);
       auto NullPtr = mlir::LLVM::ZeroOp::create(H.B, L, H.PtrTy);
@@ -861,9 +900,20 @@ bool rewriteCallee(Operation *Op, StringRef Callee, Helper &H,
     return false;
   }
 
-  /* pdeplot3D — accepts (nodes, triangles) or (nodes, triangles, data).
+  /* pdeplot3D — accepts (nodes, triangles), (nodes, triangles, data),
+   * or the model form `pdeplot3D(mesh, ColorMapData=.., Deformation=..)`.
    * Lower-case `pdeplot3d` alias kept for ergonomics. */
   if (Callee == "pdeplot3d" || Callee == "pdeplot3D") {
+    if (PdeModelForm) {
+      H.B.setInsertionPoint(Op);
+      Value Mesh  = toPtrOrNull(Op->getOperand(0));
+      Value Color = kwargValue(1, "ColorMapData");
+      Value ColP  = Color ? toPtrOrNull(Color)
+                          : (Value)mlir::LLVM::ZeroOp::create(H.B, L, H.PtrTy);
+      H.callVoid(L, "matlab_pdeplot3d_struct", {H.PtrTy, H.PtrTy},
+                 {Mesh, ColP});
+      return true;
+    }
     if (N == 2) {
       H.B.setInsertionPoint(Op);
       /* Pass a NULL data pointer when no colour vector is supplied. */

@@ -5228,6 +5228,41 @@ bool TensorLowering::rewriteBuiltinCalls() {
          PtrTy, {PtrTy, F64, F64, F64}},
         {"applyBoundaryCondition",         "matlab_pde_apply_boundary_condition",
          PtrTy, {PtrTy, F64, F64}},
+        /* Issue #28 — geometry + mesher surface.  The kwarg-bearing
+         * forms receive the `'Name', value` positional pairs that the
+         * parser lowers `Name=value` into; the runtime picks the values
+         * it understands by key, so the fixed-arity match below tracks
+         * exactly the shapes the gating examples emit. */
+        {"multicuboid",                    "matlab_pde_multicuboid",
+         PtrTy, {F64, F64, F64}},
+        {"decsg",                          "matlab_pde_decsg",
+         PtrTy, {PtrTy}},
+        {"createpde",                      "matlab_pde_createpde",
+         PtrTy, {}},
+        {"geometryFromEdges",              "matlab_pde_geometry_from_edges",
+         PtrTy, {PtrTy, PtrTy}},
+        /* generateMesh(model, 'Hmax', h). */
+        {"generateMesh",                   "matlab_pde_generate_mesh_kw",
+         PtrTy, {PtrTy, PtrTy, F64}},
+        /* generateMesh(model) — no kwargs. */
+        {"generateMesh",                   "matlab_pde_generate_mesh",
+         PtrTy, {PtrTy}},
+        /* solve(model) / solve(model, 'FrequencyRange', [...]) — PDE
+         * model solve (routed here only when arg0 is a PDE model; see
+         * the `solve` sym-predicate carve-out in Lowering.cpp). */
+        {"solve",                          "matlab_pde_solve",
+         PtrTy, {PtrTy}},
+        {"solve",                          "matlab_pde_solve_kw",
+         PtrTy, {PtrTy, PtrTy, PtrTy}},
+        /* specifyCoefficients(model, m=,d=,c=,a=,f=) — 5 (key,val) pairs. */
+        {"specifyCoefficients",            "matlab_pde_specify_coefficients_kw",
+         PtrTy, {PtrTy, PtrTy, F64, PtrTy, F64, PtrTy, F64, PtrTy, F64, PtrTy, F64}},
+        /* applyBoundaryCondition(model, "dirichlet", Edge=edges, u=val). */
+        {"applyBoundaryCondition",         "matlab_pde_apply_bc_kw",
+         PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, F64}},
+        /* interpolateSolution(R, x, y) → scalar. */
+        {"interpolateSolution",            "matlab_pde_interpolate_solution",
+         F64,   {PtrTy, F64, F64}},
         {"pde_kernel_mesh",                "matlab_pde_kernel_mesh",
          PtrTy, {PtrTy}},
         {"pde_kernel_u",                   "matlab_pde_kernel_u",
