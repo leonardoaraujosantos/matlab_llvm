@@ -5698,6 +5698,45 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
               mlir::StringAttr::get(&MCtx, "matlab_dict_new"));
           return emitUnreg("matlab.call_builtin", {}, PtrTy, L, {Cal});
         }
+    /* struct('f1', v1, 'f2', v2, ...) constructor (#28).  Build a fresh
+     * matlab_struct and set each name/value pair; field names must be
+     * string/char literals (the common scalar-struct form).  Matrix /
+     * struct values route through _set_mat, scalars through _set_f64. */
+    if (auto *SNE = dynamic_cast<const NameExpr *>(C.Callee))
+      if (SNE->Ref && SNE->Ref->Kind == BindingKind::Builtin &&
+          SNE->Name == "struct" && C.Args.size() >= 2 &&
+          (C.Args.size() % 2) == 0) {
+        auto literalName = [](const Expr *A) -> const std::string * {
+          if (auto *S = dynamic_cast<const StringLiteral *>(A)) return &S->Value;
+          if (auto *Ch = dynamic_cast<const CharLiteral *>(A)) return &Ch->Value;
+          return nullptr;
+        };
+        bool AllNames = true;
+        for (size_t i = 0; i < C.Args.size(); i += 2)
+          if (!C.Args[i] || !literalName(C.Args[i])) { AllNames = false; break; }
+        if (AllNames) {
+          auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+          mlir::NamedAttribute NewCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_struct_new"));
+          mlir::Value S = emitUnreg("matlab.call_builtin", {}, PtrTy, L, {NewCal});
+          for (size_t i = 0; i + 1 < C.Args.size(); i += 2) {
+            mlir::Value NameV = emitFieldNameChar(*literalName(C.Args[i]), L);
+            mlir::Value Val = lowerExpr(*C.Args[i + 1]);
+            bool IsMat = Val.getType() == PtrTy ||
+                         mlir::isa<mlir::RankedTensorType,
+                                   mlir::UnrankedTensorType>(Val.getType());
+            llvm::StringRef Callee = IsMat ? "matlab_struct_set_mat"
+                                            : "matlab_struct_set_f64";
+            mlir::NamedAttribute SCal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, Callee));
+            emitUnregOp("matlab.call_builtin", {S, NameV, Val},
+                        {mlir::NoneType::get(&MCtx)}, L, {SCal});
+          }
+          return S;
+        }
+      }
     /* Phase 5.4 (cont.): plot(dt_vec, y, ...) — auto-wrap the
      * first arg with matlab_datetime_vec_to_mat so the existing
      * matrix-only plot backend gets a usable numeric x-axis (days
@@ -13498,6 +13537,27 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     const ClassDef *PinnedCls = nullptr;
     if (auto *BN = dynamic_cast<const NameExpr *>(F.Base))
       if (BN->Ref && BN->Ref->PinnedClass) PinnedCls = BN->Ref->PinnedClass;
+    /* Nested property read on a class whose property is itself typed as a
+     * class (issue #28): `R.Displacement.Magnitude` — F.Base is the inner
+     * FieldAccess `R.Displacement`.  Resolve the inner property's class
+     * annotation (`Displacement pdeDisplacement`) so the leaf read sees a
+     * pinned class and fetches matrix fields via `_get_mat`.  Looks the
+     * class up by name in the current TU's class list. */
+    if (!PinnedCls)
+      if (auto *FB = dynamic_cast<const FieldAccess *>(F.Base))
+        if (auto *BBN = dynamic_cast<const NameExpr *>(FB->Base))
+          if (BBN->Ref && BBN->Ref->PinnedClass) {
+            for (const ClassDef *CC = BBN->Ref->PinnedClass; CC; CC = CC->Super) {
+              const ClassProp *Found = nullptr;
+              for (const auto &P : CC->Props)
+                if (P.Name == FB->Field) { Found = &P; break; }
+              if (!Found) continue;
+              if (!Found->TypeName.empty() && CurTU)
+                for (const ClassDef *K : CurTU->Classes)
+                  if (K && K->Name == Found->TypeName) { PinnedCls = K; break; }
+              break;
+            }
+          }
     /* Enumeration member reference: `ClassName.Member`. The base is a
      * NameExpr whose binding is BindingKind::Class, not a pinned var.
      * Each member gets its 0-based position as an f64 constant;
@@ -13582,7 +13642,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                       CN == "ModalStructuralResults" ||
                       CN == "FrequencyStructuralResults" ||
                       CN == "HarmonicEMResults" ||
-                      CN == "pdeDisplacement" ||
+                      CN == "pdeDisplacement" || CN == "pdeModeShapes" ||
                       /* MPC Toolbox Tier-1: the mpc classdef caches
                        * Sx / Su / Su1 / H / R / L / Wy / Wdu / umin /
                        * umax / A / B / C as matrix properties; the
@@ -13613,6 +13673,14 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
               else if (P.TypeName == "complex" || P.TypeName == "matrix" ||
                        P.TypeName == "double_col" || P.TypeName == "col")
                 IsMatField = true;
+              else if (!P.TypeName.empty() && CurTU) {
+                /* Property typed as another class (e.g. a result's
+                 * `Displacement pdeDisplacement` sub-object, #28): fetch
+                 * the child struct as a ptr so the next `.field` read
+                 * resolves against it. */
+                for (const ClassDef *K : CurTU->Classes)
+                  if (K && K->Name == P.TypeName) { IsMatField = true; break; }
+              }
               break;
             }
           if (IsString || IsMatField) break;

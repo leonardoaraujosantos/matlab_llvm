@@ -177,10 +177,10 @@ end
 
 classdef pdeDisplacement
     properties
-        ux
-        uy
-        uz
-        Magnitude
+        ux matrix
+        uy matrix
+        uz matrix
+        Magnitude matrix
     end
     methods
         function obj = pdeDisplacement()
@@ -188,11 +188,26 @@ classdef pdeDisplacement
     end
 end
 
+% Mode-shape sub-object for modal results (issue #28): each component
+% is a node-by-mode matrix, like pdeDisplacement.
+classdef pdeModeShapes
+    properties
+        ux matrix
+        uy matrix
+        uz matrix
+        Magnitude matrix
+    end
+    methods
+        function obj = pdeModeShapes()
+        end
+    end
+end
+
 classdef StaticStructuralResults
     properties
-        Displacement
-        VonMisesStress
-        Mesh
+        Displacement pdeDisplacement
+        VonMisesStress matrix
+        Mesh matrix
     end
     methods
         function obj = StaticStructuralResults()
@@ -202,8 +217,8 @@ end
 
 classdef StationaryResults
     properties
-        NodalSolution
-        Mesh
+        NodalSolution matrix
+        Mesh matrix
     end
     methods
         function obj = StationaryResults()
@@ -270,9 +285,9 @@ end
 
 classdef ModalStructuralResults
     properties
-        NaturalFrequencies
-        ModeShapes
-        Mesh
+        NaturalFrequencies matrix
+        ModeShapes pdeModeShapes
+        Mesh matrix
     end
     methods
         function obj = ModalStructuralResults()
