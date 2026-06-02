@@ -1107,6 +1107,29 @@ matlab_struct *matlab_pde_solve_femodel(matlab_struct *model) {
     matlab_struct_set_mat(out, "Mesh", 4, (matlab_mat *)mesh);
     matlab_struct_set_mat(out, "u",    1, u);
     matlab_struct_set_mat(out, "vm",   2, vm);
+    /* MATLAB-faithful result fields (issue #28): solve(model) returns a
+     * StaticStructuralResults exposing VonMisesStress + a Displacement
+     * sub-object with per-axis components and Magnitude.  u is the flat
+     * 3N vector [ux1,uy1,uz1, ux2,...].  Displacement is stored as a
+     * kind=2 child struct so the chained read R.Displacement.Magnitude
+     * resolves through the class-property path. */
+    matlab_struct_set_mat(out, "VonMisesStress", 14, vm);
+    {
+        matlab_mat *ux = mat_alloc(Nn, 1), *uy = mat_alloc(Nn, 1);
+        matlab_mat *uz = mat_alloc(Nn, 1), *mag = mat_alloc(Nn, 1);
+        for (int64_t i = 0; i < Nn; ++i) {
+            double a = u->data[3 * i + 0], b = u->data[3 * i + 1],
+                   c = u->data[3 * i + 2];
+            ux->data[i] = a; uy->data[i] = b; uz->data[i] = c;
+            mag->data[i] = sqrt(a * a + b * b + c * c);
+        }
+        matlab_struct *disp = matlab_struct_new();
+        matlab_struct_set_mat(disp, "ux", 2, ux);
+        matlab_struct_set_mat(disp, "uy", 2, uy);
+        matlab_struct_set_mat(disp, "uz", 2, uz);
+        matlab_struct_set_mat(disp, "Magnitude", 9, mag);
+        matlab_struct_set_child_struct(out, "Displacement", 12, disp);
+    }
     return out;
 }
 
