@@ -659,6 +659,15 @@ private:
    * numel(C) / length(C) / iscell(C) can dispatch to the matlab_cell_*
    * runtime entries instead of the matrix path. */
   std::unordered_set<Binding *> CellBindings;
+  /* For a cell-literal binding, the 1-based linear element indices whose
+   * stored value is a matrix or string (kind 1/3 — anything that the
+   * runtime keeps as a ptr, not an f64 scalar). A constant-index brace
+   * read `c{k}` of such an element must dispatch to matlab_cell_get_mat;
+   * Sema can't carry per-element types, so without this `disp(c{k})`
+   * defaults to matlab_cell_get_f64, which returns 0 for a >1-element
+   * matrix (the ptr is reinterpreted as a scalar). Mirrors the
+   * MatStructFields trick for struct fields. */
+  std::map<Binding *, std::set<int64_t>> CellMatElems;
   /* (struct binding, field name) pairs assigned a matrix value, so a later
    * read `s.field` fetches via matlab_struct_get_mat (ptr) instead of
    * defaulting to get_f64 — Sema can't specialise through struct fields, so
@@ -3688,9 +3697,42 @@ void Lowerer::lowerStmt(const Stmt &St) {
             }
     }
     if (RhsIsCellLit) {
+      /* Classify each element's storage kind so a later constant-index
+       * brace read picks matlab_cell_get_mat for matrix/string slots.
+       * Conservative: only flag elements we can prove are stored as a
+       * ptr (matrix literal, range, char/string, nested cell, or a
+       * known string expr) — a misclassified scalar would wrongly route
+       * a scalar slot through get_mat, so we never flag the uncertain
+       * cases. Linear (row-major) indexing matches the 1-D storage loop. */
+      auto elemIsPtrStored = [&](const Expr *El) -> bool {
+        if (!El) return false;
+        switch (El->Kind) {
+        case NodeKind::MatrixLiteral:
+        case NodeKind::RangeExpr:
+        case NodeKind::CharLiteral:
+        case NodeKind::StringLiteral:
+        case NodeKind::CellLiteral:
+          return true;
+        default:
+          return isStringExpr(El);
+        }
+      };
+      std::set<int64_t> MatIdx;
+      if (auto *CL = dynamic_cast<const CellLiteral *>(A.RHS)) {
+        int64_t lin = 1;
+        for (const auto &Row : CL->Rows)
+          for (const Expr *El : Row) {
+            if (elemIsPtrStored(El)) MatIdx.insert(lin);
+            ++lin;
+          }
+      }
       for (const Expr *L : A.LHS)
         if (auto *N = dynamic_cast<const NameExpr *>(L))
-          if (N->Ref) CellBindings.insert(N->Ref);
+          if (N->Ref) {
+            CellBindings.insert(N->Ref);
+            if (!MatIdx.empty()) CellMatElems[N->Ref] = MatIdx;
+            else CellMatElems.erase(N->Ref);
+          }
     }
     if (RhsIsDict) {
       for (const Expr *L : A.LHS)
@@ -13716,6 +13758,23 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
     bool WantMat = mlir::isa<mlir::RankedTensorType,
                               mlir::UnrankedTensorType>(RT);
+    /* Sema can't type per-element, so a constant-index read of a slot we
+     * recorded as matrix/string-stored (CellMatElems) forces get_mat —
+     * otherwise `disp(c{k})` defaults to get_f64 and prints 0 for a
+     * multi-element matrix element. */
+    if (!WantMat && C.Args.size() == 1) {
+      if (auto *NE = dynamic_cast<const NameExpr *>(C.Callee))
+        if (NE->Ref) {
+          auto It = CellMatElems.find(NE->Ref);
+          if (It != CellMatElems.end())
+            if (auto *IL = dynamic_cast<const IntegerLiteral *>(C.Args[0])) {
+              int64_t k = 0;
+              auto Txt = std::string(IL->Text);
+              try { k = std::stoll(Txt); } catch (...) { k = 0; }
+              if (k > 0 && It->second.count(k)) WantMat = true;
+            }
+        }
+    }
     mlir::Type ResTy = WantMat ? (mlir::Type)PtrTy : (mlir::Type)F64;
     if (C.Args.size() == 1) {
       mlir::Value Idx = lowerExpr(*C.Args[0]);
