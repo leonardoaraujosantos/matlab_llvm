@@ -969,9 +969,19 @@ matlab_struct *matlab_pde_solve_femodel(matlab_struct *model) {
     } else {
         return matlab_struct_new();  /* empty result */
     }
-    /* Material properties. */
-    matlab_struct *props = (matlab_struct *)
-        matlab_struct_get_mat(model, "MaterialProperties", 18);
+    /* Material properties.  matlab_struct_get_mat returns a non-NULL EMPTY
+     * matlab_mat (not NULL) for a missing field, so a model without a
+     * MaterialProperties struct (e.g. a 2-D scalar Poisson model that only
+     * reaches this structural fallback because its Mesh round-tripped empty
+     * under the -dap worker — see #124) would have that empty matrix
+     * reinterpreted as a matlab_struct, and struct_find_field would walk its
+     * garbage nfields/names → SIGSEGV.  Gate on field_holds_struct (the same
+     * guard used for Mesh/Geometry above) so props stays NULL when absent;
+     * matlab_struct_get_f64(NULL, …) then safely returns 0.0. */
+    matlab_struct *props =
+        field_holds_struct(model, "MaterialProperties", 18)
+            ? (matlab_struct *)matlab_struct_get_mat(model, "MaterialProperties", 18)
+            : nullptr;
     double E  = matlab_struct_get_f64(props, "YoungsModulus", 13);
     double nu = matlab_struct_get_f64(props, "PoissonsRatio", 13);
 

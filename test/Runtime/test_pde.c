@@ -55,6 +55,13 @@ extern double matlab_pde_peak_disp_3d(matlab_mat *u);
  * runtime since we don't want to pull in matlab_runtime.h. */
 extern matlab_mat *matlab_mldivide_mm(matlab_mat *A, matlab_mat *B);
 
+/* #122 regression: a model reaching the structural femodel fallback
+ * without a MaterialProperties struct. */
+extern matlab_struct *matlab_struct_new(void);
+extern void matlab_struct_set_mat(matlab_struct *s, const char *name,
+                                  int64_t len, matlab_mat *m);
+extern matlab_struct *matlab_pde_solve_femodel(matlab_struct *model);
+
 #define CHECK(cond, msg) do { \
     if (!(cond)) { fprintf(stderr, "FAIL: %s\n", msg); exit(1); } \
 } while (0)
@@ -135,10 +142,33 @@ static void test_tier2_clamped_plate(void) {
     CHECK(peak_vm > 1e4 && peak_vm < 1e9, "peak von Mises out of range");
 }
 
+/* #122: matlab_pde_solve_femodel must not SIGSEGV when the model has no
+ * MaterialProperties struct.  matlab_struct_get_mat returns a non-NULL
+ * EMPTY matlab_mat for a missing field; before the fix that empty matrix
+ * was reinterpreted as a matlab_struct and struct_find_field walked its
+ * garbage nfields/names → crash.  (This path is reached for a 2-D scalar
+ * Poisson model when its Mesh round-trips empty under the -dap worker.) */
+static void test_femodel_missing_material_props(void) {
+    printf("  [#122] femodel without MaterialProperties (no SIGSEGV)\n");
+    /* A real tet mesh struct, parked under Geometry so femodel enters its
+     * body (past the Mesh/Geometry guard) and goes on to read the absent
+     * MaterialProperties — the exact crashing path. */
+    matlab_struct *mesh = matlab_pde_mesh_cuboid_tet(1.0, 1.0, 1.0,
+                                                     2.0, 2.0, 2.0);
+    CHECK(mesh != NULL, "mesh build failed");
+    matlab_struct *model = matlab_struct_new();
+    matlab_struct_set_mat(model, "Geometry", 8, (matlab_mat *)mesh);
+    /* No MaterialProperties set. */
+    matlab_struct *R = matlab_pde_solve_femodel(model);
+    CHECK(R != NULL, "femodel returned NULL");
+    printf("    ok — no crash, result non-null\n");
+}
+
 int main(void) {
     printf("test_pde:\n");
     test_tier1_poisson_square();
     test_tier2_clamped_plate();
+    test_femodel_missing_material_props();
     printf("all tests passed.\n");
     return 0;
 }
