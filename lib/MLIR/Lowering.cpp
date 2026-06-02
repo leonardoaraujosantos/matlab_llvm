@@ -563,6 +563,15 @@ private:
   /* Phase 5.3: bindings holding a matlab_table * — used to dispatch
    * column accessors (`T.x`), shape (height/width/size), and disp(T). */
   std::unordered_set<Binding *> TableBindings;
+  /* True if a binding holds a table — same-turn (in TableBindings, set by
+   * the `T = readtable(...)` assignment) OR cross-turn (Binding::IsTable,
+   * stamped by the Resolver from the kind=6 workspace lookup, #116). The
+   * read path already returns the table ptr via matlab_ws_get_mat (kind=6
+   * pass-through); this lets the dispatch sites recover the table-ness a
+   * later REPL turn would otherwise lose. */
+  bool isTableBinding(Binding *B) const {
+    return B && (TableBindings.count(B) || B->IsTable);
+  }
   /* Phase 5.4 (cont.): bindings holding a matlab_timetable * — same
    * column-store ABI as table, plus a RowTimes axis. Constructed by
    * `timetable(col1, ..., 'RowTimes', dt)` or `table2timetable(T,
@@ -2471,7 +2480,7 @@ void Lowerer::lowerStmt(const Stmt &St) {
         if (NE->Ref && DatetimeVecBindings.count(NE->Ref)) DispIsDatetimeVec = true;
         if (NE->Ref && DurationVecBindings.count(NE->Ref)) DispIsDurationVec = true;
         if (NE->Ref && CategoricalBindings.count(NE->Ref)) DispIsCategorical = true;
-        if (NE->Ref && TableBindings.count(NE->Ref)) DispIsTable = true;
+        if (NE->Ref && isTableBinding(NE->Ref)) DispIsTable = true;
         if (NE->Ref && TimetableBindings.count(NE->Ref)) DispIsTimetable = true;
       }
       llvm::StringRef IntSuf = Lowerer::intDtypeSuffixOf(E.E);
@@ -2681,7 +2690,7 @@ void Lowerer::lowerStmt(const Stmt &St) {
       auto *NE = static_cast<const NameExpr *>(A.RHS);
       if (NE->Ref && CategoricalBindings.count(NE->Ref))
         RhsIsCategorical = true;
-      if (NE->Ref && TableBindings.count(NE->Ref))
+      if (NE->Ref && isTableBinding(NE->Ref))
         RhsIsTable = true;
       if (NE->Ref && TimetableBindings.count(NE->Ref))
         RhsIsTimetable = true;
@@ -4521,7 +4530,7 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
        * AssignStmt RhsIs* tagging block above (~:2579) — by the time
        * we get here, a `T = readtable(...)` LHS is in TableBindings,
        * `c = categorical(...)` in CategoricalBindings, etc. */
-      bool IsTable = TableBindings.count(N.Ref) != 0;
+      bool IsTable = isTableBinding(N.Ref) != 0;
       bool IsCategorical = CategoricalBindings.count(N.Ref) != 0;
       bool IsDatetime = DatetimeBindings.count(N.Ref) != 0;
       bool IsDuration = DurationBindings.count(N.Ref) != 0;
@@ -4920,7 +4929,7 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
      * Route to matlab_table_add_column (which auto-creates the column
      * on first write or replaces an existing one). */
     if (auto *BN = dynamic_cast<const NameExpr *>(F.Base))
-      if (BN->Ref && TableBindings.count(BN->Ref)) {
+      if (BN->Ref && isTableBinding(BN->Ref)) {
         mlir::Value Tv = lowerExpr(*F.Base);
         mlir::Value NameV = emitFieldNameChar(F.Field, loc(F.Range));
         mlir::NamedAttribute Cal(
@@ -11809,7 +11818,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           C.Args.size() == 1 && C.Args[0])
         if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0])) {
           bool IsTT = ArgN->Ref && TimetableBindings.count(ArgN->Ref);
-          bool IsT  = ArgN->Ref && TableBindings.count(ArgN->Ref);
+          bool IsT  = ArgN->Ref && isTableBinding(ArgN->Ref);
           if (IsT || IsTT) {
             auto F64 = mlir::Float64Type::get(&MCtx);
             mlir::Value V = lowerExpr(*C.Args[0]);
@@ -11829,7 +11838,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           N->Name == "size" && C.Args.size() == 2 && C.Args[0])
         if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0])) {
           bool IsTT = ArgN->Ref && TimetableBindings.count(ArgN->Ref);
-          bool IsT  = ArgN->Ref && TableBindings.count(ArgN->Ref);
+          bool IsT  = ArgN->Ref && isTableBinding(ArgN->Ref);
           if (IsT || IsTT) {
             auto F64 = mlir::Float64Type::get(&MCtx);
             mlir::Value V = lowerExpr(*C.Args[0]);
@@ -11890,7 +11899,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             return emitUnreg("matlab.call_builtin", {V},
                              mlir::NoneType::get(&MCtx), L, {Cal});
           }
-          if (ArgN->Ref && TableBindings.count(ArgN->Ref)) {
+          if (ArgN->Ref && isTableBinding(ArgN->Ref)) {
             mlir::Value V = lowerExpr(*C.Args[0]);
             mlir::NamedAttribute Cal(
                 mlir::StringAttr::get(&MCtx, "callee"),
@@ -13678,7 +13687,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     /* Phase 5.3: T.<name> read — Base is a NameExpr in TableBindings.
      * Returns the column matlab_mat *. */
     if (auto *BN = dynamic_cast<const NameExpr *>(F.Base))
-      if (BN->Ref && TableBindings.count(BN->Ref)) {
+      if (BN->Ref && isTableBinding(BN->Ref)) {
         auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
         mlir::Value Tv = lowerExpr(*F.Base);
         mlir::Value NameV = emitFieldNameChar(F.Field, L);

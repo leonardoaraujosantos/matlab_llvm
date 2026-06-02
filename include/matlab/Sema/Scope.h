@@ -74,6 +74,13 @@ struct Binding {
    * instead of falling through to the scalar-only path and mis-lowering
    * the code pointer into a matrix subscript (SIGSEGV). */
   int8_t HandleRetKind = -1;
+  /* Table (kind=6).  Stamped by the Resolver when the REPL workspace-kind
+   * hook reports a prior input bound this name to a table (`T =
+   * readtable(...)`).  The MLIR lowering reads it to re-populate
+   * TableBindings so a cross-turn `height(T)` / `width(T)` / `T.col` /
+   * `disp(T)` dispatches to the table runtime entries instead of the
+   * generic matrix path (which fails the call-shape detector / crashes). */
+  bool IsTable = false;
 };
 
 class Scope {

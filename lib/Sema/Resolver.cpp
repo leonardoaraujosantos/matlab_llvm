@@ -1681,6 +1681,12 @@ void Resolver::applyWorkspaceKind(Binding *NB, std::string_view Name,
   else if (K == 7) NB->IsSym = true;
   /* Kind 8 = matlab_symmat* (Phase 6.1 — symbolic matrix). */
   else if (K == 8) NB->IsSymmat = true;
+  /* Kind 6 = matlab_table* (Phase 5.3).  Stamp IsTable so the MLIR
+   * lowering re-populates TableBindings and a cross-turn `height(T)` /
+   * `width(T)` / `T.col` / `disp(T)` dispatches to the table path
+   * instead of the generic matrix path (which fails the call-shape
+   * detector or crashes) — #116. */
+  else if (K == 6) NB->IsTable = true;
   /* Kind 12 = matlab_struct* (plain field-holder, not a classdef
    * instance).  Stamping IsStruct lets the MLIR lowering re-populate
    * StructInitialised on the next compile so `lb.PathLoss` and friends
