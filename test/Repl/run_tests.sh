@@ -140,6 +140,15 @@ exit
 EOF
 )" "6"
 
+# 6a. Zero-argument anon (`@() ...`) recovered + called across a turn — the
+#     simplest capture-free handle, exercises the matlab_call_handle_s0 path.
+run_case "xturn_anon_handle_zeroarg" "$(cat <<'EOF'
+g = @() 42;
+disp(g())
+exit
+EOF
+)" "42"
+
 # 6b. The headline crash: a capture-free anon defined one turn, passed to a
 #     solver the next.  `fminunc` on the Rosenbrock banana converges to the
 #     minimiser [1; 1]; the sentinel only prints if the cross-turn solver

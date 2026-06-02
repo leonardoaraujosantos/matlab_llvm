@@ -1854,13 +1854,14 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Changed = true;
       continue;
     }
-    /* Scalar function-handle trampoline: matlab_call_handle_s{1,2,3}.
+    /* Scalar function-handle trampoline: matlab_call_handle_s{0,1,2,3}.
      * Operand 0 is the stored function pointer (ptr); the remaining
-     * operands are f64 call arguments; the result is f64.  Emitted by
-     * the lowering for `f(x)` where `f` is a workspace-backed handle. */
-    if ((Name == "matlab_call_handle_s1" || Name == "matlab_call_handle_s2" ||
-         Name == "matlab_call_handle_s3") &&
-        Call->getNumResults() == 1 && Call->getNumOperands() >= 2) {
+     * operands are f64 call arguments (none for s0, a zero-arg `@() ...`);
+     * the result is f64.  Emitted by the lowering for `f(args)` where `f`
+     * is a workspace-backed handle. */
+    if ((Name == "matlab_call_handle_s0" || Name == "matlab_call_handle_s1" ||
+         Name == "matlab_call_handle_s2" || Name == "matlab_call_handle_s3") &&
+        Call->getNumResults() == 1 && Call->getNumOperands() >= 1) {
       Value Fn = Call->getOperand(0);
       if (Fn.getType() != PtrTy) continue;   /* wait for the ws load to lower */
       SmallVector<Type, 4> ArgTys;

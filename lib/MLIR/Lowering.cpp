@@ -13109,7 +13109,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
       if (auto *NE = dynamic_cast<const NameExpr *>(C.Callee))
         if (NE->Ref && NE->Ref->Kind == BindingKind::Var &&
             Slots.find(NE->Ref) == Slots.end() &&
-            !C.Args.empty() && C.Args.size() <= 3) {
+            C.Args.size() <= 3) {
           bool WsHandle = NE->Ref->IsHandle;
           if (!WsHandle) {
             auto HIt = HandleBindings.find(NE->Ref);
@@ -13143,9 +13143,10 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
              * get DCE'd; fall through to the existing handle/subscript
              * path below. */
             if (AllF64) {
-              const char *Tramp = C.Args.size() == 1 ? "matlab_call_handle_s1"
+              const char *Tramp = C.Args.empty() ? "matlab_call_handle_s0"
+                                : (C.Args.size() == 1 ? "matlab_call_handle_s1"
                                 : (C.Args.size() == 2 ? "matlab_call_handle_s2"
-                                                      : "matlab_call_handle_s3");
+                                                      : "matlab_call_handle_s3"));
               mlir::NamedAttribute Cal(
                   mlir::StringAttr::get(&MCtx, "callee"),
                   mlir::StringAttr::get(&MCtx, Tramp));
