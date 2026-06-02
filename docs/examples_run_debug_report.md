@@ -221,6 +221,21 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
   SIGSEGVs via AOT — a #117 name=value `femodel` ctor builds a corrupt model;
   re-baselined in `known_failures.txt`) and **#124** (the `-dap` empty-`Mesh`
   round-trip race).
+- **2026-06-02 — #116 table round-trip (✅ fixed).** The last 2 REPL crashes
+  (`csv_stats`, `csv_table`). A `table` (`readtable`/`table(...)`) stored to the
+  ReplMode workspace as kind=6 read back **untyped** on a later turn — the
+  Resolver had no kind=6 case, so the binding was never re-stamped as a table.
+  A cross-turn `height(T)`/`width(T)` then hit "unsupported call shape" and
+  `disp(T)`/`T.col` crashed. (The workspace *read* already returned the table
+  ptr via `matlab_struct_get_mat`'s kind=6 pass-through; only the binding's
+  type was lost.) Fixed by adding `Binding::IsTable`, stamping it on the
+  Resolver kind=6 lookup, and an `isTableBinding` helper so the Lowering
+  dispatch sites (`height`/`width`/`T.col`/`disp`) treat a cross-turn
+  `IsTable` binding as a table — same kind-preserving pattern as the #118/#119
+  handle fix. Deterministic regression `test/Repl/run_tests.sh`
+  (`xturn_table_height_width`), verified to fail without the fix. With this the
+  REPL example lane reaches **248/269** (the residual non-OK are the per-statement
+  shape ERRORs — separate #116 sub-bug — and the tracked PDE crashes).
 - **2026-06-02 — #120 (✅ fixed).** A matrix-valued comparison used directly as
   an `if`/`elseif`/`while` condition (`if abs(v) < tol`) produced a
   `tensor<*xi1>` that `scf.if` rejected (`operand #0 must be 1-bit signless

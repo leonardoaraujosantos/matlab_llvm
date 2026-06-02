@@ -211,6 +211,29 @@ if [[ "$got_rc" != "0" ]]; then
   echo "FAIL  xturn_anon_handle_matrix_arg_solver (rc=$got_rc)"
 fi
 
+# 8. Cross-turn table persistence (issue #116). A table defined in one REPL
+#    turn must round-trip with its type intact: before the fix the kind=6
+#    workspace value read back untyped (the Resolver never stamped the
+#    binding as a table), so a later `height(T)` / `width(T)` hit
+#    "unsupported call shape" and `disp(T)` / `T.col` crashed. The Resolver
+#    now stamps Binding::IsTable on the kind=6 lookup and the lowering
+#    re-populates TableBindings.
+run_case "xturn_table_height_width" "$(cat <<'EOF'
+T = table([10; 20; 30], [1; 2; 3]);
+fprintf('TBL %.0f %.0f\n', height(T), width(T));
+exit
+EOF
+)" "TBL 3 2"
+# (Belt + braces: a use-site crash would leak a signal / non-zero rc.)
+got_rc="$(printf '%s\n' \
+  'T = table([10; 20; 30], [1; 2; 3]);' \
+  'disp(height(T)); disp(T.Var1);' "exit" | "$MATLABC" -repl >/dev/null 2>&1; echo $?)"
+if [[ "$got_rc" != "0" ]]; then
+  fail=$((fail+1))
+  fails+=("xturn_table_height_width (exit rc=$got_rc, expected 0 — table round-trip crash?)")
+  echo "FAIL  xturn_table_height_width (rc=$got_rc)"
+fi
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 if (( fail > 0 )); then
