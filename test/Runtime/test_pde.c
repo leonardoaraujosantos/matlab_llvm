@@ -61,6 +61,11 @@ extern matlab_struct *matlab_struct_new(void);
 extern void matlab_struct_set_mat(matlab_struct *s, const char *name,
                                   int64_t len, matlab_mat *m);
 extern matlab_struct *matlab_pde_solve_femodel(matlab_struct *model);
+/* #123 regression: a model whose Geometry field is a STRING path. */
+extern void matlab_struct_set_string(matlab_struct *s, const char *name,
+                                     int64_t len, void *str);
+extern void *matlab_string_from_literal(const char *src, int64_t len);
+extern matlab_struct *matlab_pde_solve(matlab_struct *model);
 
 #define CHECK(cond, msg) do { \
     if (!(cond)) { fprintf(stderr, "FAIL: %s\n", msg); exit(1); } \
@@ -164,11 +169,28 @@ static void test_femodel_missing_material_props(void) {
     printf("    ok — no crash, result non-null\n");
 }
 
+/* #123: matlab_pde_solve must not SIGSEGV when the model's Geometry field
+ * holds a STRING (a file path like "fork.stl" that was never imported into a
+ * geometry struct — e.g. `femodel(Geometry="fork.stl")`).  Before the fix
+ * field_holds_struct misread the matlab_string's `len` word as a struct
+ * pointer and struct_find_field walked it as nfields/names -> crash. */
+static void test_solve_string_geometry(void) {
+    printf("  [#123] solve() with a STRING Geometry field (no SIGSEGV)\n");
+    matlab_struct *model = matlab_struct_new();
+    void *path = matlab_string_from_literal("fork.stl", 8);
+    CHECK(path != NULL, "string build failed");
+    matlab_struct_set_string(model, "Geometry", 8, path);  /* kind=3 */
+    matlab_struct *R = matlab_pde_solve(model);
+    CHECK(R != NULL, "solve returned NULL");
+    printf("    ok — no crash, result non-null\n");
+}
+
 int main(void) {
     printf("test_pde:\n");
     test_tier1_poisson_square();
     test_tier2_clamped_plate();
     test_femodel_missing_material_props();
+    test_solve_string_geometry();
     printf("all tests passed.\n");
     return 0;
 }

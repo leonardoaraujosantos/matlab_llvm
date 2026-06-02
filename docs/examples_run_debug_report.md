@@ -249,3 +249,20 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
   rewriteMatTruth` lowers it once the producing comparison becomes a
   `matlab_mat*`). Deterministic regression `test/Run/regress_matrix_if_cond.m`
   (+`.stdout`), verified to fail (`scf.if` tensor error) without the fix.
+- **2026-06-02 — #123 (✅ root-cause SIGSEGV fixed).** `solve()` crashed when
+  the model's `Geometry` field held a STRING path (`femodel(Geometry="fork.stl")`
+  stores the path; the STL is never imported into a geometry struct). The
+  rows/cols heuristic in `field_holds_struct` (runtime_pde.cpp) misread the
+  matlab_string's `len` word as a struct pointer → `struct_find_field` walked
+  it as `nfields`/`names` → SIGSEGV. Fixed by making `field_holds_struct`
+  **kind-aware** (new `matlab_struct_field_kind`; accept only struct kinds
+  1/2/12), plus NULL / NULL-name guards in `struct_find_field`. Deterministic
+  regression `test/Runtime/test_pde.c` (`test_solve_string_geometry`), verified
+  to SIGSEGV without the fix. `tuningfork_modal` still can't *complete* (its
+  `fixtures/TuningFork.stl` asset isn't shipped, so `solve` returns empty and a
+  later `RF.ModeShapes.Magnitude(:,7)` hits the empty-mat-as-obj crash **#128**),
+  so it stays baselined; the original solve-path SIGSEGV is gone.
+- **2026-06-02 — found while fixing #123: #128** (a property read off an
+  empty/missing-field value — `RF.ModeShapes.Magnitude` — reinterprets the
+  empty matrix as an obj in `matlab_obj_get_mat` → SIGSEGV; the obj-side of the
+  empty-mat-as-struct class #122 closed on the struct side).
