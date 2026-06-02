@@ -2829,6 +2829,23 @@ void matlab_slice_store1(matlab_mat *A, matlab_mat *idx, matlab_mat *V) {
     int64_t N = idx ? idx->rows * idx->cols : A->rows * A->cols;
     int64_t m = A->rows, n = A->cols;
     int bcast = (V->rows == 1 && V->cols == 1);
+    /* Logical-mask store (`v(v>2) = w`): idx same-shape as A is a mask —
+     * assign successive V values (or the broadcast scalar) at each non-zero
+     * position, column-major. Mirrors matlab_slice1's read heuristic. */
+    if (idx && idx->rows == m && idx->cols == n && (m > 1 || n > 1)) {
+        int64_t w = 0;
+        for (int64_t j = 0; j < n; ++j)
+            for (int64_t i = 0; i < m; ++i)
+                if (idx->data[i * n + j] != 0.0) {
+                    double v;
+                    if (bcast) v = V->data[0];
+                    else if (w < V->rows * V->cols) v = V->data[w];
+                    else { ++w; continue; }
+                    A->data[i * n + j] = v;
+                    ++w;
+                }
+        return;
+    }
     for (int64_t k = 0; k < N; ++k) {
         int64_t lin = idx ? ((int64_t)idx->data[k] - 1) : k;
         if (lin < 0 || lin >= m * n) continue;
@@ -2843,6 +2860,22 @@ void matlab_slice_store1(matlab_mat *A, matlab_mat *idx, matlab_mat *V) {
 }
 
 void matlab_slice_store1_scalar(matlab_mat *A, matlab_mat *idx, double v) {
+    /* Logical-mask store (`v(v>2) = 0`): when idx has the same shape as A
+     * it is a logical mask, not a list of linear indices — assign v at
+     * every non-zero position. Mirrors the same-shape heuristic and
+     * column-major traversal of the read path (matlab_slice1). Without
+     * this the mask values (0/1) were read as literal indices, so the
+     * whole assignment collapsed onto element 1. */
+    {
+        int64_t m = A->rows, n = A->cols;
+        if (idx && idx->rows == m && idx->cols == n && (m > 1 || n > 1)) {
+            for (int64_t j = 0; j < n; ++j)
+                for (int64_t i = 0; i < m; ++i)
+                    if (idx->data[i * n + j] != 0.0)
+                        A->data[i * n + j] = v;
+            return;
+        }
+    }
     int64_t N = idx ? idx->rows * idx->cols : A->rows * A->cols;
     for (int64_t k = 0; k < N; ++k) {
         int64_t lin = idx ? ((int64_t)idx->data[k] - 1) : k;
