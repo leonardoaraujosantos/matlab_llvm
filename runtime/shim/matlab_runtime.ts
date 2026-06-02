@@ -3744,6 +3744,12 @@ export function strrep(s: string, oldv: string, newv: string): string {
 export function contains(s: string, pat: string): number {
   return String(s).includes(String(pat)) ? 1 : 0;
 }
+export function strcmp(a: string, b: string): number {
+  return String(a) === String(b) ? 1 : 0;
+}
+export function strcmpi(a: string, b: string): number {
+  return String(a).toLowerCase() === String(b).toLowerCase() ? 1 : 0;
+}
 export function startsWith(s: string, pat: string): number {
   return String(s).startsWith(String(pat)) ? 1 : 0;
 }

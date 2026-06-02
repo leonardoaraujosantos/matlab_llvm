@@ -13288,6 +13288,26 @@ double matlab_contains(matlab_string *s, matlab_string *needle) {
     return strstr(s->data, needle->data) != NULL ? 1.0 : 0.0;
 }
 
+/* strcmp(a, b): MATLAB returns 1.0 when the strings are equal, 0.0
+ * otherwise (note: opposite sense from C's strcmp). Two strings are equal
+ * iff they have the same length and identical bytes. */
+double matlab_strcmp(matlab_string *a, matlab_string *b) {
+    if (!a || !b) return 0.0;
+    if (a->len != b->len) return 0.0;
+    return memcmp(a->data, b->data, (size_t)a->len) == 0 ? 1.0 : 0.0;
+}
+
+/* strcmpi(a, b): case-insensitive strcmp. */
+double matlab_strcmpi(matlab_string *a, matlab_string *b) {
+    if (!a || !b) return 0.0;
+    if (a->len != b->len) return 0.0;
+    for (int64_t i = 0; i < a->len; ++i)
+        if (to_lower_i((unsigned char)a->data[i]) !=
+            to_lower_i((unsigned char)b->data[i]))
+            return 0.0;
+    return 1.0;
+}
+
 matlab_string *matlab_strtrim(matlab_string *s) {
     if (!s) return matlab_string_from_literal("", 0);
     int64_t lo = 0, hi = s->len;
