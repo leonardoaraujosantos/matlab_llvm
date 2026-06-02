@@ -233,6 +233,25 @@ if [[ "$got_rc" != "0" ]]; then
   fails+=("xturn_table_height_width (exit rc=$got_rc, expected 0 — table round-trip crash?)")
   echo "FAIL  xturn_table_height_width (rc=$got_rc)"
 fi
+# 9. Cross-turn struct field-assignment persistence (issue #131). A struct
+#    created/mutated by a field store (`s.x = v`) must round-trip the
+#    workspace: before the fix the field write went only to s's local slot
+#    and emitted no matlab_ws_set_struct, so `s` never entered the workspace
+#    and a later-turn `s.x` read an empty struct -> 0.
+run_case "xturn_struct_field" "$(cat <<'EOF'
+s.x = 42;
+disp(s.x)
+exit
+EOF
+)" "42"
+
+# 9b. Nested field chain (`s.a.b = v`) — the root struct must persist too.
+run_case "xturn_struct_field_nested" "$(cat <<'EOF'
+s.a.b = 7;
+disp(s.a.b)
+exit
+EOF
+)" "7"
 
 echo "----"
 echo "passed: $pass    failed: $fail"

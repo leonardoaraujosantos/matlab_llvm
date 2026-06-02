@@ -3755,6 +3755,38 @@ void Lowerer::lowerStmt(const Stmt &St) {
      * classes and non-class RHS. */
     mlir::Value StoreRhs = maybeCloneObjForAssign(Rhs, A.RHS, loc(A.Range));
     for (const Expr *L : A.LHS) if (L) lowerLValueStore(*L, StoreRhs);
+    /* #131: persist a struct mutated via field-assignment (`s.x = v`,
+     * `s.a.b = v`) to the ReplMode workspace.  The field store writes into
+     * s's local struct slot but never round-trips s, so a later REPL turn
+     * reads an empty s and `s.x` comes back 0.  Mirror the explicit
+     * `s = struct(...)` path (matlab_ws_set_struct, kind=12).  Plain structs
+     * only — class-pinned objs / tables / videowriters route through their
+     * own setters in lowerLValueStore above and must not be re-stored here. */
+    if (ReplMode && InScriptBody) {
+      for (const Expr *L : A.LHS) {
+        auto *F = dynamic_cast<const FieldAccess *>(L);
+        if (!F) continue;
+        const Expr *Base = F->Base;
+        while (auto *FB = dynamic_cast<const FieldAccess *>(Base))
+          Base = FB->Base;   /* walk to the root of an s.a.b chain */
+        auto *BN = dynamic_cast<const NameExpr *>(Base);
+        if (!BN || !BN->Ref) continue;
+        Binding *SB = BN->Ref;
+        if (!StructInitialised.count(SB)) continue;   /* plain struct only */
+        if (SB->PinnedClass) continue;                /* not a classdef obj */
+        if (TableBindings.count(SB) || VideoWriterBindings.count(SB)) continue;
+        auto SlotIt = Slots.find(SB);
+        if (SlotIt == Slots.end()) continue;
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        mlir::Value SVal = emitLoad(SlotIt->second, PtrTy, loc(A.Range));
+        mlir::Value NameV = emitFieldNameChar(SB->Name, loc(A.Range));
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_ws_set_struct"));
+        emitUnregOp("matlab.call_builtin", {NameV, SVal},
+                    {mlir::NoneType::get(&MCtx)}, loc(A.Range), {Cal});
+      }
+    }
     /* Implicit display: MATLAB prints the result of a statement that
      * doesn't end in a semicolon. We handle the common case of a single
      * named LHS (x = expr). Skip when: the rhs is a handle (we've
