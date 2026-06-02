@@ -2213,8 +2213,18 @@ mlir::Value Lowerer::fixupIfCond(mlir::OpBuilder &B, mlir::Value Cond,
    * a 1x1 matlab_mat*, and any matlab.lt/gt/etc. on it propagates the
    * ptr type. Route through matlab_mat_truth(ptr) -> i8 (1 iff
    * MATLAB's `if M` is true: non-empty AND every element non-zero),
-   * then compare against zero to materialise an i1. */
-  if (mlir::isa<mlir::LLVM::LLVMPointerType>(CT)) {
+   * then compare against zero to materialise an i1.
+   *
+   * A matrix-VALUED comparison whose operand keeps the Sema tensor type
+   * (`if abs(M) < c` — abs returns the Sema array type tensor<*xf64>, so
+   * matlab.lt yields tensor<*xi1>) reaches here as a tensor, not a ptr
+   * (#120). scf.if rejects a tensor operand, so wrap it the same way:
+   * matlab_mat_truth tolerates the tensor operand (it's lowered by
+   * LowerTensorOps::rewriteMatTruth only once the producing comparison
+   * is rewritten to a matlab_mat* ptr — see that pass), giving MATLAB's
+   * "if every element is true" reduction. */
+  if (mlir::isa<mlir::LLVM::LLVMPointerType, mlir::RankedTensorType,
+                mlir::UnrankedTensorType>(CT)) {
     auto I8 = mlir::IntegerType::get(&MCtx, 8);
     mlir::NamedAttribute Cal(
         mlir::StringAttr::get(&MCtx, "callee"),

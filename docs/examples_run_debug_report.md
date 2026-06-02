@@ -221,3 +221,16 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
   SIGSEGVs via AOT — a #117 name=value `femodel` ctor builds a corrupt model;
   re-baselined in `known_failures.txt`) and **#124** (the `-dap` empty-`Mesh`
   round-trip race).
+- **2026-06-02 — #120 (✅ fixed).** A matrix-valued comparison used directly as
+  an `if`/`elseif`/`while` condition (`if abs(v) < tol`) produced a
+  `tensor<*xi1>` that `scf.if` rejected (`operand #0 must be 1-bit signless
+  integer`). The condition was never reduced to MATLAB's "true iff every
+  element is true". Not actually REPL-specific — it reproduces on the AOT
+  `-emit-mlir` lane too whenever a comparison operand keeps its Sema array
+  type (e.g. `abs(M)` returns `tensor<*xf64>`, so `< c` yields `tensor<*xi1>`;
+  a workspace-backed 1×1 from `fminunc` hit the same path). Fixed by extending
+  `Lowerer::fixupIfCond` to wrap a tensor-typed condition in `matlab_mat_truth`
+  (the same reduction the matrix-pointer path already used; `LowerTensorOps::
+  rewriteMatTruth` lowers it once the producing comparison becomes a
+  `matlab_mat*`). Deterministic regression `test/Run/regress_matrix_if_cond.m`
+  (+`.stdout`), verified to fail (`scf.if` tensor error) without the fix.
