@@ -1324,7 +1324,20 @@ matlab_struct *matlab_pde_set_body_current(matlab_struct *model, double J) {
  * empty matlab_mat with rows == cols == 0), which we detect to
  * distinguish "field never set" from "field set to a real mesh
  * struct that happens to start with a zero-valued first word". */
+extern "C" int32_t matlab_struct_field_kind(matlab_struct *s, const char *name,
+                                            int64_t len);
+
 static bool field_holds_struct(matlab_struct *s, const char *name, int64_t len) {
+    /* #123: a Geometry / Mesh field set to a STRING path (e.g.
+     * `femodel(Geometry="fork.stl")`, where the STL was never imported into a
+     * geometry struct) stores a matlab_string* under kind=3.  The rows/cols
+     * layout heuristic below would misread the string's `len` word as a
+     * struct pointer and return true, and the caller would then walk the
+     * string as a struct (struct_find_field on garbage → SIGSEGV).  Only
+     * the struct-pointer kinds (1=mat-as-struct, 2=obj, 12=plain struct)
+     * are real geometry/mesh structs; reject everything else up front. */
+    int32_t fk = matlab_struct_field_kind(s, name, len);
+    if (fk >= 0 && fk != 1 && fk != 2 && fk != 12) return false;
     matlab_mat *box = matlab_struct_get_mat(s, name, len);
     if (!box) return false;
     /* matlab_mat layout: 8 bytes data ptr + 8 bytes rows + 8 bytes cols.

@@ -7650,7 +7650,17 @@ matlab_struct *matlab_struct_new(void) {
 }
 
 int32_t struct_find_field(matlab_struct *s, const char *name, int32_t len) {
+    /* #123: a NULL struct has no fields.  Callers reach here with a NULL
+     * `s` when a property is read off an empty/failed result (e.g.
+     * `RF.NaturalFrequencies` after a solve that produced no geometry —
+     * matlab_obj_get_mat forwards the NULL obj here).  Guard so the read
+     * returns "field absent" (-1) instead of dereferencing NULL. */
+    if (!s) return -1;
     for (int32_t i = 0; i < s->nfields; ++i) {
+        /* Skip a reserved-but-unnamed slot: a partially-constructed obj /
+         * result struct can carry nfields slots whose name is still NULL,
+         * and strlen(NULL) would segfault at address 0 (#123). */
+        if (!s->names[i]) continue;
         if ((int32_t)strlen(s->names[i]) == len &&
             memcmp(s->names[i], name, (size_t)len) == 0) {
             return i;
@@ -7835,6 +7845,18 @@ matlab_mat *matlab_struct_get_mat(matlab_struct *s, const char *name, int64_t le
 double matlab_struct_has_field(matlab_struct *s, const char *name, int64_t len) {
     if (!s) return 0.0;
     return struct_find_field(s, name, (int32_t)len) >= 0 ? 1.0 : 0.0;
+}
+
+/* Return the storage KIND of a struct field (0=f64, 1=mat, 2=obj, 3=string,
+ * 6=table, 12=struct, …), or -1 if the field is absent.  Lets a caller tell
+ * a struct-shaped field from a string/scalar one without re-deriving the
+ * matlab_struct layout — e.g. the PDE solver must not treat a Geometry field
+ * that holds a STRING path ("model.stl") as a geometry struct (#123). */
+int32_t matlab_struct_field_kind(matlab_struct *s, const char *name, int64_t len) {
+    if (!s) return -1;
+    int32_t idx = struct_find_field(s, name, (int32_t)len);
+    if (idx < 0) return -1;
+    return s->kinds[idx];
 }
 
 /* ---------------------------------------------------------------------- */

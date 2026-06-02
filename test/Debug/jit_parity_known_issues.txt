@@ -48,4 +48,3 @@
 # API), so only these two are listed.  Wiring the model-form API through
 # the shared JIT lowering is a #77/#28 follow-up.
 pde/clamped_plate_pressure.m
-pde/tuningfork_modal.m
