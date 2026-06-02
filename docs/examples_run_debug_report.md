@@ -266,3 +266,16 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
   empty/missing-field value — `RF.ModeShapes.Magnitude` — reinterprets the
   empty matrix as an obj in `matlab_obj_get_mat` → SIGSEGV; the obj-side of the
   empty-mat-as-struct class #122 closed on the struct side).
+- **2026-06-02 — #128 (✅ fixed).** A property read off an empty/missing-field
+  value — e.g. `RF.ModeShapes.Magnitude` where `RF.ModeShapes` is absent —
+  SIGSEGV'd: `matlab_struct_get_mat` returns a non-NULL empty `matlab_mat`
+  (rows==0, cols==0) for a missing field, and `matlab_obj_get_mat` then walked
+  that empty matrix as an obj — its zero `rows` word lands at the struct
+  `names` pointer offset, so `struct_find_field` dereferenced
+  `((char**)NULL)[i]` at a near-NULL address. The obj-side of the
+  empty-mat-as-struct class #122 closed on the PDE-struct side. Fixed by
+  guarding `matlab_obj_get_mat`: an input whose `rows`/`cols` words are both 0
+  (the empty-matrix sentinel; a real obj has non-NULL `names`/`kinds` there)
+  returns empty instead of being walked. Deterministic regression
+  `test/Runtime/test_struct_cell.c::test_obj_get_mat_on_empty`, verified to
+  SIGSEGV without the fix.

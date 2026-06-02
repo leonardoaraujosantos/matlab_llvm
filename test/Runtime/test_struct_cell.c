@@ -22,6 +22,8 @@ matlab_struct *matlab_struct_get_child_struct(matlab_struct *s,
                                               const char *name, int64_t len);
 matlab_struct *matlab_struct_rmfield(matlab_struct *s, const char *name,
                                       int64_t len);
+/* #128: property read off an empty-matrix value. */
+matlab_mat    *matlab_obj_get_mat(void *o, const char *name, int64_t len);
 
 matlab_cell   *matlab_cell_new(double n);
 void           matlab_cell_set_f64(matlab_cell *c, double i1, double v);
@@ -160,9 +162,23 @@ static void test_cell_grows_past_initial_capacity(void) {
                 "cell round-trip across grow");
 }
 
+/* #128: a property read off an EMPTY matrix (the non-NULL empty matlab_mat
+ * that matlab_struct_get_mat returns for a missing field, e.g.
+ * `RF.ModeShapes.Magnitude` where ModeShapes is absent) must not be walked as
+ * an obj.  Before the fix, the empty mat's zero `rows` word landed at the
+ * struct `names` pointer offset, so struct_find_field dereferenced
+ * ((char**)NULL)[i] and crashed at a near-NULL address. */
+static void test_obj_get_mat_on_empty(void) {
+    double dummy = 0.0;
+    matlab_mat *empty = mk(&dummy, 0, 0);   /* rows==0, cols==0 by construction */
+    matlab_mat *r = matlab_obj_get_mat((void *)empty, "Magnitude", 9);
+    RT_CHECK(r != NULL, "obj prop read on empty mat returns non-null (no crash)");
+}
+
 int main(void) {
     fprintf(stderr, "test_struct_cell:\n");
     RT_RUN(test_struct_set_get_f64);
+    RT_RUN(test_obj_get_mat_on_empty);
     RT_RUN(test_struct_overwrite_field);
     RT_RUN(test_struct_set_get_mat);
     RT_RUN(test_struct_has_field);
