@@ -1912,6 +1912,17 @@ def eq_sm(s, A): return (float(s) == _m(A)).astype(float)
 def ne_sm(s, A): return (float(s) != _m(A)).astype(float)
 
 
+def mat_truth(A):
+    """MATLAB `if M` truthiness: 1 iff M is non-empty AND every element is
+    non-zero, else 0.  Mirrors the C runtime's matlab_mat_truth — emitted by
+    the matrix-valued if/while condition lowering (#120) for both the LLVM
+    lane (via fixupIfCond) and the Python backend."""
+    a = _m(A)
+    if a.size == 0:
+        return 0
+    return 1 if bool((a != 0).all()) else 0
+
+
 # --- elementwise unary ops -------------------------------------------------
 
 def neg_m(A): return -_m(A)
