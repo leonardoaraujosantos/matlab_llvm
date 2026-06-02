@@ -11,8 +11,19 @@ GitHub Actions hosts is ~10-15% even with min-of-3 trials; tighter
 thresholds produce false positives.  Override with --threshold for
 local strict checks.
 
+A relative threshold alone false-positives on the sub-2ms kernels
+(chol/solve/matmul ~1ms), where absolute scheduler / CPU-frequency
+jitter dominates: 30% of 1ms is 0.3ms, smaller than the run-to-run
+noise (measured ~55% spread on identical code).  So a move must also
+clear an ABSOLUTE floor (--min-abs-ms, default 1.0ms) to count as a
+regression or improvement; smaller moves are reported but classified
+as below the noise floor.  This keeps the relative gate effective for
+the larger kernels and for genuinely large small-kernel regressions
+(1ms→3ms still trips: +2ms > floor AND +200% > threshold).
+
 Usage:
-    check_regression.py --base <base.json> --head <head.json> [--threshold 0.30]
+    check_regression.py --base <base.json> --head <head.json>
+                        [--threshold 0.30] [--min-abs-ms 1.0]
 
 Designed to be invoked by .github/workflows/ci.yml's perf-bench lane.
 Tier 7 of docs/acceleration_roadmap.md.
@@ -51,7 +62,12 @@ def main() -> int:
     parser.add_argument("--head", required=True, type=Path,
                         help="PR HEAD results JSON.")
     parser.add_argument("--threshold", type=float, default=0.30,
-                        help="Regression threshold (default 0.30 = 30%%).")
+                        help="Relative regression threshold (default 0.30 = "
+                             "30%%).")
+    parser.add_argument("--min-abs-ms", type=float, default=1.0,
+                        help="Absolute floor in milliseconds (default 1.0). A "
+                             "move must clear BOTH this and --threshold to "
+                             "count; smaller moves are below the noise floor.")
     parser.add_argument("--allow-regression", action="store_true",
                         help="Print the table but exit 0 even on regression "
                              "(use for the 'perf-allowed' PR label).")
@@ -68,6 +84,8 @@ def main() -> int:
              f"- base: `{args.base.name}`",
              f"- head: `{args.head.name}`",
              f"- threshold: ±{args.threshold:.0%}",
+             f"- noise floor: ±{args.min_abs_ms:.2f}ms (moves below this are "
+             "not gated)",
              "",
              "| Kernel | N | base | head | Δ% | status |",
              "|---|---|---|---|---|---|"]
@@ -87,18 +105,28 @@ def main() -> int:
         if b <= 0 or h <= 0:
             continue
         delta = (h - b) / b
+        abs_ms = abs(h - b) * 1000.0
+        below_floor = abs_ms < args.min_abs_ms
         status = "OK"
         flag = ""
         if delta > args.threshold:
-            status = "**REGRESSION**"
-            flag = "🔴"
-            regressions.append(f"{kernel} N={N}: {b * 1000:.2f}ms → "
-                               f"{h * 1000:.2f}ms ({delta:+.1%})")
+            if below_floor:
+                status = "OK (noise floor)"
+                flag = "⚪"
+            else:
+                status = "**REGRESSION**"
+                flag = "🔴"
+                regressions.append(f"{kernel} N={N}: {b * 1000:.2f}ms → "
+                                   f"{h * 1000:.2f}ms ({delta:+.1%})")
         elif delta < -args.threshold:
-            status = "improvement"
-            flag = "🟢"
-            improvements.append(f"{kernel} N={N}: {b * 1000:.2f}ms → "
-                                f"{h * 1000:.2f}ms ({delta:+.1%})")
+            if below_floor:
+                status = "OK (noise floor)"
+                flag = "⚪"
+            else:
+                status = "improvement"
+                flag = "🟢"
+                improvements.append(f"{kernel} N={N}: {b * 1000:.2f}ms → "
+                                    f"{h * 1000:.2f}ms ({delta:+.1%})")
         lines.append(
             f"| `{kernel}` | {N} | {fmt(b)} | {fmt(h)} | "
             f"{delta:+.1%} | {flag} {status} |")
