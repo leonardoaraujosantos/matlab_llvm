@@ -4376,6 +4376,23 @@ void *workerMain(void *) {
  * worker is resumed without ever telling the IDE we stopped; failing
  * conditions silently resume too. The IDE only sees a `stopped`
  * event for "real" pauses (step, plain bp, or true condition). */
+/* #137: the worker and monitor threads run the full MLIR lowering / JIT — the
+ * monitor compiles breakpoint *conditions* through runReplInput → lowerToMLIR,
+ * which recurses through Lowerer::lowerExpr over a whole REPL TU (prelude +
+ * workspace rehydration). The default secondary-thread stack (~512 KB on
+ * macOS) overflows that on a non-trivial prelude (SIGBUS in ___chkstk_darwin),
+ * intermittently crashing -dap on a conditional breakpoint. Spawn them with an
+ * 8 MB stack — matching the main thread's headroom. */
+static int dapSpawnBigStack(pthread_t *t, void *(*fn)(void *), void *arg) {
+  pthread_attr_t attr;
+  if (pthread_attr_init(&attr) != 0)
+    return pthread_create(t, nullptr, fn, arg);
+  pthread_attr_setstacksize(&attr, 8 * 1024 * 1024);
+  int rc = pthread_create(t, &attr, fn, arg);
+  pthread_attr_destroy(&attr);
+  return rc;
+}
+
 void *monitorMain(void *) {
   bool Debug = getenv("MATLABC_DAP_TRACE") != nullptr;
   while (true) {
@@ -5751,14 +5768,14 @@ bool handleRequest(const Object &Msg) {
     pthread_mutex_lock(&G.Mu);
     bool JustStarted = false;
     if (!G.WorkerStarted) {
-      pthread_create(&G.Worker, nullptr, workerMain, nullptr);
+      dapSpawnBigStack(&G.Worker, workerMain, nullptr);  /* #137: 8 MB stack */
       G.WorkerStarted = true;
       JustStarted = true;
       /* Detach; we use G.WorkerExited to know when it's done. */
       pthread_detach(G.Worker);
       /* Spawn the helper threads after the worker is kicked. */
       pthread_t Mon, Watcher, Rdr;
-      pthread_create(&Mon, nullptr, monitorMain, nullptr);
+      dapSpawnBigStack(&Mon, monitorMain, nullptr);  /* #137: 8 MB stack */
       pthread_detach(Mon);
       pthread_create(&Watcher, nullptr, pauseWatcherMain, nullptr);
       pthread_detach(Watcher);
