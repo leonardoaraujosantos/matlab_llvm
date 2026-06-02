@@ -12909,6 +12909,20 @@ double matlab_obj_get_f64(matlab_obj *o, const char *name, int64_t len) {
 }
 
 matlab_mat *matlab_obj_get_mat(matlab_obj *o, const char *name, int64_t len) {
+    /* #128: a property read off an EMPTY matrix must not walk it as an obj.
+     * matlab_struct_get_mat returns a non-NULL empty matlab_mat (rows==0 &&
+     * cols==0) for a missing field, so a chained access like
+     * `RF.ModeShapes.Magnitude` — where RF.ModeShapes is absent — reaches
+     * here with `o` pointing at that empty matrix.  Reinterpreted as a
+     * matlab_struct, the empty mat's zero `rows` word lands at the `names`
+     * pointer offset, so struct_find_field would deref ((char**)NULL)[i] and
+     * crash at a near-NULL address.  A real obj has heap-allocated (non-NULL)
+     * `names`/`kinds` pointers at those offsets, so rows==0 && cols==0
+     * uniquely identifies the empty-matrix sentinel — return empty for it. */
+    if (o) {
+        matlab_mat *as_mat = (matlab_mat *)o;
+        if (as_mat->rows == 0 && as_mat->cols == 0) return mat_alloc(0, 0);
+    }
     return matlab_struct_get_mat((matlab_struct *)o, name, len);
 }
 
