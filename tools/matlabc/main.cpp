@@ -4326,6 +4326,18 @@ bool compileProgram() {
  * the monitor loop on return. */
 
 void *workerMain(void *) {
+  /* #112: never dereference a null engine. The worker is only spawned
+   * once `compileProgram` succeeded (see configurationDone), but guard
+   * here too so a failed launch can never fault in
+   * `ExecutionEngine::lookup` — that was the null-engine SIGSEGV on the
+   * compile-failure path. */
+  if (!G.Engine) {
+    pthread_mutex_lock(&G.Mu);
+    G.WorkerExited = true;
+    pthread_cond_broadcast(&G.Cv);
+    pthread_mutex_unlock(&G.Mu);
+    return nullptr;
+  }
   auto FnOrErr = G.Engine->lookup("main");
   if (FnOrErr) {
     G.MainAddr = (void *)*FnOrErr;
@@ -5712,6 +5724,16 @@ bool handleRequest(const Object &Msg) {
 
   if (*Cmd == "configurationDone") {
     sendResponse(ReqSeq, *Cmd, true, Object{});
+    /* #112: only start the worker if `launch` actually produced a JIT
+     * engine. If compilation failed (G.Engine is null), the worker
+     * would dereference a null engine in `ExecutionEngine::lookup` and
+     * SIGSEGV. Instead, emit a `terminated` event so the IDE ends the
+     * session cleanly — the failure diagnostics were already delivered
+     * on the `launch` response and via the stderr `output` channel. */
+    if (!G.Engine) {
+      sendEvent("terminated");
+      return true;
+    }
     pthread_mutex_lock(&G.Mu);
     bool JustStarted = false;
     if (!G.WorkerStarted) {
@@ -7900,6 +7922,36 @@ int runDap(const std::string &CLIPath) {
     auto Ty = Root->getString("type");
     if (!Ty || *Ty != "request") continue;
     if (!handleRequest(*Root)) break;
+  }
+
+  /* #112: before returning (the caller hard-exits the process), make
+   * sure the worker thread is no longer touching the ExecutionEngine.
+   * The server loop can exit on stdin EOF or `disconnect` while the
+   * worker is still inside `ExecutionEngine::lookup("main")` (lazy ORC
+   * materialization) or running the JIT'd program. Returning straight
+   * into process teardown then races the worker against engine /
+   * MLIR-context destruction — the SIGSEGV in `ExecutionEngine::lookup`
+   * / `~ExecutionEngine` that this issue reported.
+   *
+   * Ask the runtime to stop (unblocks a stopOnEntry / breakpoint pause)
+   * and wait, bounded, for the worker to set WorkerExited. The wait is
+   * capped so a pathological program that ignores STOP can't hang the
+   * adapter shutdown — in that case we fall through to the caller's
+   * hard-exit as before. */
+  pthread_mutex_lock(&G.Mu);
+  bool MustWait = G.WorkerStarted && !G.WorkerExited;
+  pthread_mutex_unlock(&G.Mu);
+  if (MustWait) {
+    matlab_dbg_resume(STOP);
+    struct timespec Deadline;
+    clock_gettime(CLOCK_REALTIME, &Deadline);
+    Deadline.tv_sec += 5;
+    pthread_mutex_lock(&G.Mu);
+    while (!G.WorkerExited) {
+      if (pthread_cond_timedwait(&G.Cv, &G.Mu, &Deadline) == ETIMEDOUT)
+        break;
+    }
+    pthread_mutex_unlock(&G.Mu);
   }
   return 0;
 }

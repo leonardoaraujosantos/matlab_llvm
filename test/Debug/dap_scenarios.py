@@ -444,6 +444,108 @@ def scn_fixedpoint_launches(matlabc, program):
     _assert_launches_and_terminates(matlabc, fi_program)
 
 
+def scn_compile_failure_terminates_without_crash(matlabc, program):
+    """Regression for #112: a `-dap` launch whose program fails to compile
+    must NOT crash the adapter.
+
+    Before the fix, `launch` correctly answered "failed to compile program"
+    (G.Engine stayed null), but `configurationDone` still spawned the JIT
+    worker unconditionally. `workerMain` then dereferenced the null engine in
+    `mlir::ExecutionEngine::lookup("main")` and SIGSEGV'd — a deterministic
+    crash (the issue reproduced it on every run). The fix gates the worker on
+    a non-null engine and emits a `terminated` event instead.
+
+    The fixture is written to a tempfile (an undefined-variable reference the
+    JIT pipeline rejects) rather than living in this directory — the sibling
+    `run_tests.sh` hook-line test compiles every *.m here with `-emit-mlir
+    -g`, so a deliberately-non-compiling fixture would break it.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        bad = os.path.join(d, "compile_fail.m")
+        with open(bad, "w") as f:
+            # `x` is never assigned, so the -dap JIT lowering fails.
+            f.write("y = zeros(1, x);\ndisp(y)\n")
+
+        c = DapClient(matlabc, bad)
+        try:
+            c.request("initialize", {
+                "clientID": "matlabc-test",
+                "linesStartAt1": True,
+                "pathFormat": "path",
+            })
+            c.wait_event("initialized", timeout=5.0)
+            try:
+                c.request("launch", {"program": bad, "stopOnEntry": True})
+                raise AssertionError(
+                    "expected launch to report a compile failure")
+            except DapError as e:
+                assert "failed to compile" in str(e).lower(), \
+                    f"unexpected launch error: {e}"
+            # The crash trigger: pre-fix this spawned the worker against a
+            # null engine. Post-fix it must emit `terminated` cleanly.
+            c.request("configurationDone")
+            c.wait_event("terminated", timeout=10.0)
+        finally:
+            c.close()
+        assert c.proc.returncode == 0, \
+            ("adapter did not exit cleanly on the compile-failure path "
+             f"(returncode={c.proc.returncode}; negative = killed by signal)")
+
+
+def scn_eof_after_launch_no_worker_crash(matlabc, program):
+    """Regression for #112: a `-dap` session whose stdin closes right after
+    `configurationDone` (no `disconnect`) must shut down without crashing.
+
+    This is the issue's exact minimal repro: the client sends
+    initialize -> launch{stopOnEntry} -> configurationDone and then closes
+    the pipe. Pre-fix, the server loop hit EOF and returned straight into
+    process teardown while the worker thread was still inside
+    `ExecutionEngine::lookup("main")` (lazy ORC materialization), racing the
+    worker against engine/context destruction — SIGSEGV. The fix drains the
+    worker (STOP + bounded wait on WorkerExited) before `runDap` returns.
+
+    Driven with raw framed JSON rather than DapClient because the assertion
+    is specifically about the *no-disconnect* EOF path (DapClient.close()
+    always sends `disconnect` first).
+    """
+    import json
+    import subprocess
+
+    def frame(obj):
+        b = json.dumps(obj).encode()
+        return b"Content-Length: %d\r\n\r\n%s" % (len(b), b)
+
+    reqs = [
+        ("initialize", {"clientID": "matlabc-test",
+                        "linesStartAt1": True, "pathFormat": "path"}),
+        ("launch", {"program": program, "stopOnEntry": True}),
+        ("configurationDone", None),
+    ]
+    blob = b"".join(
+        frame({"seq": i, "type": "request", "command": cmd,
+               **({"arguments": a} if a else {})})
+        for i, (cmd, a) in enumerate(reqs, 1))
+
+    proc = subprocess.Popen(
+        [matlabc, "-dap", program],
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL)
+    proc.stdin.write(blob)
+    proc.stdin.flush()
+    proc.stdin.close()  # EOF, no disconnect
+    try:
+        proc.wait(timeout=15.0)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5.0)
+        raise AssertionError("adapter hung after stdin EOF")
+    assert proc.returncode == 0, \
+        ("adapter crashed on stdin-EOF shutdown "
+         f"(returncode={proc.returncode}; negative = killed by signal)")
+
+
 def scn_function_locals(matlabc, program):
     """Pausing inside a user function exposes the function's locals.
 
