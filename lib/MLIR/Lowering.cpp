@@ -555,6 +555,11 @@ private:
    * dispatch disp / categories / iscategory / equality through the
    * dedicated runtime entries. */
   std::unordered_set<Binding *> CategoricalBindings;
+  /* Bindings holding a matlab_videowriter * (from `v = VideoWriter(...)`).
+   * Used so a `v.FrameRate = ...` / `v.Quality = ...` property store routes
+   * to the video-writer setters instead of the generic struct field path
+   * (which would misread the opaque handle as a struct). */
+  std::unordered_set<Binding *> VideoWriterBindings;
   /* Phase 5.3: bindings holding a matlab_table * — used to dispatch
    * column accessors (`T.x`), shape (height/width/size), and disp(T). */
   std::unordered_set<Binding *> TableBindings;
@@ -2596,6 +2601,9 @@ void Lowerer::lowerStmt(const Stmt &St) {
     bool RhsIsTable = false;
     bool RhsIsTimetable = false;
     bool RhsIsTimerange = false;
+    /* RHS is a VideoWriter handle when it's a direct `VideoWriter(...)`
+     * call or a re-assignment from an existing VideoWriter binding. */
+    bool RhsIsVideoWriter = false;
     /* Plain matlab_struct* RHS — needs a dedicated workspace setter
      * (matlab_ws_set_struct, kind=9) so field-access dispatch sees
      * `s` as struct rather than mat on subsequent REPL turns.  RHS
@@ -2631,6 +2639,9 @@ void Lowerer::lowerStmt(const Stmt &St) {
         if (NE->Ref && TimetableBindings.count(NE->Ref))
           RhsIsTimetable = true;
         if (NE->Name == "timerange") RhsIsTimerange = true;
+        if (NE->Name == "VideoWriter") RhsIsVideoWriter = true;
+        if (NE->Ref && VideoWriterBindings.count(NE->Ref))
+          RhsIsVideoWriter = true;
         /* Known struct-returning builtins. struct() is the textbook
          * literal; linkBudget is the PROP-Tier-2b struct return; stepinfo
          * returns the CST step-response-metrics struct. Adding more is a
@@ -3602,6 +3613,11 @@ void Lowerer::lowerStmt(const Stmt &St) {
       for (const Expr *L : A.LHS)
         if (auto *N = dynamic_cast<const NameExpr *>(L))
           if (N->Ref) TableBindings.insert(N->Ref);
+    }
+    if (RhsIsVideoWriter) {
+      for (const Expr *L : A.LHS)
+        if (auto *N = dynamic_cast<const NameExpr *>(L))
+          if (N->Ref) VideoWriterBindings.insert(N->Ref);
     }
     if (RhsIsTimetable) {
       for (const Expr *L : A.LHS)
@@ -4748,6 +4764,28 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
       Rhs = emitUnreg("matlab.call_builtin", {Rhs}, PtrTy,
                       loc(F.Range), {SCal});
     };
+    /* v.FrameRate = fps / v.Quality = q on a VideoWriter handle. Route to
+     * the dedicated setters so the opaque handle isn't misread as a struct.
+     * The setters take a scalar f64, so this fires for scalar (f64 / int)
+     * RHS; a non-scalar RHS or an unknown property is silently ignored
+     * (property-set is a v1 subset — see docs/plotting.md §4). */
+    if (auto *BN = dynamic_cast<const NameExpr *>(F.Base))
+      if (BN->Ref && VideoWriterBindings.count(BN->Ref)) {
+        const char *Setter = nullptr;
+        if (F.Field == "FrameRate") Setter = "matlab_videowriter_set_framerate";
+        else if (F.Field == "Quality") Setter = "matlab_videowriter_set_quality";
+        bool ScalarRhs = Rhs && (Rhs.getType() == mlir::Float64Type::get(&MCtx) ||
+                                 mlir::isa<mlir::IntegerType>(Rhs.getType()));
+        if (Setter && ScalarRhs) {
+          mlir::Value Vv = lowerExpr(*F.Base);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, Setter));
+          emitUnregOp("matlab.call_builtin", {Vv, Rhs},
+                      {mlir::NoneType::get(&MCtx)}, loc(F.Range), {Cal});
+        }
+        return;
+      }
     /* Phase 5.3: T.<name> = Rhs — Base is a NameExpr in TableBindings.
      * Route to matlab_table_add_column (which auto-creates the column
      * on first write or replaces an existing one). */
@@ -13007,6 +13045,9 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             /* Plotting — figure / gcf return an opaque matlab_figure*
              * descriptor; everything else in the family returns void. */
             "figure", "gcf",
+            /* Animation — getframe returns an opaque matlab_frame*,
+             * VideoWriter returns an opaque matlab_videowriter*. */
+            "getframe", "VideoWriter",
           };
           if (F64Ret.contains(N->Name)) ResTy = F64;
           else if (PtrRet.contains(N->Name)) ResTy = PtrTy;

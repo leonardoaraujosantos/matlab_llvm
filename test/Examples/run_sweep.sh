@@ -127,7 +127,7 @@ if command -v pkg-config >/dev/null 2>&1 && \
   # shellcheck disable=SC2207
   PLOT_LIBS=( $(pkg-config --libs cairo cairo-svg cairo-pdf) )
   PLOT_OK=1
-  for src in c_api cairo_render colormap contour figure; do
+  for src in c_api cairo_render colormap contour figure videowriter; do
     obj="$WORK/plot_$src.o"
     if ! "$CXX" -DMATLAB_LLVM_WITH_PLOT=1 -I"$ROOT/runtime" \
            "${_plot_cflags[@]}" -c "$ROOT/runtime/plot/$src.cpp" -o "$obj" 2>/dev/null; then

@@ -20,6 +20,19 @@ Cairo must be discoverable via `pkg-config` (`cairo`, `cairo-svg`,
 `cairo-pdf`). Homebrew supplies these on macOS; `libcairo2-dev` on
 Debian/Ubuntu.
 
+Video export (`getframe` + `VideoWriter`, §4 Tier A/B) is an opt-in
+extension on top of `WITH_PLOT`:
+
+```sh
+cmake -B build -DMATLAB_LLVM_WITH_PLOT=ON -DMATLAB_LLVM_WITH_PLOT_FFMPEG=ON
+```
+
+This links libav directly, so it needs the FFmpeg dev libraries
+(`brew install ffmpeg` on macOS; `apt install libavcodec-dev
+libavformat-dev libavutil-dev libswscale-dev` on Debian/Ubuntu). Builds
+without the flag still compile and run plot scripts; `VideoWriter` just
+reports that video support is disabled.
+
 ## 0. Reading guide
 
 - **Status legend**: ✅ shipped · 🟡 partial · 🔵 not started.
@@ -171,6 +184,7 @@ Unknown names fall back to `parula`.
 | `saveas(gcf, 'path')` | ✅ | The orphan `matlab.make_handle` from `gcf`-as-handle is swept by `LowerPlot`. |
 | `print('path')` | ✅ | Same as saveas with one arg. |
 | C-ABI in-memory: `matlab_render_png/svg/pdf` | ✅ | Returns malloc'd buffer; caller releases with `matlab_plot_buffer_free`. |
+| `getframe` + `VideoWriter` → `.mp4` / `.avi` | ✅ (behind `…_FFMPEG`) | Animation capture + video export. See §4 Tier A/B. |
 | Extensions | `.png`, `.svg`, `.pdf` ✅ | Inferred from path. Unknown extension returns `-1`. |
 
 ### 2.10 matlabc integration
@@ -232,7 +246,7 @@ Unknown names fall back to `parula`.
 | Lighting: `light`, `lighting flat/gouraud/phong`, `material shiny/dull/metal`, `camlight` | 1 week | Per-face Lambertian (flat) is essentially what `surf` does today; `gouraud`/`phong` need per-vertex normals + cairo gradient tricks. |
 | Multi-series syntax `plot(x,y1,'r-', x,y2,'b--')` | 1 session | Detect alternating (vec, vec, opt-fmt) groups in `LowerPlot`. |
 | `image()` raw RGB, `montage`, `imshowpair` | 1 session each | Variants of the existing image painter. |
-| Animation: `drawnow`, `animatedline`, `comet`, `VideoWriter` | weeks | Requires a per-frame render loop and a video container writer. |
+| Animation: `drawnow`, `animatedline`, `comet`, `VideoWriter` | partial | `getframe` + `VideoWriter` (MP4/AVI) shipped — see §4 Tier A/B. `drawnow` real semantics / `animatedline` / `comet` still open. |
 
 ### Tier 4 — function-expression plots (need symbolic backend)
 
@@ -293,7 +307,7 @@ PDF teasers in §3 Tier 6.
 | `drawnow` real semantics | 1 session | Today `matlab_drawnow` is a thin shim calling `matlab_ide_emit_all_figures`. Add `Figure::dirty` flag; flush only dirty figures; `drawnow('limitrate')` rate-limits to 20 Hz; `drawnow('expose')` becomes a no-op alias. |
 | `animatedline()` + `addpoints` / `clearpoints` | 2 sessions | New `SeriesKind::AnimatedLine` with growable x/y/z buffers. Returns a handle (numeric token, like figure ids). Name/Value pairs (`'MaximumNumPoints'`, `'LineStyle'`, …) route through the existing prop-setter path in `LowerPlot.cpp`. |
 | `comet(x, y)` / `comet3(x, y, z)` | 1 session | Sugar over animatedline: per-step `addpoints` + `drawnow` + sleep. MATLAB's head/body/tail = three series with different alphas. |
-| `getframe()` / `getframe(h)` | 1 session | Wraps the existing `matlab_render_png` in-memory path. Returns a frame handle whose payload is a malloc'd PNG + dims. Stored in a thread-local frame registry. |
+| `getframe()` / `getframe(h)` | ✅ | Shipped. `matlab_getframe` renders the current figure to a raw ARGB32 raster (`cairo_render::render_raw`, not a re-decoded PNG — encoders want pixels) and returns an opaque `matlab_frame *`. Frames live in a per-thread registry freed on `close_all` / thread exit, so scripts never free them. A handle argument (`getframe(gcf)`) is accepted and ignored. |
 | `movie(F, n, fps)` | 1 session | In REPL/IDE: streams frames via the sentinel channel at `fps`. In batch: optional multi-page PDF, otherwise no-op. |
 | `pause(t)` integration | trivial | Already exists in `matlab_runtime`; animation loops just need to yield to it. |
 
@@ -303,7 +317,7 @@ PDF teasers in §3 Tier 6.
 |---|---|---|
 | Multi-page PDF via `drawnow` | 1 session | `cairo_show_page()` between paints when output is `.pdf`. |
 | Animated GIF via `libgif` (giflib) | 2 sessions | Optional dep behind `MATLAB_LLVM_WITH_PLOT_GIF`. `saveas(gcf, 'anim.gif')` after a movie buffer is filled; or `VideoWriter` profile `'GIF'`. Per-frame 256-color quantization at encode time. |
-| `VideoWriter` — MP4/H.264 | 1 week | Optional dep `MATLAB_LLVM_WITH_PLOT_FFMPEG` (libav). API-compatible: `v = VideoWriter('out.mp4', 'MPEG-4'); open(v); writeVideo(v, frame); close(v);`. Opaque handle + four entry points + four `LowerPlot` rewrites. Profiles: `'Motion JPEG AVI'`, `'MPEG-4'`, `'Uncompressed AVI'`, `'Archival'`. |
+| `VideoWriter` — MP4/H.264 | ✅ (v1) | Shipped behind `MATLAB_LLVM_WITH_PLOT_FFMPEG` (off by default; links libav directly). API: `v = VideoWriter('out.mp4', 'MPEG-4'); v.FrameRate = 30; open(v); writeVideo(v, getframe(gcf)); close(v);`. `runtime/plot/videowriter.cpp` holds the opaque handle + `matlab_videowriter_new/_new_profile/_set_framerate/_set_quality/_open/_write/_close`; in-process ARGB→YUV420P via swscale, H.264 (libx264) or MJPEG encode. Profiles in v1: `'MPEG-4'` (→ H.264/MP4) and `'Motion JPEG AVI'` (→ MJPEG/AVI); the container is also inferred from the path extension. **v1 limits:** `FrameRate`/`Quality` are set via scalar property assignment (`v.FrameRate = N`); `close(handle)` is assumed to be a VideoWriter (figure-handle close isn't distinguished yet); `'Uncompressed AVI'` / `'Archival'` profiles and `VideoReader` are follow-ups. The symbols always exist; without the flag, VideoWriter reports that video support is disabled instead of writing a bogus file. |
 | `VideoReader` | 1 session | Symmetric — libav demux + PNG-decoded frames. Lower priority. |
 
 Both video deps stay optional and off by default. Without them,
@@ -358,15 +372,20 @@ headless build remains untouched.
 
 Discrete files animation/interactivity must extend:
 
-- `runtime/matlab_plot.h` — new C ABI: `matlab_drawnow_flushed`, `matlab_animatedline_new`, `matlab_addpoints`, `matlab_clearpoints`, `matlab_getframe`, `matlab_movie`, `matlab_videowriter_*`.
-- `runtime/plot/figure.h` — `SeriesKind::AnimatedLine`, `Figure::dirty`, frame registry, `Axes::interaction_mode` enum.
-- `runtime/plot/cairo_render.cpp` — multi-page PDF support; frame-rate aware flush.
-- `lib/MLIR/Passes/LowerPlot.cpp` — extend `plotBuiltins()` (+~10 names) and `rewriteCallee()` arity branches.
-- `lib/Sema/Resolver.cpp` — register new builtins in `kBuiltins`.
-- `tools/matlabc/main.cpp` — sentinel `kind=` extension; optional DAP figure event; optional SDL window event loop.
-- `CMakeLists.txt` — new optional flags `MATLAB_LLVM_WITH_PLOT_GIF`, `…_FFMPEG`, `…_WINDOW`, `…_WEBSOCKET` (all off by default; `WITH_PLOT` remains the umbrella).
-- `test/Runtime/test_plot_animation.cpp` — frame-count, GIF magic-bytes, video duration assertions (no JIT, follow the existing direct-ABI test pattern).
-- `examples/plot/animatedline_*.m`, `examples/plot/comet_*.m` — end-to-end through matlabc.
+- `runtime/matlab_plot.h` — C ABI. **Done:** `matlab_getframe`, `matlab_videowriter_*`. **Remaining:** `matlab_drawnow_flushed`, `matlab_animatedline_new`, `matlab_addpoints`, `matlab_clearpoints`, `matlab_movie`.
+- `runtime/plot/frame.h` — **Done:** internal `matlab_frame` definition (ARGB32 raster) shared by the capture path and the encoder.
+- `runtime/plot/videowriter.cpp` — **Done:** the libav encoder + opaque `matlab_videowriter` handle (guarded by `MATLAB_LLVM_WITH_PLOT_FFMPEG`).
+- `runtime/plot/cairo_render.{h,cpp}` — **Done:** `render_raw()` (raw frame capture). **Remaining:** multi-page PDF support; frame-rate aware flush.
+- `runtime/plot/cairo_dl.cpp` — **Done:** added `cairo_image_surface_get_data` / `_get_stride` / `cairo_surface_flush` for the raw-pixel readback.
+- `runtime/plot/figure.h` — `SeriesKind::AnimatedLine`, `Figure::dirty`, `Axes::interaction_mode` enum (remaining). The per-thread frame registry lives in `c_api.cpp`.
+- `lib/MLIR/Passes/LowerPlot.cpp` — **Done:** `getframe` / `VideoWriter` / `open` / `writeVideo` in `plotBuiltins()` + `rewriteCallee()`; `close(ptr)` → `matlab_videowriter_close`.
+- `lib/MLIR/Lowering.cpp` — **Done:** `getframe` / `VideoWriter` in the `PtrRet` set; `VideoWriterBindings` tag so `v.FrameRate = N` / `v.Quality = N` route to the setters.
+- `lib/MLIR/Passes/LowerTensorOps.cpp` — **Done:** lowers the `matlab_videowriter_set_framerate/_set_quality` calls (with scalar→f64 coercion).
+- `lib/Sema/Resolver.cpp` — **Done:** `getframe`, `VideoWriter`, `open`, `writeVideo` registered.
+- `tools/matlabc/main.cpp` — sentinel `kind=` extension; optional DAP figure event; optional SDL window event loop (remaining).
+- `CMakeLists.txt` — **Done:** `MATLAB_LLVM_WITH_PLOT_FFMPEG` (off by default; `WITH_PLOT` umbrella). **Remaining:** `…_GIF`, `…_WINDOW`, `…_WEBSOCKET`.
+- `test/Runtime/test_plot_video.cpp` — **Done:** getframe + VideoWriter direct-ABI test (encode assertions gated on the flag, disabled-path asserted otherwise).
+- `examples/plot/{videowriter_sine,animation_orbit,animation_fourbar,animation_surf_wave}.m` — **Done** (MP4 + Motion JPEG AVI; 2-D motion, four-bar mechanism, animated 3-D surf). `examples/plot/animatedline_*.m`, `examples/plot/comet_*.m` — remaining.
 
 ### Tier G — Explicitly out of scope
 

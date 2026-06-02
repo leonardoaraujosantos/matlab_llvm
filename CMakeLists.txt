@@ -80,8 +80,33 @@ if(MATLAB_LLVM_WITH_PLOT)
     runtime/plot/cairo_render.cpp
     runtime/plot/cairo_dl.cpp
     runtime/plot/colormap.cpp
-    runtime/plot/contour.cpp)
+    runtime/plot/contour.cpp
+    # videowriter.cpp is always compiled so the JIT can resolve the
+    # matlab_videowriter_* symbols; the actual libav encoder is guarded
+    # by MATLAB_LLVM_WITH_PLOT_FFMPEG below (a clear runtime error fires
+    # if those symbols are called in a build without it).
+    runtime/plot/videowriter.cpp)
   set(MATLAB_PLOT_INCLUDE_DIRS ${CAIRO_INCLUDE_DIRS})
+  set(MATLAB_PLOT_DEFINES "")
+  set(MATLAB_PLOT_LIBS "")
+
+  # --- Video export (FFmpeg / libav) ---------------------------------------
+  # Optional, off by default. When on, VideoWriter encodes H.264 (MP4) and
+  # Motion JPEG (AVI) in-process via libav. Requires the FFmpeg dev
+  # libraries (libavcodec/libavformat/libavutil/libswscale). Without this
+  # flag the plot runtime still builds; VideoWriter just reports that
+  # video support is disabled.
+  option(MATLAB_LLVM_WITH_PLOT_FFMPEG
+         "Enable VideoWriter video export via libav (needs FFmpeg dev libs)" OFF)
+  if(MATLAB_LLVM_WITH_PLOT_FFMPEG)
+    pkg_check_modules(LIBAV REQUIRED
+      libavcodec libavformat libavutil libswscale)
+    message(STATUS "Found libav (avcodec ${LIBAV_libavcodec_VERSION}) — "
+                   "VideoWriter video export enabled")
+    list(APPEND MATLAB_PLOT_INCLUDE_DIRS ${LIBAV_INCLUDE_DIRS})
+    list(APPEND MATLAB_PLOT_DEFINES MATLAB_LLVM_WITH_PLOT_FFMPEG=1)
+    list(APPEND MATLAB_PLOT_LIBS ${LIBAV_LINK_LIBRARIES})
+  endif()
 endif()
 
 # --- BLAS / LAPACK acceleration --------------------------------------------
@@ -378,6 +403,14 @@ if(MATLAB_LLVM_WITH_PLOT)
   target_sources(MatlabRuntime PRIVATE ${MATLAB_PLOT_SOURCES})
   target_include_directories(MatlabRuntime PRIVATE ${MATLAB_PLOT_INCLUDE_DIRS})
   target_compile_definitions(MatlabRuntime PRIVATE MATLAB_LLVM_WITH_PLOT=1)
+  if(MATLAB_PLOT_DEFINES)
+    target_compile_definitions(MatlabRuntime PRIVATE ${MATLAB_PLOT_DEFINES})
+  endif()
+  if(MATLAB_PLOT_LIBS)
+    # libav is linked directly (unlike libcairo's dlopen) since the whole
+    # video feature is opt-in; builds without the flag carry no libav dep.
+    target_link_libraries(MatlabRuntime PUBLIC ${MATLAB_PLOT_LIBS})
+  endif()
 endif()
 
 # Helper — force-load every symbol from MatlabRuntime into a consumer.
@@ -739,7 +772,7 @@ set_source_files_properties(
   PROPERTIES COMPILE_OPTIONS "-Wold-style-cast;-Werror=old-style-cast")
 
 if(MATLAB_LLVM_WITH_PLOT)
-  foreach(_plot_test IN ITEMS hello basic)
+  foreach(_plot_test IN ITEMS hello basic video)
     set(_plot_target "runtime-plot-${_plot_test}")
     # Plot TUs are inside MatlabRuntime now (see add_library above);
     # force-load pulls every entry into the test binary so the symbol
@@ -747,6 +780,11 @@ if(MATLAB_LLVM_WITH_PLOT)
     add_executable(${_plot_target}
       test/Runtime/test_plot_${_plot_test}.cpp)
     target_link_libraries(${_plot_target} PRIVATE MatlabRuntime)
+    # Mirror the runtime's video-support define so the video test knows
+    # whether to assert on real encoder output or on the disabled path.
+    if(MATLAB_PLOT_DEFINES)
+      target_compile_definitions(${_plot_target} PRIVATE ${MATLAB_PLOT_DEFINES})
+    endif()
     matlab_runtime_force_load(${_plot_target})
     add_test(NAME runtime-plot-${_plot_test}
              COMMAND $<TARGET_FILE:${_plot_target}>)

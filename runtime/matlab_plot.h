@@ -27,6 +27,15 @@ extern "C" {
 /* Opaque figure handle. */
 typedef struct matlab_figure matlab_figure;
 
+/* Opaque captured-frame handle (getframe). Holds one rendered raster of a
+ * figure; consumed by matlab_videowriter_write. */
+typedef struct matlab_frame matlab_frame;
+
+/* Opaque video-writer handle (VideoWriter). Encodes a sequence of frames
+ * to a container file via libav (when built with
+ * MATLAB_LLVM_WITH_PLOT_FFMPEG). */
+typedef struct matlab_videowriter matlab_videowriter;
+
 /* In-memory render buffer. Caller must free via matlab_plot_buffer_free. */
 typedef struct {
     uint8_t *data;
@@ -358,6 +367,62 @@ void matlab_ide_emit_all_figures(void);
  * matlab_ide_emit_all_figures. Always safe to call; no-op outside the
  * IDE-integration path. */
 void matlab_drawnow(void);
+
+/* --------------------------------------------------------------------------
+ * Animation capture & video export (getframe / VideoWriter)
+ *
+ * Capture the current figure as a raster frame, then stream frames into a
+ * video container. Mirrors MATLAB:
+ *
+ *   v = VideoWriter('out.mp4', 'MPEG-4');
+ *   v.FrameRate = 30;
+ *   open(v);
+ *   for k = 1:N
+ *       plot(...);
+ *       writeVideo(v, getframe(gcf));
+ *   end
+ *   close(v);
+ *
+ * Frame structs returned by matlab_getframe are owned by a per-thread
+ * registry and released by matlab_close_all / thread exit, so MATLAB
+ * scripts never have to free them explicitly.
+ * -------------------------------------------------------------------------- */
+
+/* getframe / getframe(h) — render the current figure to an in-memory raster
+ * and return an opaque frame handle. Returns null only on render failure. */
+matlab_frame *matlab_getframe(void);
+
+/* VideoWriter('path') / VideoWriter('path', 'profile').
+ *  - matlab_videowriter_new picks a profile from the path extension
+ *    (.mp4/.m4v -> MPEG-4 H.264, .avi -> Motion JPEG AVI).
+ *  - matlab_videowriter_new_profile takes an explicit MATLAB profile name
+ *    ("MPEG-4", "Motion JPEG AVI"); unknown names fall back to the
+ *    extension default.
+ * Strings are (ptr, len), not zero-terminated. Returns null on bad args. */
+matlab_videowriter *matlab_videowriter_new(const char *path, int64_t plen);
+matlab_videowriter *matlab_videowriter_new_profile(const char *path,
+                                                   int64_t plen,
+                                                   const char *profile,
+                                                   int64_t prlen);
+
+/* Property setters (v.FrameRate = fps / v.Quality = q). Must be called
+ * before the first frame is written; ignored afterwards. Quality is
+ * 0..100 (MATLAB convention), default 75. FrameRate default 30. */
+void matlab_videowriter_set_framerate(matlab_videowriter *v, double fps);
+void matlab_videowriter_set_quality(matlab_videowriter *v, double q);
+
+/* open(v) — ready the writer for frames. The encoder itself is initialised
+ * lazily from the first frame's dimensions. Returns 0 on success. */
+int matlab_videowriter_open(matlab_videowriter *v);
+
+/* writeVideo(v, frame) — append one frame. The first frame fixes the video
+ * dimensions; later frames must match. Returns 0 on success, non-zero on
+ * encode error or dimension mismatch. */
+int matlab_videowriter_write(matlab_videowriter *v, matlab_frame *frame);
+
+/* close(v) — flush the encoder, finalise the container, free the writer.
+ * The handle is invalid after this call. Returns 0 on success. */
+int matlab_videowriter_close(matlab_videowriter *v);
 
 #ifdef __cplusplus
 }  /* extern "C" */
