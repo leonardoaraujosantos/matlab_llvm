@@ -4805,7 +4805,10 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
     for (size_t a = 0; a < C.Args.size(); ++a) {
       const Expr *Arg = C.Args[a];
       if (!Arg) continue;
-      if (Base) SubscriptCtx.push_back({Base, (int64_t)(a + 1)});
+      // Single-subscript indexing: `end` means numel(Base), not size(,1).
+      // Use sentinel dim 0 → matlab_end_of_dim treats it as numel.
+      int64_t EndDim = (C.Args.size() == 1) ? 0 : (int64_t)(a + 1);
+      if (Base) SubscriptCtx.push_back({Base, EndDim});
       Os.push_back(lowerExpr(*Arg));
       if (Base) SubscriptCtx.pop_back();
     }
@@ -13563,8 +13566,11 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     for (size_t a = 0; a < C.Args.size(); ++a) {
       const Expr *Arg = C.Args[a];
       if (!Arg) continue;
+      // Single-subscript indexing: `end` means numel(Arr), not size(,1).
+      // Use sentinel dim 0 → matlab_end_of_dim treats it as numel.
+      int64_t EndDim = (C.Args.size() == 1) ? 0 : (int64_t)(a + 1);
       if (!IsHandleCall)
-        SubscriptCtx.push_back({Arr, (int64_t)(a + 1)});
+        SubscriptCtx.push_back({Arr, EndDim});
       Idx.push_back(lowerExpr(*Arg));
       if (!IsHandleCall) SubscriptCtx.pop_back();
     }

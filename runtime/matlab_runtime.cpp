@@ -2640,6 +2640,9 @@ double matlab_ndims(matlab_mat *A)  {
  * resolves to size(A, dim) where `dim` is the 1-based position of the
  * argument in the subscript. */
 double matlab_end_of_dim(matlab_mat *A, double dim) {
+    // Sentinel dim 0: single-subscript `end` resolves to numel(A), so that
+    // v(end) on a row vector is numel (=3), not size(,1) (=1).
+    if (dim == 0) return matlab_numel(A);
     return matlab_size_dim(A, dim);
 }
 

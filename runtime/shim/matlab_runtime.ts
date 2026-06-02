@@ -2166,7 +2166,7 @@ export function numel3(A: any): number { return numel(A); }
 export function ndims(A: any): number { return asArray(A).ndim; }
 export function ndims3(A: any): number { return asArray(A).ndim; }
 
-export function end_of_dim(A: any, d: number): number { return size_dim(A, d); }
+export function end_of_dim(A: any, d: number): number { return d === 0 ? numel(A) : size_dim(A, d); }
 
 export function isempty(A: any): number {
   if (A === null || A === undefined) return 1;

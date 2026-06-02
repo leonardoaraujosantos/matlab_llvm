@@ -2051,6 +2051,8 @@ def ndims3(A): return float(np.asarray(A).ndim)
 def end_of_dim(A, d):
     a = _m(A)
     d = int(d)
+    if d == 0:  # single-subscript `end` -> numel
+        return float(a.size)
     if a.ndim < 2:
         return float(a.shape[0]) if d == 1 else 1.0
     return float(a.shape[d - 1])
