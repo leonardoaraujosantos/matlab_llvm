@@ -373,6 +373,63 @@ void matlab_ws_set_handle(const char *name, int64_t len, void *fn) {
     matlab_ws_check_watch(name, len);
 }
 
+/* #119: function-handle call SIGNATURE side-channel.  The bare kind=13
+ * pointer can't tell a scalar-returning anon (`@(x) x(1)+x(2)`,
+ * double(*)(matlab_mat*)) from a matrix-returning one (`@(x) x*2`,
+ * matlab_mat*(*)(matlab_mat*)) — needed to pick the right matrix-argument
+ * trampoline / result type on a later turn.  We stash the return-kind in
+ * the kind=13 field's otherwise-unused f64 slot: -1 unknown, 0 scalar,
+ * 1 matrix.  set is a no-op if the name isn't a live kind=13 field (it is,
+ * because the matlab_ws_set_handle store runs immediately before). */
+void matlab_ws_set_handle_sig(const char *name, int64_t len, int32_t retkind) {
+    matlab_ws_init_if_needed();
+    matlab_ws_lock();
+    for (int32_t i = 0; i < matlab_ws->nfields; ++i) {
+        const char *gn = matlab_ws->names[i];
+        if (!gn || strlen(gn) != (size_t)len) continue;
+        if (memcmp(gn, name, (size_t)len) != 0) continue;
+        if (matlab_ws->kinds[i] == 13) matlab_ws->f64_vals[i] = (double)retkind;
+        break;
+    }
+    matlab_ws_unlock();
+}
+
+int32_t matlab_ws_get_handle_sig(const char *name, int64_t len) {
+    matlab_ws_init_if_needed();
+    matlab_ws_lock();
+    int32_t out = -1;
+    for (int32_t i = 0; i < matlab_ws->nfields; ++i) {
+        const char *gn = matlab_ws->names[i];
+        if (!gn || strlen(gn) != (size_t)len) continue;
+        if (memcmp(gn, name, (size_t)len) != 0) continue;
+        if (matlab_ws->kinds[i] == 13) out = (int32_t)matlab_ws->f64_vals[i];
+        break;
+    }
+    matlab_ws_unlock();
+    return out;
+}
+
+/* Matrix-argument handle trampolines (#119).  Mirror the scalar s* family
+ * but pass matlab_mat* arguments.  `m*` = scalar (double) return (vector
+ * objective ABI, fminunc/fmincon-style); `mm*` = matrix (matlab_mat*)
+ * return (vector->vector ABI, residual/model-style). */
+double matlab_call_handle_m1(void *fn, void *a) {
+    if (!fn) return 0.0;
+    return ((double (*)(void *))fn)(a);
+}
+double matlab_call_handle_m2(void *fn, void *a, void *b) {
+    if (!fn) return 0.0;
+    return ((double (*)(void *, void *))fn)(a, b);
+}
+void *matlab_call_handle_mm1(void *fn, void *a) {
+    if (!fn) return nullptr;
+    return ((void *(*)(void *))fn)(a);
+}
+void *matlab_call_handle_mm2(void *fn, void *a, void *b) {
+    if (!fn) return nullptr;
+    return ((void *(*)(void *, void *))fn)(a, b);
+}
+
 void *matlab_ws_get_handle(const char *name, int64_t len) {
     matlab_ws_init_if_needed();
     matlab_ws_lock();

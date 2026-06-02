@@ -1906,6 +1906,56 @@ bool TensorLowering::rewriteBuiltinCalls() {
       continue;
     }
 
+    /* Matrix-argument function-handle trampolines (#119).  Operand 0 is the
+     * stored function pointer; the rest are matlab_mat* pointers.  `m*`
+     * returns f64 (scalar objective), `mm*` returns matlab_mat*.  Emitted
+     * for a cross-turn `f(vec)` whose recovered return-kind is known. */
+    if ((Name == "matlab_call_handle_m1" || Name == "matlab_call_handle_m2" ||
+         Name == "matlab_call_handle_mm1" || Name == "matlab_call_handle_mm2") &&
+        Call->getNumResults() == 1 && Call->getNumOperands() >= 2) {
+      bool Ready = true;
+      SmallVector<Type, 4> ArgTys;
+      SmallVector<Value, 4> ArgVals;
+      for (unsigned i = 0; i < Call->getNumOperands(); ++i) {
+        Value A = Call->getOperand(i);
+        if (A.getType() != PtrTy) { Ready = false; break; }   /* wait for ws loads */
+        ArgTys.push_back(PtrTy);
+        ArgVals.push_back(A);
+      }
+      if (!Ready) continue;
+      bool ScalarRet = (Name == "matlab_call_handle_m1" ||
+                        Name == "matlab_call_handle_m2");
+      Type ResTy = ScalarRet ? (Type)F64 : (Type)PtrTy;
+      B.setInsertionPoint(Call);
+      auto Fnc = rt(Name, ResTy, ArgTys);
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fnc, ArgVals);
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+
+    /* #119: function-handle return-kind side-channel store.  Shape mirrors
+     * matlab_ws_set_handle (name ptr + len) but the value is an i32. */
+    if (Name == "matlab_ws_set_handle_sig" && Call->getNumOperands() == 2) {
+      Value NameV = Call->getOperand(0);
+      Value Rk = Call->getOperand(1);
+      if (!mlir::isa<mlir::IntegerType>(Rk.getType())) continue;
+      int64_t Len = 0;
+      Value Ptr = fieldNameAddr(NameV, Len);
+      if (!Ptr) continue;
+      B.setInsertionPoint(Call);
+      Value LenV = LLVM::ConstantOp::create(
+          B, Call->getLoc(), I64, B.getI64IntegerAttr(Len));
+      auto Fn = rt("matlab_ws_set_handle_sig", VoidTy,
+                   {PtrTy, I64, B.getI32Type()});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{Ptr, LenV, Rk});
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+
     if ((Name == "matlab_ws_set_f64" || Name == "matlab_ws_set_mat" ||
          Name == "matlab_ws_set_obj" || Name == "matlab_ws_set_string" ||
          Name == "matlab_ws_set_sym" || Name == "matlab_ws_set_symmat" ||

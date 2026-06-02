@@ -66,6 +66,14 @@ struct Binding {
    * `f(x)` call through the matlab_call_handle_s* trampoline instead of
    * a matrix subscript. */
   bool IsHandle = false;
+  /* Return-kind of the function the handle points at, recovered from the
+   * kind=13 workspace signature on a later REPL turn (#119): -1 unknown,
+   * 0 scalar (double), 1 matrix (matlab_mat*).  Lets a cross-turn
+   * `f(vec)` call with a MATRIX argument dispatch to the matrix-argument
+   * trampoline (matlab_call_handle_m* / _mm*) with the right result type,
+   * instead of falling through to the scalar-only path and mis-lowering
+   * the code pointer into a matrix subscript (SIGSEGV). */
+  int8_t HandleRetKind = -1;
 };
 
 class Scope {

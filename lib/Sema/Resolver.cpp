@@ -1691,7 +1691,14 @@ void Resolver::applyWorkspaceKind(Binding *NB, std::string_view Name,
    * routes `f(x)` through the matlab_call_handle_s* trampoline instead
    * of the matrix-subscript path that read the code pointer as a
    * matlab_mat* and crashed. */
-  else if (K == 13) NB->IsHandle = true;
+  else if (K == 13) {
+    NB->IsHandle = true;
+    /* #119: recover the handle's return-kind so a cross-turn `f(vec)`
+     * with a matrix argument dispatches to the right matrix trampoline. */
+    if (WorkspaceHandleSigHook)
+      NB->HandleRetKind =
+          (int8_t)WorkspaceHandleSigHook(Name.data(), (int64_t)Name.size());
+  }
   /* Kind 2 = matlab_obj* (classdef instance).  Re-pin the binding to
    * the runtime-tracked class so the obj-call sugar / dot-method
    * dispatch / class operator overloads stay live across REPL turns.
