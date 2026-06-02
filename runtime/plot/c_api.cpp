@@ -392,6 +392,55 @@ void matlab_pdeplot3d(matlab_mat *nodes, matlab_mat *triangles,
     ax.colorbar = true;
 }
 
+/* --- model/mesh-struct plot forms (issue #28) -------------------------
+ * The high-level `pdeplot(model, XYData=..)` / `pdeplot3D(mesh, ColorMapData=..)`
+ * calls pass a geometry/result struct rather than raw node/element
+ * matrices.  These wrappers pull the Nodes + Triangles/Faces out of the
+ * struct and forward to the painters above.  `colordata` is optional and
+ * passed through only when it looks like a real matrix (a scalar / null
+ * arrives when the field read defaulted to f64 — render uncoloured then).
+ */
+extern "C" {
+matlab_mat *matlab_struct_get_mat(matlab_struct *s, const char *name, int64_t len);
+}
+
+namespace {
+/* A struct field read can defensively return a 1×1 / empty box; only
+ * treat a genuinely vector-sized matrix as colour data. */
+matlab_mat *plot_colordata_or_null(matlab_mat *m) {
+    if (!m) return nullptr;
+    if (m->rows * m->cols <= 1) return nullptr;
+    return m;
+}
+/* `R.Mesh` may itself be the mesh struct, or the arg may already be a
+ * mesh struct — return whichever carries Nodes. */
+matlab_struct *plot_mesh_of(matlab_struct *s) {
+    if (!s) return nullptr;
+    if (matlab_struct_get_mat(s, "Nodes", 5)->rows > 0) return s;
+    matlab_struct *m = (matlab_struct *)matlab_struct_get_mat(s, "Mesh", 4);
+    if (m && matlab_struct_get_mat(m, "Nodes", 5)->rows > 0) return m;
+    return s;
+}
+}  /* namespace */
+
+void matlab_pdeplot_struct(matlab_struct *model, matlab_mat *colordata) {
+    matlab_struct *mesh = plot_mesh_of(model);
+    if (!mesh) return;
+    matlab_mat *nodes = matlab_struct_get_mat(mesh, "Nodes", 5);
+    matlab_mat *tris  = matlab_struct_get_mat(mesh, "Triangles", 9);
+    matlab_pdeplot(nodes, tris, plot_colordata_or_null(colordata));
+}
+
+void matlab_pdeplot3d_struct(matlab_struct *mesharg, matlab_mat *colordata) {
+    matlab_struct *mesh = plot_mesh_of(mesharg);
+    if (!mesh) return;
+    matlab_mat *nodes = matlab_struct_get_mat(mesh, "Nodes", 5);
+    matlab_mat *faces = matlab_struct_get_mat(mesh, "Faces", 5);
+    if (!faces || faces->rows == 0)
+        faces = matlab_struct_get_mat(mesh, "Tets", 4);  /* fall back */
+    matlab_pdeplot3d(nodes, faces, plot_colordata_or_null(colordata));
+}
+
 void matlab_surf1(matlab_mat *Z) {
     if (!Z || Z->rows < 2 || Z->cols < 2) return;
     auto &ax = matlab_plot::current_axes();

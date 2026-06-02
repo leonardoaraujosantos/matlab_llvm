@@ -1085,7 +1085,11 @@ bool Lowerer::exprIsSym(const Expr *X) const {
           if (auto *AN = dynamic_cast<const NameExpr *>(CX->Args[0]))
             if (AN->Ref && AN->Ref->PinnedClass &&
                 (AN->Ref->PinnedClass->Name == "OptimizationProblem" ||
-                 AN->Ref->PinnedClass->Name == "EquationProblem"))
+                 AN->Ref->PinnedClass->Name == "EquationProblem" ||
+                 /* PDE Toolbox (#28): solve(femodel) is a FEM solve, not a
+                  * symbolic one — let it fall through to the builtin call
+                  * that LowerTensorOps maps to matlab_pde_solve. */
+                 AN->Ref->PinnedClass->Name == "femodel"))
               return false;
         }
         return true;

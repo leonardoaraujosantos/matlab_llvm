@@ -2050,6 +2050,30 @@ void Resolver::resolveStmt(Stmt &St, Scope *S) {
           if (NX->Name == "rlPredefinedEnv") {
             if (ClassDef *C = classByName("rlMDPEnv")) return C;
           }
+          /* PDE Toolbox (#28): the geometry/model/result front door is
+           * function-form (not classdef ctors), so pin the result class
+           * by name — otherwise field reads (`R.NodalSolution`,
+           * `R.VonMisesStress`, `model.Geometry`) default to f64 and a
+           * struct-valued field is lost / mis-passed to the painters.
+           * Any PDE class in the IsCstClass list forces `_get_mat`. */
+          /* NB: createpde() is intentionally NOT pinned — pinning the
+           * model to femodel makes the chained read
+           * `model.Geometry.NumEdges` (in applyBoundaryCondition's edge
+           * set) route through the class-property path and clobber the
+           * stored Geometry.  The runtime reads model.Geometry directly,
+           * so the pin isn't needed; leaving model untyped keeps the
+           * chained read a harmless scalar default. */
+          if (NX->Name == "solvepde" || NX->Name == "solvepdeeig") {
+            if (ClassDef *C = classByName("StationaryResults")) return C;
+          }
+          /* `solve(model)` is otherwise treated as a symbolic producer;
+           * only pin it (to a structural-results class) when the first
+           * arg is a PDE model. */
+          if (NX->Name == "solve" && !CX->Args.empty()) {
+            ClassDef *A0 = pinnedOfRhs(CX->Args[0]);
+            if (A0 && A0->Name == "femodel")
+              if (ClassDef *C = classByName("StaticStructuralResults")) return C;
+          }
           if (NX->Name == "getObservationInfo" || NX->Name == "getActionInfo") {
             if (ClassDef *C = classByName("rlFiniteSetSpec")) return C;
           }

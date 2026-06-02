@@ -16953,6 +16953,22 @@ matlab_struct *matlab_struct_get_child_struct(matlab_struct *s,
     return child;
 }
 
+/* Store `child` as a kind=2 child-struct field.  Needed when a struct
+ * field is assigned a struct value that the lowering will later read
+ * back through the chained-property path (`s.field.sub`), which routes
+ * via matlab_struct_get_child_struct and only recognises kind=2 — a
+ * value stored via matlab_struct_set_mat (kind=1) would otherwise be
+ * silently re-vivified as an empty child and clobbered.  (Issue #28:
+ * geometryFromEdges + `model.Geometry.NumEdges`.) */
+void matlab_struct_set_child_struct(matlab_struct *s, const char *name,
+                                    int64_t len, matlab_struct *child) {
+    if (!s) return;
+    int32_t idx = struct_reserve(s, name, (int32_t)len);
+    s->kinds[idx] = 2;
+    s->f64_vals[idx] = 0.0;
+    s->ptr_vals[idx] = child;
+}
+
 /* ====================================================================== */
 /* Phase 2 — Struct arrays.
  *
