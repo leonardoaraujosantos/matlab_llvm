@@ -421,7 +421,17 @@ int matlab_videowriter_open(matlab_videowriter *v);
 int matlab_videowriter_write(matlab_videowriter *v, matlab_frame *frame);
 
 /* close(v) — flush the encoder, finalise the container, free the writer.
- * The handle is invalid after this call. Returns 0 on success. */
+ * The handle is invalid after this call. Returns 0 on success.
+ *
+ * When the IDE env gate (MATLAB_LLVM_IDE_FIGURES=1) is set and the file
+ * was written successfully, close() also emits a one-line sentinel on
+ * stdout so the IDE can surface the finished video in its Plots panel:
+ *
+ *   ___MF_VID___ w=<px> h=<px> fps=<rate> path=<absolute path>
+ *
+ * `path=` is last and runs to end-of-line, so paths with spaces survive.
+ * This mirrors the figure-emit protocol (matlab_ide_emit_all_figures)
+ * but points at an on-disk artifact instead of streaming a bitmap. */
 int matlab_videowriter_close(matlab_videowriter *v);
 
 #ifdef __cplusplus
