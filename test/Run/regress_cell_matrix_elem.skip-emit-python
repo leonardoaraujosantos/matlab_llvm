@@ -1,0 +1,1 @@
+matrix disp formatting diverges in the python/ts shims (pre-existing); the fix itself works on all backends, validated on LLVM/C/C++ via the real runtime

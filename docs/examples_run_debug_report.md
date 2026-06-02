@@ -217,6 +217,22 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
   Together with #135 this makes the `v(end+1)=x` append idiom work. Regression
   `test/Run/regress_end_single_subscript.m` (verified to print first-element /
   garbage without the fix, across all backends).
+- **2026-06-02 — #142 (✅ fixed).** A cell literal with a **matrix** element
+  read back `0` on a brace index: `c = {1, 5, [1 2 3]}; disp(c{3})` printed `0`
+  (and `sum(c{3})` failed to compile). The `CellIndex` read lowering picks the
+  runtime entry from the Sema result type of `c{k}`, but Sema can't carry
+  per-element cell types, so it defaulted to `matlab_cell_get_f64`, which
+  returns `0` for a >1-element matrix slot (the stored `matlab_mat*` can't be
+  unboxed to a scalar). The matrix is *stored* correctly (`cell_set_mat`,
+  kind=1) — only read dispatch was wrong. Fixed by recording which cell-literal
+  element indices are matrix/string-stored (`CellMatElems`, mirroring
+  `MatStructFields`) and forcing `matlab_cell_get_mat` for a **constant-index**
+  read of those slots; `matlab_cell_get_mat` is already kind-aware (boxes
+  scalars, converts strings). Conservative — only provably-ptr elements
+  (matrix literal / range / char / string / nested cell) are flagged, so a
+  scalar slot is never mis-routed. Regression `test/Run/regress_cell_matrix_elem.m`
+  (fails to compile without the fix — `sum(e{2})` sees a scalar). Variable-index
+  reads and name-bound matrix elements remain follow-ups (tracked on #142).
 - **2026-06-02 — #122 (✅ fixed).** `pde/poisson_disk.m` SIGSEGV under `-dap`.
   `matlab_pde_solve_femodel` read `MaterialProperties` via
   `matlab_struct_get_mat`, which returns a non-NULL **empty matrix** for a
