@@ -201,3 +201,23 @@ python3 test/Debug/jit_parity_sweep.py "$PWD/build/matlabc" --timeout 20
 # Interactive REPL (line-by-line) — NOTE: absolute matlabc path required
 python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
 ```
+
+---
+
+## Changelog
+
+- **2026-06-02 — #122 (✅ fixed).** `pde/poisson_disk.m` SIGSEGV under `-dap`.
+  `matlab_pde_solve_femodel` read `MaterialProperties` via
+  `matlab_struct_get_mat`, which returns a non-NULL **empty matrix** for a
+  missing field; that empty matrix was reinterpreted as a `matlab_struct` and
+  `struct_find_field` walked its garbage `nfields`/`names` → crash. The model
+  only reached this structural fallback because its `Mesh` round-tripped empty
+  under the `-dap` worker (~20% of runs). Fixed by gating `props` on
+  `field_holds_struct` (runtime_pde.cpp). Deterministic regression in
+  `test/Runtime/test_pde.c` (`test_femodel_missing_material_props`, verified
+  to SIGSEGV without the fix). The intermittent empty-`Mesh` round-trip itself
+  (silent wrong result, no longer a crash) is tracked as **#124**.
+- **2026-06-02 — found while fixing #122: #123** (`pde/tuningfork_modal.m`
+  SIGSEGVs via AOT — a #117 name=value `femodel` ctor builds a corrupt model;
+  re-baselined in `known_failures.txt`) and **#124** (the `-dap` empty-`Mesh`
+  round-trip race).
