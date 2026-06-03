@@ -7539,6 +7539,33 @@ double matlab_mod_s(double a, double b) {
     return r;
 }
 
+/* Element-wise mod / rem on matrices (mm = both matrices, ms = matrix·scalar,
+ * sm = scalar·matrix). Each element goes through the scalar helper so the
+ * MATLAB sign rules (mod follows the divisor, rem the dividend; both return
+ * the dividend when the divisor is 0) are preserved. */
+#define ELT_BINARY(name, scalarfn) \
+    matlab_mat *matlab_##name##_mm(matlab_mat *A, matlab_mat *B) { \
+        int64_t m = A->rows, n = A->cols; \
+        matlab_mat *C = mat_alloc(m, n); \
+        for (int64_t k = 0; k < m * n; ++k) C->data[k] = scalarfn(A->data[k], B->data[k]); \
+        return C; \
+    } \
+    matlab_mat *matlab_##name##_ms(matlab_mat *A, double s) { \
+        int64_t m = A->rows, n = A->cols; \
+        matlab_mat *C = mat_alloc(m, n); \
+        for (int64_t k = 0; k < m * n; ++k) C->data[k] = scalarfn(A->data[k], s); \
+        return C; \
+    } \
+    matlab_mat *matlab_##name##_sm(double s, matlab_mat *A) { \
+        int64_t m = A->rows, n = A->cols; \
+        matlab_mat *C = mat_alloc(m, n); \
+        for (int64_t k = 0; k < m * n; ++k) C->data[k] = scalarfn(s, A->data[k]); \
+        return C; \
+    }
+ELT_BINARY(mod, matlab_mod_s)
+ELT_BINARY(rem, matlab_rem_s)
+#undef ELT_BINARY
+
 /* linspace(a, b, n): n points evenly spaced from a to b inclusive.
  * n < 2 returns just [b] per MATLAB. Returns a 1xn row matrix. */
 matlab_mat *matlab_linspace(double a, double b, double nd) {
