@@ -3627,15 +3627,18 @@ def sprintf_f64(fmt, v): return _c_printf(_expand_escapes(str(fmt)), v)
 
 # --- set ops --------------------------------------------------------------
 
+def _setop_shape(A, B, u):
+    # Match MATLAB orientation: a row vector only when BOTH inputs are row
+    # vectors; otherwise a column vector.
+    a = _m(A); b = _m(B)
+    both_row = (a.ndim >= 2 and a.shape[0] == 1) and (b.ndim >= 2 and b.shape[0] == 1)
+    return u.reshape((1, -1)) if both_row else u.reshape((-1, 1))
 def union(A, B):
-    u = np.union1d(_m(A).flatten(), _m(B).flatten())
-    return u.reshape((-1, 1))
+    return _setop_shape(A, B, np.union1d(_m(A).flatten(), _m(B).flatten()))
 def intersect(A, B):
-    u = np.intersect1d(_m(A).flatten(), _m(B).flatten())
-    return u.reshape((-1, 1))
+    return _setop_shape(A, B, np.intersect1d(_m(A).flatten(), _m(B).flatten()))
 def setdiff(A, B):
-    u = np.setdiff1d(_m(A).flatten(), _m(B).flatten())
-    return u.reshape((-1, 1))
+    return _setop_shape(A, B, np.setdiff1d(_m(A).flatten(), _m(B).flatten()))
 def ismember(A, B):
     a = _m(A).flatten(); b = set(_m(B).flatten().tolist())
     return np.array([1.0 if x in b else 0.0 for x in a]).reshape(_m(A).shape)

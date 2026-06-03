@@ -11,8 +11,8 @@ disp(sortrows(A));           % lex: [1 2; 2 3; 3 1]
 
 a = [1 2 3 4];
 b = [3 4 5 6];
-disp(intersect(a, b));       % [3; 4]
-disp(setdiff(a, b));         % [1; 2]
-disp(union(a, b));           % [1; 2; 3; 4; 5; 6]
+disp(intersect(a, b));       % both rows -> row: [3 4]
+disp(setdiff(a, b));         % both rows -> row: [1 2]
+disp(union(a, b));           % both rows -> row: [1 2 3 4 5 6]
 
 disp(ismember(a, b));        % [0 0 1 1]
