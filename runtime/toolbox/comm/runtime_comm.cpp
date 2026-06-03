@@ -2232,14 +2232,28 @@ matlab_mat_c *matlab_comm_ostbc_combine(matlab_mat_c *y,
                                          double h1_re, double h1_im,
                                          double h2_re, double h2_im) {
     if (!y) return mat_c_alloc(0, 0);
-    int64_t N = y->rows * y->cols;
+    /* Defensive (#214): an upstream complex op (e.g. `x * complex(h)`) can
+     * degrade to a real matlab_mat — its complex-dispatch isn't wired yet.
+     * Reading such a real matrix through the matlab_mat_c layout reads `rows`/
+     * `cols`/`re`/`im` at the wrong (past-the-end) offsets → heap-buffer-
+     * overflow and an intermittent SIGSEGV under -dap on Linux. Accept a real
+     * input as complex-with-zero-imaginary instead of blindly dereferencing. */
+    int64_t rows, cols;
+    const double *yre, *yim;
+    if (mat_is_complex(y)) {
+        rows = y->rows; cols = y->cols; yre = y->re; yim = y->im;
+    } else {
+        const matlab_mat *yr = reinterpret_cast<const matlab_mat *>(y);
+        rows = yr->rows; cols = yr->cols; yre = yr->data; yim = nullptr;
+    }
+    int64_t N = rows * cols;
     if (N % 2 != 0) N -= 1;
     double norm2 = h1_re * h1_re + h1_im * h1_im + h2_re * h2_re + h2_im * h2_im;
     if (norm2 <= 0.0) norm2 = 1.0;
     matlab_mat_c *out = mat_c_alloc(N, 1);
     for (int64_t k = 0; k < N / 2; ++k) {
-        double y0r = y->re[2 * k],     y0i = y->im[2 * k];
-        double y1r = y->re[2 * k + 1], y1i = y->im[2 * k + 1];
+        double y0r = yre[2 * k],     y0i = yim ? yim[2 * k] : 0.0;
+        double y1r = yre[2 * k + 1], y1i = yim ? yim[2 * k + 1] : 0.0;
         double t1r = h1_re * y0r + h1_im * y0i;
         double t1i = h1_re * y0i - h1_im * y0r;
         double t2r = h2_re * y1r + h2_im * y1i;
