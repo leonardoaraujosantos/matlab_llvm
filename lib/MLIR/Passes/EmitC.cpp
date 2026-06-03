@@ -1779,7 +1779,7 @@ static llvm::StringRef MatrixReturningFns[] = {
     "matlab_lt_ms", "matlab_le_ms", "matlab_eq_ms", "matlab_ne_ms",
     "matlab_gt_sm", "matlab_ge_sm", "matlab_lt_sm", "matlab_le_sm",
     "matlab_eq_sm", "matlab_ne_sm",
-    "matlab_neg_m", "matlab_exp_m", "matlab_log_m", "matlab_sin_m",
+    "matlab_neg_m", "matlab_not_m", "matlab_exp_m", "matlab_log_m", "matlab_sin_m",
     "matlab_cos_m", "matlab_tan_m", "matlab_sqrt_m", "matlab_abs_m",
     "matlab_asin_m", "matlab_acos_m", "matlab_atan_m", "matlab_sinh_m",
     "matlab_cosh_m", "matlab_tanh_m", "matlab_log2_m", "matlab_log10_m",

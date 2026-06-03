@@ -1953,6 +1953,11 @@ export function mat_truth(A: any): number {
 // --- elementwise unary ops -------------------------------------------------
 
 export function neg_m(A: any): NDArray { return asArray(A).neg(); }
+// element-wise ~ (#200): nonzero -> 0, zero -> 1
+export function not_m(A: any): NDArray {
+  const a = asArray(A);
+  return new NDArray(Float64Array.from(a.data, (x) => (x !== 0 ? 0 : 1)), a.shape.slice());
+}
 function unaryM(op: (x: number) => number) {
   return (A: any): NDArray => {
     const a = asArray(A);

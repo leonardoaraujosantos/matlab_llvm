@@ -1927,6 +1927,7 @@ def mat_truth(A):
 # --- elementwise unary ops -------------------------------------------------
 
 def neg_m(A): return -_m(A)
+def not_m(A): return (_m(A) == 0).astype(float)  # element-wise ~ (#200)
 def exp_m(A): return np.exp(_m(A))
 def log_m(A): return np.log(_m(A))
 def sin_m(A): return np.sin(_m(A))
