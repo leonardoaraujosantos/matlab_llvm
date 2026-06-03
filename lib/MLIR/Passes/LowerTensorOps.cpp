@@ -6855,9 +6855,15 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"mean",       "matlab_mean_dim",   1, "pf"},
       {"mean",       "matlab_mean_dims",  1, "pp"},
       {"min",        "matlab_min",        1, "p"},
+      {"min",        "matlab_min_2s",     1, "ff"},  /* min(a, b) two scalars */
+      {"min",        "matlab_min_ms",     1, "pf"},  /* min(A, s) broadcast */
+      {"min",        "matlab_min_sm",     1, "fp"},  /* min(s, A) broadcast */
       {"min",        "matlab_min_mm",     1, "pp"},  /* min(A, B) elementwise */
       {"min",        "matlab_min_dim3",   1, "ppf"}, /* min(A, [], dim) */
       {"max",        "matlab_max",        1, "p"},
+      {"max",        "matlab_max_2s",     1, "ff"},  /* max(a, b) two scalars */
+      {"max",        "matlab_max_ms",     1, "pf"},  /* max(A, s) broadcast */
+      {"max",        "matlab_max_sm",     1, "fp"},  /* max(s, A) broadcast */
       {"max",        "matlab_max_mm",     1, "pp"},  /* max(A, B) elementwise */
       {"max",        "matlab_max_dim3",   1, "ppf"}, /* max(A, [], dim) */
       {"cumsum",     "matlab_cumsum",     1, "p"},

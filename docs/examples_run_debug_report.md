@@ -219,6 +219,17 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
   `lowerToLLVMIR` (AOT). Regression `test/Run/regress_if_string_predicate.m`
   (verified to fail on both llvm and python without the fix; runs on all
   backends). Workaround previously was `if contains(...) == 1`.
+- **2026-06-02 — #153 (✅ fixed).** `max(a,b)` / `min(a,b)` with two scalar
+  args failed (`unsupported call shape`). The `LowerTensorOps` pde_table had
+  `p` (reduction), `pp` (two matrices), `ppf` (dim) shapes for max/min but no
+  `ff` (two scalars) or `pf`/`fp` (matrix-scalar broadcast). Added all three:
+  the two-scalar form returns a **1×1 matrix** (matching the frontend's ptr
+  typing for max/min, so `max(a,b)+c` and `max(max(1,2),3)` flow through the
+  existing matrix paths — a bare-double return broke those), plus
+  `matlab_max_2s/_ms/_sm`, `matlab_min_2s/_ms/_sm` runtime fns and python/ts
+  shims. Reduction / element-wise / dim forms unaffected. Regression
+  `test/Run/regress_max_min_two_scalars.m` (verified `unsupported call shape`
+  without the fix).
 - **2026-06-02 — #144 (✅ fixed).** Logical-mask indexed **assignment**
   (`v(v>2) = 0`) was wrong on all backends — it collapsed onto element 1
   (`[0 2 3 4]` instead of `[1 2 0 0]`). `matlab_slice_store1[_scalar]`
