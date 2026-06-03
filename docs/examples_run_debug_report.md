@@ -206,6 +206,18 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
 
 ## Changelog
 
+- **2026-06-03 — #179 (✅ fixed).** `unique()` of a **row** vector returned a
+  **column** vector — orientation was not preserved. MATLAB returns a row
+  vector for a row-vector input (and a column for a column vector or matrix);
+  `sort` already preserved orientation, so the divergence was silent (wrong
+  shape, right values). `matlab_unique` hard-coded `mat_alloc(u, 1)` with a
+  comment incorrectly asserting "MATLAB's default is column for all unique()
+  results"; the Python/TS shims likewise reshaped to a column. All three now
+  branch on input orientation (`rows == 1` → `1 x u` row, else `u x 1` column).
+  Regression `test/Run/regress_unique_row_shape.m` (row → `1x3`, column → `3x1`,
+  matrix → `3x1`; verified to produce `3x1` for the row case without the fix;
+  runs on all backends).
+
 - **2026-06-03 — #177 (✅ fixed).** `numel(s)` / `length(s)` on a struct
   returned garbage — the struct ptr was read as a `matlab_mat`. The
   numel/length lowering had a cell special-case but no struct one. Added a

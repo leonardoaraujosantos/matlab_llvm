@@ -3640,7 +3640,12 @@ def ismember(A, B):
     a = _m(A).flatten(); b = set(_m(B).flatten().tolist())
     return np.array([1.0 if x in b else 0.0 for x in a]).reshape(_m(A).shape)
 def unique(A):
-    return np.unique(_m(A).flatten()).reshape((-1, 1))
+    # Match MATLAB orientation: a row-vector input yields a row vector;
+    # a column vector or matrix yields a column vector.
+    a = _m(A)
+    u = np.unique(a.flatten())
+    is_row = (a.ndim >= 2 and a.shape[0] == 1) or a.ndim == 1
+    return u.reshape((1, -1)) if is_row else u.reshape((-1, 1))
 
 
 # --- concat ---------------------------------------------------------------
