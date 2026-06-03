@@ -20,18 +20,19 @@ Cairo must be discoverable via `pkg-config` (`cairo`, `cairo-svg`,
 `cairo-pdf`). Homebrew supplies these on macOS; `libcairo2-dev` on
 Debian/Ubuntu.
 
-Video export (`getframe` + `VideoWriter`, §4 Tier A/B) is an opt-in
-extension on top of `WITH_PLOT`:
+Video export (`getframe` + `VideoWriter`, §4 Tier A/B) is **on by
+default** within a `WITH_PLOT` build:
 
 ```sh
-cmake -B build -DMATLAB_LLVM_WITH_PLOT=ON -DMATLAB_LLVM_WITH_PLOT_FFMPEG=ON
+cmake -B build -DMATLAB_LLVM_WITH_PLOT=ON            # video included
 ```
 
-This links libav directly, so it needs the FFmpeg dev libraries
-(`brew install ffmpeg` on macOS; `apt install libavcodec-dev
-libavformat-dev libavutil-dev libswscale-dev` on Debian/Ubuntu). Builds
-without the flag still compile and run plot scripts; `VideoWriter` just
-reports that video support is disabled.
+This links libav directly, so a `WITH_PLOT` build needs the FFmpeg dev
+libraries (`brew install ffmpeg` on macOS; `apt install libavcodec-dev
+libavformat-dev libavutil-dev libswscale-dev` on Debian/Ubuntu) — the
+same hard-dependency posture as Cairo. On a host without them, opt out
+with `-DMATLAB_LLVM_WITH_PLOT_FFMPEG=OFF`: plot scripts still compile and
+run, and `VideoWriter` reports that video support is disabled.
 
 ## 0. Reading guide
 
@@ -317,12 +318,13 @@ PDF teasers in §3 Tier 6.
 |---|---|---|
 | Multi-page PDF via `drawnow` | 1 session | `cairo_show_page()` between paints when output is `.pdf`. |
 | Animated GIF via `libgif` (giflib) | 2 sessions | Optional dep behind `MATLAB_LLVM_WITH_PLOT_GIF`. `saveas(gcf, 'anim.gif')` after a movie buffer is filled; or `VideoWriter` profile `'GIF'`. Per-frame 256-color quantization at encode time. |
-| `VideoWriter` — MP4/H.264 | ✅ (v1) | Shipped behind `MATLAB_LLVM_WITH_PLOT_FFMPEG` (off by default; links libav directly). API: `v = VideoWriter('out.mp4', 'MPEG-4'); v.FrameRate = 30; open(v); writeVideo(v, getframe(gcf)); close(v);`. `runtime/plot/videowriter.cpp` holds the opaque handle + `matlab_videowriter_new/_new_profile/_set_framerate/_set_quality/_open/_write/_close`; in-process ARGB→YUV420P via swscale, H.264 (libx264) or MJPEG encode. Profiles in v1: `'MPEG-4'` (→ H.264/MP4) and `'Motion JPEG AVI'` (→ MJPEG/AVI); the container is also inferred from the path extension. **v1 limits:** `FrameRate`/`Quality` are set via scalar property assignment (`v.FrameRate = N`); `close(handle)` is assumed to be a VideoWriter (figure-handle close isn't distinguished yet); `'Uncompressed AVI'` / `'Archival'` profiles and `VideoReader` are follow-ups. The symbols always exist; without the flag, VideoWriter reports that video support is disabled instead of writing a bogus file. |
+| `VideoWriter` — MP4/H.264 | ✅ (v1) | Shipped behind `MATLAB_LLVM_WITH_PLOT_FFMPEG` (on by default within a `WITH_PLOT` build; links libav directly). API: `v = VideoWriter('out.mp4', 'MPEG-4'); v.FrameRate = 30; open(v); writeVideo(v, getframe(gcf)); close(v);`. `runtime/plot/videowriter.cpp` holds the opaque handle + `matlab_videowriter_new/_new_profile/_set_framerate/_set_quality/_open/_write/_close`; in-process ARGB→YUV420P via swscale, H.264 (libx264) or MJPEG encode. Profiles in v1: `'MPEG-4'` (→ H.264/MP4) and `'Motion JPEG AVI'` (→ MJPEG/AVI); the container is also inferred from the path extension. **v1 limits:** `FrameRate`/`Quality` are set via scalar property assignment (`v.FrameRate = N`); `close(handle)` is assumed to be a VideoWriter (figure-handle close isn't distinguished yet); `'Uncompressed AVI'` / `'Archival'` profiles and `VideoReader` are follow-ups. The symbols always exist; without the flag, VideoWriter reports that video support is disabled instead of writing a bogus file. |
 | `VideoReader` | 1 session | Symmetric — libav demux + PNG-decoded frames. Lower priority. |
 
-Both video deps stay optional and off by default. Without them,
-animation still produces multi-page PDF + IDE streaming, which covers
-most REPL workflows.
+FFmpeg is on by default within a `WITH_PLOT` build; GIF stays optional.
+When video is opted out (`-DMATLAB_LLVM_WITH_PLOT_FFMPEG=OFF`), animation
+still produces multi-page PDF + IDE streaming, which covers most REPL
+workflows.
 
 ### Tier C — REPL / Debug / IDE wiring (the "live plotting" channel)
 
@@ -383,7 +385,7 @@ Discrete files animation/interactivity must extend:
 - `lib/MLIR/Passes/LowerTensorOps.cpp` — **Done:** lowers the `matlab_videowriter_set_framerate/_set_quality` calls (with scalar→f64 coercion).
 - `lib/Sema/Resolver.cpp` — **Done:** `getframe`, `VideoWriter`, `open`, `writeVideo` registered.
 - `tools/matlabc/main.cpp` — sentinel `kind=` extension; optional DAP figure event; optional SDL window event loop (remaining).
-- `CMakeLists.txt` — **Done:** `MATLAB_LLVM_WITH_PLOT_FFMPEG` (off by default; `WITH_PLOT` umbrella). **Remaining:** `…_GIF`, `…_WINDOW`, `…_WEBSOCKET`.
+- `CMakeLists.txt` — **Done:** `MATLAB_LLVM_WITH_PLOT_FFMPEG` (on by default; `WITH_PLOT` umbrella). **Remaining:** `…_GIF`, `…_WINDOW`, `…_WEBSOCKET`.
 - `test/Runtime/test_plot_video.cpp` — **Done:** getframe + VideoWriter direct-ABI test (encode assertions gated on the flag, disabled-path asserted otherwise).
 - `examples/plot/{videowriter_sine,animation_orbit,animation_fourbar,animation_surf_wave}.m` — **Done** (MP4 + Motion JPEG AVI; 2-D motion, four-bar mechanism, animated 3-D surf). `examples/plot/animatedline_*.m`, `examples/plot/comet_*.m` — remaining.
 

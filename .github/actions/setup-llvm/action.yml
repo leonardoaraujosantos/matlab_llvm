@@ -42,6 +42,7 @@ runs:
           cmake ninja-build ccache pkg-config zstd \
           gcc g++ \
           libcairo2-dev \
+          libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
           libzstd-dev libcurl4-openssl-dev libedit-dev \
           libxml2-dev zlib1g-dev libtinfo-dev \
           python3 python3-pip python3-numpy \
