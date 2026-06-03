@@ -1,0 +1,4 @@
+row: 2x2 vals=1 2 5 6
+col: 2x1 vals=2 4
+end: 2x2 last=4
+var: 2x2 vals=30 60

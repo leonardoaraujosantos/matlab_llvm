@@ -6911,6 +6911,10 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"union",      "matlab_union",      1, "pp"},
       {"horzcat",    "matlab_horzcat",    1, "pp"},
       {"vertcat",    "matlab_vertcat",    1, "pp"},
+      /* #189: row/column deletion A(i,:)=[] / A(:,j)=[]. Emitted directly by
+       * the AssignStmt empty-RHS path with the runtime fn name as callee. */
+      {"matlab_erase_rows", "matlab_erase_rows", 1, "pp"},
+      {"matlab_erase_cols", "matlab_erase_cols", 1, "pp"},
       {"sub2ind",    "matlab_sub2ind",    0, "pff"},
       {"ind2sub",    "matlab_ind2sub",    1, "pf"},
       {"norm",       "matlab_norm",       0, "p"},

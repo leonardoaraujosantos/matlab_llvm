@@ -206,6 +206,21 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
 
 ## Changelog
 
+- **2026-06-03 — #189 (✅ fixed).** 2D row/column deletion `A(i,:) = []` /
+  `A(:,j) = []` was a silent no-op. The runtime `matlab_erase_rows` /
+  `matlab_erase_cols` (and the Python/TS shim equivalents) already existed but
+  were never wired from lowering. The `AssignStmt` path now detects an empty
+  matrix-literal RHS with a 2-subscript LHS holding a `ColonExpr` in exactly
+  one position and routes to the erase helper (scalar index boxed via
+  `matlab_mat_from_scalar`), storing the shrunk result back into the base
+  binding. Added the two runtime fns to the `LowerTensorOps` pde_table (`pp`).
+  Scoped to **scalar / `end` indices** (the dominant case); a vector or range
+  index (`A(:,[1 3])=[]`, `A(:,1:2)=[]`) falls through untouched (the index
+  operand's `matlab.range`/`concat_row` isn't resolved in this path yet) — that
+  remains tracked under #189's follow-up, alongside the vector-form #188.
+  Regression `test/Run/regress_erase_row_col.m` (row/col/`end`/variable index;
+  verified to be a no-op without the fix; runs on all backends).
+
 - **2026-06-03 — #184 (✅ fixed).** `prod([])` returned `0` instead of the
   empty-product identity `1` (MATLAB). The shared `COLWISE_REDUCE` macro in
   `matlab_runtime.cpp` hard-coded the empty-input result as `0.0` for every
