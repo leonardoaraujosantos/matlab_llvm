@@ -12288,6 +12288,28 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         return emitUnreg("matlab.undef", {},
                          mlir::NoneType::get(&MCtx), L);
       }
+      /* #147: isequal on two STRING operands. matlab_isequal takes two
+       * matlab_mat* and reads rows/cols/data, but a matlab_string has a
+       * different layout, so `isequal("ab","ab")` mis-reads the string and
+       * returns 0. Sema can't distinguish string from matrix at the runtime
+       * boundary, but isStringExpr knows here — route a both-string isequal
+       * to the strcmp path (matlab_strcmp; element-count + byte compare,
+       * returns 1.0 when equal). Non-string isequal falls through to the
+       * normal matlab_isequal. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "isequal" && C.Args.size() == 2 &&
+          isStringExpr(C.Args[0]) && isStringExpr(C.Args[1])) {
+        auto F64 = mlir::Float64Type::get(&MCtx);
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        mlir::Value A = lowerExpr(*C.Args[0]);
+        mlir::Value B = lowerExpr(*C.Args[1]);
+        if (A.getType() != PtrTy) A.setType(PtrTy);
+        if (B.getType() != PtrTy) B.setType(PtrTy);
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "strcmp"));
+        return emitUnreg("matlab.call_builtin", {A, B}, F64, L, {Cal});
+      }
       /* Phase 5.1: datetime / duration constructors. Each maps to a
        * dedicated runtime entry that returns a fresh ptr-typed
        * descriptor. Arithmetic and display dispatch live further
