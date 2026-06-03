@@ -100,6 +100,10 @@ mlir::Type mapType(mlir::MLIRContext &Ctx, const matlab::Type *T) {
   case matlab::Type::Kind::StringArray:
     // MATLAB strings as opaque handles for now — represent as !matlab.string.
     return mlir::NoneType::get(&Ctx);
+  case matlab::Type::Kind::Object:
+    // A class instance is a heap-allocated matlab_obj*; carry it as an
+    // opaque pointer end-to-end (same convention as the matrix / cell paths).
+    return mlir::LLVM::LLVMPointerType::get(&Ctx);
   case matlab::Type::Kind::Cell:
   case matlab::Type::Kind::Struct:
   case matlab::Type::Kind::FuncHandle:

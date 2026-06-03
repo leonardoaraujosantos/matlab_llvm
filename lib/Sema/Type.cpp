@@ -1,5 +1,7 @@
 #include "matlab/Sema/Type.h"
 
+#include "matlab/AST/AST.h" // ClassDef, for ObjectType::Class->Name
+
 #include <sstream>
 
 namespace matlab {
@@ -200,6 +202,11 @@ std::string Type::toString() const {
     return OS.str();
   }
   case Kind::Fimath:      return "fimath";
+  case Kind::Object: {
+    auto &O = static_cast<const ObjectType &>(*this);
+    return "object<" +
+           (O.Class ? std::string(O.Class->Name) : std::string("?")) + ">";
+  }
   }
   return "?";
 }
@@ -287,6 +294,14 @@ const FuncHandleType *TypeContext::funcHandle() {
   return FuncHandleT;
 }
 
+const ObjectType *TypeContext::objectOf(const ClassDef *CD) {
+  for (auto &E : ObjectCache)
+    if (E.first == CD) return E.second;
+  auto *T = own<ObjectType>(CD);
+  ObjectCache.push_back({CD, T});
+  return T;
+}
+
 const NumerictypeType *TypeContext::numerictype(bool Signed, uint8_t WL,
                                                  int8_t FL) {
   /* Linear scan — these are tiny per-program (a handful at most). */
@@ -357,6 +372,13 @@ const Type *TypeContext::join(const Type *A, const Type *B) {
      * branches; defer to `any` (a control-flow merge on these almost
      * never happens — they're constructed once per use). */
     return any();
+  case Type::Kind::Object: {
+    /* Two object types of the SAME class are already pointer-equal (objectOf
+     * interns per ClassDef) and caught by the `A == B` fast path above. A
+     * merge of two DIFFERENT classes has no common static class — widen to
+     * any (dispatch falls back to the runtime). */
+    return any();
+  }
   case Type::Kind::Any:        return any();
   }
   return any();

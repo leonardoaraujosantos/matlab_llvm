@@ -1697,6 +1697,15 @@ const Type *TypeInference::visitCallOrIndex(CallOrIndex &C, Env &Env) {
         }
         return TC.any();
       }
+      if (N->Ref && N->Ref->Kind == BindingKind::Class &&
+          N->Ref->ClassDef) {
+        // Constructor call `ClassName(args)`. The result is an instance of
+        // that class — give it a concrete object type (#40) instead of the
+        // old `Any`, so the constructor monomorphizer can bucket call sites
+        // by class and the lowerer maps the value to a matlab_obj* ptr.
+        for (Expr *A : C.Args) if (A) visit(*A, Env);
+        return TC.objectOf(N->Ref->ClassDef);
+      }
     }
     for (Expr *A : C.Args) if (A) visit(*A, Env);
     return TC.any();

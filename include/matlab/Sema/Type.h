@@ -10,6 +10,8 @@
 
 namespace matlab {
 
+class ClassDef; // user classdef AST node; ObjectType references it by pointer.
+
 //===----------------------------------------------------------------------===//
 // Dtype — element type of a numeric/logical/char array.
 //===----------------------------------------------------------------------===//
@@ -129,6 +131,7 @@ public:
     FuncHandle,   // function handle (signature left opaque for now)
     Numerictype,  // Fixed-Point Designer numerictype object — compile-time only
     Fimath,       // Fixed-Point Designer fimath object — compile-time only
+    Object,       // instance of a user classdef (lowers to a matlab_obj* ptr)
   };
   Kind K;
   explicit Type(Kind K) : K(K) {}
@@ -185,6 +188,18 @@ public:
   FuncHandleType() : Type(Kind::FuncHandle) {}
 };
 
+/// Instance of a user classdef (e.g. the result of a `tf(...)` constructor
+/// call, an operator overload, or a method returning the class). Carries the
+/// owning ClassDef so the monomorphizer can bucket constructor call sites by
+/// concrete class and the type mapper can lower it to `matlab_obj*` (ptr).
+/// This is what lets class-valued expressions carry a static type instead of
+/// the old `Any` + `Binding::PinnedClass` side channel — see docs/sema.md §4.
+class ObjectType : public Type {
+public:
+  const ClassDef *Class = nullptr;
+  explicit ObjectType(const ClassDef *CD) : Type(Kind::Object), Class(CD) {}
+};
+
 /// Fixed-Point Designer `numerictype(s, WL, FL)` object — pure compile-time
 /// metadata. Carries only the WL/FL/signedness; overflow + rounding live on
 /// FimathType. Has no runtime representation: any consumer (`fi(value, T)`,
@@ -237,6 +252,9 @@ public:
   const CellType *cellAny();
   const StructType *structAny();
   const FuncHandleType *funcHandle();
+  // Instance of a user classdef, interned per ClassDef so two requests for
+  // the same class hash-equal (constructor-call bucketing relies on this).
+  const ObjectType *objectOf(const ClassDef *CD);
 
   // Join two types (control-flow merge).
   const Type *join(const Type *A, const Type *B);
@@ -264,6 +282,7 @@ private:
   const FuncHandleType *FuncHandleT = nullptr;
   std::vector<const NumerictypeType *> NumerictypeCache;
   std::vector<const FimathType *> FimathCache;
+  std::vector<std::pair<const ClassDef *, const ObjectType *>> ObjectCache;
 
   template <typename T, typename... A> T *own(A &&...as);
 };
