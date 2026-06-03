@@ -3032,6 +3032,32 @@ matlab_mat *matlab_erase_cols(matlab_mat *A, matlab_mat *cols) {
     return Y;
 }
 
+/* Vector element deletion: `x(idx) = []`. Removes the 1-based linear
+ * positions listed in `idx` from a vector, preserving orientation (a row
+ * vector stays a row, a column stays a column). The index matrix carries
+ * plain 1-based positions; logical-mask deletion is resolved to positions by
+ * the caller. (#188) */
+matlab_mat *matlab_delete_lin(matlab_mat *A, matlab_mat *idx) {
+    int64_t total = A ? A->rows * A->cols : 0;
+    int64_t r = idx ? idx->rows * idx->cols : 0;
+    char *kill = (char *)calloc((size_t)(total > 0 ? total : 1), 1);
+    for (int64_t k = 0; k < r; ++k) {
+        int64_t p = (int64_t)idx->data[k] - 1;
+        if (p >= 0 && p < total) kill[p] = 1;
+    }
+    int64_t keep = 0;
+    for (int64_t i = 0; i < total; ++i) if (!kill[i]) ++keep;
+    /* Orientation: a column vector (cols==1, rows>1) stays a column;
+     * everything else (row vector, or empty) becomes a row. */
+    int is_col = A && A->cols == 1 && A->rows > 1;
+    matlab_mat *Y = is_col ? mat_alloc(keep, 1) : mat_alloc(1, keep);
+    int64_t w = 0;
+    for (int64_t i = 0; i < total; ++i)
+        if (!kill[i]) Y->data[w++] = A->data[i];
+    free(kill);
+    return Y;
+}
+
 /* Multi-arg fprintf variants for 2, 3, 4 f64 trailing args. LowerTensorOps
  * picks the matching symbol based on the call arity. Variadic C is too
  * ABI-fragile across targets; per-arity entries are the cleanest path. */

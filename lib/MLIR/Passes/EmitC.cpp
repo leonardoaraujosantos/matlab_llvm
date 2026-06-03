@@ -1796,7 +1796,7 @@ static llvm::StringRef MatrixReturningFns[] = {
     "matlab_cumsum", "matlab_cumprod",
     "matlab_cumsum_dim", "matlab_cumprod_dim",
     "matlab_size", "matlab_slice1", "matlab_slice2", "matlab_find",
-    "matlab_erase_rows", "matlab_erase_cols",
+    "matlab_erase_rows", "matlab_erase_cols", "matlab_delete_lin",
     "matlab_struct_get_mat", "matlab_cell_get_mat", "matlab_obj_get_mat",
     "matlab_ws_get_mat",
     "matlab_linspace", "matlab_chol", "matlab_pinv", "matlab_permute",
