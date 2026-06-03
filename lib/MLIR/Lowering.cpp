@@ -13018,6 +13018,26 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             return emitUnreg("matlab.call_builtin", {Arg}, F64, L, {Cal});
           }
       }
+      /* numel(s) / length(s) on a scalar struct -> 1. Without this the
+       * struct ptr is read as a matlab_mat and numel returns garbage
+       * (rows*cols off the struct descriptor). Struct ARRAYS are excluded
+       * here (they have their own length handling). */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          (N->Name == "numel" || N->Name == "length") &&
+          C.Args.size() == 1) {
+        if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]))
+          if (ArgN->Ref &&
+              (ArgN->Ref->IsStruct || StructInitialised.count(ArgN->Ref) ||
+               StructBindings.count(ArgN->Ref)) &&
+              !ArgN->Ref->IsStructArray &&
+              !StructArrayBindings.count(ArgN->Ref)) {
+            auto F64 = mlir::Float64Type::get(&MCtx);
+            mlir::NamedAttribute VA(
+                mlir::StringAttr::get(&MCtx, "value"),
+                mlir::FloatAttr::get(F64, 1.0));
+            return emitUnreg("matlab.const_float", {}, F64, L, {VA});
+          }
+      }
       /* Phase 4: numel(d) / length(d) on a dict binding ->
        * matlab_dict_length. */
       if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
