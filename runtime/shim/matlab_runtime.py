@@ -2125,7 +2125,19 @@ def slice2(A, rows, cols):
 
 
 def slice_store1(A, idx, V):
-    idx_flat = _m(idx).flatten(order='F').astype(int) - 1
+    mi = _m(idx)
+    # Logical-mask store: idx same-shape as A is a mask, not linear indices.
+    if mi.shape == A.shape and A.size > 1:
+        flat = A.flatten(order='F')
+        v_flat = _m(V).flatten(order='F')
+        mask = mi.flatten(order='F') != 0
+        if v_flat.size == 1:
+            flat[mask] = v_flat[0]
+        else:
+            flat[mask] = v_flat[:int(mask.sum())]
+        A[:] = flat.reshape(A.shape, order='F')
+        return
+    idx_flat = mi.flatten(order='F').astype(int) - 1
     v_flat = _m(V).flatten(order='F')
     flat = A.flatten(order='F')
     flat[idx_flat] = v_flat
@@ -2133,7 +2145,14 @@ def slice_store1(A, idx, V):
 
 
 def slice_store1_scalar(A, idx, v):
-    idx_flat = _m(idx).flatten(order='F').astype(int) - 1
+    mi = _m(idx)
+    # Logical-mask store: idx same-shape as A is a mask, not linear indices.
+    if mi.shape == A.shape and A.size > 1:
+        flat = A.flatten(order='F')
+        flat[mi.flatten(order='F') != 0] = float(v)
+        A[:] = flat.reshape(A.shape, order='F')
+        return
+    idx_flat = mi.flatten(order='F').astype(int) - 1
     flat = A.flatten(order='F')
     flat[idx_flat] = float(v)
     A[:] = flat.reshape(A.shape, order='F')

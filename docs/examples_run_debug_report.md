@@ -206,6 +206,18 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
 
 ## Changelog
 
+- **2026-06-02 — #144 (✅ fixed).** Logical-mask indexed **assignment**
+  (`v(v>2) = 0`) was wrong on all backends — it collapsed onto element 1
+  (`[0 2 3 4]` instead of `[1 2 0 0]`). `matlab_slice_store1[_scalar]`
+  interpreted the mask's 0/1 entries as literal linear indices (`0 → lin -1`,
+  `1 → lin 0`). The mask *read* path (`matlab_slice1`) already treats an index
+  the **same shape as A** as a logical mask; the store path didn't. Fixed by
+  mirroring that same-shape heuristic (and column-major traversal) in both
+  store entries and in the python/ts shims. Numeric-index assignment and mask
+  reads are unaffected. Regression `test/Run/regress_logical_mask_store.m`
+  (reduced to `sum()` scalars; verified to produce `9/18/9/19/...` without the
+  fix). The explicit-`logical(...)`-variable index path (`__subscript_store`
+  compile error) is a separate follow-up noted on #144.
 - **2026-06-02 — #136 (✅ fixed).** `end` in single-subscript indexing resolved
   to `size(base, dim)` with `dim` = the 1-based subscript position, so a lone
   subscript used `dim=1` (row count). For a row vector that is `1`, not `numel`,

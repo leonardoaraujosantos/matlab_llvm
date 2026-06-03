@@ -2280,6 +2280,19 @@ export function slice2(A: any, rows: any, cols: any): NDArray {
 export function slice_store1(A: any, idx: any, V: any): void {
   const a = asArray(A); const v = asArray(V);
   const ix = asArray(idx);
+  // Logical-mask store: idx same-shape as A is a mask, not linear indices.
+  if (ix.rows === a.rows && ix.cols === a.cols && a.size > 1) {
+    const bcast = v.size === 1;
+    let w = 0;
+    for (let j = 0; j < a.cols; j++)
+      for (let i = 0; i < a.rows; i++)
+        if (ix.data[i * a.cols + j] !== 0) {
+          if (bcast) a.data[i * a.cols + j] = v.data[0];
+          else if (w < v.size) a.data[i * a.cols + j] = v.data[w];
+          w++;
+        }
+    return;
+  }
   for (let k = 0; k < ix.size; k++) {
     const lin = (ix.data[k] | 0) - 1;
     const col = Math.floor(lin / a.rows);
@@ -2291,6 +2304,14 @@ export function slice_store1(A: any, idx: any, V: any): void {
 export function slice_store1_scalar(A: any, idx: any, v: number): void {
   const a = asArray(A);
   const ix = asArray(idx);
+  // Logical-mask store: idx same-shape as A is a mask, not linear indices.
+  if (ix.rows === a.rows && ix.cols === a.cols && a.size > 1) {
+    for (let j = 0; j < a.cols; j++)
+      for (let i = 0; i < a.rows; i++)
+        if (ix.data[i * a.cols + j] !== 0)
+          a.data[i * a.cols + j] = +v;
+    return;
+  }
   for (let k = 0; k < ix.size; k++) {
     const lin = (ix.data[k] | 0) - 1;
     const col = Math.floor(lin / a.rows);
