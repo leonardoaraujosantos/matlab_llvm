@@ -10,11 +10,14 @@ The runtime is a pure-C++/Cairo backend that compiles to PNG/SVG/PDF in
 memory or on disk. Headless: no subprocess, no display server, no temp
 files. Targets macOS, Linux, and iOS from the same codebase.
 
-Enable with:
+On by default — a plain configure builds the plot runtime:
 
 ```sh
-cmake -B build -DMATLAB_LLVM_WITH_PLOT=ON
+cmake -B build                                      # plotting enabled
 ```
+
+Opt out with `-DMATLAB_LLVM_WITH_PLOT=OFF` on a host without the Cairo
+(and FFmpeg) dev libraries.
 
 Cairo must be discoverable via `pkg-config` (`cairo`, `cairo-svg`,
 `cairo-pdf`). Homebrew supplies these on macOS; `libcairo2-dev` on

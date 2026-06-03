@@ -60,11 +60,13 @@ if(MATLAB_LLVM_WITH_SYM)
 endif()
 
 # --- Plotting (Cairo backend) ----------------------------------------------
-# Off by default; turn on with -DMATLAB_LLVM_WITH_PLOT=ON. Adds runtime
-# plotting symbols (matlab_plot, matlab_figure, matlab_savefig, ...) backed
-# by Cairo's image/svg/pdf surfaces. Headless: no subprocess, no display
-# server, no temp files. Cross-platform target: macOS, Linux, iOS.
-option(MATLAB_LLVM_WITH_PLOT "Enable matlab_plot runtime (Cairo backend)" OFF)
+# On by default. Adds runtime plotting symbols (matlab_plot, matlab_figure,
+# matlab_savefig, ...) backed by Cairo's image/svg/pdf surfaces. Headless:
+# no subprocess, no display server, no temp files. Cross-platform target:
+# macOS, Linux, iOS. Cairo dev headers are a hard dependency (resolved via
+# pkg-config below); turn the whole runtime off with
+# -DMATLAB_LLVM_WITH_PLOT=OFF to build on a host without them.
+option(MATLAB_LLVM_WITH_PLOT "Enable matlab_plot runtime (Cairo backend)" ON)
 if(MATLAB_LLVM_WITH_PLOT)
   find_package(PkgConfig REQUIRED)
   # Cairo headers are required at compile time for the type declarations
