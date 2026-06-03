@@ -1966,6 +1966,7 @@ def sum_dim(A, d):
 
 def prod(A):
     a = _m(A)
+    if a.size == 0: return 1.0  # MATLAB: empty product is the identity 1
     if a.ndim < 2 or a.shape[0] == 1: return float(a.prod())
     return _to_row(a.prod(axis=0))
 

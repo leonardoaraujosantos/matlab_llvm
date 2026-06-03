@@ -2076,6 +2076,7 @@ export function cumsum_dim(A: any, d: number): NDArray {
 
 export function prod(A: any): NDArray | number {
   const a = asArray(A);
+  if (a.size === 0) return 1;  // MATLAB: empty product is the identity 1
   if (a.ndim < 2 || a.rows === 1) {
     let p = 1;
     for (let i = 0; i < a.size; i++) p *= a.data[i];

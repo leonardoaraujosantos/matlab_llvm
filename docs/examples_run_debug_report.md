@@ -206,6 +206,17 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
 
 ## Changelog
 
+- **2026-06-03 — #184 (✅ fixed).** `prod([])` returned `0` instead of the
+  empty-product identity `1` (MATLAB). The shared `COLWISE_REDUCE` macro in
+  `matlab_runtime.cpp` hard-coded the empty-input result as `0.0` for every
+  reduction — correct for `sum` but wrong for `prod`. Added a per-function
+  empty-value macro parameter (`sum`→0, `prod`→1; min/max/mean keep their prior
+  `0.0`). The Python/TS shim `prod` got an `a.size==0 → 1` guard (they had
+  returned `[]`). Regression `test/Run/regress_prod_empty.m` (empty → 1, plus
+  normal/column/matrix prod; verified to produce `0` without the fix; runs on
+  all backends). Filed #185 for the separate shim `sum`/`mean`-of-empty `[]`
+  divergence (out of scope here).
+
 - **2026-06-03 — #181 (✅ fixed).** `intersect` / `setdiff` / `union` of two
   **row** vectors returned **column** vectors — same orientation bug as #179
   but in the set operations. MATLAB returns a row vector only when *both*

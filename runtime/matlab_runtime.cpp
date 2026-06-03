@@ -1801,7 +1801,7 @@ matlab_mat3 *matlab_repmat3(matlab_mat *A, double m, double n, double p) {
 /* If A is a vector, reduce the flat sequence into a 1×1. Otherwise apply
  * `col_init` to each column and fold with `op`. The init lambdas and
  * ops are passed as macros so the resulting code inlines cleanly. */
-#define COLWISE_REDUCE(NAME, INIT_EXPR, UPDATE_EXPR, FINALIZE_EXPR)       \
+#define COLWISE_REDUCE(NAME, INIT_EXPR, UPDATE_EXPR, FINALIZE_EXPR, EMPTY_VAL) \
     matlab_mat *matlab_##NAME(matlab_mat *A) {                            \
         /* matN / mat3 fast path: reduce the flat buffer to a scalar.     \
          * Matches MATLAB on rank>=3 where vector-shape behaviour applies \
@@ -1828,7 +1828,7 @@ matlab_mat3 *matlab_repmat3(matlab_mat *A, double m, double n, double p) {
             }                                                             \
             double result = FINALIZE_EXPR;                                \
             matlab_mat *R = mat_alloc(1, 1);                              \
-            R->data[0] = total > 0 ? result : 0.0;                        \
+            R->data[0] = total > 0 ? result : (EMPTY_VAL);                \
             return R;                                                     \
         }                                                                 \
         int64_t m = A->rows, n = A->cols;                                 \
@@ -1841,7 +1841,7 @@ matlab_mat3 *matlab_repmat3(matlab_mat *A, double m, double n, double p) {
             }                                                             \
             double result = FINALIZE_EXPR;                                \
             matlab_mat *R = mat_alloc(1, 1);                              \
-            R->data[0] = total > 0 ? result : 0.0;                        \
+            R->data[0] = total > 0 ? result : (EMPTY_VAL);                \
             return R;                                                     \
         }                                                                 \
         matlab_mat *R = mat_alloc(1, n);                                  \
@@ -1858,11 +1858,14 @@ matlab_mat3 *matlab_repmat3(matlab_mat *A, double m, double n, double p) {
         return R;                                                         \
     }
 
-COLWISE_REDUCE(sum,  0.0,       acc + x,                    acc)
-COLWISE_REDUCE(prod, 1.0,       acc * x,                    acc)
-COLWISE_REDUCE(mean, 0.0,       acc + x,                    acc / (double)total)
-COLWISE_REDUCE(min,  INFINITY,  (x < acc ? x : acc),        acc)
-COLWISE_REDUCE(max, -INFINITY,  (x > acc ? x : acc),        acc)
+/* Empty-reduction value: MATLAB defines sum([])==0 and prod([])==1 (the
+ * additive / multiplicative identity). min/max/mean keep their prior 0.0
+ * fallback (handled out of scope here). */
+COLWISE_REDUCE(sum,  0.0,       acc + x,                    acc,                  0.0)
+COLWISE_REDUCE(prod, 1.0,       acc * x,                    acc,                  1.0)
+COLWISE_REDUCE(mean, 0.0,       acc + x,                    acc / (double)total,  0.0)
+COLWISE_REDUCE(min,  INFINITY,  (x < acc ? x : acc),        acc,                  0.0)
+COLWISE_REDUCE(max, -INFINITY,  (x > acc ? x : acc),        acc,                  0.0)
 
 #undef COLWISE_REDUCE
 
