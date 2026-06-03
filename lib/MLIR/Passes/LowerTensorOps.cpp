@@ -1431,6 +1431,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
     }
     if ((Name == "matlab_cell_get_f64" ||
          Name == "matlab_cell_get_mat" ||
+         Name == "matlab_cell_get_str" ||
          Name == "matlab_cell_numel" ||
          Name == "matlab_iscell") &&
         Call->getNumResults() == 1) {
@@ -1438,7 +1439,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Type Ret;
       SmallVector<Type, 2> Args;
       SmallVector<Value, 2> Ops;
-      if (Name == "matlab_cell_get_mat") {
+      if (Name == "matlab_cell_get_mat" || Name == "matlab_cell_get_str") {
         if (Call->getNumOperands() != 2) continue;
         Ret = PtrTy;
         Args = {PtrTy, F64};

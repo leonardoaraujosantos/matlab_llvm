@@ -17090,6 +17090,20 @@ matlab_mat *matlab_cell_get_mat(matlab_cell *c, double i1) {
     return mat_alloc(0, 0);
 }
 
+/* String-typed brace read `c{i}` (#206): return the stored matlab_string*
+ * for a kind=3 element so disp / string ops see a real string rather than the
+ * char-code row matrix that matlab_cell_get_mat produces. Falls back to an
+ * empty string for a non-string slot (the frontend only routes known string
+ * elements here). */
+void *matlab_cell_get_str(matlab_cell *c, double i1) {
+    if (c) {
+        int32_t i = (int32_t)i1 - 1;
+        if (i >= 0 && i < c->n && c->kinds[i] == 3 && c->ptr_vals[i])
+            return c->ptr_vals[i];
+    }
+    return matlab_string_from_literal("", 0);
+}
+
 double matlab_cell_numel(matlab_cell *c) {
     if (!c) return 0.0;
     return (double)c->n;

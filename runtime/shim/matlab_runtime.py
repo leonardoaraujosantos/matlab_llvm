@@ -2888,6 +2888,11 @@ def cell_set_mat(c, i, m):
     _cell_grow(c, idx)
     c[idx - 1] = m
 
+def cell_set_str(c, i, s):  # string cell element (#206)
+    idx = int(i)
+    _cell_grow(c, idx)
+    c[idx - 1] = s
+
 def cell_get_f64(c, i):
     v = c[int(i) - 1]
     try: return float(v)
@@ -2895,6 +2900,9 @@ def cell_get_f64(c, i):
 
 def cell_get_mat(c, i):
     return c[int(i) - 1]
+
+def cell_get_str(c, i):
+    return c[int(i) - 1]  # string element returned as-is (#206)
 
 def cell_numel(c):
     return float(len(c))
