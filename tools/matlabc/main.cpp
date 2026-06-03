@@ -1013,6 +1013,14 @@ static void runJitSoftwareLowering(mlir::ModuleOp M) {
     runRefineFuncSigs(M);
     if (!Changed) break;
   }
+  // #148: an `if <string-predicate>(a,b)` (contains/startsWith/strcmp/...)
+  // condition is `none`-typed at MIR-to-MLIR lowering, so fixupIfCond left a
+  // verifier-placeholder unrealized_conversion_cast on the scf.if. The
+  // builtin's result only refines to f64 in the LowerTensorOps loop above, so
+  // resolve those placeholders now (cast -> arith.cmpf one, 0.0). The SV-emit
+  // pipeline runs this separately; this covers the AOT / JIT / REPL / -dap
+  // path (this lowering function is shared by all of them).
+  runRefineIfConds(M);
   // Promote any surviving scalar-primitive matlab.alloc to llvm.alloca.
   runLowerScalarSlots(M);
 #ifdef MATLAB_LLVM_WITH_PLOT
@@ -14074,6 +14082,13 @@ int main(int Argc, char **Argv) {
             if (!Changed) break;
           }
         }
+        // #148: resolve verifier-placeholder unrealized_conversion_cast on
+        // scf.if conditions (e.g. `if contains(a,b)` / `if strcmp(a,b)` —
+        // `none`-typed at lowering, refined to f64 by the loop above) before
+        // any emitter sees them. Without this the cast survives into the
+        // emit-c/cpp/python/typescript backends as an "unsupported op" and
+        // into emit-llvm translation as a failure. Idempotent.
+        mlirgen::runRefineIfConds(M);
         // After user-call refinement, any surviving matlab.alloc whose
         // result type is now a scalar primitive can be promoted to
         // llvm.alloca. This catches function-body locals that weren't

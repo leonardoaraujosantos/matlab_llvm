@@ -206,6 +206,19 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
 
 ## Changelog
 
+- **2026-06-02 — #148 (✅ fixed).** An F64-returning string predicate
+  (`contains` / `startsWith` / `endsWith` / `strcmp` / ...) used **directly**
+  as an `if`/`while` condition failed to lower (`unrealized_conversion_cast`
+  on llvm; "unsupported op" on emit-c/cpp/python/ts). These builtins are
+  `none`-typed at MIR-to-MLIR lowering, so `fixupIfCond` leaves a
+  verifier-placeholder cast on the `scf.if`; the result only refines to f64
+  in the LowerTensorOps loop, and `runRefineIfConds` (which rewrites the
+  placeholder to `arith.cmpf one, 0.0`) was only wired into the SV-emit
+  pipeline. Added it to the shared emit full-pipeline (after the LowerTensorOps
+  convergence), to `runJitSoftwareLowering` (JIT/REPL/-dap), and to
+  `lowerToLLVMIR` (AOT). Regression `test/Run/regress_if_string_predicate.m`
+  (verified to fail on both llvm and python without the fix; runs on all
+  backends). Workaround previously was `if contains(...) == 1`.
 - **2026-06-02 — #144 (✅ fixed).** Logical-mask indexed **assignment**
   (`v(v>2) = 0`) was wrong on all backends — it collapsed onto element 1
   (`[0 2 3 4]` instead of `[1 2 0 0]`). `matlab_slice_store1[_scalar]`

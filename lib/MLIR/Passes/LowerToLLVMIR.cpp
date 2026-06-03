@@ -437,6 +437,15 @@ std::string lowerToLLVMIR(mlir::ModuleOp M, bool EmitDebugInfo) {
    * Idempotent — no-op when nothing matches. */
   mlirgen::runLowerScalarsToArith(M);
 
+  /* #148: resolve any verifier-placeholder unrealized_conversion_cast on an
+   * scf.if condition (inserted by fixupIfCond when the cond was `none`-typed,
+   * e.g. `if contains(a,b)` / `if strcmp(a,b)` — these string predicates only
+   * refine to f64 in the upstream LowerTensorOps loop). By now the source is
+   * concrete, so rewrite the cast to `arith.cmpf one, src, 0.0`; otherwise the
+   * cast survives to translateModuleToLLVMIR and fails. ReconcileUnrealizedCasts
+   * (below) only drops redundant cast pairs, not f64->i1. */
+  mlirgen::runRefineIfConds(M);
+
   /* Reject any leftover matlab.* dialect ops BEFORE the MLIR-to-LLVM
    * conversion pipeline. The conversion passes (canonicalizer /
    * scf-to-cf / cf-to-llvm / arith-to-llvm / func-to-llvm /
