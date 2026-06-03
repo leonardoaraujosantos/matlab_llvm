@@ -1,0 +1,1 @@
+sum disp formatting diverges in python/ts shims (pre-existing); the index-order fix itself works there — values match — validated exactly on LLVM/C/C++

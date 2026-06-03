@@ -2722,9 +2722,25 @@ matlab_mat *matlab_slice2(matlab_mat *A, matlab_mat *rows, matlab_mat *cols) {
  * 1x1 scalar) we interpret idx as a mask — pick elements where idx!=0,
  * walked in column-major order, return as a column vector. This is what
  * makes `A(A > 0)` work naturally. */
+/* A same-shape index is treated as a logical mask only when every element
+ * is 0 or 1. The runtime lost the logical-vs-double type, so a same-shape
+ * index that contains a value outside {0,1} (e.g. `v([3 2 1])` or the
+ * descending range `v(end:-1:1)`) is an index list, NOT a mask — gather in
+ * index order. Without this guard such reorders returned the original order. */
+static int idx_looks_like_mask(matlab_mat *idx, int64_t m, int64_t n) {
+    if (!(idx && idx->rows == m && idx->cols == n && (m > 1 || n > 1)))
+        return 0;
+    int64_t tot = m * n;
+    for (int64_t k = 0; k < tot; ++k) {
+        double d = idx->data[k];
+        if (d != 0.0 && d != 1.0) return 0;
+    }
+    return 1;
+}
+
 matlab_mat *matlab_slice1(matlab_mat *A, matlab_mat *idx) {
     int64_t m = A->rows, n = A->cols;
-    if (idx && idx->rows == m && idx->cols == n && (m > 1 || n > 1)) {
+    if (idx_looks_like_mask(idx, m, n)) {
         int64_t count = 0;
         for (int64_t j = 0; j < n; ++j)
             for (int64_t i = 0; i < m; ++i)
@@ -2848,10 +2864,12 @@ void matlab_slice_store1(matlab_mat *A, matlab_mat *idx, matlab_mat *V) {
     int64_t N = idx ? idx->rows * idx->cols : A->rows * A->cols;
     int64_t m = A->rows, n = A->cols;
     int bcast = (V->rows == 1 && V->cols == 1);
-    /* Logical-mask store (`v(v>2) = w`): idx same-shape as A is a mask —
-     * assign successive V values (or the broadcast scalar) at each non-zero
-     * position, column-major. Mirrors matlab_slice1's read heuristic. */
-    if (idx && idx->rows == m && idx->cols == n && (m > 1 || n > 1)) {
+    /* Logical-mask store (`v(v>2) = w`): idx same-shape as A and all-0/1 is a
+     * mask — assign successive V values (or the broadcast scalar) at each
+     * non-zero position, column-major. A same-shape index with a value outside
+     * {0,1} (e.g. `v([3 2 1]) = w`) is an index list, handled below. Mirrors
+     * matlab_slice1's read heuristic. */
+    if (idx_looks_like_mask(idx, m, n)) {
         int64_t w = 0;
         for (int64_t j = 0; j < n; ++j)
             for (int64_t i = 0; i < m; ++i)
@@ -2887,7 +2905,7 @@ void matlab_slice_store1_scalar(matlab_mat *A, matlab_mat *idx, double v) {
      * whole assignment collapsed onto element 1. */
     {
         int64_t m = A->rows, n = A->cols;
-        if (idx && idx->rows == m && idx->cols == n && (m > 1 || n > 1)) {
+        if (idx_looks_like_mask(idx, m, n)) {
             for (int64_t j = 0; j < n; ++j)
                 for (int64_t i = 0; i < m; ++i)
                     if (idx->data[i * n + j] != 0.0)

@@ -206,6 +206,18 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
 
 ## Changelog
 
+- **2026-06-03 — #165 (✅ fixed).** Indexing a vector with a **same-length**
+  index list returned the original order — `v(end:-1:1)` (reverse) and
+  `v([3 2 1])` (reorder) both gave `[v]` unchanged. `matlab_slice1` (and the
+  store path) treated any same-shape index as a logical mask. A genuine mask
+  only holds 0/1, so a same-shape index with a value outside {0,1} is now an
+  index list (gather/scatter in index order); all-0/1 same-shape stays a mask.
+  New `idx_looks_like_mask` guard in `matlab_slice1` /
+  `matlab_slice_store1[_scalar]` + the python/ts shims. Regression
+  `test/Run/regress_reverse_index.m` (element-wise scalar disps; verified to
+  return original order without the fix). Mask reads/stores (`v(v>2)`) and
+  ascending/strided indexing unaffected.
+
 - **2026-06-03 — #152 (✅ fixed).** A scalar logical / comparison result
   displayed as `-1` instead of `1`: `disp(5>0)`, `disp(1|0)`, `disp(~0)` all
   printed `-1`. The LowerIO scalar-disp path widened an integer disp arg with

@@ -2285,11 +2285,22 @@ export function slice2(A: any, rows: any, cols: any): NDArray {
   return new NDArray(out, [r.length, c.length]);
 }
 
+// A same-shape index is a logical mask only when every element is 0/1 (#165);
+// a value outside {0,1} means it is an index list (e.g. v([3 2 1])).
+function idxIsMask(ix: any, a: any): boolean {
+  if (!(ix.rows === a.rows && ix.cols === a.cols && a.size > 1)) return false;
+  for (let k = 0; k < ix.size; k++) {
+    const d = ix.data[k];
+    if (d !== 0 && d !== 1) return false;
+  }
+  return true;
+}
+
 export function slice_store1(A: any, idx: any, V: any): void {
   const a = asArray(A); const v = asArray(V);
   const ix = asArray(idx);
   // Logical-mask store: idx same-shape as A is a mask, not linear indices.
-  if (ix.rows === a.rows && ix.cols === a.cols && a.size > 1) {
+  if (idxIsMask(ix, a)) {
     const bcast = v.size === 1;
     let w = 0;
     for (let j = 0; j < a.cols; j++)
@@ -2313,7 +2324,7 @@ export function slice_store1_scalar(A: any, idx: any, v: number): void {
   const a = asArray(A);
   const ix = asArray(idx);
   // Logical-mask store: idx same-shape as A is a mask, not linear indices.
-  if (ix.rows === a.rows && ix.cols === a.cols && a.size > 1) {
+  if (idxIsMask(ix, a)) {
     for (let j = 0; j < a.cols; j++)
       for (let i = 0; i < a.rows; i++)
         if (ix.data[i * a.cols + j] !== 0)
