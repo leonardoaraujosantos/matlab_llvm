@@ -206,6 +206,18 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
 
 ## Changelog
 
+- **2026-06-03 — #197 (✅ fixed).** A `NaN`/`Inf`/`-Inf` literal emitted bare
+  `nan`/`inf` in the emit-python (`NameError`) and emit-typescript
+  (`ReferenceError`) backends — e.g. `[1 NaN 3]` became `[1.0, nan, 3.0]`. The
+  float-literal stringifier `formatFloatAttr` used `%g`, which renders NaN/Inf
+  as bare tokens. Added NaN/Inf guards: emit-python now emits `float("nan")` /
+  `float("inf")` / `float("-inf")`, emit-typescript `NaN` / `Infinity` /
+  `-Infinity`. (AOT and emit-c/cpp were already correct.) Regression
+  `test/Run/regress_nan_inf_literal.m` (NaN/Inf/-Inf via comparisons + a
+  `[1 NaN 3]` matrix literal; backend-independent — no NaN display; emit-python/
+  typescript crashed at the matrix-literal line without the fix; runs on all
+  backends).
+
 - **2026-06-03 — #214 (✅ fixed).** Root-caused & fixed the intermittent
   `-dap` SIGSEGV in `comm/alamouti_diversity.m`. AddressSanitizer (runtime built
   `-fsanitize=address`, example linked + run on macOS) pinned it to a
