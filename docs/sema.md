@@ -248,8 +248,9 @@ lines). Its job: visit every `Expr`, set `Expr::Ty`, and update
   Logical, Char, Fixed, Unknown).
 - `Shape` — rank + per-dim extents, `-1` = dynamic.
 - `Type::Kind` — `Any`, `Array`, `StringArray`, `Cell`, `Struct`,
-  `FuncHandle`, `Numerictype`, `Fimath`. (`Numerictype` / `Fimath`
-  model the compile-time-only Fixed-Point Designer config objects.)
+  `FuncHandle`, `Numerictype`, `Fimath`, `Object`. (`Numerictype` /
+  `Fimath` model the compile-time-only Fixed-Point Designer config
+  objects; `Object` is a user-classdef instance — see below.)
 - `FixedSpec` — wordlength / fraction length / signedness / overflow
   / rounding for `fi` types.
 
@@ -261,23 +262,30 @@ hard-coded shape rule, etc. Builtins with type-specific behavior
 analysis can't be sure, it emits `Type::Any` rather than failing —
 runtime generic dispatch handles the rest.
 
-**There is no class-instance ("object") type.** This is deliberate
-and worth understanding. A class instance is *not* modelled as a
-`Type`; instead the resolver hangs a `ClassDef *` on the binding
-(`Binding::PinnedClass`, §3.4), and the *type* of a constructor /
-method / operator-overload result stays `Type::Any`
-(`visitCallOrIndex` falls through to `TC.any()` at
-`TypeInference.cpp:1698`/`:1702`). This is enough for `obj.prop` /
-`obj.method()` to dispatch statically, but it means class-valued
-expressions carry no static type. That is the root reason the late
-constructor monomorphizer can't move to Sema (§2): `tf(G + 2)` sees
-`G + 2` as `Any`, so it can't tell a scalar ctor call from a matrix
-one. Adding a real `Object`-of-class type to the lattice — wiring
-constructors / methods / operators to return it instead of `Any` — is
-the open enabler for retiring that late pass; it touches the ~25
-`TC.any()` sites here plus the ~60 `PinnedClass` sites in
-`lib/MLIR/Lowering.cpp`, so it's a moderate-blast-radius project, not
-a one-liner.
+**Class instances carry an `Object` type, with a `PinnedClass` side
+channel for dispatch.** `Type::Kind::Object` (`ObjectType`, holding the
+owning `ClassDef *`) is the static type of a constructor call and of
+arithmetic operator-overloads on an instance — `Box(3)` and `g + h`
+both infer `object<Box>` (#40, `visitCallOrIndex` / `visitBinary`). It
+interns per class via `TypeContext::objectOf` and lowers to
+`matlab_obj*` (ptr). Alongside it, the resolver still hangs a
+`ClassDef *` on the *binding* (`Binding::PinnedClass`, §3.4) to drive
+property / method *dispatch*; the object type is additive and agrees
+with the pin. Method-call results that aren't operator overloads, and
+class-valued expressions the inference can't follow, still fall back to
+`Type::Any` (`visitCallOrIndex`'s `TC.any()` paths).
+
+The object type is the **foundation** for moving the late constructor /
+method monomorphizer (`runMonomorphiseUserCalls`, §2) to Sema: with
+concrete object types, constructor call sites can be bucketed by class
+at Sema time. Two things still block *fully* retiring that late pass,
+both tracked on #40: (1) many constructor / method args are computed
+values that remain `Any` at Sema but acquire concrete `ptr` types only
+after lowering, and (2) the operator-overload lowering *synthesizes*
+constructor / method calls (`G + 2` → `plus(G, tf(2))`) that don't
+exist at Sema time. Closing those is a multi-PR effort that
+monomorphizes the whole class-method call graph (~60+ method symbols),
+not just constructors.
 
 Type inference is also where `load`'s return type would be set to
 `Struct` (see `docs/save_load_compat.md` §1.1) — it's the natural

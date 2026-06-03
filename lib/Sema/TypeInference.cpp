@@ -760,6 +760,33 @@ const Type *TypeInference::visitBinary(BinaryOpExpr &B, Env &Env) {
   const Type *L = B.LHS ? visit(*B.LHS, Env) : TC.any();
   const Type *R = B.RHS ? visit(*B.RHS, Env) : TC.any();
 
+  // #40: arithmetic involving a class instance dispatches to the class's
+  // operator overload (plus / minus / mtimes / ...), which by convention
+  // returns an instance of the same class. Preserving the object type keeps
+  // chained expressions (`(G + H) * K`) and downstream constructor / call
+  // args concrete instead of collapsing to Any. This mirrors the same
+  // same-class assumption the resolver already makes when it pins operands
+  // (docs/sema.md §3.4). Comparison / logical operators are left alone —
+  // their overloads return logical, not the class.
+  {
+    auto objClass = [](const Type *T) -> const ClassDef * {
+      return (T && T->K == Type::Kind::Object)
+                 ? static_cast<const ObjectType &>(*T).Class
+                 : nullptr;
+    };
+    switch (B.Op) {
+    case BinOp::Add: case BinOp::Sub: case BinOp::Mul: case BinOp::Div:
+    case BinOp::LeftDiv: case BinOp::Pow:
+    case BinOp::ElemMul: case BinOp::ElemDiv:
+    case BinOp::ElemLeftDiv: case BinOp::ElemPow:
+      if (const ClassDef *CD = objClass(L)) return TC.objectOf(CD);
+      if (const ClassDef *CD = objClass(R)) return TC.objectOf(CD);
+      break;
+    default:
+      break;
+    }
+  }
+
   // Per-op fi handling (FullPrecision rules; Phase 4 will route through a
   // first-class fimath surface). Falls through to the regular numeric
   // promotion path when neither operand is Fixed.
@@ -1696,6 +1723,15 @@ const Type *TypeInference::visitCallOrIndex(CallOrIndex &C, Env &Env) {
           if (auto *FTy = F->OutputRefs[0]->InferredType) return FTy;
         }
         return TC.any();
+      }
+      if (N->Ref && N->Ref->Kind == BindingKind::Class &&
+          N->Ref->ClassDef) {
+        // Constructor call `ClassName(args)`. The result is an instance of
+        // that class — give it a concrete object type (#40) instead of the
+        // old `Any`, so the constructor monomorphizer can bucket call sites
+        // by class and the lowerer maps the value to a matlab_obj* ptr.
+        for (Expr *A : C.Args) if (A) visit(*A, Env);
+        return TC.objectOf(N->Ref->ClassDef);
       }
     }
     for (Expr *A : C.Args) if (A) visit(*A, Env);

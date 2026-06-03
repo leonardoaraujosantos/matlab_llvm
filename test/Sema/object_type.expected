@@ -1,0 +1,38 @@
+TranslationUnit
+  Function use
+    Inputs:
+    Outputs: out[any]
+    Locals: g[object<Box>] h[object<Box>] s[object<Box>] t[object<Box>]
+    Block
+      AssignStmt suppressed
+        LHS
+          Name g (var) [object<Box>]
+        RHS
+          Call [object<Box>]
+            Name Box (class) [any]
+            IntLit 3 [double]
+      AssignStmt suppressed
+        LHS
+          Name h (var) [object<Box>]
+        RHS
+          Call [object<Box>]
+            Name Box (class) [any]
+            IntLit 4 [double]
+      AssignStmt suppressed
+        LHS
+          Name s (var) [object<Box>]
+        RHS
+          BinOp + [object<Box>]
+            Name g (var) [object<Box>]
+            Name h (var) [object<Box>]
+      AssignStmt suppressed
+        LHS
+          Name t (var) [object<Box>]
+        RHS
+          Name s (var) [object<Box>]
+      AssignStmt suppressed
+        LHS
+          Name out (output) [any]
+        RHS
+          Field .v [any]
+            Name t (var) [object<Box>]
