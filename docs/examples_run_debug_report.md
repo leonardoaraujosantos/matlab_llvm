@@ -224,6 +224,21 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
   unaffected. Regression `test/Run/regress_isequal_two_scalars.m` (verified
   `unsupported call shape` without the fix; runs on all backends).
 
+- **2026-06-02 — #156 / #157 (✅ fixed).** `disp(struct)` and `disp(cell)`
+  SIGSEGV'd on **all** backends (AOT/-repl/-dap, rc 139): disp routed the
+  struct/cell pointer to the polymorphic `matlab_disp_mat_f64`, which read it
+  as a matrix descriptor (garbage rows/cols/data). The frontend now detects a
+  struct- or cell-bound disp argument (`IsStruct`/`StructInitialised`/
+  `StructBindings`/`CellBindings`) and routes it to new `matlab_disp_struct` /
+  `matlab_disp_cell` runtime entries (registered in LowerTensorOps as void
+  one-ptr calls) that print a field / element listing — `name: value`, with
+  `[RxC double]` summaries for matrix members; not byte-exact to MATLAB but
+  crash-free and deterministic. Plain numeric `disp` is unaffected (and was
+  never broken — #157's "any disp" was the -dap manifestation of this same
+  `matlab_disp_mat_f64` crash on a non-matrix). Regression
+  `test/Run/regress_disp_struct_cell.m` (verified rc 139 without the fix).
+  emit-python/typescript skipped (those shims lack the new entries / format
+  differently; validated exactly on LLVM/C/C++).
 - **2026-06-02 — #148 (✅ fixed).** An F64-returning string predicate
   (`contains` / `startsWith` / `endsWith` / `strcmp` / ...) used **directly**
   as an `if`/`while` condition failed to lower (`unrealized_conversion_cast`

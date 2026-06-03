@@ -6773,6 +6773,32 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         return emitUnreg("matlab.call_builtin", {V},
                          mlir::NoneType::get(&MCtx), L, {Cal});
       }
+      /* #156: disp(struct) / disp(cell). These ptrs would otherwise hit the
+       * polymorphic matlab_disp_mat path, which reads them as a matrix
+       * descriptor and SIGSEGVs. Route a struct- or cell-bound argument to a
+       * dedicated display entry. Detected via the binding tags (IsStruct /
+       * StructBindings / CellBindings). */
+      if (Nm == "disp" && C.Args.size() == 1) {
+        if (auto *AN = dynamic_cast<const NameExpr *>(C.Args[0])) {
+          if (AN->Ref && (AN->Ref->IsStruct || StructBindings.count(AN->Ref) ||
+                          StructInitialised.count(AN->Ref))) {
+            mlir::Value V = lowerExpr(*C.Args[0]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_disp_struct"));
+            return emitUnreg("matlab.call_builtin", {V},
+                             mlir::NoneType::get(&MCtx), L, {Cal});
+          }
+          if (AN->Ref && CellBindings.count(AN->Ref)) {
+            mlir::Value V = lowerExpr(*C.Args[0]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_disp_cell"));
+            return emitUnreg("matlab.call_builtin", {V},
+                             mlir::NoneType::get(&MCtx), L, {Cal});
+          }
+        }
+      }
       /* latex / pretty / ccode — char-returning printers. Result is a
        * matlab_string* (matches matlab_num2str shape). */
       if ((Nm == "latex" || Nm == "pretty" || Nm == "ccode") &&
