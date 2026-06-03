@@ -1,0 +1,6 @@
+grow: 1x3 vals=1 2 3
+trail: 1x1 val=1
+lead: 5
+colgrow: 3x1 vals=10 20 30
+vrow: 7 8
+plain: 1 2 3 4

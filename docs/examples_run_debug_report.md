@@ -206,6 +206,19 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
 
 ## Changelog
 
+- **2026-06-03 — #204 (✅ fixed).** Concatenation with an empty `[]` operand
+  returned empty instead of dropping it (`x=[]; x=[x 1]` gave `[]`), breaking
+  the ubiquitous grow-from-`[]` idiom. `matlab_horzcat`/`matlab_vertcat`
+  guarded only against a NULL pointer; an empty `[]` is a valid 0-element
+  `matlab_mat`, so the dimension-mismatch guard (`A->rows != B->rows` /
+  `A->cols != B->cols`) saw the 0 dim as a conflict and returned empty. Added
+  an empty-operand drop (`[[] X] == X`, `[X []] == X`) in both, mirrored in the
+  Python/TS shims (filter zero-size operands before hstack/vstack). Non-empty
+  concat and both-empty (→ 0x0) are unchanged. Regression
+  `test/Run/regress_empty_concat.m` (row/column grow, leading/trailing empty,
+  plain concat; verified to produce empty without the fix; runs on all
+  backends).
+
 - **2026-06-03 — #202 (✅ fixed).** `double(x)` / `single(x)` on a vector or
   matrix errored with "unsupported call shape" — only the scalar form worked.
   Since the runtime is uniformly f64, these are identity casts on a matrix. The

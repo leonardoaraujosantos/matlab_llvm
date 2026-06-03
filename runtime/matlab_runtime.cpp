@@ -2390,6 +2390,11 @@ matlab_mat *matlab_horzcat(matlab_mat *A, matlab_mat *B) {
         }
         return (matlab_mat *)R;
     }
+    /* MATLAB drops an empty operand in concatenation: [[] X] == X, [X []] == X.
+     * An empty `[]` is a valid 0-element matlab_mat (not NULL), so the null
+     * checks above miss it and the row-count guard below would wrongly bail. */
+    if (A->rows == 0 || A->cols == 0) return B;
+    if (B->rows == 0 || B->cols == 0) return A;
     if (A->rows != B->rows) return mat_alloc(0, 0);
     int64_t m = A->rows, na = A->cols, nb = B->cols;
     matlab_mat *_a = A, *_b = B;
@@ -2420,6 +2425,9 @@ matlab_mat *matlab_vertcat(matlab_mat *A, matlab_mat *B) {
         }
         return (matlab_mat *)R;
     }
+    /* MATLAB drops an empty operand in concatenation: [[]; X] == X, [X; []] == X. */
+    if (A->rows == 0 || A->cols == 0) return B;
+    if (B->rows == 0 || B->cols == 0) return A;
     if (A->cols != B->cols) return mat_alloc(0, 0);
     int64_t n = A->cols, ma = A->rows, mb = B->rows;
     matlab::runtime::MatPtr R = matlab::runtime::make_mat(ma + mb, n);
