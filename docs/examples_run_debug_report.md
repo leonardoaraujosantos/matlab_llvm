@@ -206,16 +206,20 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
 
 ## Changelog
 
-- **2026-06-03 — #214 (⚠️ quarantined).** `comm/alamouti_diversity.m`
-  intermittently SIGSEGVs under the `-dap` JIT on Linux CI (a layout-sensitive
-  latent read; does not reproduce on macOS — 0/30 clean — and passes on most CI
-  runs). It recurred across *unrelated* PRs (#205 empty-concat merge and
-  #213/#185), forcing spurious gate re-runs; it was previously quarantined and
-  pruned 2026-06-01 (#77). Re-added to `test/Debug/jit_parity_known_issues.txt`
-  so it stops blocking unrelated PRs (a listed crash is tolerated; a passing run
-  is reported STALE, not a failure). CI-stability change only — no runtime/
-  compiler behavior change; root-cause tracked in #214 (needs Linux ASan on the
-  OFDM/fading/MIMO `-dap` path).
+- **2026-06-03 — #214 (✅ fixed).** Root-caused & fixed the intermittent
+  `-dap` SIGSEGV in `comm/alamouti_diversity.m`. AddressSanitizer (runtime built
+  `-fsanitize=address`, example linked + run on macOS) pinned it to a
+  **heap-buffer-overflow** in `matlab_comm_ostbc_combine`: an upstream complex
+  op (`tx * complex(h)`) degrades to a real `matlab_mat` (matrix×complex-scalar
+  dispatch isn't wired — filed #216), `awgn` then returns a real matrix, and the
+  combiner blindly read it through the `matlab_mat_c` layout (`rows`/`cols`/`re`/
+  `im` at past-the-end offsets) — a latent OOB that only sometimes faults on
+  Linux. `ostbcCombine` now checks `mat_is_complex` and accepts a real input as
+  complex-with-zero-imaginary. ASan: 8/8 flagged before → 8/8 clean after.
+  Regression `test/Run/regress_ostbc_real_input.m` (real input → correct element
+  count; deterministically wrong (`n=0`) without the fix; AOT/`-dap`/`-repl` —
+  comm toolbox isn't in the emit shims, so emit-* skipped like other comm
+  tests). No quarantine needed.
 
 - **2026-06-03 — #185 (✅ fixed).** `sum([])` / `mean([])` of an empty array
   diverged: the Python/TS shims returned `[]` and AOT `mean([])` returned `0`,

@@ -48,15 +48,3 @@
 # API), so only these two are listed.  Wiring the model-form API through
 # the shared JIT lowering is a #77/#28 follow-up.
 pde/clamped_plate_pressure.m
-
-# Re-added 2026-06-03 (#214): comm/alamouti_diversity.m intermittently
-# SIGSEGVs under the -dap JIT on Linux CI — a layout-sensitive latent read in
-# the example's -dap path. It does NOT reproduce on macOS (0/30 clean runs)
-# and passes on most CI runs, but recurs across unrelated PRs (crashed on the
-# #205 empty-concat merge and on #213/#185 — neither touches comm or mean/sum),
-# forcing spurious re-runs. The gate's single CRASH-retry doesn't help: both
-# tries crash within a given (Linux) binary. This was previously quarantined
-# and pruned 2026-06-01 (#77) as "no longer reproduces" — the flake is back.
-# Quarantined here so it stops blocking unrelated PRs; root-cause tracked in
-# #214 (needs Linux ASan/Valgrind on the OFDM/fading/MIMO -dap path).
-comm/alamouti_diversity.m
