@@ -1,0 +1,5 @@
+inter: 1x2 vals=3 4
+diff:  1x2 vals=1 2
+union: 1x6
+inter_col: 2x1
+union_mixed: 6x1

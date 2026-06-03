@@ -206,6 +206,17 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
 
 ## Changelog
 
+- **2026-06-03 — #181 (✅ fixed).** `intersect` / `setdiff` / `union` of two
+  **row** vectors returned **column** vectors — same orientation bug as #179
+  but in the set operations. MATLAB returns a row vector only when *both*
+  inputs are row vectors; otherwise a column. The shared `set_op` helper in
+  `matlab_runtime.cpp` hard-coded `make_mat(u, 1)`, and the Python/TS shims
+  reshaped to a column. All now branch on `both_row` (both inputs `rows == 1`).
+  Mixed / column inputs still yield a column. Regression
+  `test/Run/regress_setop_row_shape.m` (both-row → row, column/mixed → column;
+  verified to produce `2x1` for the both-row case without the fix; runs on all
+  backends). `test/Run/math_sort_set.m` expectations updated accordingly.
+
 - **2026-06-03 — #179 (✅ fixed).** `unique()` of a **row** vector returned a
   **column** vector — orientation was not preserved. MATLAB returns a row
   vector for a row-vector input (and a column for a column vector or matrix);

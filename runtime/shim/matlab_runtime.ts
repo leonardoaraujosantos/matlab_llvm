@@ -3970,13 +3970,19 @@ export function unique(A: any): NDArray {
   return new NDArray(Float64Array.from(arr), isRow ? [1, arr.length] : [arr.length, 1]);
 }
 
+// Match MATLAB orientation: a row vector only when BOTH inputs are row
+// vectors; otherwise a column vector.
+function setopShape(a: NDArray, b: NDArray, n: number): number[] {
+  return (a.shape[0] === 1 && b.shape[0] === 1) ? [1, n] : [n, 1];
+}
+
 export function union(A: any, B: any): NDArray {
   const a = asArray(A); const b = asArray(B);
   const set = new Set<number>();
   for (let i = 0; i < a.size; i++) set.add(a.data[i]);
   for (let i = 0; i < b.size; i++) set.add(b.data[i]);
   const arr = Array.from(set).sort((x, y) => x - y);
-  return new NDArray(Float64Array.from(arr), [arr.length, 1]);
+  return new NDArray(Float64Array.from(arr), setopShape(a, b, arr.length));
 }
 
 export function intersect(A: any, B: any): NDArray {
@@ -3991,7 +3997,7 @@ export function intersect(A: any, B: any): NDArray {
     }
   }
   out.sort((x, y) => x - y);
-  return new NDArray(Float64Array.from(out), [out.length, 1]);
+  return new NDArray(Float64Array.from(out), setopShape(a, b, out.length));
 }
 
 export function setdiff(A: any, B: any): NDArray {
@@ -4006,7 +4012,7 @@ export function setdiff(A: any, B: any): NDArray {
     }
   }
   out.sort((x, y) => x - y);
-  return new NDArray(Float64Array.from(out), [out.length, 1]);
+  return new NDArray(Float64Array.from(out), setopShape(a, b, out.length));
 }
 
 export function ismember(A: any, B: any): NDArray {

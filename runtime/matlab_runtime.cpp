@@ -2305,7 +2305,11 @@ static matlab_mat *set_op(matlab_mat *A, matlab_mat *B, int op /*0=diff,1=inter,
             if (uu == 0 || tmp[uu - 1] != tmp[k]) tmp[uu++] = tmp[k];
         u = uu;
     }
-    matlab::runtime::MatPtr R = matlab::runtime::make_mat(u, 1);
+    /* Match MATLAB orientation: the result is a row vector only when BOTH
+     * inputs are row vectors; otherwise it is a column vector. */
+    int both_row = A && B && A->rows == 1 && B->rows == 1;
+    matlab::runtime::MatPtr R =
+        both_row ? matlab::runtime::make_mat(1, u) : matlab::runtime::make_mat(u, 1);
     if (u > 0) memcpy(R->data, tmp.data(), (size_t)u * sizeof(double));
     return R.release();
 }
