@@ -3650,6 +3650,11 @@ def sort(A):
     if a.ndim >= 2 and a.shape[0] == 1:
         return np.sort(a, axis=1)
     return np.sort(a, axis=0)
+def sort_dir(A, d):
+    # sort(A, 'ascend'|'descend')
+    s = sort(A)
+    return s if not str(d).lower().startswith('d') else (
+        np.flip(s, axis=1) if (s.ndim >= 2 and s.shape[0] == 1) else np.flip(s, axis=0))
 def sortrows(A): return _m(A)[np.lexsort(_m(A).T[::-1])]
 def permute(A, perm):
     p = _m(perm).flatten().astype(int) - 1
