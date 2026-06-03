@@ -206,6 +206,15 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
 
 ## Changelog
 
+- **2026-06-03 — #177 (✅ fixed).** `numel(s)` / `length(s)` on a struct
+  returned garbage — the struct ptr was read as a `matlab_mat`. The
+  numel/length lowering had a cell special-case but no struct one. Added a
+  scalar-struct case (`IsStruct` / `StructInitialised` / `StructBindings`,
+  excluding struct arrays) that yields the constant `1`. Cell/matrix numel
+  and struct arrays unaffected. Regression `test/Run/regress_numel_struct.m`
+  (scalar + nested struct, guard use, cell/matrix; verified garbage without
+  the fix; runs on all backends).
+
 - **2026-06-03 — #175 (✅ fixed).** `end` inside cell brace-indexing
   (`c{end}`, `c{end-1}`) was left as an unconverted `matlab.end` — the cell
   read lowered its index without a `SubscriptCtx` base, and a cell `end` must
