@@ -206,6 +206,20 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
 
 ## Changelog
 
+- **2026-06-03 — #206 (✅ fixed).** A string element of a cell array retrieved
+  via `c{i}` came back as numeric char codes — `c={"a","b"}; disp(c{1})` printed
+  `97`. String elements are stored as `matlab_string*` (kind=3), but the brace-
+  read used `matlab_cell_get_mat`, which exposes them as a char-code row matrix.
+  Added `matlab_cell_get_str` (returns the stored `matlab_string*`) and a
+  `CellStrElems` tracking set (string-only indices, parallel to `CellMatElems`);
+  the brace-read routes a known string element to `get_str`, `isStringExpr` and
+  the `disp` dispatch recognise `c{i}` as a string, so `disp(c{i})` and
+  `t=c{i}` propagate the string. Also added the missing `cell_set_str` to the
+  Python/TS shims (cell-of-strings never round-tripped on those backends).
+  Numeric and matrix cell elements are unaffected. Regression
+  `test/Run/regress_cell_string.m` (single/multi-char, assignment, mixed
+  numeric, matrix element; printed char codes without the fix; all backends).
+
 - **2026-06-03 — #204 (✅ fixed).** Concatenation with an empty `[]` operand
   returned empty instead of dropping it (`x=[]; x=[x 1]` gave `[]`), breaking
   the ubiquitous grow-from-`[]` idiom. `matlab_horzcat`/`matlab_vertcat`

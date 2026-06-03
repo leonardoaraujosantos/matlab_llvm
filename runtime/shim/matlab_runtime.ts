@@ -3171,6 +3171,10 @@ export function cell_set_mat(c: any[], i: number, m: any): void {
   cellGrow(c, i | 0);
   c[(i | 0) - 1] = m;
 }
+export function cell_set_str(c: any[], i: number, s: any): void {  // (#206)
+  cellGrow(c, i | 0);
+  c[(i | 0) - 1] = s;
+}
 export function cell_get_f64(c: any[], i: number): number {
   const v = c[(i | 0) - 1];
   const f = Number(v);
@@ -3178,6 +3182,9 @@ export function cell_get_f64(c: any[], i: number): number {
 }
 export function cell_get_mat(c: any[], i: number): any {
   return c[(i | 0) - 1];
+}
+export function cell_get_str(c: any[], i: number): any {
+  return c[(i | 0) - 1];  // string element returned as-is (#206)
 }
 export function cell_numel(c: any[]): number { return c.length; }
 export function iscell(c: any): number {
