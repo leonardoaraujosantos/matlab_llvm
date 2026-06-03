@@ -4254,7 +4254,9 @@ function _fmtVec(fmt: string, vals: any[], kinds: any[], n: number): string {
       if (!m) { out += eb.slice(i); i = eb.length; break; }
       if (ti >= toks.length) { ranOut = true; break; }
       const conv = m[4]; const t = toks[ti++];
-      if (conv === "s" || conv === "c") {
+      if (conv === "c") {  // character: numeric -> char(value) (#209)
+        out += t.s ? String(t.v) : String.fromCharCode(Math.round(Number(t.v)));
+      } else if (conv === "s") {
         out += t.s ? cPrintf(m[0], [t.v]) : cPrintf("%g", [t.v]);
       } else if (conv === "d" || conv === "i") {  // integer-of-double -> %.0f
         out += cPrintf("%" + (m[1] || "") + (m[2] || "") + ".0f",
