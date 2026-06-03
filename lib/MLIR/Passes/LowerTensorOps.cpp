@@ -8559,6 +8559,19 @@ bool TensorLowering::rewriteBinaryOps() {
       }
       continue;
     }
+    /* `.^` (element power) on two scalars: there is no arith pow op, so
+     * LowerScalarsToArith can't lower it — route to libm pow here, the same
+     * way matlab.matpow handles a scalar base. Without this, scalar `3.^2` /
+     * `2.5.^2` survive as an unconverted matlab.epow (the lexer now correctly
+     * tokenizes `3.^2` as `3 .^ 2`, i.e. epow, not `3. ^ 2`). */
+    if (ML == "matlab.epow" && AF && BF) {
+      B.setInsertionPoint(Op);
+      auto Pf = rt("matlab_pow_scalar", F64, {F64, F64});
+      auto NC = LLVM::CallOp::create(B, Op->getLoc(), Pf, ValueRange{A, BVal});
+      Op->getResult(0).replaceAllUsesWith(NC.getResult());
+      Op->erase(); Changed = true;
+      continue;
+    }
     if (!AP && !BP) continue; // scalar-only — LowerScalarsToArith handled it
 
     B.setInsertionPoint(Op);

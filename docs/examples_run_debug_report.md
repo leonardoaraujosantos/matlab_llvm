@@ -206,6 +206,17 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
 
 ## Changelog
 
+- **2026-06-03 — #173 (✅ fixed).** `2.^x` (a digit immediately before `.^`)
+  was mis-lexed as the float `2.` plus matrix-power `^` (→ unconverted
+  matlab.matpow for a vector RHS), instead of `2 .^ x` (element-wise power).
+  `Lexer::lexNumber` no longer consumes a trailing `.` when the next char is a
+  dotted-operator char (`^ * / \ '`); and scalar `.^` (epow of two f64s) now
+  routes to `matlab_pow_scalar` (mirroring the matpow scalar case) + a
+  `pow_scalar` shim. Ordinary floats (`2.5`, `3.`, `2.*`/`2./`) unaffected.
+  Regression `test/Run/regress_dotop_after_digit.m` (scalar `.^`, scalar`.^`vec,
+  `2.*`/`2./`, float lexing, vec forms; verified unconverted ops without the
+  fix; runs on all backends).
+
 - **2026-06-03 — #169 (✅ fixed).** `num2str` of a vector/matrix failed with
   "unsupported call shape" — only the scalar f64 form was wired. Added a
   ptr-operand path → `matlab_num2str_mat` ("%g" per element, two spaces
