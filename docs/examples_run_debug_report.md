@@ -217,6 +217,15 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
   `test/Run/regress_reverse_index.m` (element-wise scalar disps; verified to
   return original order without the fix). Mask reads/stores (`v(v>2)`) and
   ascending/strided indexing unaffected.
+- **2026-06-03 — #167 (✅ fixed).** `sort(x, 'ascend'|'descend')` (the 2-arg
+  direction form) failed with "unsupported call shape" — only 1-arg `sort(x)`
+  was wired. Refactored the ascending sort into a direction-parameterised core
+  (`matlab_sort_impl`) and added `matlab_sort_dir(A, dir)` (sorts asc/desc by
+  the first char of `dir`), wired via the string-arg table that materialises
+  the direction `const_char` to a `matlab_string*`; added `sort_dir` to the
+  python/ts shims. 1-arg `sort` / `[s,i]=sort` unaffected. Regression
+  `test/Run/regress_sort_direction.m` (element-wise scalar disps; verified
+  `unsupported call shape` without the fix; runs on all backends).
 
 - **2026-06-03 — #152 (✅ fixed).** A scalar logical / comparison result
   displayed as `-1` instead of `1`: `disp(5>0)`, `disp(1|0)`, `disp(~0)` all

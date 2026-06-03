@@ -2149,15 +2149,21 @@ static int cmp_double_asc(const void *a, const void *b) {
     double da = *(const double *)a, db = *(const double *)b;
     return (da > db) - (da < db);
 }
+static int cmp_double_desc(const void *a, const void *b) {
+    double da = *(const double *)a, db = *(const double *)b;
+    return (da < db) - (da > db);
+}
 
-matlab_mat *matlab_sort(matlab_mat *A) {
+/* sort core, parameterised by direction (cmp_double_asc / _desc). */
+static matlab_mat *matlab_sort_impl(matlab_mat *A,
+                                    int (*cmp)(const void *, const void *)) {
     if (!A) return mat_alloc(0, 0);
     int64_t m = A->rows, n = A->cols;
     matlab_mat *R = mat_alloc(m, n);
     if (m == 1 || n == 1) {
         int64_t total = m * n;
         memcpy(R->data, A->data, (size_t)total * sizeof(double));
-        qsort(R->data, (size_t)total, sizeof(double), cmp_double_asc);
+        qsort(R->data, (size_t)total, sizeof(double), cmp);
         return R;
     }
     /* Column-wise sort for matrices. Allocate a per-column buffer
@@ -2165,12 +2171,18 @@ matlab_mat *matlab_sort(matlab_mat *A) {
     double *col = (double *)malloc((size_t)m * sizeof(double));
     for (int64_t j = 0; j < n; ++j) {
         for (int64_t i = 0; i < m; ++i) col[i] = A->data[i * n + j];
-        qsort(col, (size_t)m, sizeof(double), cmp_double_asc);
+        qsort(col, (size_t)m, sizeof(double), cmp);
         for (int64_t i = 0; i < m; ++i) R->data[i * n + j] = col[i];
     }
     free(col);
     return R;
 }
+
+matlab_mat *matlab_sort(matlab_mat *A) {
+    return matlab_sort_impl(A, cmp_double_asc);
+}
+/* matlab_sort_dir (the 2-arg `sort(A, 'descend')` form) is defined after the
+ * matlab_string struct (it inspects the direction string) — see below. */
 
 /* Index companions for the `[v, i] = min/max/sort(A)` second output.
  * Shapes mirror matlab_min / matlab_sort: a vector reduces to a 1×1 (min/max)
@@ -13337,6 +13349,15 @@ double matlab_endsWith(matlab_string *s, matlab_string *suf) {
     if (suf->len > s->len) return 0.0;
     return memcmp(s->data + (s->len - suf->len),
                   suf->data, (size_t)suf->len) == 0 ? 1.0 : 0.0;
+}
+
+/* sort(A, dir) — `dir` is the direction string 'ascend' (default) or
+ * 'descend'. Routed via the pde_table 2-arg ("pp") form. Defined here (after
+ * the matlab_string struct) since it inspects the direction string. */
+matlab_mat *matlab_sort_dir(matlab_mat *A, matlab_string *dir) {
+    int desc = dir && dir->data && dir->len > 0 &&
+               (dir->data[0] == 'd' || dir->data[0] == 'D');
+    return matlab_sort_impl(A, desc ? cmp_double_desc : cmp_double_asc);
 }
 
 double matlab_contains(matlab_string *s, matlab_string *needle) {

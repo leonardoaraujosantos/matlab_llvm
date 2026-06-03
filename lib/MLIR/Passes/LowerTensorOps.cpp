@@ -5767,6 +5767,10 @@ bool TensorLowering::rewriteBuiltinCalls() {
          * args (filenames, fspecial/imnoise type) arrive as matlab_string*
          * (PtrTy) and are read in the runtime.  Multi-arity via the
          * scan-all-overloads matcher. */
+        /* sort(A, 'ascend'|'descend') — 2-arg direction form; the direction
+         * const_char is materialised to a matlab_string* read in the runtime.
+         * The 1-arg sort(A) stays in the scalar-sig pde_table above. (#165→sort) */
+        {"sort",       "matlab_sort_dir",         PtrTy, {PtrTy, PtrTy}},
         {"imread",     "matlab_image_imread",     PtrTy, {PtrTy}},
         {"imwrite",    "matlab_image_imwrite",    F64,   {PtrTy, PtrTy}},
         {"checkerboard", "matlab_image_checkerboard1", PtrTy, {PtrTy}},
