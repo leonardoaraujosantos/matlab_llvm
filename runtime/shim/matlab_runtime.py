@@ -2133,10 +2133,16 @@ def slice2(A, rows, cols):
     return a[np.ix_(r, c)]
 
 
+def _idx_is_mask(mi, A):
+    # A same-shape index is a logical mask only when every element is 0/1
+    # (#165). A value outside {0,1} means it is an index list (e.g. v([3 2 1])).
+    return mi.shape == A.shape and A.size > 1 and bool(np.all((mi == 0) | (mi == 1)))
+
+
 def slice_store1(A, idx, V):
     mi = _m(idx)
-    # Logical-mask store: idx same-shape as A is a mask, not linear indices.
-    if mi.shape == A.shape and A.size > 1:
+    # Logical-mask store: idx same-shape as A and all-0/1 is a mask.
+    if _idx_is_mask(mi, A):
         flat = A.flatten(order='F')
         v_flat = _m(V).flatten(order='F')
         mask = mi.flatten(order='F') != 0
@@ -2155,8 +2161,8 @@ def slice_store1(A, idx, V):
 
 def slice_store1_scalar(A, idx, v):
     mi = _m(idx)
-    # Logical-mask store: idx same-shape as A is a mask, not linear indices.
-    if mi.shape == A.shape and A.size > 1:
+    # Logical-mask store: idx same-shape as A and all-0/1 is a mask.
+    if _idx_is_mask(mi, A):
         flat = A.flatten(order='F')
         flat[mi.flatten(order='F') != 0] = float(v)
         A[:] = flat.reshape(A.shape, order='F')
