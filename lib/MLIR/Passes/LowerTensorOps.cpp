@@ -2384,6 +2384,17 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Call->erase(); Changed = true; continue;
     }
 
+    /* #156: disp(struct) / disp(cell) — one ptr operand, void result. */
+    if ((Name == "matlab_disp_struct" || Name == "matlab_disp_cell") &&
+        Call->getNumOperands() == 1 &&
+        Call->getOperand(0).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, VoidTy, {PtrTy});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                            ValueRange{Call->getOperand(0)});
+      Call->erase(); Changed = true; continue;
+    }
+
     /* Phase 5.2: categorical runtime. */
     if (Name == "matlab_categorical_from_cell" &&
         Call->getNumResults() == 1 && Call->getNumOperands() == 2 &&

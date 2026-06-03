@@ -16910,6 +16910,57 @@ double matlab_cell_numel(matlab_cell *c) {
     return (double)c->n;
 }
 
+/* #156: disp of a struct / cell. disp routed these ptrs to
+ * matlab_disp_mat_f64, which read them as a matrix descriptor (garbage
+ * rows/cols/data) and SIGSEGV'd. Print a MATLAB-ish field / element
+ * listing instead. Not byte-exact to MATLAB, but correct and crash-free. */
+void matlab_disp_struct(matlab_struct *s) {
+    pthread_mutex_lock(&matlab_io_mutex);
+    if (s) {
+        for (int32_t i = 0; i < s->nfields; ++i) {
+            if (!s->names[i]) continue;
+            printf("    %s: ", s->names[i]);
+            int32_t k = s->kinds[i];
+            if (k == 0) {
+                printf("%g", s->f64_vals[i]);
+            } else if (k == 1 && s->ptr_vals[i]) {
+                matlab_mat *m = (matlab_mat *)s->ptr_vals[i];
+                if (m->rows == 1 && m->cols == 1) printf("%g", m->data[0]);
+                else printf("[%lldx%lld double]",
+                            (long long)m->rows, (long long)m->cols);
+            } else if (k == 2) {
+                printf("[1x1 struct]");
+            } else {
+                printf("[]");
+            }
+            putchar('\n');
+        }
+    }
+    pthread_mutex_unlock(&matlab_io_mutex);
+}
+
+void matlab_disp_cell(matlab_cell *c) {
+    pthread_mutex_lock(&matlab_io_mutex);
+    if (c && c->n > 0) {
+        for (int32_t i = 0; i < c->n; ++i) {
+            if (i) putchar(' ');
+            if (c->kinds[i] == 1 && c->ptr_vals[i]) {
+                matlab_mat *m = (matlab_mat *)c->ptr_vals[i];
+                if (m->rows == 1 && m->cols == 1) printf("   {[%g]}", m->data[0]);
+                else printf("   {[%lldx%lld double]}",
+                            (long long)m->rows, (long long)m->cols);
+            } else if (c->kinds[i] == 3 && c->ptr_vals[i]) {
+                matlab_string *s = (matlab_string *)c->ptr_vals[i];
+                printf("   {'%.*s'}", (int)s->len, s->data);
+            } else {
+                printf("   {[%g]}", c->f64_vals[i]);
+            }
+        }
+        putchar('\n');
+    }
+    pthread_mutex_unlock(&matlab_io_mutex);
+}
+
 double matlab_iscell(matlab_cell *c) {
     return c ? 1.0 : 0.0;
 }
