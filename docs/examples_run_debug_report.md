@@ -206,6 +206,19 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
 
 ## Changelog
 
+- **2026-06-03 — #202 (✅ fixed).** `double(x)` / `single(x)` on a vector or
+  matrix errored with "unsupported call shape" — only the scalar form worked.
+  Since the runtime is uniformly f64, these are identity casts on a matrix. The
+  cast handling in `LowerTensorOps` only fired for an `F64` (scalar) operand;
+  added a matrix branch that replaces a `double`/`single` call with a ptr/tensor
+  operand by the operand itself (identity) and erases the call. This also fixes
+  the common `double(x > 1)` logical-to-double idiom (comparisons already yield
+  a 0/1 f64 matrix). matlabc-only (no runtime/shim change); all backends benefit
+  since the call is removed before emission. `logical(matrix)` / `int*(matrix)`
+  need element-wise saturate/0-1 helpers and remain a separate follow-up.
+  Regression `test/Run/regress_double_matrix.m` (vector/comparison/single/shape/
+  arithmetic/scalar; fails to compile without the fix; runs on all backends).
+
 - **2026-06-03 — #200 (✅ fixed).** Element-wise logical NOT `~` on a vector
   or matrix collapsed the whole operand to a single scalar truth value
   (`~[1 0 2 0]` returned scalar `1`) — the unary sibling of #151. `matlab.not`

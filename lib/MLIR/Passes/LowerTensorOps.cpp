@@ -8348,6 +8348,21 @@ bool TensorLowering::rewriteBuiltinCalls() {
         Changed = true;
         continue;
       }
+      /* #202: double()/single() on a matrix (ptr/tensor) operand is an
+       * identity cast — the runtime is uniformly f64. (The scalar forms are
+       * handled by the Scalar map below.) Replace the call with its operand.
+       * This also covers the common `double(x > 1)` logical-to-double idiom,
+       * since comparisons already produce a 0/1 f64 matrix. */
+      if ((Name == "double" || Name == "single") &&
+          Call->getNumOperands() == 1) {
+        Value Arg = Call->getOperand(0);
+        if (Arg.getType() == PtrTy || isTensorLike(Arg.getType())) {
+          Call->getResult(0).replaceAllUsesWith(Arg);
+          Call->erase();
+          Changed = true;
+          continue;
+        }
+      }
       auto It = Scalar.find(Name);
       if (It == Scalar.end()) continue;
       if (Call->getNumOperands() != 1) continue;
