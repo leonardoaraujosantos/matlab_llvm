@@ -3939,18 +3939,15 @@ export function sort(A: any): NDArray {
 }
 
 export function sort_dir(A: any, d: any): NDArray {
-  // sort(A, 'ascend'|'descend')
-  const s = sort(A);
-  if (!String(d).toLowerCase().startsWith("d")) return s;
-  if (s.ndim < 2 || s.rows === 1) {
-    const out = Float64Array.from(s.data).reverse();
-    return new NDArray(out, s.shape.slice());
-  }
-  const out = new Float64Array(s.size);
-  for (let j = 0; j < s.cols; j++)
-    for (let i = 0; i < s.rows; i++)
-      out[i * s.cols + j] = s.data[(s.rows - 1 - i) * s.cols + j];
-  return new NDArray(out, s.shape.slice());
+  // sort(A, 'ascend'|'descend'). MATLAB keeps NaN at the end in BOTH
+  // directions. Ascending: TypedArray.sort already puts NaN last. Descending:
+  // sort the negated array ascending (NaN last) and negate back — -NaN == NaN
+  // stays last, while finite values come out in descending order.
+  const a = asArray(A);
+  if (!String(d).toLowerCase().startsWith("d")) return sort(a);
+  const neg = new NDArray(Float64Array.from(a.data, (x) => -x), a.shape.slice());
+  const s = sort(neg);
+  return new NDArray(Float64Array.from(s.data, (x) => -x), s.shape.slice());
 }
 
 export function sortrows(A: any): NDArray {

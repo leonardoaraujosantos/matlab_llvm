@@ -3687,10 +3687,14 @@ def sort(A):
         return np.sort(a, axis=1)
     return np.sort(a, axis=0)
 def sort_dir(A, d):
-    # sort(A, 'ascend'|'descend')
-    s = sort(A)
-    return s if not str(d).lower().startswith('d') else (
-        np.flip(s, axis=1) if (s.ndim >= 2 and s.shape[0] == 1) else np.flip(s, axis=0))
+    # sort(A, 'ascend'|'descend'). MATLAB keeps NaN at the end in BOTH
+    # directions; np.sort already puts NaN last ascending, and -sort(-a)
+    # gives descending while leaving NaN last (since -NaN == NaN).
+    a = _m(A)
+    axis = 1 if (a.ndim >= 2 and a.shape[0] == 1) else 0
+    if str(d).lower().startswith('d'):
+        return -np.sort(-a, axis=axis)
+    return np.sort(a, axis=axis)
 def sortrows(A): return _m(A)[np.lexsort(_m(A).T[::-1])]
 def permute(A, perm):
     p = _m(perm).flatten().astype(int) - 1
