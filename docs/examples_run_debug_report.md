@@ -206,6 +206,19 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
 
 ## Changelog
 
+- **2026-06-03 — #196 (✅ fixed).** `sort` left NaN values unsorted in place;
+  MATLAB sorts NaN to the **end** in both ascending and descending order. The
+  comparators `cmp_double_asc`/`_desc` used `(da>db)-(da<db)` (every NaN
+  comparison false → qsort leaves NaN roughly in place). Added a shared
+  `cmp_nan_last` guard so NaN orders after every real value, direction-
+  independent. The Python/TS shim `sort_dir` descending path was rewritten to
+  keep NaN last (`-sort(-a)`) instead of flipping the ascending result. `unique`
+  / set ops share the comparator and now also place NaN last (matching MATLAB).
+  Regression `test/Run/regress_sort_nan.m` (asc/desc/multi-NaN; NaN produced via
+  `rem(_,0)` and detected via `v==v` being false; verified unsorted without the
+  fix; runs on all backends). Filed #197 for the separate emit-python/ts `NaN`
+  literal codegen bug (bare `nan` → NameError).
+
 - **2026-06-03 — #194 (✅ fixed).** `rem(x,0)` returned `x` instead of `NaN`
   (MATLAB). `matlab_rem_s` had `if (b==0) return a;` with a comment wrongly
   citing the rule as rem's — it is `mod`'s (`mod(x,0)==x`, which stays correct).

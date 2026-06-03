@@ -2148,12 +2148,22 @@ CUM_SCAN(cumprod, 1.0, acc * x)
  * matrices).
  *--------------------------------------------------------------------------*/
 
+/* MATLAB sorts NaN to the end regardless of direction. When either operand is
+ * NaN, fill *out with the NaN ordering (NaN after a real, ties for two NaNs)
+ * and return 1; otherwise return 0 and let the caller do the real compare. */
+static inline int cmp_nan_last(double da, double db, int *out) {
+    int an = (da != da), bn = (db != db);
+    if (an || bn) { *out = an - bn; return 1; }
+    return 0;
+}
 static int cmp_double_asc(const void *a, const void *b) {
     double da = *(const double *)a, db = *(const double *)b;
+    int n; if (cmp_nan_last(da, db, &n)) return n;
     return (da > db) - (da < db);
 }
 static int cmp_double_desc(const void *a, const void *b) {
     double da = *(const double *)a, db = *(const double *)b;
+    int n; if (cmp_nan_last(da, db, &n)) return n;
     return (da < db) - (da > db);
 }
 
