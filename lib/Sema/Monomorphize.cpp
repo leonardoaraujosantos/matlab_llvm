@@ -29,6 +29,7 @@
 #include "matlab/Sema/Scope.h"
 #include "matlab/Sema/Type.h"
 
+#include <algorithm>
 #include <map>
 #include <set>
 #include <string>
@@ -95,16 +96,20 @@ int growPlan(TranslationUnit &TU, ASTContext &Ctx, ClonePlan &Plan) {
         Function *CalleeRoot = rootOf(Plan, &F);
         Function *CallerRoot = Caller ? rootOf(Plan, Caller) : nullptr;
         bool Recursive = (CallerRoot == CalleeRoot);
-        // #40 Class 2: arity-varying callees (call args < declared,
-        // MATLAB nargin semantics) are now absorbed Sema-side via
-        // per-arity clones carrying NarginOverride — no longer deferred
-        // to the late MLIR mono. Variadic callees (varargin/varargout)
-        // still defer (Class 3, handled below).
+        // #40 Class 2/3: arity-varying callees (call args != declared,
+        // MATLAB nargin semantics) and varargin callees are now absorbed
+        // Sema-side via per-arity clones carrying NarginOverride — no
+        // longer deferred to the late MLIR mono. A varargin call's
+        // distinct arities already produce distinct CallSignatures (the
+        // tail isn't packed into the cell until lowering), so they bucket
+        // and clone naturally; the clone's nargin is its call arity.
+        //
+        // varargout callees still defer: their per-LHS unpacking is
+        // handled entirely by the runtime cell helpers at the call site
+        // (varargout_basic passes without any cloning), so adding clones
+        // here would be pure churn.
         if (!CalleeRoot->Outputs.empty() &&
             CalleeRoot->Outputs.back() == "varargout")
-          SkipRoot.insert(CalleeRoot);
-        if (!CalleeRoot->Inputs.empty() &&
-            CalleeRoot->Inputs.back() == "varargin")
           SkipRoot.insert(CalleeRoot);
         CallSignature Sig = callSignatureFrom(C.ArgTypes);
         // Touch the slot so its presence reflects "this sig was seen
@@ -172,10 +177,15 @@ int growPlan(TranslationUnit &TU, ASTContext &Ctx, ClonePlan &Plan) {
         NewClones++;
         Target = Clone;
       }
-      // Reduced-arity (non-variadic) call shape: record the per-call-site
-      // nargin so the lowerer emits matlab.nargin_value and the body's
-      // `if nargin == N` branches fold for this specialisation.
-      if (!IsVariadic && Sig.size() < DeclArity)
+      // Record the per-call-site nargin so the lowerer emits
+      // matlab.nargin_value and the body's `if nargin == N` branches fold
+      // for this specialisation. For a variadic callee nargin is the
+      // actual call arity (Sig.size()); for a fixed-arity callee only a
+      // reduced-arity clone needs an override (the full-arity canonical
+      // uses its declared count).
+      if (IsVariadic)
+        Target->NarginOverride = static_cast<int>(Sig.size());
+      else if (Sig.size() < DeclArity)
         Target->NarginOverride = static_cast<int>(Sig.size());
       Table[Sig] = std::move(Name);
       NextSuffix++;
@@ -222,18 +232,15 @@ int applyPlan(TranslationUnit &TU, ASTContext &Ctx, const ClonePlan &Plan) {
 // any call site's ArgTypes is sufficient. Returns the number of stamp
 // slots that actually changed (so the driver can detect a fixpoint).
 int stampSignatureTypes(TranslationUnit &TU, TypeContext &TC) {
-  // Pre-scan: collect Functions to skip entirely. These are the
-  // ones whose signature shape the late MLIR machinery still owns —
-  // varargin / varargout (#40 Class 3, not yet absorbed). Arity-
-  // varying callees (#40 Class 2) are NO LONGER skipped: growPlan now
-  // produces per-arity clones, and the reduced-arity clones stamp just
-  // their supplied prefix (the trailing dead params settle to f64 via
-  // RefineFuncSigs after the call site is padded by nargin_value).
+  // Pre-scan: collect Functions to skip entirely. Only varargout
+  // callees remain deferred (their per-LHS unpacking is a runtime-cell
+  // concern, not a signature one — see growPlan). Arity-varying (#40
+  // Class 2) and varargin (#40 Class 3) callees are NO LONGER skipped:
+  // growPlan produces per-arity clones, and stamping below handles the
+  // reduced-arity prefix and the varargin cell slot.
   std::set<Function *> Skip;
   walkUserCalls(TU, [&](CallOrIndex & /*C*/, NameExpr & /*N*/, Function &F) {
     if (!F.Outputs.empty() && F.Outputs.back() == "varargout")
-      Skip.insert(&F);
-    if (!F.Inputs.empty() && F.Inputs.back() == "varargin")
       Skip.insert(&F);
   });
 
@@ -248,14 +255,22 @@ int stampSignatureTypes(TranslationUnit &TU, TypeContext &TC) {
   for (auto &KV : ChosenSigs) {
     Function *F = KV.first;
     const auto &ArgTypes = KV.second;
+    bool Variadic = !F->Inputs.empty() && F->Inputs.back() == "varargin";
+    // Leading params that take a positional arg. For a variadic callee
+    // the trailing `varargin` slot is a runtime cell (typed !llvm.ptr by
+    // the lowerer) and is never stamped — extra call args beyond the
+    // leading params are packed into it.
+    size_t LeadCount = Variadic ? F->Inputs.size() - 1 : F->Inputs.size();
     // Reduced-arity clones supply fewer args than declared params — stamp
-    // just the supplied prefix. Only bail when there are MORE args than
-    // params (a user error the resolver already flags).
-    if (ArgTypes.size() > F->ParamRefs.size()) continue;
+    // just the supplied prefix. For non-variadic callees, bail when there
+    // are MORE args than params (a user error the resolver already flags);
+    // variadic callees legitimately have extra args (the packed tail).
+    if (!Variadic && ArgTypes.size() > F->ParamRefs.size()) continue;
     // Resize stamps vector to match arity; fresh entries start null.
     if (F->ParamTypeStamps.size() != F->Inputs.size())
       F->ParamTypeStamps.assign(F->Inputs.size(), nullptr);
-    for (size_t I = 0; I < ArgTypes.size(); ++I) {
+    size_t StampN = std::min(LeadCount, ArgTypes.size());
+    for (size_t I = 0; I < StampN; ++I) {
       const Type *NewT = ArgTypes[I];
       if (!NewT) continue;
       // Only refine (don't widen). Refusing to overwrite a concrete
@@ -290,13 +305,13 @@ int stampSignatureTypes(TranslationUnit &TU, TypeContext &TC) {
       F->ParamTypeStamps[I] = NewT;
       Stamped++;
     }
-    // #40 Class 2: a reduced-arity clone's trailing params receive no
-    // call-site arg. Pad them to scalar double (mirrors the late mono's
-    // f64 padding of dead trailing params) so a body branch guarded by
-    // `if nargin == N` that references them — dead for this arity but
-    // still type-checked by TypeInference — doesn't poison the result
-    // type with `none`.
-    for (size_t I = ArgTypes.size(); I < F->ParamTypeStamps.size(); ++I) {
+    // #40 Class 2: a reduced-arity clone's trailing positional params
+    // receive no call-site arg. Pad them to scalar double (mirrors the
+    // late mono's f64 padding of dead trailing params) so a body branch
+    // guarded by `if nargin == N` that references them — dead for this
+    // arity but still type-checked by TypeInference — doesn't poison the
+    // result type with `none`. Stops before the varargin cell slot.
+    for (size_t I = ArgTypes.size(); I < LeadCount; ++I) {
       if (!F->ParamTypeStamps[I]) {
         F->ParamTypeStamps[I] = TC.scalar(Dtype::Double);
         Stamped++;
