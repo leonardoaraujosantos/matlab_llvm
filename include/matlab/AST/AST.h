@@ -434,6 +434,16 @@ public:
   // the specialised arg types. Empty until the monomorphizer has run.
   std::vector<const Type *> ParamTypeStamps;
 
+  // Populated by the Sema-time monomorphizer (#40) when this is a
+  // per-arity clone of a callee invoked with fewer args than declared
+  // (MATLAB `nargin` semantics). Drives the `matlab.nargin_value` /
+  // `matlab.nargout_value` attributes the lowerer attaches to the
+  // func.func so `if nargin == N` branches fold per call-site arity.
+  // 0 means "unset — use the declared arity". The Cloner does NOT copy
+  // these; every clone starts fresh and growPlan sets them explicitly.
+  int NarginOverride = 0;
+  int NargoutOverride = 0;
+
   Function() : Node(NodeKind::Function) {}
 };
 

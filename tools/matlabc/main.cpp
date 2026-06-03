@@ -12897,7 +12897,7 @@ int main(int Argc, char **Argv) {
         Inf2.run(*TU);
       };
       MonomorphizeStats S =
-          runMonomorphize(*TU, Ctx, runSemaPass, /*MaxIters=*/8);
+          runMonomorphize(*TU, Ctx, TC, runSemaPass, /*MaxIters=*/8);
       dumpSema(std::cout, *TU);
       std::cout << "monomorphize: iterations=" << S.Iterations
                 << " clones=" << S.ClonesCreated
@@ -12983,7 +12983,7 @@ int main(int Argc, char **Argv) {
         Inf2.run(*TU);
         Inf2.run(*TU);
       };
-      (void)runMonomorphize(*TU, Ctx, runSemaPass, /*MaxIters=*/8);
+      (void)runMonomorphize(*TU, Ctx, TC, runSemaPass, /*MaxIters=*/8);
     }
   }
 
