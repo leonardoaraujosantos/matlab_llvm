@@ -7582,6 +7582,12 @@ double matlab_mod_s(double a, double b) {
     return r;
 }
 
+/* Element-wise logical AND / OR (#151): MATLAB `&` / `|` on equal-size
+ * matrices (or matrix·scalar) produce a 0/1 matrix, element by element. A
+ * value is "true" when nonzero. */
+double matlab_and_s(double a, double b) { return (a != 0.0 && b != 0.0) ? 1.0 : 0.0; }
+double matlab_or_s(double a, double b)  { return (a != 0.0 || b != 0.0) ? 1.0 : 0.0; }
+
 /* Element-wise mod / rem on matrices (mm = both matrices, ms = matrix·scalar,
  * sm = scalar·matrix). Each element goes through the scalar helper so the
  * MATLAB sign rules (mod follows the divisor, rem the dividend; both return
@@ -7607,6 +7613,8 @@ double matlab_mod_s(double a, double b) {
     }
 ELT_BINARY(mod, matlab_mod_s)
 ELT_BINARY(rem, matlab_rem_s)
+ELT_BINARY(and, matlab_and_s)
+ELT_BINARY(or,  matlab_or_s)
 #undef ELT_BINARY
 
 /* linspace(a, b, n): n points evenly spaced from a to b inclusive.

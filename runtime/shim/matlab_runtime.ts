@@ -2479,6 +2479,15 @@ export function mod_sm(s: number, A: any): NDArray { return eltBin([+s], A, mod_
 export function rem_mm(A: any, B: any): NDArray { return eltBin(A, B, rem_s); }
 export function rem_ms(A: any, s: number): NDArray { return eltBin(A, [+s], rem_s); }
 export function rem_sm(s: number, A: any): NDArray { return eltBin([+s], A, rem_s); }
+// Element-wise logical & / | on matrices (#151): nonzero is true, 0/1 result.
+function and_s(a: number, b: number): number { return (a !== 0 && b !== 0) ? 1 : 0; }
+function or_s(a: number, b: number): number { return (a !== 0 || b !== 0) ? 1 : 0; }
+export function and_mm(A: any, B: any): NDArray { return eltBin(A, B, and_s); }
+export function and_ms(A: any, s: number): NDArray { return eltBin(A, [+s], and_s); }
+export function and_sm(s: number, A: any): NDArray { return eltBin([+s], A, and_s); }
+export function or_mm(A: any, B: any): NDArray { return eltBin(A, B, or_s); }
+export function or_ms(A: any, s: number): NDArray { return eltBin(A, [+s], or_s); }
+export function or_sm(s: number, A: any): NDArray { return eltBin([+s], A, or_s); }
 
 // --- type coercions (scalar) ----------------------------------------------
 

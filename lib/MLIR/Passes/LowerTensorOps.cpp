@@ -8507,6 +8507,11 @@ bool TensorLowering::rewriteBinaryOps() {
     {"matlab.le",   "le"},
     {"matlab.eq",   "eq"},
     {"matlab.ne",   "ne"},
+    /* #151: element-wise logical & / | on matrices. Scalar-only operands are
+     * skipped below (`!AP && !BP`) and handled by LowerScalarsToArith as
+     * arith.andi/ori, so scalar `&`/`|` semantics are unchanged. */
+    {"matlab.and",  "and"},
+    {"matlab.or",   "or"},
   };
 
   SmallVector<Operation *> Binaries;

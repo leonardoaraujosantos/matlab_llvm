@@ -2268,6 +2268,13 @@ def mod_sm(s, A): return np.mod(float(s), _m(A))
 def rem_mm(A, B): return np.fmod(_m(A), _m(B))
 def rem_ms(A, s): return np.fmod(_m(A), float(s))
 def rem_sm(s, A): return np.fmod(float(s), _m(A))
+# Element-wise logical & / | on matrices (#151): nonzero is true, 0/1 result.
+def and_mm(A, B): return ((_m(A) != 0) & (_m(B) != 0)).astype(float)
+def and_ms(A, s): return ((_m(A) != 0) & (float(s) != 0)).astype(float)
+def and_sm(s, A): return ((float(s) != 0) & (_m(A) != 0)).astype(float)
+def or_mm(A, B): return ((_m(A) != 0) | (_m(B) != 0)).astype(float)
+def or_ms(A, s): return ((_m(A) != 0) | (float(s) != 0)).astype(float)
+def or_sm(s, A): return ((float(s) != 0) | (_m(A) != 0)).astype(float)
 
 
 # --- type coercions (scalar) ----------------------------------------------
