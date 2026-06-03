@@ -2254,10 +2254,10 @@ matlab_mat *matlab_unique(matlab_mat *A) {
     for (int64_t k = 0; k < total; ++k) {
         if (u == 0 || tmp[u - 1] != tmp[k]) tmp[u++] = tmp[k];
     }
-    /* Preserve column-vector shape when input was a column, otherwise
-     * return a row vector. MATLAB's default is column for all
-     * unique() results; we keep a column to match that. */
-    matlab_mat *R = mat_alloc(u, 1);
+    /* Match MATLAB orientation: a row-vector input yields a row vector;
+     * a column vector or matrix yields a column vector. */
+    int is_row = (A->rows == 1);
+    matlab_mat *R = is_row ? mat_alloc(1, u) : mat_alloc(u, 1);
     memcpy(R->data, tmp, (size_t)u * sizeof(double));
     free(tmp);
     return R;

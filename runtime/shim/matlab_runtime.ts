@@ -3964,7 +3964,10 @@ export function unique(A: any): NDArray {
   const set = new Set<number>();
   for (let i = 0; i < a.size; i++) set.add(a.data[i]);
   const arr = Array.from(set).sort((x, y) => x - y);
-  return new NDArray(Float64Array.from(arr), [arr.length, 1]);
+  // Match MATLAB orientation: a row-vector input yields a row vector;
+  // a column vector or matrix yields a column vector.
+  const isRow = a.shape[0] === 1;
+  return new NDArray(Float64Array.from(arr), isRow ? [1, arr.length] : [arr.length, 1]);
 }
 
 export function union(A: any, B: any): NDArray {

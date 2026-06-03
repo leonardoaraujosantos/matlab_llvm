@@ -2,7 +2,7 @@
 
 v = [3 1 4 1 5 9 2 6 5 3 5];
 disp(sort(v));               % [1 1 2 3 3 4 5 5 5 6 9]
-disp(unique(v));             % column: [1; 2; 3; 4; 5; 6; 9]
+disp(unique(v));             % row in -> row out: [1 2 3 4 5 6 9]
 
 A = [3 1; 1 2; 2 3];
 disp(sort(A));               % column-wise: [1 1; 2 2; 3 3]
