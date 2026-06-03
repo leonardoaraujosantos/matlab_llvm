@@ -206,6 +206,17 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
 
 ## Changelog
 
+- **2026-06-03 — #214 (⚠️ quarantined).** `comm/alamouti_diversity.m`
+  intermittently SIGSEGVs under the `-dap` JIT on Linux CI (a layout-sensitive
+  latent read; does not reproduce on macOS — 0/30 clean — and passes on most CI
+  runs). It recurred across *unrelated* PRs (#205 empty-concat merge and
+  #213/#185), forcing spurious gate re-runs; it was previously quarantined and
+  pruned 2026-06-01 (#77). Re-added to `test/Debug/jit_parity_known_issues.txt`
+  so it stops blocking unrelated PRs (a listed crash is tolerated; a passing run
+  is reported STALE, not a failure). CI-stability change only — no runtime/
+  compiler behavior change; root-cause tracked in #214 (needs Linux ASan on the
+  OFDM/fading/MIMO `-dap` path).
+
 - **2026-06-03 — #185 (✅ fixed).** `sum([])` / `mean([])` of an empty array
   diverged: the Python/TS shims returned `[]` and AOT `mean([])` returned `0`,
   vs MATLAB `sum([])==0`, `mean([])==NaN`. Fixed to MATLAB semantics with AOT/
