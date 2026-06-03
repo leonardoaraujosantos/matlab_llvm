@@ -3850,54 +3850,76 @@ void Lowerer::lowerStmt(const Stmt &St) {
      * runtime helper and store the shrunk result back into the base binding.
      * (matlab_erase_rows / matlab_erase_cols and the shim equivalents already
      * exist; they were simply never wired from lowering.) */
+    /* Element deletion by empty-assignment — `A(i,:)=[]` / `A(:,j)=[]` (2D,
+     * #189) and `x(idx)=[]` (vector linear, #188). Detect an empty matrix
+     * literal RHS with an indexed LHS and route to the erase/delete runtime
+     * helper, storing the shrunk result back into the base binding. Scoped to
+     * a scalar / `end` index (the dominant case): a vector or range index
+     * lowers to a matlab.range / matlab.concat_row operand that this call's
+     * operand match doesn't yet resolve here, so those forms fall through
+     * untouched (no regression) — tracked as the #188/#189 follow-up. */
     if (A.LHS.size() == 1 && A.LHS[0]) {
       auto *EmptyM = dynamic_cast<const MatrixLiteral *>(A.RHS);
       auto *CI = dynamic_cast<const CallOrIndex *>(A.LHS[0]);
-      if (EmptyM && EmptyM->Rows.empty() && CI && CI->Callee &&
-          CI->Args.size() == 2 && CI->Args[0] && CI->Args[1]) {
-        bool col0 = dynamic_cast<const ColonExpr *>(CI->Args[0]) != nullptr;
-        bool col1 = dynamic_cast<const ColonExpr *>(CI->Args[1]) != nullptr;
-        const Expr *IdxE = col1 ? CI->Args[0] : CI->Args[1];
-        /* Scoped to a scalar / `end` index (the dominant case). A vector or
-         * range index (`A(:,[1 3])=[]`, `A(:,1:2)=[]`) lowers to a
-         * matlab.range / matlab.concat_row operand that the erase call's
-         * operand match doesn't yet resolve in this path — tracked in #189.
-         * Restrict to literal-scalar / name / end / arithmetic index exprs so
-         * those vector/range forms fall through untouched (no regression). */
-        auto isScalarIdxExpr = [](const Expr *E) -> bool {
-          return E && (dynamic_cast<const IntegerLiteral *>(E) ||
-                       dynamic_cast<const NameExpr *>(E) ||
-                       dynamic_cast<const EndExpr *>(E) ||
-                       dynamic_cast<const BinaryOpExpr *>(E) ||
-                       dynamic_cast<const UnaryOpExpr *>(E));
+      auto isScalarIdxExpr = [](const Expr *E) -> bool {
+        return E && (dynamic_cast<const IntegerLiteral *>(E) ||
+                     dynamic_cast<const NameExpr *>(E) ||
+                     dynamic_cast<const EndExpr *>(E) ||
+                     dynamic_cast<const BinaryOpExpr *>(E) ||
+                     dynamic_cast<const UnaryOpExpr *>(E)) &&
+               !dynamic_cast<const MatrixLiteral *>(E) &&
+               !dynamic_cast<const RangeExpr *>(E);
+      };
+      if (EmptyM && EmptyM->Rows.empty() && CI && CI->Callee) {
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        auto F64 = mlir::Float64Type::get(&MCtx);
+        /* Helper: box a scalar f64 index to a 1×1 matrix, run `fn(base, idx)`,
+         * and store the shrunk result back into the base binding. */
+        auto emitDelete = [&](mlir::Value Base, mlir::Value Idx,
+                              const char *fn) {
+          if (Base.getType() != PtrTy) Base.setType(PtrTy);
+          mlir::NamedAttribute BoxCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_mat_from_scalar"));
+          Idx = emitUnreg("matlab.call_builtin", {Idx}, PtrTy, loc(A.Range),
+                          {BoxCal});
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, fn));
+          mlir::Value Res = emitUnreg("matlab.call_builtin", {Base, Idx},
+                                      PtrTy, loc(A.Range), {Cal});
+          lowerLValueStore(*CI->Callee, Res);
         };
-        if (col0 != col1 && isScalarIdxExpr(IdxE) &&
-            !dynamic_cast<const MatrixLiteral *>(IdxE) &&
-            !dynamic_cast<const RangeExpr *>(IdxE)) {
-          auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
-          auto F64 = mlir::Float64Type::get(&MCtx);
+        /* Vector form: x(idx) = []  (#188) */
+        if (CI->Args.size() == 1 && CI->Args[0] &&
+            isScalarIdxExpr(CI->Args[0])) {
           mlir::Value Base = lowerExpr(*CI->Callee);
           if (Base.getType() != PtrTy) Base.setType(PtrTy);
-          int64_t EndDim = col1 ? 1 : 2; // dim indexed: 1=rows, 2=cols (for `end`)
-          SubscriptCtx.push_back({Base, EndDim});
-          mlir::Value Idx = lowerExpr(*IdxE);
+          SubscriptCtx.push_back({Base, 0}); // dim 0 → numel for `end`
+          mlir::Value Idx = lowerExpr(*CI->Args[0]);
           SubscriptCtx.pop_back();
-          /* Only proceed for a scalar (f64) index; a name bound to a vector
-           * yields a ptr/tensor we don't handle here — fall through. */
           if (Idx.getType() == F64) {
-            mlir::NamedAttribute BoxCal(
-                mlir::StringAttr::get(&MCtx, "callee"),
-                mlir::StringAttr::get(&MCtx, "matlab_mat_from_scalar"));
-            Idx = emitUnreg("matlab.call_builtin", {Idx}, PtrTy, loc(A.Range),
-                            {BoxCal});
-            mlir::NamedAttribute Cal(
-                mlir::StringAttr::get(&MCtx, "callee"),
-                mlir::StringAttr::get(&MCtx,
-                    col1 ? "matlab_erase_rows" : "matlab_erase_cols"));
-            mlir::Value Res = emitUnreg("matlab.call_builtin", {Base, Idx},
-                                        PtrTy, loc(A.Range), {Cal});
-            lowerLValueStore(*CI->Callee, Res);
+            emitDelete(Base, Idx, "matlab_delete_lin");
             return;
+          }
+        }
+        /* 2D row/column form: A(i,:) = [] / A(:,j) = []  (#189) */
+        if (CI->Args.size() == 2 && CI->Args[0] && CI->Args[1]) {
+          bool col0 = dynamic_cast<const ColonExpr *>(CI->Args[0]) != nullptr;
+          bool col1 = dynamic_cast<const ColonExpr *>(CI->Args[1]) != nullptr;
+          const Expr *IdxE = col1 ? CI->Args[0] : CI->Args[1];
+          if (col0 != col1 && isScalarIdxExpr(IdxE)) {
+            mlir::Value Base = lowerExpr(*CI->Callee);
+            if (Base.getType() != PtrTy) Base.setType(PtrTy);
+            int64_t EndDim = col1 ? 1 : 2; // 1=rows, 2=cols (for `end`)
+            SubscriptCtx.push_back({Base, EndDim});
+            mlir::Value Idx = lowerExpr(*IdxE);
+            SubscriptCtx.pop_back();
+            if (Idx.getType() == F64) {
+              emitDelete(Base, Idx,
+                         col1 ? "matlab_erase_rows" : "matlab_erase_cols");
+              return;
+            }
           }
         }
       }

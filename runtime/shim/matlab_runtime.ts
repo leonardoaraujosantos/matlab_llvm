@@ -2414,6 +2414,17 @@ export function erase_cols(A: any, cols: any): NDArray {
   return new NDArray(out, [a.rows, keep.length]);
 }
 
+// Vector element deletion x(idx)=[]: remove 1-based linear positions,
+// preserving orientation (column stays column, else row).
+export function delete_lin(A: any, idx: any): NDArray {
+  const a = asArray(A);
+  const drop = new Set(Array.from(asArray(idx).data, (v) => (v | 0) - 1));
+  const kept: number[] = [];
+  for (let i = 0; i < a.size; i++) if (!drop.has(i)) kept.push(a.data[i]);
+  const isCol = a.cols === 1 && a.rows > 1;
+  return new NDArray(Float64Array.from(kept), isCol ? [kept.length, 1] : [1, kept.length]);
+}
+
 // --- scalar math ----------------------------------------------------------
 
 export function exp_s(x: number): number { return Math.exp(+x); }

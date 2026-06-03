@@ -2211,6 +2211,19 @@ def erase_cols(A, cols):
     return _m(A)[:, mask]
 
 
+def delete_lin(A, idx):
+    # Vector element deletion x(idx)=[]: remove 1-based linear positions,
+    # preserving orientation (column stays column, else row).
+    a = _m(A)
+    flat = a.flatten(order='F')
+    p = _m(idx).flatten(order='F').astype(int) - 1
+    mask = np.ones(flat.size, dtype=bool)
+    mask[p] = False
+    kept = flat[mask]
+    is_col = a.ndim >= 2 and a.shape[1] == 1 and a.shape[0] > 1
+    return kept.reshape((-1, 1)) if is_col else kept.reshape((1, -1))
+
+
 # --- scalar math ----------------------------------------------------------
 
 def exp_s(x): return math.exp(float(x))

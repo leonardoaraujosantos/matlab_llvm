@@ -206,6 +206,19 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
 
 ## Changelog
 
+- **2026-06-03 — #188 (✅ partial).** Vector element deletion `x(idx) = []`
+  was a silent no-op. Added a runtime `matlab_delete_lin(A, idx)` (orientation-
+  preserving: a row stays a row, a column stays a column) + Python/TS shim
+  `delete_lin`, and extended the `AssignStmt` empty-RHS path (shared with #189)
+  to route a single-subscript LHS to it. Scoped to **scalar / `end` / variable
+  index** (`x(2)=[]`, `x(end)=[]`, `x(k)=[]` — the "remove/pop one element"
+  idioms). Range / vector-list / logical-mask indices (`x(2:3)=[]`,
+  `x([2 4])=[]`, `x(x>3)=[]`) still fall through untouched — they need the
+  index operand to be materialised the way `matlab.subscript` does (a shared
+  blocker with the #189 follow-up), tracked on #188. Regression
+  `test/Run/regress_delete_vector.m` (mid/`end`/variable/column; verified no-op
+  without the fix; runs on all backends).
+
 - **2026-06-03 — #189 (✅ fixed).** 2D row/column deletion `A(i,:) = []` /
   `A(:,j) = []` was a silent no-op. The runtime `matlab_erase_rows` /
   `matlab_erase_cols` (and the Python/TS shim equivalents) already existed but
