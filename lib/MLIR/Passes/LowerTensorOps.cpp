@@ -1073,7 +1073,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
       continue;
     }
     if ((Name == "startsWith" || Name == "endsWith" ||
-         Name == "contains") && Call->getNumOperands() == 2 &&
+         Name == "contains" || Name == "strcmp" ||
+         Name == "strcmpi") && Call->getNumOperands() == 2 &&
         Call->getNumResults() == 1 &&
         Call->getOperand(0).getType() == PtrTy &&
         Call->getOperand(1).getType() == PtrTy) {

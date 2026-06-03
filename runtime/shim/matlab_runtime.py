@@ -3585,6 +3585,8 @@ def lower(s): return str(s).lower()
 def upper(s): return str(s).upper()
 def strrep(s, old, new): return str(s).replace(str(old), str(new))
 def contains(s, pat): return 1.0 if str(pat) in str(s) else 0.0
+def strcmp(a, b): return 1.0 if str(a) == str(b) else 0.0
+def strcmpi(a, b): return 1.0 if str(a).lower() == str(b).lower() else 0.0
 def startsWith(s, pat): return 1.0 if str(s).startswith(str(pat)) else 0.0
 def endsWith(s, pat): return 1.0 if str(s).endswith(str(pat)) else 0.0
 def num2str(v): return f"{float(v):g}"

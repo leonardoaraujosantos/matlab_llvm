@@ -218,6 +218,19 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
   (reduced to `sum()` scalars; verified to produce `9/18/9/19/...` without the
   fix). The explicit-`logical(...)`-variable index path (`__subscript_store`
   compile error) is a separate follow-up noted on #144.
+- **2026-06-02 — #146 (✅ fixed).** `strcmp` / `strcmpi` were unimplemented
+  (`undefined name`), so any program using them failed to compile. Wired them
+  into the existing string-predicate family: added to the Resolver builtin
+  list, extended the `contains`/`startsWith` lowering arm (2 string operands →
+  F64), and added `matlab_strcmp` / `matlab_strcmpi` runtime fns (return **1.0
+  if equal**, MATLAB sense — opposite of C; strcmpi case-insensitive) plus the
+  python/ts shims. Regression `test/Run/regress_strcmp.m` (verified to fail
+  with `undefined name 'strcmp'` without the fix; runs on all backends — no
+  disp-formatting divergence). Two related pre-existing bugs found and filed
+  separately: `isequal` returns 0 for equal strings (#147), and
+  `if <string-predicate>(a,b)` directly as a condition fails to lower (#148,
+  family-wide; workaround `== 1`). Single-quoted char-array args remain the
+  same family-wide limitation.
 - **2026-06-02 — #136 (✅ fixed).** `end` in single-subscript indexing resolved
   to `size(base, dim)` with `dim` = the 1-based subscript position, so a lone
   subscript used `dim=1` (row count). For a row vector that is `1`, not `numel`,
