@@ -2182,6 +2182,7 @@ export function isequal(A: any, B: any): number {
     return 1;
   } catch { return 0; }
 }
+export function isequal_2s(a: number, b: number): number { return +a === +b ? 1 : 0; }
 
 // --- subscripting (1-indexed, MATLAB convention) --------------------------
 

@@ -3137,6 +3137,10 @@ double matlab_isequal(matlab_mat *A, matlab_mat *B) {
     return 1.0;
 }
 
+/* isequal(a, b) with two scalar args (#155). Genuinely scalar, so returns
+ * a bare f64 (unlike max/min, which return 1x1 to flow through matrix ops). */
+double matlab_isequal_2s(double a, double b) { return a == b ? 1.0 : 0.0; }
+
 /*---------- Matrix power -------------------------------------------------
  * matlab_matpow(A, n) = A^n for integer n. Uses repeated multiplication,
  * with inv(A) for negative n. Non-integer n falls back to A * A scaled

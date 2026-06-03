@@ -216,6 +216,14 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
   string vars, numeric arrays; verified to return `0` for equal strings
   without the fix; runs on all backends). The two-scalar form
   `isequal(5,5)` is a separate pre-existing `ff`-shape gap (#155).
+- **2026-06-02 — #155 (✅ fixed).** `isequal(a,b)` with two scalar args failed
+  (`unsupported call shape`): the pde_table had `isequal` only as `pp` (two
+  matrix ptrs). Added an `ff` (two-scalar) entry → `matlab_isequal_2s`
+  (returns a bare f64 0/1; isequal of scalars is genuinely scalar, so unlike
+  max/min #153 it doesn't need a 1×1 ptr) + python/ts shims. Matrix `isequal`
+  unaffected. Regression `test/Run/regress_isequal_two_scalars.m` (verified
+  `unsupported call shape` without the fix; runs on all backends).
+
 - **2026-06-02 — #148 (✅ fixed).** An F64-returning string predicate
   (`contains` / `startsWith` / `endsWith` / `strcmp` / ...) used **directly**
   as an `if`/`while` condition failed to lower (`unrealized_conversion_cast`

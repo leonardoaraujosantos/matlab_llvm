@@ -7140,6 +7140,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
        * dedicated splitter above. */
       {"bode_tf",    "matlab_bode_tf_mag",1, "ppp"},
       {"isequal",    "matlab_isequal",    0, "pp"},
+      {"isequal",    "matlab_isequal_2s", 0, "ff"},  /* isequal(a,b) two scalars */
       {"size",       "matlab_size_dim",   0, "pf"},   /* size(A, dim) */
       {"find",       "matlab_find",       1, "p"},
       {"matlab_empty_mat", "matlab_empty_mat", 1, ""},

@@ -2066,6 +2066,8 @@ def isequal(A, B):
     try: return 1.0 if np.array_equal(_m(A), _m(B)) else 0.0
     except Exception: return 0.0
 
+def isequal_2s(a, b): return 1.0 if float(a) == float(b) else 0.0
+
 
 # --- subscripting ---------------------------------------------------------
 
