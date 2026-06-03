@@ -206,6 +206,17 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
 
 ## Changelog
 
+- **2026-06-03 — #208 (✅ fixed).** `fprintf` with no value arguments printed
+  `%%` literally instead of a single `%` (`fprintf('50%%')` → `50%%`). The no-arg
+  path `matlab_fprintf_str` runs `expand_escapes` (which keeps `%%` so the
+  value-bearing paths' C `printf` can collapse it) and then writes via `fputs`,
+  which does not interpret `%%`. Collapse `%%` → `%` in that path before
+  writing. Value-bearing `fprintf` (C `printf`) and the Python/TS shims already
+  handled it. Regression `test/Run/regress_fprintf_pct.m` (no-arg `%%`, multiple
+  `%%`, `%%%%`, value-path `%%`, plain text; printed `%%` without the fix; runs
+  on all backends). Filed #209 for the separate `%c` conversion (prints the
+  number, not the character).
+
 - **2026-06-03 — #206 (✅ fixed).** A string element of a cell array retrieved
   via `c{i}` came back as numeric char codes — `c={"a","b"}; disp(c{1})` printed
   `97`. String elements are stored as `matlab_string*` (kind=3), but the brace-

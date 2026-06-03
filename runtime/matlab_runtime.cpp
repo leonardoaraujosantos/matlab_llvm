@@ -251,8 +251,18 @@ void matlab_fprintf_str(const char *fmt, int64_t n) {
     char buf[1024];
     int64_t len = expand_escapes(buf, fmt, n);
     buf[len] = '\0';
+    /* expand_escapes keeps `%%` as `%%` so the value-bearing paths' C printf
+     * can collapse it; this no-arg path writes via fputs, which does not, so
+     * collapse `%%` -> `%` here (MATLAB: fprintf('50%%') prints 50%). #208 */
+    char out[1024];
+    int64_t w = 0;
+    for (int64_t i = 0; i < len && w < 1023; ++i) {
+        if (buf[i] == '%' && i + 1 < len && buf[i + 1] == '%') { out[w++] = '%'; ++i; }
+        else out[w++] = buf[i];
+    }
+    out[w] = '\0';
     pthread_mutex_lock(&matlab_io_mutex);
-    fputs(buf, stdout);
+    fputs(out, stdout);
     pthread_mutex_unlock(&matlab_io_mutex);
 }
 
