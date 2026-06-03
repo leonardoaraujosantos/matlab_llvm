@@ -206,6 +206,17 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
 
 ## Changelog
 
+- **2026-06-03 — #152 (✅ fixed).** A scalar logical / comparison result
+  displayed as `-1` instead of `1`: `disp(5>0)`, `disp(1|0)`, `disp(~0)` all
+  printed `-1`. The LowerIO scalar-disp path widened an integer disp arg with
+  `SIToFP`, switching to `UIToFP` only on an explicit `matlab.unsigned` tag —
+  which an **i1 logical never carries**, so its `true` bit sign-extended to
+  `-1.0`. An i1 is always a 0/1 logical, so it now zero-extends (`UIToFP`)
+  unconditionally; wider ints keep the tag heuristic. Regression
+  `test/Run/regress_logical_scalar_disp.m` (logical + comparison ops; verified
+  `-1` without the fix; runs on all backends). The related case of a logical
+  result *used in arithmetic* (`x=1|0; x+10` → unconverted `matlab.add`) is a
+  separate lowering gap, filed as #161.
 - **2026-06-02 — #147 (✅ fixed).** `isequal` on two **string** operands
   returned `0` even when equal: `matlab_isequal` reads `rows`/`cols`/`data`
   off its args as `matlab_mat*`, but a `matlab_string` has a different layout,
