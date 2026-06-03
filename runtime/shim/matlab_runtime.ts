@@ -3851,8 +3851,9 @@ export function sprintf_f64(fmt: string, v: number): string {
 // --- concat ---------------------------------------------------------------
 
 export function horzcat(...args: any[]): NDArray {
-  if (args.length === 0) return np.zeros(0, 0);
-  const arrs = args.map(asArray);
+  // MATLAB drops empty operands in concatenation ([[] X] == X). (#204)
+  const arrs = args.map(asArray).filter((a) => a.size > 0);
+  if (arrs.length === 0) return np.zeros(0, 0);
   const m = arrs[0].rows;
   const n = arrs.reduce((s, a) => s + a.cols, 0);
   const out = new Float64Array(m * n);
@@ -3866,8 +3867,8 @@ export function horzcat(...args: any[]): NDArray {
 }
 
 export function vertcat(...args: any[]): NDArray {
-  if (args.length === 0) return np.zeros(0, 0);
-  const arrs = args.map(asArray);
+  const arrs = args.map(asArray).filter((a) => a.size > 0);
+  if (arrs.length === 0) return np.zeros(0, 0);
   const n = arrs[0].cols;
   const m = arrs.reduce((s, a) => s + a.rows, 0);
   const out = new Float64Array(m * n);

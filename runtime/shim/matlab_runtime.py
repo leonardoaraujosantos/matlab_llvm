@@ -3676,11 +3676,14 @@ def unique(A):
 # --- concat ---------------------------------------------------------------
 
 def horzcat(*args):
-    return np.hstack([_m(a) for a in args]) if args else np.zeros((0, 0))
+    # MATLAB drops empty operands in concatenation ([[] X] == X). (#204)
+    parts = [m for m in (_m(a) for a in args) if m.size > 0]
+    return np.hstack(parts) if parts else np.zeros((0, 0))
 
 
 def vertcat(*args):
-    return np.vstack([_m(a) for a in args]) if args else np.zeros((0, 0))
+    parts = [m for m in (_m(a) for a in args) if m.size > 0]
+    return np.vstack(parts) if parts else np.zeros((0, 0))
 
 
 def flip(A): return np.flip(_m(A))
