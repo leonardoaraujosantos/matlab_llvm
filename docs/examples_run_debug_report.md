@@ -217,6 +217,17 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
   `-1` without the fix; runs on all backends). The related case of a logical
   result *used in arithmetic* (`x=1|0; x+10` → unconverted `matlab.add`) is a
   separate lowering gap, filed as #161.
+- **2026-06-03 — #161 (✅ fixed).** A scalar logical / comparison result (an
+  i1) used in arithmetic failed to lower — `x=1|0; x+10`, `(5>0)*3`, `(5>0)/2`
+  left the `matlab.add`/`sub`/`matmul`/`matdiv` unconverted (i1 operand
+  mismatched the f64 other operand). MATLAB promotes a logical to double in
+  arithmetic, so a new `promoteLogicalArith` helper widens an i1 operand to
+  f64 (UIToFP — 0/1) when the other operand/result is float or both are
+  logical, applied in `BinArithToArith` (+/-/.*/./), `ScalarMatMulToMulf`
+  (`*`), and `ScalarMatDivToDivf` (`/`). Plain numeric arithmetic unaffected.
+  Regression `test/Run/regress_logical_in_arithmetic.m` (verified unconverted
+  ops without the fix; runs on all backends). Companion to #152 (the disp
+  analog).
 - **2026-06-02 — #147 (✅ fixed).** `isequal` on two **string** operands
   returned `0` even when equal: `matlab_isequal` reads `rows`/`cols`/`data`
   off its args as `matlab_mat*`, but a `matlab_string` has a different layout,

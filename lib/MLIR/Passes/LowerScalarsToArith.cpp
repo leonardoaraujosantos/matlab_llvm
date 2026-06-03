@@ -34,6 +34,31 @@ bool isScalarInt(mlir::Type T) {
   return mlir::isa<mlir::IntegerType>(T);
 }
 
+/// #161: a logical (i1) operand promotes to double in arithmetic — `true +
+/// 10 == 11`, `(5>0)*3 == 3`. When an arithmetic op has an i1 operand and the
+/// other operand/result is a float (or both operands are logical), widen the
+/// i1 to f64 with UIToFP (the logical is 0/1, never a signed -1) and report
+/// f64 as the unified type. Without this the i1/f64 type mismatch left the
+/// matlab.add/sub/mul/matmul/matdiv unconverted. Returns true if it changed an
+/// operand (updating `A`/`B`/`Ty`). (#152 was the disp analog.)
+static bool promoteLogicalArith(mlir::Value &A, mlir::Value &B, mlir::Type &Ty,
+                                mlir::PatternRewriter &R, mlir::Location Loc) {
+  auto isI1 = [](mlir::Value V) {
+    auto IT = mlir::dyn_cast<mlir::IntegerType>(V.getType());
+    return (bool)IT && IT.getWidth() == 1;
+  };
+  bool aI1 = isI1(A), bI1 = isI1(B);
+  if (!aI1 && !bI1) return false;
+  bool anyFloat = isScalarFloat(A.getType()) || isScalarFloat(B.getType()) ||
+                  isScalarFloat(Ty);
+  if (!(anyFloat || (aI1 && bI1))) return false;
+  auto F64 = R.getF64Type();
+  if (aI1) A = mlir::arith::UIToFPOp::create(R, Loc, F64, A);
+  if (bI1) B = mlir::arith::UIToFPOp::create(R, Loc, F64, B);
+  Ty = F64;
+  return true;
+}
+
 /// Shared helper for matching an unregistered matlab.* op by name and
 /// asserting a single-result, N-operand scalar shape.
 struct NameMatch : public mlir::RewritePattern {
@@ -387,6 +412,7 @@ struct BinArithToArith : public NameMatch {
     // bitop rewrite).
     mlir::Type Ty = Op->getResult(0).getType();
     if (mlir::isa<mlir::NoneType>(Ty)) Ty = A.getType();
+    promoteLogicalArith(A, B, Ty, R, Op->getLoc());  // #161
     // Tier-5c — fi-math width equaliser. The HDL emit path
     // routes function args through pragma-driven i32 typing and
     // persistent fetches through f64→fptosi→i32→extsi→i64 (the
@@ -762,6 +788,7 @@ struct ScalarMatMulToMulf : public NameMatch {
     mlir::Value A = Op->getOperand(0);
     mlir::Value B = Op->getOperand(1);
     mlir::Type Ty = Op->getResult(0).getType();
+    promoteLogicalArith(A, B, Ty, R, Op->getLoc());  // #161
     // Original strict path: result type must already match both
     // operands. Common after the user-call refinement loop.
     if (A.getType() == Ty && B.getType() == Ty) {
@@ -804,6 +831,8 @@ struct ScalarMatDivToDivf : public NameMatch {
     mlir::Value A = Op->getOperand(0);
     mlir::Value B = Op->getOperand(1);
     mlir::Type Ty = Op->getResult(0).getType();
+    if (mlir::isa<mlir::NoneType>(Ty)) Ty = A.getType();
+    promoteLogicalArith(A, B, Ty, R, Op->getLoc());  // #161
     if (A.getType() != Ty || B.getType() != Ty) return mlir::failure();
     if (isScalarFloat(Ty)) {
       R.replaceOpWithNewOp<mlir::arith::DivFOp>(Op, A, B);
