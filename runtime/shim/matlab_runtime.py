@@ -2258,7 +2258,7 @@ def mod_s(a, b):
     return float(a) - b * math.floor(float(a) / b)
 def rem_s(a, b):
     b = float(b)
-    if b == 0: return float(a)
+    if b == 0: return float('nan')   # MATLAB: rem(a,0) == NaN
     return float(a) - b * math.trunc(float(a) / b)
 # Element-wise mod/rem on matrices (#171). numpy mod matches MATLAB's mod
 # (sign of divisor); rem uses fmod (sign of dividend).

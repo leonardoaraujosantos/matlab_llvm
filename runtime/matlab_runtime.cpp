@@ -7562,7 +7562,7 @@ double matlab_atan2d_s(double y, double x) {
 /* MATLAB `mod(a,b)`: result has same sign as b (or 0). `rem(a,b)`: sign
  * of a. C's fmod uses sign-of-a, so fmod == rem; derive mod from that. */
 double matlab_rem_s(double a, double b) {
-    if (b == 0.0) return a;            /* MATLAB: rem(a,0) == a */
+    if (b == 0.0) return NAN;          /* MATLAB: rem(a,0) == NaN */
     return fmod(a, b);
 }
 double matlab_mod_s(double a, double b) {
