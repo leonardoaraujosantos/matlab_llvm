@@ -668,6 +668,10 @@ private:
    * matrix (the ptr is reinterpreted as a scalar). Mirrors the
    * MatStructFields trick for struct fields. */
   std::map<Binding *, std::set<int64_t>> CellMatElems;
+  /* Total element count of a cell-literal binding — lets a bare-`end` brace
+   * read `c{end}` (effective index = count) consult CellMatElems for the
+   * last element's matrix-ness. */
+  std::map<Binding *, int64_t> CellElemCount;
   /* (struct binding, field name) pairs assigned a matrix value, so a later
    * read `s.field` fetches via matlab_struct_get_mat (ptr) instead of
    * defaulting to get_f64 — Sema can't specialise through struct fields, so
@@ -3718,6 +3722,7 @@ void Lowerer::lowerStmt(const Stmt &St) {
         }
       };
       std::set<int64_t> MatIdx;
+      int64_t elemCount = 0;
       if (auto *CL = dynamic_cast<const CellLiteral *>(A.RHS)) {
         int64_t lin = 1;
         for (const auto &Row : CL->Rows)
@@ -3725,6 +3730,7 @@ void Lowerer::lowerStmt(const Stmt &St) {
             if (elemIsPtrStored(El)) MatIdx.insert(lin);
             ++lin;
           }
+        elemCount = lin - 1;
       }
       for (const Expr *L : A.LHS)
         if (auto *N = dynamic_cast<const NameExpr *>(L))
@@ -3732,6 +3738,7 @@ void Lowerer::lowerStmt(const Stmt &St) {
             CellBindings.insert(N->Ref);
             if (!MatIdx.empty()) CellMatElems[N->Ref] = MatIdx;
             else CellMatElems.erase(N->Ref);
+            if (elemCount > 0) CellElemCount[N->Ref] = elemCount;
           }
     }
     if (RhsIsDict) {
@@ -5356,12 +5363,21 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     // so this path is really only reachable for weird IR.
     if (!SubscriptCtx.empty()) {
       auto [Base, Dim] = SubscriptCtx.back();
+      auto F64End = mlir::Float64Type::get(&MCtx);
+      // Sentinel dim -1: the base is a cell, so `end` (in `c{end}`) is
+      // numel(cell) via matlab_cell_numel — matlab_end_of_dim would misread
+      // the cell descriptor as a matlab_mat.
+      if (Dim == -1) {
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_cell_numel"));
+        return emitUnreg("matlab.call_builtin", {Base}, F64End, L, {Cal});
+      }
       mlir::NamedAttribute VA(
           mlir::StringAttr::get(&MCtx, "value"),
-          mlir::FloatAttr::get(mlir::Float64Type::get(&MCtx),
-                                (double)Dim));
+          mlir::FloatAttr::get(F64End, (double)Dim));
       mlir::Value DimV = emitUnreg("matlab.const_float", {},
-                                   mlir::Float64Type::get(&MCtx), L, {VA});
+                                   F64End, L, {VA});
       return emitUnreg("matlab.end", {Base, DimV}, RT, L);
     }
     return emitUnreg("matlab.end", {}, RT, L);
@@ -13814,18 +13830,28 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
       if (auto *NE = dynamic_cast<const NameExpr *>(C.Callee))
         if (NE->Ref) {
           auto It = CellMatElems.find(NE->Ref);
-          if (It != CellMatElems.end())
+          if (It != CellMatElems.end()) {
             if (auto *IL = dynamic_cast<const IntegerLiteral *>(C.Args[0])) {
               int64_t k = 0;
               auto Txt = std::string(IL->Text);
               try { k = std::stoll(Txt); } catch (...) { k = 0; }
               if (k > 0 && It->second.count(k)) WantMat = true;
+            } else if (dynamic_cast<const EndExpr *>(C.Args[0])) {
+              // bare `c{end}` — effective index is the element count.
+              auto Cnt = CellElemCount.find(NE->Ref);
+              if (Cnt != CellElemCount.end() && It->second.count(Cnt->second))
+                WantMat = true;
             }
+          }
         }
     }
     mlir::Type ResTy = WantMat ? (mlir::Type)PtrTy : (mlir::Type)F64;
     if (C.Args.size() == 1) {
+      // Push a cell-numel sentinel (dim -1) so `end` in `c{end}` resolves to
+      // matlab_cell_numel(c) rather than emitting a bare matlab.end.
+      if (Arr) SubscriptCtx.push_back({Arr, -1});
       mlir::Value Idx = lowerExpr(*C.Args[0]);
+      if (Arr) SubscriptCtx.pop_back();
       llvm::StringRef Callee = WantMat ? "matlab_cell_get_mat"
                                         : "matlab_cell_get_f64";
       mlir::NamedAttribute Cal(
