@@ -206,6 +206,14 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
 
 ## Changelog
 
+- **2026-06-03 — #169 (✅ fixed).** `num2str` of a vector/matrix failed with
+  "unsupported call shape" — only the scalar f64 form was wired. Added a
+  ptr-operand path → `matlab_num2str_mat` ("%g" per element, two spaces
+  between row elements, newline between rows) + the python/ts shims. Scalar
+  `num2str` unaffected. Regression `test/Run/regress_num2str_matrix.m`
+  (row vector, decimals, char-concat label idiom; verified `unsupported call
+  shape` without the fix; runs on all backends).
+
 - **2026-06-03 — #165 (✅ fixed).** Indexing a vector with a **same-length**
   index list returned the original order — `v(end:-1:1)` (reverse) and
   `v([3 2 1])` (reorder) both gave `[v]` unchanged. `matlab_slice1` (and the

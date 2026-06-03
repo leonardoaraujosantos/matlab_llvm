@@ -13316,6 +13316,28 @@ matlab_string *matlab_num2str(double v) {
     return matlab_string_from_literal(buf, (int64_t)n);
 }
 
+/* num2str of a matrix / vector. Each element is "%g"-formatted; elements on a
+ * row are separated by two spaces (MATLAB pads to a common width — we use a
+ * fixed 2-space separator, which matches MATLAB's default for simple values),
+ * rows by '\n'. A 1x1 matrix matches the scalar form. */
+matlab_string *matlab_num2str_mat(matlab_mat *A) {
+    if (!A) return matlab_string_from_literal("", 0);
+    int64_t m = A->rows, n = A->cols;
+    /* Format every element first so we can size the buffer. */
+    std::string out;
+    for (int64_t i = 0; i < m; ++i) {
+        for (int64_t j = 0; j < n; ++j) {
+            char buf[64];
+            int k = snprintf(buf, sizeof buf, "%g", A->data[i * n + j]);
+            if (k < 0) k = 0;
+            if (j) out += "  ";
+            out.append(buf, (size_t)k);
+        }
+        if (i + 1 < m) out += '\n';
+    }
+    return matlab_string_from_literal(out.c_str(), (int64_t)out.size());
+}
+
 double matlab_str2double(matlab_string *s) {
     if (!s || !s->data) return 0.0 / 0.0; /* NaN */
     char *end = NULL;

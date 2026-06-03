@@ -3605,6 +3605,11 @@ def strcmpi(a, b): return 1.0 if str(a).lower() == str(b).lower() else 0.0
 def startsWith(s, pat): return 1.0 if str(s).startswith(str(pat)) else 0.0
 def endsWith(s, pat): return 1.0 if str(s).endswith(str(pat)) else 0.0
 def num2str(v): return f"{float(v):g}"
+def num2str_mat(A):
+    a = _m(A)
+    if a.ndim < 2:
+        a = a.reshape(1, -1)
+    return "\n".join("  ".join(f"{float(x):g}" for x in row) for row in a)
 def str2double(s):
     try: return float(s)
     except Exception: return float('nan')
