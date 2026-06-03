@@ -1875,6 +1875,7 @@ def add_mm(A, B): return _m(A) + _m(B)
 def sub_mm(A, B): return _m(A) - _m(B)
 def emul_mm(A, B): return _m(A) * _m(B)
 def ediv_mm(A, B): return _m(A) / _m(B)
+def pow_scalar(a, b): return float(a) ** float(b)
 def epow_mm(A, B): return _m(A) ** _m(B)
 
 def add_ms(A, s): return _m(A) + float(s)

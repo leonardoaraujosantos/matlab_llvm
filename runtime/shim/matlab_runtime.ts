@@ -1883,6 +1883,7 @@ export function add_mm(A: any, B: any): NDArray { return asArray(A).add(asArray(
 export function sub_mm(A: any, B: any): NDArray { return asArray(A).sub(asArray(B)); }
 export function emul_mm(A: any, B: any): NDArray { return asArray(A).mul(asArray(B)); }
 export function ediv_mm(A: any, B: any): NDArray { return asArray(A).div(asArray(B)); }
+export function pow_scalar(a: number, b: number): number { return Math.pow(+a, +b); }
 export function epow_mm(A: any, B: any): NDArray { return asArray(A).pow(asArray(B)); }
 
 export function add_ms(A: any, s: number): NDArray { return asArray(A).add(+s); }

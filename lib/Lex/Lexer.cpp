@@ -194,8 +194,15 @@ Token Lexer::lexNumber(uint32_t Begin) {
       IsFloat = true;
       ++Pos;
       while (!eof() && std::isdigit((unsigned char)peek())) ++Pos;
-    } else if (peek() == '.' && !isIdentStart(peek(1)) && peek(1) != '.') {
-      // "3." with no fractional digits is still a float (MATLAB allows this)
+    } else if (peek() == '.' && !isIdentStart(peek(1)) && peek(1) != '.' &&
+               peek(1) != '^' && peek(1) != '*' && peek(1) != '/' &&
+               peek(1) != '\\' && peek(1) != '\'') {
+      // "3." with no fractional digits is still a float (MATLAB allows this).
+      // BUT if the '.' is immediately followed by an operator char, it begins
+      // a dotted operator (.^ .* ./ .\ .') — e.g. `2.^x` is `2 .^ x`, not
+      // `2. ^ x`. Stop the number before the '.' in that case so the dotted
+      // operator tokenizes correctly (`2.^[1 2 3]` was mis-lexed as a float
+      // `2.` then matrix-power `^`, which has no scalar^matrix lowering).
       IsFloat = true;
       ++Pos;
     }
