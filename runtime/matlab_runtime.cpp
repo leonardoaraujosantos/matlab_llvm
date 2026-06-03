@@ -7499,6 +7499,8 @@ CMP_MM(ne, !=) CMP_MS(ne, !=) CMP_SM(ne, !=)
     }
 
 UNARY_M(neg,  -x)
+/* Element-wise logical NOT `~` (#200): nonzero -> 0, zero -> 1. */
+UNARY_M(not,  (x != 0.0 ? 0.0 : 1.0))
 UNARY_M(exp,  exp(x))
 UNARY_M(log,  log(x))
 UNARY_M(sin,  sin(x))

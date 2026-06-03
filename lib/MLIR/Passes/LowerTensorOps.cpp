@@ -158,6 +158,7 @@ private:
 
   // --- Unary neg on tensor ----------------------------------------------
   bool rewriteUnaryNeg();
+  bool rewriteLogicalNot();
 
   // --- matlab.range -----------------------------------------------------
   // Lowers a:b or a:step:b to a matlab_range runtime call returning a ptr.
@@ -8736,6 +8737,31 @@ bool TensorLowering::rewriteUnaryNeg() {
   return Changed;
 }
 
+/* #200: element-wise logical NOT `~` on a matrix operand. Mirrors
+ * rewriteUnaryNeg — routes a ptr-operand matlab.not to matlab_not_m. A scalar
+ * `~` has a non-ptr operand and is left for LowerScalarsToArith (NotToArith),
+ * so scalar semantics are unchanged. */
+bool TensorLowering::rewriteLogicalNot() {
+  SmallVector<Operation *> Ops;
+  Mod.walk([&](Operation *Op) {
+    if (isMatlabOp(Op, "matlab.not") && Op->getNumOperands() == 1 &&
+        Op->getOperand(0).getType() == PtrTy)
+      Ops.push_back(Op);
+  });
+  bool Changed = false;
+  for (Operation *Op : Ops) {
+    B.setInsertionPoint(Op);
+    auto Fn = rt("matlab_not_m", PtrTy, {PtrTy});
+    auto NC = LLVM::CallOp::create(B, Op->getLoc(), Fn,
+                                    ValueRange{Op->getOperand(0)});
+    carryName(Op, NC);
+    Op->getResult(0).replaceAllUsesWith(NC.getResult());
+    Op->erase();
+    Changed = true;
+  }
+  return Changed;
+}
+
 bool TensorLowering::rewriteRange() {
   SmallVector<Operation *> Ranges;
   Mod.walk([&](Operation *Op) {
@@ -9299,6 +9325,7 @@ bool TensorLowering::run() {
     Changed |= rewriteBinaryOps();
     Changed |= rewritePostfix();
     Changed |= rewriteUnaryNeg();
+    Changed |= rewriteLogicalNot();
     Changed |= rewriteRange();
     Changed |= rewriteSubscript();
     Changed |= rewriteSubscriptStore();

@@ -206,6 +206,19 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
 
 ## Changelog
 
+- **2026-06-03 — #200 (✅ fixed).** Element-wise logical NOT `~` on a vector
+  or matrix collapsed the whole operand to a single scalar truth value
+  (`~[1 0 2 0]` returned scalar `1`) — the unary sibling of #151. `matlab.not`
+  always lowered via `NotToArith` in `LowerScalarsToArith`, whose `coerceToI1`
+  reduces a ptr (matrix) operand to one truth via `matlab_mat_truth`. Added a
+  `rewriteLogicalNot` in `LowerTensorOps` (mirroring `rewriteUnaryNeg`) routing
+  a ptr-operand `matlab.not` to a new element-wise `matlab_not_m` (0→1,
+  nonzero→0); it runs before `LowerScalarsToArith`, so scalar `~` (and `if ~x`)
+  is unchanged. Registered in EmitC + Python/TS shims. dlnet AOT 70/0, `-dap`
+  parity GATE OK. Regression `test/Run/regress_elementwise_not.m` (vector /
+  column / matrix / scalar / combined with `&`; fails to compile without the
+  fix — the collapsed scalar can't be indexed; runs on all backends).
+
 - **2026-06-03 — #151 (✅ fixed).** Element-wise logical `&` / `|` on
   vectors/matrices collapsed both operands to a single scalar truth value
   (`[1 0 1 0] & [1 1 0 0]` returned a scalar `0`). The operators always lowered
