@@ -309,7 +309,9 @@ def _fmt_vec(fmt, vals, kinds, n):
                 elif conv in 'eEfFgG':
                     spec = '%' + (flags or '') + (width or '') + (('.' + prec) if prec else '') + conv
                     out.append(spec % (0.0 if is_str else float(val)))
-                elif conv in 'sc':
+                elif conv == 'c':   # character: numeric -> chr(value) (#209)
+                    out.append(str(val) if is_str else chr(int(round(float(val)))))
+                elif conv == 's':
                     if is_str:
                         spec = '%' + (flags or '') + (width or '') + (('.' + prec) if prec else '') + 's'
                         out.append(spec % str(val))

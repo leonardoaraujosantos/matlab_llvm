@@ -339,7 +339,12 @@ static void matlab_fmt_vec_core(std::string &out, const char *fmt, int64_t fmtn,
             memcpy(spec, ebuf + k, (size_t)sl); spec[sl] = '\0';
             const Tok &t = toks[ti++];
             char tmp[1200];
-            if (conv == 's' || conv == 'c') {
+            if (conv == 'c') {
+                /* %c emits the character: a numeric token becomes char(value),
+                 * a string token emits its text (matches MATLAB). #209 */
+                if (t.isStr) out.append(t.s, (size_t)t.slen);
+                else out.push_back((char)(long long)(t.num));
+            } else if (conv == 's') {
                 if (t.isStr) out.append(t.s, (size_t)t.slen);
                 else { snprintf(tmp, sizeof tmp, "%g", t.num); out.append(tmp); }
             } else if (conv == 'x' || conv == 'X' || conv == 'o') {

@@ -206,6 +206,16 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
 
 ## Changelog
 
+- **2026-06-03 — #209 (✅ fixed).** `fprintf`/`sprintf` `%c` printed the numeric
+  value instead of the character (`fprintf('%c',65)` → `65`). In the shared
+  format core (`matlab_fmt_vec_core`) `%c` was grouped with `%s` and a numeric
+  token was formatted as `%g`. Split `%c` out to emit `char(value)` for a
+  numeric token (string token emits its text). Mirrored in the Python/TS shim
+  `_fmt_vec`/`_fmtVec` (same grouping bug). `%s` and the integer/float specs
+  are unaffected. Regression `test/Run/regress_fprintf_c.m` (scalar, multi,
+  mixed with `%d`, vector recycling, `%s` alongside; printed numbers without the
+  fix; runs on all backends).
+
 - **2026-06-03 — #208 (✅ fixed).** `fprintf` with no value arguments printed
   `%%` literally instead of a single `%` (`fprintf('50%%')` → `50%%`). The no-arg
   path `matlab_fprintf_str` runs `expand_escapes` (which keeps `%%` so the
