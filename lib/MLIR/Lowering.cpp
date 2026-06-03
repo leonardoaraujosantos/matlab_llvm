@@ -1908,6 +1908,20 @@ void Lowerer::lowerFunction(const Function &F, mlir::ModuleOp M,
    * a valid identifier in C / C++ output. */
   for (char &ch : FnName) if (ch == '.') ch = '_';
   auto Fn = mlir::func::FuncOp::create(loc(F.Range), FnName, FnTy);
+  /* #40 Class 2/3: a per-arity / per-nargout clone produced by the
+   * Sema-time monomorphizer carries an override so `runLowerNarginNargout`
+   * folds the body's nargin / nargout to this call site's value (matching
+   * what the late MLIR mono used to stamp). 0 means "unset". */
+  if (F.NarginOverride > 0) {
+    auto I64 = mlir::IntegerType::get(&MCtx, 64);
+    Fn->setAttr("matlab.nargin_value",
+                mlir::IntegerAttr::get(I64, (int64_t)F.NarginOverride));
+  }
+  if (F.NargoutOverride > 0) {
+    auto I64 = mlir::IntegerType::get(&MCtx, 64);
+    Fn->setAttr("matlab.nargout_value",
+                mlir::IntegerAttr::get(I64, (int64_t)F.NargoutOverride));
+  }
   /* Attach class-method metadata so the C++ emitter can reconstruct
    * idiomatic class{...}; blocks. These attributes are discardable
    * from a verifier perspective and ignored by the plain C backend. */

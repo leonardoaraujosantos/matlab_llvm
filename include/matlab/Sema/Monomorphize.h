@@ -34,6 +34,7 @@ namespace matlab {
 
 class TranslationUnit;
 class ASTContext;
+class TypeContext;
 
 struct MonomorphizeStats {
   int Iterations = 0;        // number of fixpoint iterations actually run
@@ -45,6 +46,7 @@ struct MonomorphizeStats {
 MonomorphizeStats runMonomorphize(
     TranslationUnit &TU,
     ASTContext &Ctx,
+    TypeContext &TC,
     const std::function<void()> &runSemaPass,
     int MaxIters = 8);
 

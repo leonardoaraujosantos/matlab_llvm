@@ -95,8 +95,11 @@ int growPlan(TranslationUnit &TU, ASTContext &Ctx, ClonePlan &Plan) {
         Function *CalleeRoot = rootOf(Plan, &F);
         Function *CallerRoot = Caller ? rootOf(Plan, Caller) : nullptr;
         bool Recursive = (CallerRoot == CalleeRoot);
-        if (C.Args.size() != CalleeRoot->Inputs.size())
-          SkipRoot.insert(CalleeRoot);
+        // #40 Class 2: arity-varying callees (call args < declared,
+        // MATLAB nargin semantics) are now absorbed Sema-side via
+        // per-arity clones carrying NarginOverride — no longer deferred
+        // to the late MLIR mono. Variadic callees (varargin/varargout)
+        // still defer (Class 3, handled below).
         if (!CalleeRoot->Outputs.empty() &&
             CalleeRoot->Outputs.back() == "varargout")
           SkipRoot.insert(CalleeRoot);
@@ -136,21 +139,44 @@ int growPlan(TranslationUnit &TU, ASTContext &Ctx, ClonePlan &Plan) {
     if (Bucket.size() <= 1) continue; // monomorphic
 
     SignatureToName &Table = Plan.ByRoot[Root];
+    size_t DeclArity = Root->Inputs.size();
+    bool IsVariadic =
+        !Root->Inputs.empty() && Root->Inputs.back() == "varargin";
+    // #40 Class 2: when a callee is invoked at several arities, keep the
+    // declared-arity signature on the original Function* (canonical) and
+    // make the reduced-arity ones clones carrying a NarginOverride. Order
+    // the bucket so a full-arity sig is named first and claims suffix 0.
+    std::vector<const CallSignature *> Order;
+    Order.reserve(Bucket.size());
+    for (const CallSignature &Sig : Bucket) Order.push_back(&Sig);
+    std::stable_sort(Order.begin(), Order.end(),
+        [&](const CallSignature *A, const CallSignature *B) {
+          return (A->size() == DeclArity) && (B->size() != DeclArity);
+        });
     int NextSuffix = static_cast<int>(Table.size()); // 0 means "canonical name"
-    for (const CallSignature &Sig : Bucket) {
+    for (const CallSignature *SigP : Order) {
+      const CallSignature &Sig = *SigP;
       if (Table.count(Sig)) continue; // already named
       std::string Name;
+      Function *Target;
       if (NextSuffix == 0) {
         // Canonical signature — keeps the root's original name. Do NOT
         // clone; the original Function* is reused for this signature.
         Name = std::string(Root->Name);
+        Target = Root;
       } else {
         Name = std::string(Root->Name) + "__s" + std::to_string(NextSuffix);
         Function *Clone = cloneFunction(Ctx, *Root, Name);
         TU.Functions.push_back(Clone);
         Plan.CloneToRoot[Clone] = Root;
         NewClones++;
+        Target = Clone;
       }
+      // Reduced-arity (non-variadic) call shape: record the per-call-site
+      // nargin so the lowerer emits matlab.nargin_value and the body's
+      // `if nargin == N` branches fold for this specialisation.
+      if (!IsVariadic && Sig.size() < DeclArity)
+        Target->NarginOverride = static_cast<int>(Sig.size());
       Table[Sig] = std::move(Name);
       NextSuffix++;
     }
@@ -195,22 +221,20 @@ int applyPlan(TranslationUnit &TU, ASTContext &Ctx, const ClonePlan &Plan) {
 // Post-mono, every call site of F shares the same signature — picking
 // any call site's ArgTypes is sufficient. Returns the number of stamp
 // slots that actually changed (so the driver can detect a fixpoint).
-int stampSignatureTypes(TranslationUnit &TU) {
+int stampSignatureTypes(TranslationUnit &TU, TypeContext &TC) {
   // Pre-scan: collect Functions to skip entirely. These are the
-  // ones whose signature shape the late MLIR machinery owns —
-  // varargin / varargout / any call site with arity != declared. A
-  // single arity-mismatched site is enough to disqualify the
-  // function from being stamped (the late `runMonomorphiseUserCalls`
-  // would need its declared `none` params to dispatch per-arity via
-  // LowerNarginNargout; stamping just the matching-arity sites
-  // would freeze the signature before the late pass can clone).
+  // ones whose signature shape the late MLIR machinery still owns —
+  // varargin / varargout (#40 Class 3, not yet absorbed). Arity-
+  // varying callees (#40 Class 2) are NO LONGER skipped: growPlan now
+  // produces per-arity clones, and the reduced-arity clones stamp just
+  // their supplied prefix (the trailing dead params settle to f64 via
+  // RefineFuncSigs after the call site is padded by nargin_value).
   std::set<Function *> Skip;
-  walkUserCalls(TU, [&](CallOrIndex &C, NameExpr & /*N*/, Function &F) {
+  walkUserCalls(TU, [&](CallOrIndex & /*C*/, NameExpr & /*N*/, Function &F) {
     if (!F.Outputs.empty() && F.Outputs.back() == "varargout")
       Skip.insert(&F);
     if (!F.Inputs.empty() && F.Inputs.back() == "varargin")
       Skip.insert(&F);
-    if (C.Args.size() != F.Inputs.size()) Skip.insert(&F);
   });
 
   std::map<Function *, std::vector<const Type *>> ChosenSigs;
@@ -224,7 +248,10 @@ int stampSignatureTypes(TranslationUnit &TU) {
   for (auto &KV : ChosenSigs) {
     Function *F = KV.first;
     const auto &ArgTypes = KV.second;
-    if (F->ParamRefs.size() != ArgTypes.size()) continue;
+    // Reduced-arity clones supply fewer args than declared params — stamp
+    // just the supplied prefix. Only bail when there are MORE args than
+    // params (a user error the resolver already flags).
+    if (ArgTypes.size() > F->ParamRefs.size()) continue;
     // Resize stamps vector to match arity; fresh entries start null.
     if (F->ParamTypeStamps.size() != F->Inputs.size())
       F->ParamTypeStamps.assign(F->Inputs.size(), nullptr);
@@ -263,6 +290,18 @@ int stampSignatureTypes(TranslationUnit &TU) {
       F->ParamTypeStamps[I] = NewT;
       Stamped++;
     }
+    // #40 Class 2: a reduced-arity clone's trailing params receive no
+    // call-site arg. Pad them to scalar double (mirrors the late mono's
+    // f64 padding of dead trailing params) so a body branch guarded by
+    // `if nargin == N` that references them — dead for this arity but
+    // still type-checked by TypeInference — doesn't poison the result
+    // type with `none`.
+    for (size_t I = ArgTypes.size(); I < F->ParamTypeStamps.size(); ++I) {
+      if (!F->ParamTypeStamps[I]) {
+        F->ParamTypeStamps[I] = TC.scalar(Dtype::Double);
+        Stamped++;
+      }
+    }
   }
   return Stamped;
 }
@@ -270,7 +309,7 @@ int stampSignatureTypes(TranslationUnit &TU) {
 } // namespace
 
 MonomorphizeStats runMonomorphize(
-    TranslationUnit &TU, ASTContext &Ctx,
+    TranslationUnit &TU, ASTContext &Ctx, TypeContext &TC,
     const std::function<void()> &runSemaPass, int MaxIters) {
   MonomorphizeStats Stats;
   ClonePlan Plan;
@@ -298,7 +337,7 @@ MonomorphizeStats runMonomorphize(
     // honors a pre-existing concrete InferredType on each param
     // binding (see TypeInference.cpp's param-init branch), so body
     // expressions refine under the stamped arg types.
-    int Stamped = stampSignatureTypes(TU);
+    int Stamped = stampSignatureTypes(TU, TC);
     if (Stamped > 0) {
       ChangedThisIter = true;
       // Refresh body types so the stamped params propagate through
