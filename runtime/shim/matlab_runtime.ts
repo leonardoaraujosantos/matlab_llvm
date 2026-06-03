@@ -1937,6 +1937,18 @@ export function le_sm(s: number, A: any): NDArray { return asArray(A).ge(+s); }
 export function eq_sm(s: number, A: any): NDArray { return asArray(A).eq(+s); }
 export function ne_sm(s: number, A: any): NDArray { return asArray(A).ne(+s); }
 
+// MATLAB `if M` truthiness: 1 iff M is non-empty AND every element is
+// non-zero, else 0. Mirrors the C runtime's matlab_mat_truth and the Python
+// shim's mat_truth — emitted by the matrix-valued if/while condition
+// lowering (#120) for both the LLVM lane (via fixupIfCond) and the
+// transpiled backends.
+export function mat_truth(A: any): number {
+  const a = asArray(A);
+  if (a.data.length === 0) return 0;
+  for (let i = 0; i < a.data.length; i++) if (a.data[i] === 0) return 0;
+  return 1;
+}
+
 // --- elementwise unary ops -------------------------------------------------
 
 export function neg_m(A: any): NDArray { return asArray(A).neg(); }
