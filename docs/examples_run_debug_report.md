@@ -206,6 +206,15 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
 
 ## Changelog
 
+- **2026-06-03 — #194 (✅ fixed).** `rem(x,0)` returned `x` instead of `NaN`
+  (MATLAB). `matlab_rem_s` had `if (b==0) return a;` with a comment wrongly
+  citing the rule as rem's — it is `mod`'s (`mod(x,0)==x`, which stays correct).
+  All matrix forms route through the scalar helper, so the one-line fix (return
+  `NaN`) covers them; the Python/TS shim `rem_s` got the same guard. Regression
+  `test/Run/regress_rem_zero.m` (scalar/negative/matrix rem-by-zero detected via
+  `r==r` being false for NaN; nonzero-divisor rem and `mod(x,0)` unchanged;
+  verified to return `x` without the fix; runs on all backends).
+
 - **2026-06-03 — #188 (✅ partial).** Vector element deletion `x(idx) = []`
   was a silent no-op. Added a runtime `matlab_delete_lin(A, idx)` (orientation-
   preserving: a row stays a row, a column stays a column) + Python/TS shim

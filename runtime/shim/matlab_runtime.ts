@@ -2461,7 +2461,7 @@ export function mod_s(a: number, b: number): number {
 }
 export function rem_s(a: number, b: number): number {
   const bn = +b;
-  if (bn === 0) return +a;
+  if (bn === 0) return NaN;   // MATLAB: rem(a,0) == NaN
   return +a - bn * Math.trunc(+a / bn);
 }
 // Element-wise mod/rem on matrices (#171), each element via the scalar helper.
