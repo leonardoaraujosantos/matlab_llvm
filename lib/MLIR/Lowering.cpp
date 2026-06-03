@@ -3844,6 +3844,64 @@ void Lowerer::lowerStmt(const Stmt &St) {
         }
       }
     }
+    /* #189: 2D row/column deletion — `A(i,:) = []` / `A(:,j) = []`. When the
+     * RHS is an empty matrix literal and the LHS is a 2-subscript with a
+     * ColonExpr in exactly one position, erase the indexed rows/cols via the
+     * runtime helper and store the shrunk result back into the base binding.
+     * (matlab_erase_rows / matlab_erase_cols and the shim equivalents already
+     * exist; they were simply never wired from lowering.) */
+    if (A.LHS.size() == 1 && A.LHS[0]) {
+      auto *EmptyM = dynamic_cast<const MatrixLiteral *>(A.RHS);
+      auto *CI = dynamic_cast<const CallOrIndex *>(A.LHS[0]);
+      if (EmptyM && EmptyM->Rows.empty() && CI && CI->Callee &&
+          CI->Args.size() == 2 && CI->Args[0] && CI->Args[1]) {
+        bool col0 = dynamic_cast<const ColonExpr *>(CI->Args[0]) != nullptr;
+        bool col1 = dynamic_cast<const ColonExpr *>(CI->Args[1]) != nullptr;
+        const Expr *IdxE = col1 ? CI->Args[0] : CI->Args[1];
+        /* Scoped to a scalar / `end` index (the dominant case). A vector or
+         * range index (`A(:,[1 3])=[]`, `A(:,1:2)=[]`) lowers to a
+         * matlab.range / matlab.concat_row operand that the erase call's
+         * operand match doesn't yet resolve in this path — tracked in #189.
+         * Restrict to literal-scalar / name / end / arithmetic index exprs so
+         * those vector/range forms fall through untouched (no regression). */
+        auto isScalarIdxExpr = [](const Expr *E) -> bool {
+          return E && (dynamic_cast<const IntegerLiteral *>(E) ||
+                       dynamic_cast<const NameExpr *>(E) ||
+                       dynamic_cast<const EndExpr *>(E) ||
+                       dynamic_cast<const BinaryOpExpr *>(E) ||
+                       dynamic_cast<const UnaryOpExpr *>(E));
+        };
+        if (col0 != col1 && isScalarIdxExpr(IdxE) &&
+            !dynamic_cast<const MatrixLiteral *>(IdxE) &&
+            !dynamic_cast<const RangeExpr *>(IdxE)) {
+          auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+          auto F64 = mlir::Float64Type::get(&MCtx);
+          mlir::Value Base = lowerExpr(*CI->Callee);
+          if (Base.getType() != PtrTy) Base.setType(PtrTy);
+          int64_t EndDim = col1 ? 1 : 2; // dim indexed: 1=rows, 2=cols (for `end`)
+          SubscriptCtx.push_back({Base, EndDim});
+          mlir::Value Idx = lowerExpr(*IdxE);
+          SubscriptCtx.pop_back();
+          /* Only proceed for a scalar (f64) index; a name bound to a vector
+           * yields a ptr/tensor we don't handle here — fall through. */
+          if (Idx.getType() == F64) {
+            mlir::NamedAttribute BoxCal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_mat_from_scalar"));
+            Idx = emitUnreg("matlab.call_builtin", {Idx}, PtrTy, loc(A.Range),
+                            {BoxCal});
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx,
+                    col1 ? "matlab_erase_rows" : "matlab_erase_cols"));
+            mlir::Value Res = emitUnreg("matlab.call_builtin", {Base, Idx},
+                                        PtrTy, loc(A.Range), {Cal});
+            lowerLValueStore(*CI->Callee, Res);
+            return;
+          }
+        }
+      }
+    }
     /* Phase 3: when the RHS is a value-class binding (`b = a`), clone
      * the underlying matlab_obj before the store so b owns its own
      * fields. Method-call returns are already fresh, so we only clone
