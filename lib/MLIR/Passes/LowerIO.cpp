@@ -185,9 +185,14 @@ LogicalResult rewriteDispCall(Operation *Call, OpBuilder &B,
   // for uint8 / uint16 / ... casts) so a saturated 0xFF doesn't render
   // as signed -1; otherwise stay with the signed path.
   if (auto IT = mlir::dyn_cast<IntegerType>(Arg.getType())) {
-    bool IsUns = false;
-    if (auto *D = Arg.getDefiningOp())
-      IsUns = (bool)D->getAttr("matlab.unsigned");
+    // #152: an i1 is a MATLAB logical (0/1), never a signed -1. Zero-extend
+    // it (UIToFP) so `disp(5>0)` / `disp(1|0)` print 1, not -1 (SIToFP would
+    // sign-extend the true bit to -1.0). Wider ints keep the unsigned-tag
+    // heuristic.
+    bool IsUns = IT.getWidth() == 1;
+    if (!IsUns)
+      if (auto *D = Arg.getDefiningOp())
+        IsUns = (bool)D->getAttr("matlab.unsigned");
     Value AsF64 = IsUns
         ? (Value)arith::UIToFPOp::create(B, Call->getLoc(), F64, Arg)
         : (Value)arith::SIToFPOp::create(B, Call->getLoc(), F64, Arg);

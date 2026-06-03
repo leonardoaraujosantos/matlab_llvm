@@ -29,4 +29,4 @@ peak = passivity(mdl, 1.0e7, 1.0e10);
 disp(peak);
 % peak > 1 → not passive in the strict sense, but the test just
 % reports the magnitude; the passivity decision is caller-side.
-disp(peak > 1.0);   % -1 (true)
+disp(peak > 1.0);   % 1 (true)
