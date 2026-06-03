@@ -424,7 +424,7 @@ flowchart TB
 |---|---|---|
 | `MATLAB_LLVM_WITH_MLIR` | ON | Builds matlabc + the MLIR/LLVM lowering passes (off → frontend-only build, runtime unit tests still work) |
 | `MATLAB_LLVM_WITH_SYM` | OFF | Links `runtime_sym.cpp` and pulls SymPP / GMP / MPFR — enables Symbolic Math Toolbox |
-| `MATLAB_LLVM_WITH_PLOT` | OFF | Links `runtime/plot/*.cpp` and pulls Cairo / FreeType — enables headless plotting |
+| `MATLAB_LLVM_WITH_PLOT` | ON | Links `runtime/plot/*.cpp` and pulls Cairo / FreeType — enables headless plotting (and VideoWriter via FFmpeg; see `MATLAB_LLVM_WITH_PLOT_FFMPEG`) |
 | `MATLAB_LLVM_RUNTIME_ASAN` | OFF | Adds ASan+UBSan to runtime-test-* targets |
 | `MATLAB_LLVM_COVERAGE` | OFF | Adds gcov instrumentation |
 

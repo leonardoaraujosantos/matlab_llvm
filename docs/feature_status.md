@@ -22,8 +22,9 @@ Out of scope:
 In scope (subsets shipped, covered by dedicated docs):
 - **Plotting**: headless Cairo-backed `plot` / `bar` / `surf` / etc. with
   PNG/SVG/PDF output, plus `getframe` + `VideoWriter` animation capture to
-  MP4 (H.264) / AVI (MJPEG) via libav, opt-in behind
-  `-DMATLAB_LLVM_WITH_PLOT_FFMPEG=ON`. See [`plotting.md`](plotting.md).
+  MP4 (H.264) / AVI (MJPEG) via libav, on by default within a `WITH_PLOT`
+  build (opt out with `-DMATLAB_LLVM_WITH_PLOT_FFMPEG=OFF`). See
+  [`plotting.md`](plotting.md).
 - **Toolboxes (thirteen shipped surfaces)** — earlier revisions of this
   doc listed toolboxes as out of scope; that scope has expanded. The
   runtime now ships practical subsets of:

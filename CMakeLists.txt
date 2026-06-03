@@ -60,11 +60,13 @@ if(MATLAB_LLVM_WITH_SYM)
 endif()
 
 # --- Plotting (Cairo backend) ----------------------------------------------
-# Off by default; turn on with -DMATLAB_LLVM_WITH_PLOT=ON. Adds runtime
-# plotting symbols (matlab_plot, matlab_figure, matlab_savefig, ...) backed
-# by Cairo's image/svg/pdf surfaces. Headless: no subprocess, no display
-# server, no temp files. Cross-platform target: macOS, Linux, iOS.
-option(MATLAB_LLVM_WITH_PLOT "Enable matlab_plot runtime (Cairo backend)" OFF)
+# On by default. Adds runtime plotting symbols (matlab_plot, matlab_figure,
+# matlab_savefig, ...) backed by Cairo's image/svg/pdf surfaces. Headless:
+# no subprocess, no display server, no temp files. Cross-platform target:
+# macOS, Linux, iOS. Cairo dev headers are a hard dependency (resolved via
+# pkg-config below); turn the whole runtime off with
+# -DMATLAB_LLVM_WITH_PLOT=OFF to build on a host without them.
+option(MATLAB_LLVM_WITH_PLOT "Enable matlab_plot runtime (Cairo backend)" ON)
 if(MATLAB_LLVM_WITH_PLOT)
   find_package(PkgConfig REQUIRED)
   # Cairo headers are required at compile time for the type declarations
@@ -91,13 +93,15 @@ if(MATLAB_LLVM_WITH_PLOT)
   set(MATLAB_PLOT_LIBS "")
 
   # --- Video export (FFmpeg / libav) ---------------------------------------
-  # Optional, off by default. When on, VideoWriter encodes H.264 (MP4) and
-  # Motion JPEG (AVI) in-process via libav. Requires the FFmpeg dev
-  # libraries (libavcodec/libavformat/libavutil/libswscale). Without this
-  # flag the plot runtime still builds; VideoWriter just reports that
-  # video support is disabled.
+  # On by default (within a WITH_PLOT build). VideoWriter encodes H.264
+  # (MP4) and Motion JPEG (AVI) in-process via libav, so the FFmpeg dev
+  # libraries (libavcodec/libavformat/libavutil/libswscale) become a hard
+  # dependency of the plot runtime — same posture as Cairo above. Turn it
+  # off with -DMATLAB_LLVM_WITH_PLOT_FFMPEG=OFF to build the plot runtime
+  # without video on a host that lacks the FFmpeg dev libraries; in that
+  # case VideoWriter reports that video support is disabled at runtime.
   option(MATLAB_LLVM_WITH_PLOT_FFMPEG
-         "Enable VideoWriter video export via libav (needs FFmpeg dev libs)" OFF)
+         "Enable VideoWriter video export via libav (needs FFmpeg dev libs)" ON)
   if(MATLAB_LLVM_WITH_PLOT_FFMPEG)
     pkg_check_modules(LIBAV REQUIRED
       libavcodec libavformat libavutil libswscale)
