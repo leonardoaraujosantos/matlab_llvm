@@ -1,0 +1,1 @@
+sum/matmul-scalar disp formatting diverges in python/ts shims; the mod/rem matrix fix itself works there — values match — validated exactly on LLVM/C/C++

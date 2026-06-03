@@ -6977,7 +6977,13 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"linspace",   "matlab_linspace",   1, "fff"},
       {"logspace",   "matlab_logspace",   1, "fff"},
       {"mod",        "matlab_mod_s",      0, "ff"},
+      {"mod",        "matlab_mod_mm",     1, "pp"},  /* element-wise mod */
+      {"mod",        "matlab_mod_ms",     1, "pf"},
+      {"mod",        "matlab_mod_sm",     1, "fp"},
       {"rem",        "matlab_rem_s",      0, "ff"},
+      {"rem",        "matlab_rem_mm",     1, "pp"},  /* element-wise rem */
+      {"rem",        "matlab_rem_ms",     1, "pf"},
+      {"rem",        "matlab_rem_sm",     1, "fp"},
       {"atan2",      "matlab_atan2_m",    1, "pp"},
       {"inv",        "matlab_inv",        1, "p"},
       {"det",        "matlab_det",        0, "p"},

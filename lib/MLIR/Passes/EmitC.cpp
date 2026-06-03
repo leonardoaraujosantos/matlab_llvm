@@ -1789,6 +1789,8 @@ static llvm::StringRef MatrixReturningFns[] = {
     "matlab_min_mm", "matlab_max_mm",
     "matlab_min_2s", "matlab_max_2s", "matlab_min_ms", "matlab_max_ms",
     "matlab_min_sm", "matlab_max_sm",
+    "matlab_mod_mm", "matlab_mod_ms", "matlab_mod_sm",
+    "matlab_rem_mm", "matlab_rem_ms", "matlab_rem_sm",
     "matlab_sum_dim", "matlab_prod_dim", "matlab_mean_dim",
     "matlab_min_dim", "matlab_max_dim",
     "matlab_cumsum", "matlab_cumprod",

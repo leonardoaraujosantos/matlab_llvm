@@ -224,6 +224,15 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
   `num2str` unaffected. Regression `test/Run/regress_num2str_matrix.m`
   (row vector, decimals, char-concat label idiom; verified `unsupported call
   shape` without the fix; runs on all backends).
+- **2026-06-03 — #171 (✅ fixed).** `mod` / `rem` of a vector/matrix failed
+  with "unsupported call shape" — only the two-scalar form was wired. Added
+  element-wise `_mm` / `_ms` / `_sm` variants (each element through the scalar
+  `matlab_mod_s` / `matlab_rem_s`, so the MATLAB sign rules — mod follows the
+  divisor, rem the dividend — are preserved) via an `ELT_BINARY` macro, the
+  `pp`/`pf`/`fp` pde_table entries, and the python/ts shims. Two-scalar
+  mod/rem unaffected. Regression `test/Run/regress_mod_rem_matrix.m`
+  (vec/scalar, scalar/vec, vec/vec, negative sign rules; verified `unsupported
+  call shape` without the fix).
 
 - **2026-06-03 — #165 (✅ fixed).** Indexing a vector with a **same-length**
   index list returned the original order — `v(end:-1:1)` (reverse) and

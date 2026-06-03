@@ -2440,6 +2440,21 @@ export function rem_s(a: number, b: number): number {
   if (bn === 0) return +a;
   return +a - bn * Math.trunc(+a / bn);
 }
+// Element-wise mod/rem on matrices (#171), each element via the scalar helper.
+function eltBin(A: any, B: any, f: (x: number, y: number) => number): NDArray {
+  const a = asArray(A); const b = asArray(B);
+  const n = Math.max(a.size, b.size);
+  const out = new Float64Array(n);
+  for (let k = 0; k < n; k++) out[k] = f(a.data[a.size === 1 ? 0 : k], b.data[b.size === 1 ? 0 : k]);
+  const shape = a.size >= b.size ? a.shape.slice() : b.shape.slice();
+  return new NDArray(out, shape);
+}
+export function mod_mm(A: any, B: any): NDArray { return eltBin(A, B, mod_s); }
+export function mod_ms(A: any, s: number): NDArray { return eltBin(A, [+s], mod_s); }
+export function mod_sm(s: number, A: any): NDArray { return eltBin([+s], A, mod_s); }
+export function rem_mm(A: any, B: any): NDArray { return eltBin(A, B, rem_s); }
+export function rem_ms(A: any, s: number): NDArray { return eltBin(A, [+s], rem_s); }
+export function rem_sm(s: number, A: any): NDArray { return eltBin([+s], A, rem_s); }
 
 // --- type coercions (scalar) ----------------------------------------------
 

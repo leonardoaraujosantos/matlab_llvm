@@ -2246,6 +2246,14 @@ def rem_s(a, b):
     b = float(b)
     if b == 0: return float(a)
     return float(a) - b * math.trunc(float(a) / b)
+# Element-wise mod/rem on matrices (#171). numpy mod matches MATLAB's mod
+# (sign of divisor); rem uses fmod (sign of dividend).
+def mod_mm(A, B): return np.mod(_m(A), _m(B))
+def mod_ms(A, s): return np.mod(_m(A), float(s))
+def mod_sm(s, A): return np.mod(float(s), _m(A))
+def rem_mm(A, B): return np.fmod(_m(A), _m(B))
+def rem_ms(A, s): return np.fmod(_m(A), float(s))
+def rem_sm(s, A): return np.fmod(float(s), _m(A))
 
 
 # --- type coercions (scalar) ----------------------------------------------
