@@ -206,6 +206,23 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
 
 ## Changelog
 
+- **2026-06-03 — #151 (✅ fixed).** Element-wise logical `&` / `|` on
+  vectors/matrices collapsed both operands to a single scalar truth value
+  (`[1 0 1 0] & [1 1 0 0]` returned a scalar `0`). The operators always lowered
+  via `LowerScalarsToArith` (`arith.andi`/`ori` after coercing each operand to
+  i1). Added `matlab.and`/`matlab.or` to the `LowerTensorOps` `rewriteBinaryOps`
+  `ElemSpecs` table so **matrix** operands route to new element-wise runtime
+  helpers `matlab_and_mm/_ms/_sm` + `matlab_or_mm/_ms/_sm` (0/1 result); scalar
+  operands fall through the `!AP && !BP` guard and keep their `arith` lowering,
+  so scalar `&`/`|` (and `if a & b`) are unchanged. Mirrored in EmitC and the
+  Python/TS shims. **Previously blocked on #40** (the dlnet prelude had `&`/`|`
+  on unrefined tensor operands that mis-routed); now that #40/#162 landed, the
+  dlnet operands are scalar-typed and skip the new path — dlnet AOT 70/0, `-dap`
+  parity GATE OK, REPL 15/0 all clean. Regression
+  `test/Run/regress_elementwise_logical.m` (vector &/|, matrix·scalar,
+  matrix·matrix, scalar unchanged; fails to compile without the fix — the
+  collapsed scalar can't be indexed; runs on all backends).
+
 - **2026-06-03 — #196 (✅ fixed).** `sort` left NaN values unsorted in place;
   MATLAB sorts NaN to the **end** in both ascending and descending order. The
   comparators `cmp_double_asc`/`_desc` used `(da>db)-(da<db)` (every NaN
