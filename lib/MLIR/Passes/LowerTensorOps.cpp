@@ -1127,6 +1127,23 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Changed = true;
       continue;
     }
+    /* num2str(matrix/vector) — ptr operand → matlab_num2str_mat (space-
+     * separated elements, '\n' between rows). The scalar f64 form is above. */
+    if (Name == "num2str" && Call->getNumOperands() == 1 &&
+        Call->getNumResults() == 1 &&
+        Call->getOperand(0).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_num2str_mat", PtrTy, {PtrTy});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      Call->getOperands());
+      if (Call->getResult(0).getType() != PtrTy)
+        Call->getResult(0).setType(PtrTy);
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
     /* assert(cond) / assert(cond, msg). Void return — the frontend
      * drops any result. A false condition sets the error flag via
      * matlab_set_error_msg, so subsequent try/catch can pick it up.

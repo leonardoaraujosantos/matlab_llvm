@@ -3776,6 +3776,16 @@ export function endsWith(s: string, pat: string): number {
   return String(s).endsWith(String(pat)) ? 1 : 0;
 }
 export function num2str(v: number): string { return formatG(+v, 6); }
+export function num2str_mat(A: any): string {
+  const a = asArray(A);
+  const rows: string[] = [];
+  for (let i = 0; i < a.rows; i++) {
+    const cols: string[] = [];
+    for (let j = 0; j < a.cols; j++) cols.push(formatG(a.data[i * a.cols + j], 6));
+    rows.push(cols.join("  "));
+  }
+  return rows.join("\n");
+}
 export function str2double(s: string): number {
   const f = parseFloat(s);
   return Number.isNaN(f) ? NaN : f;
