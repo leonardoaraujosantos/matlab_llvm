@@ -16,15 +16,19 @@ Sema is a small layer with a focused job:
 After Sema runs, lowering can ask each `NameExpr` "who are you?" and
 each `Expr` "what type are you?" without re-doing any work.
 
-The directory has five `.cpp` files. They line up with the four
-phases below; we'll cover them in the order data flows.
+The directory has eight `.cpp` files. The first four are the core
+pipeline (covered below in the order data flows); the rest support
+monomorphization, the dumper, and one toolbox-specific rewrite.
 
 ```
-lib/Sema/Scope.cpp           — symbol-table primitives + SemaContext
-lib/Sema/Resolver.cpp        — scope construction + name resolution
-lib/Sema/Type.cpp            — Type / Shape / Dtype values + helpers
-lib/Sema/TypeInference.cpp   — type propagation over the resolved AST
-lib/Sema/SemaDumper.cpp      — pretty-printer for `--dump-sema`
+lib/Sema/Scope.cpp             — symbol-table primitives + SemaContext
+lib/Sema/Resolver.cpp          — scope construction + name resolution
+lib/Sema/TypeInference.cpp     — type propagation over the resolved AST
+lib/Sema/Type.cpp              — Type / Shape / Dtype values + helpers
+lib/Sema/CallSiteAnalyzer.cpp  — buckets call sites by arg-type signature
+lib/Sema/Monomorphize.cpp      — clones user functions per call signature
+lib/Sema/SemaDumper.cpp        — pretty-printer for `-emit-sema`
+lib/Sema/RewriteDspSoForSv.cpp — DSP System-object rewrite for the SV lane
 ```
 
 ## 1. The data model: `Binding`, `Scope`, `SemaContext`
@@ -66,7 +70,7 @@ a single `SemaContext`, which is destroyed alongside the
 ## 2. The pipeline at a glance
 
 The driver runs Sema in this order (see `Resolver::resolve` in
-`lib/Sema/Resolver.cpp:92`):
+`lib/Sema/Resolver.cpp:1272`):
 
 ```
 Parser → AST → Resolver → TypeInference → Monomorphize → (lowering)
@@ -101,19 +105,38 @@ type stamping, and Sema re-runs until no further specialisation is
 discovered — `Resolver::collectAssignments` clears stale
 `ParamRefs`/`OutputRefs` on each re-run so binding state stays clean.
 
-The Sema-time pass leaves three classes to the late MLIR mono:
-matrix-typed call sites (the ptr-shape settling depends on
-`LowerTensorOps` materialising tensor literals first), arity-varying
-callees (`add2(5)` + `add2(5, 7)` need per-arity clones with
-`matlab.nargin_value`), and `varargin`/`varargout` (per-arity
-cell-pack/unpack shape). Absorbing those classes Sema-side is
-tracked in issue #40.
+A second, *late* monomorphizer (`runMonomorphiseUserCalls` in
+`lib/MLIR/Passes/LowerUserCalls.cpp`) runs after lowering, at the
+`matlab.call` layer. Issue #40 / PR #162 absorbed most of its former
+work into the Sema-time pass above:
+
+- **arity-varying callees** (`add2(5)` + `add2(5, 7)`) — now cloned
+  Sema-side, each clone carrying `Function::NarginOverride` which the
+  lowerer turns into a `matlab.nargin_value` attribute.
+- **`varargin` callees** — same, with the clone's nargin set to the
+  actual call arity (the variadic tail isn't packed into the cell
+  until lowering, so distinct arities already have distinct
+  signatures and bucket naturally).
+- **`varargout`** — never needed cloning; its per-LHS unpacking is a
+  runtime-cell concern handled at the call site.
+- **matrix-typed call sites** — settle to `ptr` via the late
+  `RefineFuncSigs` pass, independent of the monomorphizer.
+
+The one class still owned by the late pass is **polymorphic class
+constructors** (`tf(num, den)` vs `tf(c)` vs `tf(M)`). These can't be
+bucketed Sema-side because their arguments are frequently `Type::Any`
+at Sema — they're results of operator overloads (`G + 2`), nested
+constructor calls, and method returns — and only acquire concrete
+`ptr`/`f64`/`tensor` types *after* lowering, which is exactly when the
+late pass runs. Fully absorbing them would require a real
+class-instance type in the lattice (see §4); the late pass is retained
+for them for now.
 
 ## 3. Resolver, walked through
 
 ### 3.1 Builtins are pre-declared in the global scope
 
-`Resolver::registerBuiltins` (`lib/Sema/Resolver.cpp:19`) seeds the
+`Resolver::registerBuiltins` (`lib/Sema/Resolver.cpp:21`) seeds the
 global scope with around 150 builtin names — `zeros`, `disp`, `fft`,
 `save`, `load`, etc. They are declared with `BindingKind::Builtin`.
 This is how a call to `disp(x)` resolves without any `import` or
@@ -127,7 +150,7 @@ something with it, that's a separate change in `LowerTensorOps.cpp`.
 ### 3.2 Two-pass scope construction
 
 For every function body, `Resolver::resolveFunction`
-(`lib/Sema/Resolver.cpp:315`) runs a pre-pass before the real
+(`lib/Sema/Resolver.cpp:1874`) runs a pre-pass before the real
 resolution walk:
 
 ```cpp
@@ -150,11 +173,11 @@ LHS expressions are not always plain names: `a(i) = …` and
 `obj.field = …` and `c{1} = …` all bind the *root* name. The
 pre-pass peels off `CallOrIndex` / `CellIndex` / `FieldAccess` /
 `DynamicField` until it finds the `NameExpr` underneath
-(`Resolver.cpp:215`).
+(`collectAssignments`, `Resolver.cpp:1616`).
 
 ### 3.3 Resolution: `NameExpr → Binding*`
 
-`Resolver::resolveExpr` (`Resolver.cpp:571`) is the workhorse. For a
+`Resolver::resolveExpr` (`Resolver.cpp:2399`) is the workhorse. For a
 `NameExpr` it just calls `S->lookup(N.Name)`:
 
 - If found, set `N.Ref = B` and mark `B->ReadFrom = true`.
@@ -162,7 +185,7 @@ pre-pass peels off `CallOrIndex` / `CellIndex` / `FieldAccess` /
   REPL feeds it from the runtime workspace).
 - Otherwise diagnose `undefined name 'X'`.
 
-LHS positions go through `resolveLValue` (`Resolver.cpp:443`), which
+LHS positions go through `resolveLValue` (`Resolver.cpp:2271`), which
 is similar but rejects assignment to a function/builtin/class.
 
 ### 3.4 Call vs. Index — the same syntax, two meanings
@@ -170,7 +193,7 @@ is similar but rejects assignment to a function/builtin/class.
 `f(2)` could be a function call or a subscript into a variable
 called `f`. The parser doesn't try to decide; it always emits a
 `CallOrIndex` node. Sema decides in `Resolver::resolveCallee`
-(`Resolver.cpp:497`):
+(`Resolver.cpp:2325`):
 
 - If the callee is a `NameExpr` whose binding is a Var/Param/Output/
   Global/Persistent → `CallKind::Index`.
@@ -194,14 +217,16 @@ RHS:
 The "pinning" is really a `ClassDef *` stored on the binding. It
 lets `obj.method(args)` dispatch statically without runtime type
 inspection. Without it, every dot-call would have to be a
-matlab.subscript. Read `Resolver.cpp:339-388` for the exact
-heuristic; it's deliberately conservative.
+matlab.subscript. Read `Resolver.cpp:2203` (the `pinnedOfRhs`
+heuristic at the end of assignment resolution) for the exact rule;
+it's deliberately conservative — and note it pins only the *first*
+LHS, so `[f, gof] = fit(...)` doesn't mis-pin the trailing struct.
 
 ### 3.5 Class methods
 
 After resolving plain functions, the resolver walks each
 `ClassDef::Methods` and resolves them as functions, with one twist
-(`Resolver.cpp:149-177`):
+(`Resolver.cpp:1349-1377`):
 
 - For a constructor `function obj = ClassName(args)`, pin the
   *output* binding to the class.
@@ -214,16 +239,17 @@ the class's property table.
 
 ## 4. TypeInference, briefly
 
-`lib/Sema/TypeInference.cpp` is the largest file in Sema (~1150
+`lib/Sema/TypeInference.cpp` is the largest file in Sema (~1,830
 lines). Its job: visit every `Expr`, set `Expr::Ty`, and update
 `Binding::InferredType`. The type lattice lives in
 `include/matlab/Sema/Type.h`:
 
 - `Dtype` — element type (Double, Single, Complex, IntN, UIntN,
-  Logical, Char, Fixed).
+  Logical, Char, Fixed, Unknown).
 - `Shape` — rank + per-dim extents, `-1` = dynamic.
-- `Type::Kind` — Any, Array, StringArray, Cell, Struct, Object,
-  FuncHandle.
+- `Type::Kind` — `Any`, `Array`, `StringArray`, `Cell`, `Struct`,
+  `FuncHandle`, `Numerictype`, `Fimath`. (`Numerictype` / `Fimath`
+  model the compile-time-only Fixed-Point Designer config objects.)
 - `FixedSpec` — wordlength / fraction length / signedness / overflow
   / rounding for `fi` types.
 
@@ -235,14 +261,32 @@ hard-coded shape rule, etc. Builtins with type-specific behavior
 analysis can't be sure, it emits `Type::Any` rather than failing —
 runtime generic dispatch handles the rest.
 
+**There is no class-instance ("object") type.** This is deliberate
+and worth understanding. A class instance is *not* modelled as a
+`Type`; instead the resolver hangs a `ClassDef *` on the binding
+(`Binding::PinnedClass`, §3.4), and the *type* of a constructor /
+method / operator-overload result stays `Type::Any`
+(`visitCallOrIndex` falls through to `TC.any()` at
+`TypeInference.cpp:1698`/`:1702`). This is enough for `obj.prop` /
+`obj.method()` to dispatch statically, but it means class-valued
+expressions carry no static type. That is the root reason the late
+constructor monomorphizer can't move to Sema (§2): `tf(G + 2)` sees
+`G + 2` as `Any`, so it can't tell a scalar ctor call from a matrix
+one. Adding a real `Object`-of-class type to the lattice — wiring
+constructors / methods / operators to return it instead of `Any` — is
+the open enabler for retiring that late pass; it touches the ~25
+`TC.any()` sites here plus the ~60 `PinnedClass` sites in
+`lib/MLIR/Lowering.cpp`, so it's a moderate-blast-radius project, not
+a one-liner.
+
 Type inference is also where `load`'s return type would be set to
 `Struct` (see `docs/save_load_compat.md` §1.1) — it's the natural
 place for "this builtin returns a known kind".
 
-## 5. SemaDumper — `--dump-sema`
+## 5. SemaDumper — `-emit-sema`
 
 If you want to see what Sema produced, run the driver with
-`--dump-sema`. The output is printed by `lib/Sema/SemaDumper.cpp`:
+`-emit-sema`. The output is printed by `lib/Sema/SemaDumper.cpp`:
 the AST in tree form, with each `NameExpr` annotated with its
 binding kind and each `Expr` annotated with its inferred type:
 
@@ -269,7 +313,7 @@ The most common Sema-side change is adding a new builtin. The
 checklist:
 
 1. Add the name to `Resolver::registerBuiltins`
-   (`lib/Sema/Resolver.cpp:22`). At this point `f(args)` parses and
+   (`lib/Sema/Resolver.cpp:21`). At this point `f(args)` parses and
    resolves cleanly but the lowerer rejects it.
 2. If the result type is non-obvious (matrix shape, dtype change,
    struct return), add a case to `TypeInference` so dependents see
@@ -305,9 +349,9 @@ A few things you might expect to be in Sema, but aren't:
 
 1. `include/matlab/Sema/Scope.h` — the data model. ~100 lines.
 2. `lib/Sema/Scope.cpp` — the trivial implementations. ~80 lines.
-3. `lib/Sema/Resolver.cpp:92-178` — top-level `resolve()`.
-4. `lib/Sema/Resolver.cpp:184-309` — pre-pass.
-5. `lib/Sema/Resolver.cpp:497-569` — `resolveCallee`, the most
+3. `lib/Sema/Resolver.cpp:1272` — top-level `resolve()`.
+4. `lib/Sema/Resolver.cpp:1616` — `collectAssignments`, the pre-pass.
+5. `lib/Sema/Resolver.cpp:2325` — `resolveCallee`, the most
    subtle part.
 6. `include/matlab/Sema/Type.h` — the type lattice.
 7. `lib/Sema/TypeInference.cpp` — skim the dispatch on `Expr::Kind`,
