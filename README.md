@@ -338,11 +338,12 @@ ninja -C build
 ctest --test-dir build --output-on-failure
 ```
 
-> **Optional — video export.** `getframe` / `VideoWriter` (MP4/AVI) is gated
-> behind `-DMATLAB_LLVM_WITH_PLOT_FFMPEG=ON`, which links libav and needs the
-> FFmpeg dev libraries (`apt install libavcodec-dev libavformat-dev
-> libavutil-dev libswscale-dev`). Without the flag the plot runtime still
-> builds and runs; `VideoWriter` just reports that video support is disabled.
+> **Video export.** `getframe` / `VideoWriter` (MP4/AVI) is **on by default**
+> within a `WITH_PLOT` build (`MATLAB_LLVM_WITH_PLOT_FFMPEG=ON`), which links
+> libav and needs the FFmpeg dev libraries (`apt install libavcodec-dev
+> libavformat-dev libavutil-dev libswscale-dev`). Opt out with
+> `-DMATLAB_LLVM_WITH_PLOT_FFMPEG=OFF` on a host without them: the plot runtime
+> still builds and runs; `VideoWriter` just reports that video support is disabled.
 > See [`docs/plotting.md`](docs/plotting.md) §4.
 
 ### Building with Docker
@@ -692,7 +693,7 @@ Core docs:
 - [`docs/mflowlink_blocks.md`](docs/mflowlink_blocks.md): mflowLink per-block parameter catalogue — schema fields, units, default values, lowering hooks
 - [`docs/embedded_coder_roadmap.md`](docs/embedded_coder_roadmap.md): mflowLink Embedded Coder — AOT codegen for `.mflow` models across C / C++ / Python / TS / SV; Tiers 1–7 shipped (per-subsystem + whole-diagram + cocotb SIL)
 - [`docs/mStateflow_roadmap.md`](docs/mStateflow_roadmap.md): mStateflow (state-chart `.mflow` dialect) — chart IR + lowering + interpreter + DAP `stateChart/*` + Moore/Mealy/AND synthesizable SV emission all shipped
-- [`docs/plotting.md`](docs/plotting.md): headless plot runtime — Cairo backend, PNG/SVG/PDF, 2-D + 3-D + decoration + layout + axes options + style; `-DMATLAB_LLVM_WITH_PLOT=ON`. Animation + video export (`getframe` + `VideoWriter` → MP4/AVI via libav) behind the opt-in `-DMATLAB_LLVM_WITH_PLOT_FFMPEG=ON`
+- [`docs/plotting.md`](docs/plotting.md): headless plot runtime — Cairo backend, PNG/SVG/PDF, 2-D + 3-D + decoration + layout + axes options + style; `-DMATLAB_LLVM_WITH_PLOT=ON`. Animation + video export (`getframe` + `VideoWriter` → MP4/AVI via libav) on by default via `MATLAB_LLVM_WITH_PLOT_FFMPEG=ON` (opt out with `=OFF`)
 - [`docs/sema.md`](docs/sema.md): semantic analysis and type inference
 - [`docs/save_load_compat.md`](docs/save_load_compat.md): `save` / `load` `.mat` compatibility
 
