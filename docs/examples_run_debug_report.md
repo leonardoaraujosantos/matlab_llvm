@@ -206,6 +206,17 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
 
 ## Changelog
 
+- **2026-06-03 — #185 (✅ fixed).** `sum([])` / `mean([])` of an empty array
+  diverged: the Python/TS shims returned `[]` and AOT `mean([])` returned `0`,
+  vs MATLAB `sum([])==0`, `mean([])==NaN`. Fixed to MATLAB semantics with AOT/
+  shim parity: AOT `mean` empty value `0.0`→`NaN` in the `COLWISE_REDUCE`
+  instantiation (sum stays 0); the shim `sum`/`mean` got `a.size==0` guards
+  (→ 0 / NaN). Non-empty sum/mean unchanged. Regression
+  `test/Run/regress_sum_mean_empty.m` (sum([])=0, mean([])=NaN via r==r,
+  nonempty unchanged; AOT printed 1 for the mean-NaN check without the fix; runs
+  on all backends). Filed #212 for `min([])`/`max([])` (shim crashes, AOT
+  returns 0; MATLAB returns `[]` — needs empty-result handling, out of scope).
+
 - **2026-06-03 — #209 (✅ fixed).** `fprintf`/`sprintf` `%c` printed the numeric
   value instead of the character (`fprintf('%c',65)` → `65`). In the shared
   format core (`matlab_fmt_vec_core`) `%c` was grouped with `%s` and a numeric

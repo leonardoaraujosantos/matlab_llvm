@@ -1878,7 +1878,7 @@ matlab_mat3 *matlab_repmat3(matlab_mat *A, double m, double n, double p) {
  * fallback (handled out of scope here). */
 COLWISE_REDUCE(sum,  0.0,       acc + x,                    acc,                  0.0)
 COLWISE_REDUCE(prod, 1.0,       acc * x,                    acc,                  1.0)
-COLWISE_REDUCE(mean, 0.0,       acc + x,                    acc / (double)total,  0.0)
+COLWISE_REDUCE(mean, 0.0,       acc + x,                    acc / (double)total,  NAN)
 COLWISE_REDUCE(min,  INFINITY,  (x < acc ? x : acc),        acc,                  0.0)
 COLWISE_REDUCE(max, -INFINITY,  (x > acc ? x : acc),        acc,                  0.0)
 

@@ -1986,6 +1986,7 @@ function toRow(arr: number[]): NDArray {
 
 export function sum(A: any): NDArray | number {
   const a = asArray(A);
+  if (a.size === 0) return 0;  // MATLAB: sum([]) == 0 (#185)
   if (a.ndim < 2 || a.rows === 1) {
     let s = 0;
     for (let i = 0; i < a.size; i++) s += a.data[i];
@@ -2095,6 +2096,7 @@ export function prod(A: any): NDArray | number {
 
 export function mean(A: any): NDArray | number {
   const a = asArray(A);
+  if (a.size === 0) return NaN;  // MATLAB: mean([]) == NaN (#185)
   if (a.ndim < 2 || a.rows === 1) {
     let s = 0;
     for (let i = 0; i < a.size; i++) s += a.data[i];

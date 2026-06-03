@@ -1953,6 +1953,7 @@ def _to_row(v):
 
 def sum(A):
     a = _m(A)
+    if a.size == 0: return 0.0          # MATLAB: sum([]) == 0 (#185)
     if a.ndim < 2 or a.shape[0] == 1: return float(a.sum())
     return _to_row(a.sum(axis=0))
 
@@ -1980,6 +1981,7 @@ def prod_dim(A, d):
 
 def mean(A):
     a = _m(A)
+    if a.size == 0: return float('nan')  # MATLAB: mean([]) == NaN (#185)
     if a.ndim < 2 or a.shape[0] == 1: return float(a.mean())
     return _to_row(a.mean(axis=0))
 
