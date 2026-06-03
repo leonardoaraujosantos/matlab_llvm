@@ -2132,6 +2132,13 @@ export function max_mm(A: any, B: any): NDArray {
   for (let i = 0; i < out.length; i++) out[i] = Math.max(a.data[i], b.data[i]);
   return new NDArray(out, a.shape.slice());
 }
+// Two-scalar and matrix-scalar broadcast forms (return a 1x1 / matrix).
+export function max_2s(a: number, b: number): NDArray { return new NDArray(new Float64Array([Math.max(+a, +b)]), [1, 1]); }
+export function min_2s(a: number, b: number): NDArray { return new NDArray(new Float64Array([Math.min(+a, +b)]), [1, 1]); }
+export function max_ms(A: any, s: number): NDArray { const a = asArray(A); const o = new Float64Array(a.data.length); for (let i = 0; i < o.length; i++) o[i] = Math.max(a.data[i], +s); return new NDArray(o, a.shape.slice()); }
+export function max_sm(s: number, A: any): NDArray { return max_ms(A, s); }
+export function min_ms(A: any, s: number): NDArray { const a = asArray(A); const o = new Float64Array(a.data.length); for (let i = 0; i < o.length; i++) o[i] = Math.min(a.data[i], +s); return new NDArray(o, a.shape.slice()); }
+export function min_sm(s: number, A: any): NDArray { return min_ms(A, s); }
 
 // --- shape / predicates ----------------------------------------------------
 

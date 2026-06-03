@@ -2556,6 +2556,25 @@ matlab_mat *matlab_max_mm(matlab_mat *A, matlab_mat *B) {
     return C;
 }
 
+/* Matrix-scalar broadcast forms of max/min: `max(A, s)` / `max(s, A)`
+ * (likewise min). Each element is compared against the scalar. Also the
+ * landing spot for a 1x1 result of the two-scalar `matlab_max_2s` feeding
+ * a further `max(_, scalar)` (e.g. `max(max(1,2),3)`). */
+matlab_mat *matlab_min_ms(matlab_mat *A, double s) {
+    int64_t m = A->rows, n = A->cols;
+    matlab_mat *C = mat_alloc(m, n);
+    for (int64_t k = 0; k < m * n; ++k) C->data[k] = A->data[k] < s ? A->data[k] : s;
+    return C;
+}
+matlab_mat *matlab_min_sm(double s, matlab_mat *A) { return matlab_min_ms(A, s); }
+matlab_mat *matlab_max_ms(matlab_mat *A, double s) {
+    int64_t m = A->rows, n = A->cols;
+    matlab_mat *C = mat_alloc(m, n);
+    for (int64_t k = 0; k < m * n; ++k) C->data[k] = A->data[k] > s ? A->data[k] : s;
+    return C;
+}
+matlab_mat *matlab_max_sm(double s, matlab_mat *A) { return matlab_max_ms(A, s); }
+
 /*---------- Shape queries ------------------------------------------------*/
 
 /* size(A) -> 1×2 row vector [rows cols]. */
@@ -7947,6 +7966,23 @@ double matlab_uint64_s(double x) { return sat(x, 0.0, 1.8446744073709552e19); }
 double matlab_double_s(double x) { return x; }
 double matlab_single_s(double x) { return (double)(float)x; }
 double matlab_logical_s(double x) { return x != 0.0 ? 1.0 : 0.0; }
+
+/* Two-scalar max/min: `max(a, b)` / `min(a, b)` with both args scalar.
+ * Returns a 1x1 matrix (ptr) rather than a bare double so the result type
+ * matches the frontend's ptr typing for `max`/`min` — this keeps a later
+ * `max(a,b) + c` on the element-wise matrix-add path (consistent with the
+ * reduction form `max(v)`, which also returns a 1x1 ptr). The common finite
+ * case; uses the simple >/< form. */
+matlab_mat *matlab_max_2s(double a, double b) {
+    matlab_mat *m = mat_alloc(1, 1);
+    m->data[0] = a > b ? a : b;
+    return m;
+}
+matlab_mat *matlab_min_2s(double a, double b) {
+    matlab_mat *m = mat_alloc(1, 1);
+    m->data[0] = a < b ? a : b;
+    return m;
+}
 
 /* ---------------------------------------------------------------------- */
 /* Fixed-Point Designer (fi) helpers — see docs/emit_fixed_point.md §6.2.

@@ -1997,6 +1997,13 @@ def max(A):
 
 def min_mm(A, B): return np.minimum(_m(A), _m(B))
 def max_mm(A, B): return np.maximum(_m(A), _m(B))
+# Two-scalar and matrix-scalar broadcast forms (return a 1x1 / matrix).
+def max_2s(a, b): return np.array([[float(a) if float(a) > float(b) else float(b)]])
+def min_2s(a, b): return np.array([[float(a) if float(a) < float(b) else float(b)]])
+def max_ms(A, s): return np.maximum(_m(A), float(s))
+def max_sm(s, A): return np.maximum(_m(A), float(s))
+def min_ms(A, s): return np.minimum(_m(A), float(s))
+def min_sm(s, A): return np.minimum(_m(A), float(s))
 
 
 def cumsum(A): return np.cumsum(_m(A)).reshape(_m(A).shape)
