@@ -206,6 +206,16 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
 
 ## Changelog
 
+- **2026-06-02 — #147 (✅ fixed).** `isequal` on two **string** operands
+  returned `0` even when equal: `matlab_isequal` reads `rows`/`cols`/`data`
+  off its args as `matlab_mat*`, but a `matlab_string` has a different layout,
+  so the comparison mis-read the strings. The frontend now routes a
+  both-string `isequal` (detected via `isStringExpr`) to the `strcmp` path
+  (#146 — length + byte compare); non-string `isequal` still uses
+  `matlab_isequal`. Regression `test/Run/regress_isequal_strings.m` (strings,
+  string vars, numeric arrays; verified to return `0` for equal strings
+  without the fix; runs on all backends). The two-scalar form
+  `isequal(5,5)` is a separate pre-existing `ff`-shape gap (#155).
 - **2026-06-02 — #148 (✅ fixed).** An F64-returning string predicate
   (`contains` / `startsWith` / `endsWith` / `strcmp` / ...) used **directly**
   as an `if`/`while` condition failed to lower (`unrealized_conversion_cast`
