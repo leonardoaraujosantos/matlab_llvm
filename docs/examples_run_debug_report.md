@@ -206,6 +206,18 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
 
 ## Changelog
 
+- **2026-06-03 — #175 (✅ fixed).** `end` inside cell brace-indexing
+  (`c{end}`, `c{end-1}`) was left as an unconverted `matlab.end` — the cell
+  read lowered its index without a `SubscriptCtx` base, and a cell `end` must
+  resolve to `matlab_cell_numel` (not `matlab_end_of_dim`, which misreads the
+  cell descriptor as a matrix). The cell read now pushes a cell-numel sentinel
+  (`SubscriptCtx` dim `-1`) and the EndExpr lowering routes `-1` to
+  `matlab_cell_numel`. Also extended the `CellMatElems` detection (tracking the
+  cell element count) so `c{end}` of a matrix element picks `get_mat`.
+  Regression `test/Run/regress_cell_end_index.m` (scalar `c{end}`/`end-1`,
+  matrix element via `end`, downstream use; verified unconverted without the
+  fix; runs on all backends).
+
 - **2026-06-03 — #173 (✅ fixed).** `2.^x` (a digit immediately before `.^`)
   was mis-lexed as the float `2.` plus matrix-power `^` (→ unconverted
   matlab.matpow for a vector RHS), instead of `2 .^ x` (element-wise power).
