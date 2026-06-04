@@ -641,6 +641,27 @@ bool TensorLowering::rewriteBuiltinCalls() {
       return Addr;
     };
 
+    /* Coerce a string-function operand to a matlab_string* ptr. A string
+     * variable is already PtrTy; a char literal arrives as matlab.const_char
+     * (tensor<1xNxi8>) and is materialised via matlab_string_from_literal —
+     * without this, string builtins called on literals (strcat('a','b'),
+     * upper('x'), contains('a','b'), ...) hit "unsupported call shape" because
+     * the arms below require PtrTy operands. Returns {} if neither shape. */
+    auto toStrPtr = [&](Value V) -> Value {
+      if (V.getType() == PtrTy) return V;
+      Operation *Def = V.getDefiningOp();
+      if (!isMatlabOp(Def, "matlab.const_char")) return Value{};
+      int64_t Len = 0;
+      Value Addr = fieldNameAddr(V, Len);
+      if (!Addr) return Value{};
+      B.setInsertionPoint(Call);
+      Value LenV = LLVM::ConstantOp::create(
+          B, Call->getLoc(), I64, B.getI64IntegerAttr(Len));
+      auto SFn = rt("matlab_string_from_literal", PtrTy, {PtrTy, I64});
+      return LLVM::CallOp::create(B, Call->getLoc(), SFn,
+                                  ValueRange{Addr, LenV}).getResult();
+    };
+
     /* Normalize 1-arg forms of 2-arg shape builtins: `eye(n)` is
      * `eye(n, n)`, same for zeros / ones / rand / randn. The runtime
      * only exposes 2-arg entries (matlab_eye(m, n) etc.), so rewrite
@@ -1058,13 +1079,13 @@ bool TensorLowering::rewriteBuiltinCalls() {
      * the "frontend-called" builtin names (sprintf, upper, ...) —
      * distinct from the matlab_string_* internals above. */
     if ((Name == "upper" || Name == "lower" || Name == "strtrim") &&
-        Call->getNumOperands() == 1 && Call->getNumResults() == 1 &&
-        Call->getOperand(0).getType() == PtrTy) {
+        Call->getNumOperands() == 1 && Call->getNumResults() == 1) {
+      Value A0 = toStrPtr(Call->getOperand(0));
+      if (!A0) continue;
       std::string Rn = "matlab_" + Name.str();
       B.setInsertionPoint(Call);
       auto Fn = rt(Rn, PtrTy, {PtrTy});
-      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
-                                      Call->getOperands());
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{A0});
       if (Call->getResult(0).getType() != PtrTy)
         Call->getResult(0).setType(PtrTy);
       carryName(Call, NC);
@@ -1077,25 +1098,6 @@ bool TensorLowering::rewriteBuiltinCalls() {
          Name == "contains" || Name == "strcmp" ||
          Name == "strcmpi") && Call->getNumOperands() == 2 &&
         Call->getNumResults() == 1) {
-      /* Coerce each operand to a matlab_string* ptr. A string variable is
-       * already PtrTy; a char literal (`contains('a','b')`) arrives as a
-       * matlab.const_char tensor and is materialised via
-       * matlab_string_from_literal — without this the literal form never
-       * matched and hit "unsupported call shape". */
-      auto toStrPtr = [&](Value V) -> Value {
-        if (V.getType() == PtrTy) return V;
-        Operation *Def = V.getDefiningOp();
-        if (!isMatlabOp(Def, "matlab.const_char")) return Value{};
-        int64_t Len = 0;
-        Value Addr = fieldNameAddr(V, Len);
-        if (!Addr) return Value{};
-        B.setInsertionPoint(Call);
-        Value LenV = LLVM::ConstantOp::create(
-            B, Call->getLoc(), I64, B.getI64IntegerAttr(Len));
-        auto SFn = rt("matlab_string_from_literal", PtrTy, {PtrTy, I64});
-        return LLVM::CallOp::create(B, Call->getLoc(), SFn,
-                                    ValueRange{Addr, LenV}).getResult();
-      };
       Value A0 = toStrPtr(Call->getOperand(0));
       Value A1 = toStrPtr(Call->getOperand(1));
       if (!A0 || !A1) continue;
@@ -1115,16 +1117,21 @@ bool TensorLowering::rewriteBuiltinCalls() {
     if ((Name == "strcat" || Name == "strrep") &&
         Call->getNumResults() == 1 &&
         (Call->getNumOperands() == 2 || Call->getNumOperands() == 3)) {
-      bool AllPtr = true;
-      for (Value V : Call->getOperands())
-        if (V.getType() != PtrTy) { AllPtr = false; break; }
-      if (!AllPtr) continue;
+      /* Coerce each operand (PtrTy string var or const_char literal) to a
+       * matlab_string* ptr so strcat('a','b') / strrep('aXc','X','-') work. */
+      SmallVector<Value, 4> Args;
+      bool ok = true;
+      for (Value V : Call->getOperands()) {
+        Value S = toStrPtr(V);
+        if (!S) { ok = false; break; }
+        Args.push_back(S);
+      }
+      if (!ok) continue;
       std::string Rn = "matlab_" + Name.str();
       SmallVector<Type, 4> Sig(Call->getNumOperands(), (Type)PtrTy);
       B.setInsertionPoint(Call);
       auto Fn = rt(Rn, PtrTy, Sig);
-      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
-                                      Call->getOperands());
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn, Args);
       if (Call->getResult(0).getType() != PtrTy)
         Call->getResult(0).setType(PtrTy);
       carryName(Call, NC);
