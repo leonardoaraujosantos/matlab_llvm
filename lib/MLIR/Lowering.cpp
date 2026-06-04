@@ -791,6 +791,7 @@ bool Lowerer::isStringReturningBuiltin(llvm::StringRef N) {
   return N == "fgetl" || N == "sprintf" || N == "num2str" ||
          N == "upper" || N == "lower" || N == "strtrim" ||
          N == "strrep" || N == "strcat" || N == "char" ||
+         N == "deblank" || N == "blanks" ||
          N == "bin" || N == "hex" || N == "dec";
 }
 

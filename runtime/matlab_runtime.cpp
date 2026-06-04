@@ -13575,6 +13575,26 @@ matlab_string *matlab_strtrim(matlab_string *s) {
     return matlab_string_from_literal(s->data + lo, hi - lo);
 }
 
+/* deblank(s): strip only TRAILing whitespace (leading is preserved) — MATLAB's
+ * deblank, distinct from strtrim which strips both ends. */
+matlab_string *matlab_deblank(matlab_string *s) {
+    if (!s) return matlab_string_from_literal("", 0);
+    int64_t hi = s->len;
+    while (hi > 0 && (unsigned char)s->data[hi - 1] <= ' ') --hi;
+    return matlab_string_from_literal(s->data, hi);
+}
+
+/* blanks(n): an n-character string of spaces (n<0 -> empty). */
+matlab_string *matlab_blanks(double n) {
+    int64_t k = (int64_t)n;
+    if (k < 0) k = 0;
+    char *buf = (char *)malloc((size_t)(k > 0 ? k : 1));
+    for (int64_t i = 0; i < k; ++i) buf[i] = ' ';
+    matlab_string *s = matlab_string_from_literal(buf, k);
+    free(buf);
+    return s;
+}
+
 /* strrep(s, old, new): every non-overlapping occurrence of `old` in
  * `s` replaced with `new`. Returns a fresh heap string. */
 matlab_string *matlab_strrep(matlab_string *s, matlab_string *old, matlab_string *nw) {

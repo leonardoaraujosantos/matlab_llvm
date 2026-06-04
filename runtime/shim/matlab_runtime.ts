@@ -3833,6 +3833,8 @@ export function string_concat(a: string, b: string): string { return String(a) +
 export function string_disp(s: string): void { console.log(s); }
 export function strcat(...args: any[]): string { return args.map(String).join(""); }
 export function strtrim(s: string): string { return String(s).trim(); }
+export function deblank(s: string): string { return String(s).replace(/\s+$/, ""); }
+export function blanks(n: number): string { return " ".repeat(Math.max(0, n | 0)); }
 export function lower(s: string): string { return String(s).toLowerCase(); }
 export function upper(s: string): string { return String(s).toUpperCase(); }
 export function strrep(s: string, oldv: string, newv: string): string {

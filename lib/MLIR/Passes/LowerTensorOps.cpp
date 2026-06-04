@@ -1115,7 +1115,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
      * "..." literals via matlab_string_from_literal). These are
      * the "frontend-called" builtin names (sprintf, upper, ...) —
      * distinct from the matlab_string_* internals above. */
-    if ((Name == "upper" || Name == "lower" || Name == "strtrim") &&
+    if ((Name == "upper" || Name == "lower" || Name == "strtrim" ||
+         Name == "deblank") &&
         Call->getNumOperands() == 1 && Call->getNumResults() == 1) {
       Value A0 = toStrPtr(Call->getOperand(0));
       if (!A0) continue;
@@ -1123,6 +1124,22 @@ bool TensorLowering::rewriteBuiltinCalls() {
       B.setInsertionPoint(Call);
       auto Fn = rt(Rn, PtrTy, {PtrTy});
       auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{A0});
+      if (Call->getResult(0).getType() != PtrTy)
+        Call->getResult(0).setType(PtrTy);
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    /* blanks(n): n-space string from a scalar count. (Placed by the strtrim
+     * arm, away from the str2double/char cluster, to limit merge churn.) */
+    if (Name == "blanks" && Call->getNumOperands() == 1 &&
+        Call->getNumResults() == 1 && Call->getOperand(0).getType() == F64) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_blanks", PtrTy, {F64});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Call->getOperand(0)});
       if (Call->getResult(0).getType() != PtrTy)
         Call->getResult(0).setType(PtrTy);
       carryName(Call, NC);
