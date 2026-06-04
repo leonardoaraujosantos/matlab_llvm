@@ -29,6 +29,45 @@ with a cascade controller — **linear MPC** for horizontal position and
 | --- | --- |
 | `quadrotor_derive_eom.m` | Symbolic Math Toolbox derivation of the 6-DOF EOM + hover linearization. Prints the nonlinear translational/rotational accelerations and the decoupled linear plant used by the controller. |
 | `quadrotor_pid_mpc.m` | Full closed-loop simulation: MIMO MPC (position) + 4 PIDs (attitude/altitude) driving the nonlinear plant, with reference previewing. Renders a 4-panel plot to `quadrotor_pid_mpc.png`. |
+| `quadrotor_fp_derive.m` | **Richer** first-principles symbolic derivation: builds the ZYX rotation matrix column by column, the full nonlinear translational + rotational (Euler) dynamics, the rotor→wrench mixing matrix, then the hover linearizations feeding *all three* control layers. |
+| `quadrotor_fp_flight.m` | **Animated** three-layer cascade flight demo (outer MPC + inner PID + inner MPC) flying a climbing figure-8. Renders a static 4-panel summary **and** a cool tilting-body 3-D animation (MP4) you can watch the attitude loop work in. |
+
+## Animated demo — `quadrotor_fp_*`
+
+The `quadrotor_fp_derive.m` / `quadrotor_fp_flight.m` pair is the cooler,
+animation-first take on the same problem, runnable end-to-end through the
+**JIT/REPL** with plotting + FFmpeg enabled:
+
+```sh
+cmake -B build -DMATLAB_LLVM_WITH_PLOT=ON -DMATLAB_LLVM_WITH_PLOT_FFMPEG=ON
+cat examples/quadrotor/quadrotor_fp_flight.m | build/matlabc -repl /dev/stdin
+```
+
+It writes two artifacts:
+
+- `/tmp/quadrotor_fp_summary.png` — 3-D path (ref vs actual), position vs
+  time, attitude-PID command-vs-actual tracking, and the control inputs.
+- `/tmp/quadrotor_fp_flight.mp4` — the quadrotor body **rendered with its
+  true attitude** (the front arm is red so you can see it bank into the
+  turns), trailing its flight path, over a ground shadow and the faint
+  ghost of the reference figure-8, with a slowly orbiting camera.
+
+**Three control layers** (the user-requested "PID for attitude **and** MPC
+on the inner loop"):
+
+| Layer | Controller | Plant model | Output |
+| --- | --- | --- | --- |
+| Outer | linear **MPC** (2-in/2-out) | `x_ddot=g·θ`, `y_ddot=-g·φ` | tilt cmd `θ_cmd, φ_cmd` |
+| Inner | **PID ×3** | `φ_ddot=u2/Ix`, `θ_ddot=u3/Iy`, `ψ_ddot=u4/Iz` | torques `u2,u3,u4` |
+| Inner | linear **MPC** | `z_ddot=du1/m` | thrust trim `du1` → `u1=m·g+du1` |
+
+So the inner loop is a **PID and an MPC working together** — PIDs hold the
+attitude the outer MPC asks for, while a second MPC tracks altitude. The
+reference is a *climbing/descending* figure-8 (`z = 1.5 + 0.6·sin(0.4t)`)
+so the altitude MPC has real work to do. Closed-loop RMS position error is
+**~0.097 m** over a 12 s flight (this build, REPL path, single-setpoint
+look-ahead — the AOT `quadrotor_pid_mpc.m` with full preview-matrix MPC
+gets to 0.014 m).
 
 ## Control architecture
 
@@ -130,3 +169,28 @@ type-inference limits:
   controller is tuned so the limits aren't hit on this trajectory.
 - `fprintf` integer fields use `%g` rather than `%d` (the runtime passes
   a double, which C's `%d` prints as 0).
+
+### `quadrotor_fp_flight.m` — REPL/plotting workarounds
+
+These are written around current bugs (issues filed) and are the reason a
+few lines look the way they do:
+
+- **VideoWriter setup is packed onto one physical line** (`v = VideoWriter(...);
+  v.FrameRate = 25; open(v); figure(2);`). Splitting it across lines makes
+  the REPL segfault inside `start_encoder` — the writer handle doesn't
+  survive across REPL submissions (issue **#236**). The render loop body can
+  still be one statement per line.
+- **`plot3` is only ever called with vector arguments.** A scalar coordinate
+  (`plot3(cx, cy, cz, ...)` or even `plot3([cx], ...)`, which collapses to a
+  scalar) fails MLIR verification (issue **#237**). The single front-rotor
+  marker is therefore drawn as a degenerate 2-point segment, and the
+  animation loop starts at `k = 3` so the trail/shadow slices always have
+  ≥ 2 points.
+- **PNG-per-frame export is avoided.** `saveas(gcf, sprintf(...))` with a
+  computed filename silently writes nothing — only string literals save
+  (issue **#239**) — so animation goes through VideoWriter, not a frame dump.
+- **Outer/inner MPC use a single-setpoint look-ahead, not a preview matrix.**
+  The `p×ny` preview-matrix form of `mpcmove` used by `quadrotor_pid_mpc.m`
+  errors on the JIT/REPL path ("unsupported call shape", and tracking then
+  degrades to ~1.9 m — issue **#240**), so this REPL-runnable demo feeds each
+  MPC the reference `look` steps ahead as a single setpoint vector instead.
