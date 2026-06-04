@@ -30,6 +30,7 @@ void Resolver::registerBuiltins() {
     /* Degree-argument trigonometry. */
     "sind", "cosd", "tand", "asind", "acosd", "atand", "atan2d",
     "log2", "log10", "sign",
+    "log1p", "expm1", "factorial", "nextpow2", "hypot", "nthroot", "gcd", "lcm",
     "min", "max", "sum", "prod", "mean",
     "cumsum", "cumprod",
     "sort", "sortrows", "unique", "ismember",

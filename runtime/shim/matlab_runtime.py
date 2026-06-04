@@ -2269,6 +2269,34 @@ def asin_s(x): return math.asin(float(x))
 def acos_s(x): return math.acos(float(x))
 def atan_s(x): return math.atan(float(x))
 def atan2_s(y, x): return math.atan2(float(y), float(x))
+def log1p_s(x): return math.log1p(float(x))
+def expm1_s(x): return math.expm1(float(x))
+def factorial_s(n):
+    k = int(n) if n > 0 else 0; r = 1.0; i = 2  # NB: shim shadows builtin range
+    while i <= k: r *= i; i += 1
+    return r
+def nextpow2_s(x):
+    a = abs(float(x))
+    return 0.0 if a <= 1.0 else math.ceil(math.log2(a))
+def hypot_s(a, b): return math.hypot(float(a), float(b))
+def nthroot_s(x, n):
+    x = float(x); n = float(n)
+    if x < 0:
+        ni = round(n)
+        if ni == n and ni % 2 != 0: return -((-x) ** (1.0 / n))
+        return float('nan')
+    return x ** (1.0 / n)
+def gcd_s(a, b):
+    a, b = abs(int(a)), abs(int(b))
+    while b: a, b = b, a % b
+    return float(a)
+def lcm_s(a, b):
+    a, b = abs(int(a)), abs(int(b))
+    if a == 0 or b == 0: return 0.0
+    g = a; x, y = a, b
+    while y: x, y = y, x % y
+    g = x
+    return float(a // g * b)
 def sinh_s(x): return math.sinh(float(x))
 def cosh_s(x): return math.cosh(float(x))
 def tanh_s(x): return math.tanh(float(x))

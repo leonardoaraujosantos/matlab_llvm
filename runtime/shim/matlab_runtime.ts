@@ -2460,6 +2460,27 @@ export function asin_s(x: number): number { return Math.asin(+x); }
 export function acos_s(x: number): number { return Math.acos(+x); }
 export function atan_s(x: number): number { return Math.atan(+x); }
 export function atan2_s(y: number, x: number): number { return Math.atan2(+y, +x); }
+export function log1p_s(x: number): number { return Math.log1p(+x); }
+export function expm1_s(x: number): number { return Math.expm1(+x); }
+export function factorial_s(n: number): number {
+  let k = n > 0 ? (n | 0) : 0, r = 1; for (let i = 2; i <= k; i++) r *= i; return r;
+}
+export function nextpow2_s(x: number): number {
+  const a = Math.abs(+x); return a <= 1 ? 0 : Math.ceil(Math.log2(a));
+}
+export function hypot_s(a: number, b: number): number { return Math.hypot(+a, +b); }
+export function nthroot_s(x: number, n: number): number {
+  x = +x; n = +n;
+  if (x < 0) { const ni = Math.round(n); return (ni === n && ni % 2 !== 0) ? -Math.pow(-x, 1 / n) : NaN; }
+  return Math.pow(x, 1 / n);
+}
+export function gcd_s(a: number, b: number): number {
+  a = Math.abs(a | 0); b = Math.abs(b | 0); while (b) { const t = a % b; a = b; b = t; } return a;
+}
+export function lcm_s(a: number, b: number): number {
+  a = Math.abs(a | 0); b = Math.abs(b | 0); if (!a || !b) return 0;
+  let x = a, y = b; while (y) { const t = x % y; x = y; y = t; } return (a / x) * b;
+}
 export function sinh_s(x: number): number { return Math.sinh(+x); }
 export function cosh_s(x: number): number { return Math.cosh(+x); }
 export function tanh_s(x: number): number { return Math.tanh(+x); }

@@ -8486,6 +8486,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"tanh", "matlab_tanh_s"},
         {"log2", "matlab_log2_s"}, {"log10", "matlab_log10_s"},
         {"sign", "matlab_sign_s"},
+        {"log1p", "matlab_log1p_s"}, {"expm1", "matlab_expm1_s"},
+        {"factorial", "matlab_factorial_s"}, {"nextpow2", "matlab_nextpow2_s"},
         {"floor", "matlab_floor_s"}, {"ceil", "matlab_ceil_s"},
         {"round", "matlab_round_s"}, {"fix", "matlab_fix_s"},
         /* Integer / type cast builtins — runtime is still f64, but
@@ -8498,6 +8500,30 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"double", "matlab_double_s"}, {"single", "matlab_single_s"},
         {"logical", "matlab_logical_s"},
       };
+      /* Two-argument scalar math: hypot / nthroot / gcd / lcm — same shape
+       * as atan2 (two f64 -> f64). */
+      {
+        static const llvm::StringMap<StringRef> Scalar2 = {
+          {"hypot", "matlab_hypot_s"}, {"nthroot", "matlab_nthroot_s"},
+          {"gcd", "matlab_gcd_s"}, {"lcm", "matlab_lcm_s"},
+        };
+        auto S2 = Scalar2.find(Name);
+        if (S2 != Scalar2.end() && Call->getNumOperands() == 2 &&
+            Call->getOperand(0).getType() == F64 &&
+            Call->getOperand(1).getType() == F64) {
+          B.setInsertionPoint(Call);
+          auto Fn = rt(S2->second, F64, {F64, F64});
+          auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                          Call->getOperands());
+          if (Call->getResult(0).getType() != F64)
+            Call->getResult(0).setType(F64);
+          carryName(Call, NC);
+          Call->getResult(0).replaceAllUsesWith(NC.getResult());
+          Call->erase();
+          Changed = true;
+          continue;
+        }
+      }
       /* Two-argument scalar: atan2(y, x) / atan2d(y, x). */
       if ((Name == "atan2" || Name == "atan2d") &&
           Call->getNumOperands() == 2 &&
