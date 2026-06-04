@@ -3857,6 +3857,12 @@ export function strfind(s: any, pat: any): NDArray {
 export function strcmp(a: string, b: string): number {
   return String(a) === String(b) ? 1 : 0;
 }
+// strncmp(a, b, n): first-n-chars compare (false if either is shorter).
+export function strncmp(a: any, b: any, n: number): number {
+  const s = String(a), t = String(b); const k = Math.max(0, n | 0);
+  if (s.length < k || t.length < k) return 0;
+  return s.slice(0, k) === t.slice(0, k) ? 1 : 0;
+}
 export function strcmpi(a: string, b: string): number {
   return String(a).toLowerCase() === String(b).toLowerCase() ? 1 : 0;
 }

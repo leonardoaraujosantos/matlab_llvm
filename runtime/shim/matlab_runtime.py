@@ -3686,6 +3686,11 @@ def strfind(s, pat):  # 1-based positions of every (overlapping) match -> 1xk ro
         i = s.find(pat, i + 1)
     return np.array([pos], dtype=float) if pos else np.zeros((1, 0))
 def strcmp(a, b): return 1.0 if str(a) == str(b) else 0.0
+def strncmp(a, b, n):  # first-n-chars compare (false if either is shorter)
+    a, b, n = str(a), str(b), int(n)
+    if n < 0: n = 0
+    if len(a) < n or len(b) < n: return 0.0
+    return 1.0 if a[:n] == b[:n] else 0.0
 def strcmpi(a, b): return 1.0 if str(a).lower() == str(b).lower() else 0.0
 def startsWith(s, pat): return 1.0 if str(s).startswith(str(pat)) else 0.0
 def endsWith(s, pat): return 1.0 if str(s).endswith(str(pat)) else 0.0

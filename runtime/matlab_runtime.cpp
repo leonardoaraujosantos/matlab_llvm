@@ -13567,6 +13567,16 @@ double matlab_strcmpi(matlab_string *a, matlab_string *b) {
     return 1.0;
 }
 
+/* strncmp(a, b, n): true iff the first n characters of a and b match. If
+ * either string is shorter than n, MATLAB returns false. */
+double matlab_strncmp(matlab_string *a, matlab_string *b, double nd) {
+    if (!a || !b) return 0.0;
+    int64_t n = (int64_t)nd;
+    if (n < 0) n = 0;
+    if (a->len < n || b->len < n) return 0.0;
+    return memcmp(a->data, b->data, (size_t)n) == 0 ? 1.0 : 0.0;
+}
+
 matlab_string *matlab_strtrim(matlab_string *s) {
     if (!s) return matlab_string_from_literal("", 0);
     int64_t lo = 0, hi = s->len;
