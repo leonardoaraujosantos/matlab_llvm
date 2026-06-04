@@ -1992,12 +1992,14 @@ def mean_dim(A, d):
 
 def min(A):
     a = _m(A)
+    if a.size == 0: return empty_mat()   # min([]) == [] (#212)
     if a.ndim < 2 or a.shape[0] == 1: return float(a.min())
     return _to_row(a.min(axis=0))
 
 
 def max(A):
     a = _m(A)
+    if a.size == 0: return empty_mat()   # max([]) == [] (#212)
     if a.ndim < 2 or a.shape[0] == 1: return float(a.max())
     return _to_row(a.max(axis=0))
 

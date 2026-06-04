@@ -1,0 +1,3 @@
+min: isempty=1 numel=0
+max: isempty=1 numel=0
+nonempty: 1 3
