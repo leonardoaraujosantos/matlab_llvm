@@ -13649,6 +13649,59 @@ double matlab_norm(matlab_mat *A) {
     return sqrt(acc);
 }
 
+/* norm(x, p): p-norm with an explicit order. Vectors (the common case) get the
+ * full family — p=1 (sum |x|), p=2 (Euclidean, == norm(x)), p=Inf (max |x|),
+ * p=-Inf (min |x|), and a general real p ((sum |x|^p)^(1/p)). For a matrix we
+ * cover the cheap induced norms — p=1 (max column abs-sum), p=Inf (max row
+ * abs-sum) — and fall back to the Frobenius value for p=2 (the spectral norm
+ * needs an SVD; this matches the 1-arg matlab_norm's existing behaviour). */
+double matlab_norm_p(matlab_mat *A, double p) {
+    if (!A) return 0.0;
+    int64_t m = A->rows, n = A->cols;
+    int64_t total = m * n;
+    int is_vector = (m <= 1 || n <= 1);
+    if (is_vector) {
+        if (p == 2.0) return matlab_norm(A);
+        if (p == 1.0) {
+            double acc = 0.0;
+            for (int64_t k = 0; k < total; ++k) acc += fabs(A->data[k]);
+            return acc;
+        }
+        if (isinf(p)) {
+            double best = (p > 0) ? 0.0 : INFINITY;
+            for (int64_t k = 0; k < total; ++k) {
+                double a = fabs(A->data[k]);
+                if (p > 0) { if (a > best) best = a; }
+                else       { if (a < best) best = a; }
+            }
+            return (total == 0) ? 0.0 : best;
+        }
+        double acc = 0.0;
+        for (int64_t k = 0; k < total; ++k) acc += pow(fabs(A->data[k]), p);
+        return pow(acc, 1.0 / p);
+    }
+    /* Matrix induced norms. */
+    if (p == 1.0) {                       /* max column abs-sum */
+        double best = 0.0;
+        for (int64_t j = 0; j < n; ++j) {
+            double s = 0.0;
+            for (int64_t i = 0; i < m; ++i) s += fabs(A->data[i * n + j]);
+            if (s > best) best = s;
+        }
+        return best;
+    }
+    if (isinf(p) && p > 0) {              /* max row abs-sum */
+        double best = 0.0;
+        for (int64_t i = 0; i < m; ++i) {
+            double s = 0.0;
+            for (int64_t j = 0; j < n; ++j) s += fabs(A->data[i * n + j]);
+            if (s > best) best = s;
+        }
+        return best;
+    }
+    return matlab_norm(A);                /* p==2 / fro fallback (Frobenius) */
+}
+
 /* trace(A): sum of diagonal. Defined for square matrices; for
  * non-square we sum min(rows, cols) leading-diagonal entries. */
 double matlab_trace(matlab_mat *A) {

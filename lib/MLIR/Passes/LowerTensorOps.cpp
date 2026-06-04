@@ -6922,6 +6922,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"sub2ind",    "matlab_sub2ind",    0, "pff"},
       {"ind2sub",    "matlab_ind2sub",    1, "pf"},
       {"norm",       "matlab_norm",       0, "p"},
+      {"norm",       "matlab_norm_p",     0, "pf"},  /* norm(x, p) order */
       {"trace",      "matlab_trace",      0, "p"},
       {"kron",       "matlab_kron",       1, "pp"},
       {"chol",       "matlab_chol",       1, "p"},
