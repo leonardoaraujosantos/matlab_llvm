@@ -7587,6 +7587,43 @@ double matlab_asin_s(double x) { return asin(x); }
 double matlab_acos_s(double x) { return acos(x); }
 double matlab_atan_s(double x) { return atan(x); }
 double matlab_atan2_s(double y, double x) { return atan2(y, x); }
+/* Scalar math builtins (#tail). 1-arg: log1p / expm1 / factorial / nextpow2;
+ * 2-arg: hypot / nthroot / gcd / lcm. */
+double matlab_log1p_s(double x) { return log1p(x); }
+double matlab_expm1_s(double x) { return expm1(x); }
+double matlab_factorial_s(double n) {
+    int64_t k = (int64_t)(n < 0 ? 0 : n);
+    double r = 1.0;
+    for (int64_t i = 2; i <= k; ++i) r *= (double)i;
+    return r;
+}
+double matlab_nextpow2_s(double x) {
+    double a = fabs(x);
+    if (a <= 1.0) return 0.0;
+    return ceil(log2(a));
+}
+double matlab_hypot_s(double a, double b) { return hypot(a, b); }
+double matlab_nthroot_s(double x, double n) {
+    /* Real n-th root; for x<0 only odd integer n is real (MATLAB errors
+     * otherwise — we return NaN to match the "not real" case). */
+    if (x < 0.0) {
+        double ni = round(n);
+        if (ni == n && fmod(ni, 2.0) != 0.0) return -pow(-x, 1.0 / n);
+        return NAN;
+    }
+    return pow(x, 1.0 / n);
+}
+double matlab_gcd_s(double ad, double bd) {
+    int64_t a = (int64_t)llabs((long long)ad), b = (int64_t)llabs((long long)bd);
+    while (b) { int64_t t = a % b; a = b; b = t; }
+    return (double)a;
+}
+double matlab_lcm_s(double ad, double bd) {
+    int64_t a = (int64_t)llabs((long long)ad), b = (int64_t)llabs((long long)bd);
+    if (a == 0 || b == 0) return 0.0;
+    int64_t g = a; { int64_t x = a, y = b; while (y) { int64_t t = x % y; x = y; y = t; } g = x; }
+    return (double)(a / g * b);
+}
 double matlab_sinh_s(double x) { return sinh(x); }
 double matlab_cosh_s(double x) { return cosh(x); }
 double matlab_tanh_s(double x) { return tanh(x); }
