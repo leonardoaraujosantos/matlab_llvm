@@ -2469,6 +2469,20 @@ export function nextpow2_s(x: number): number {
   const a = Math.abs(+x); return a <= 1 ? 0 : Math.ceil(Math.log2(a));
 }
 export function hypot_s(a: number, b: number): number { return Math.hypot(+a, +b); }
+export function isprime_s(nd: number): number {
+  const n = nd | 0;
+  if (n !== nd || n < 2) return 0;
+  if (n % 2 === 0) return n === 2 ? 1 : 0;
+  for (let d = 3; d * d <= n; d += 2) if (n % d === 0) return 0;
+  return 1;
+}
+export function nchoosek_s(nd: number, kd: number): number {
+  let n = nd | 0, k = kd | 0;
+  if (k < 0 || n < 0 || k > n) return 0;
+  if (k > n - k) k = n - k;
+  let r = 1; for (let i = 1; i <= k; i++) r = (r * (n - k + i)) / i;
+  return Math.round(r);
+}
 export function nthroot_s(x: number, n: number): number {
   x = +x; n = +n;
   if (x < 0) { const ni = Math.round(n); return (ni === n && ni % 2 !== 0) ? -Math.pow(-x, 1 / n) : NaN; }

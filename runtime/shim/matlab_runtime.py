@@ -2279,6 +2279,22 @@ def nextpow2_s(x):
     a = abs(float(x))
     return 0.0 if a <= 1.0 else math.ceil(math.log2(a))
 def hypot_s(a, b): return math.hypot(float(a), float(b))
+def isprime_s(n):
+    n = int(n)
+    if float(n) != float(int(n)) or n < 2: return 0.0
+    if n % 2 == 0: return 1.0 if n == 2 else 0.0
+    d = 3
+    while d * d <= n:
+        if n % d == 0: return 0.0
+        d += 2
+    return 1.0
+def nchoosek_s(n, k):
+    n = int(n); k = int(k)
+    if k < 0 or n < 0 or k > n: return 0.0
+    if k > n - k: k = n - k
+    r = 1.0; i = 1
+    while i <= k: r = r * (n - k + i) / i; i += 1
+    return round(r)
 def nthroot_s(x, n):
     x = float(x); n = float(n)
     if x < 0:

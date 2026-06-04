@@ -1478,7 +1478,8 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
   /* Scalar math builtins added with the runtime _s forms (scalar args). */
   if (Name == "log1p" || Name == "expm1" || Name == "factorial" ||
       Name == "nextpow2" || Name == "hypot" || Name == "nthroot" ||
-      Name == "gcd" || Name == "lcm")
+      Name == "gcd" || Name == "lcm" || Name == "isprime" ||
+      Name == "nchoosek")
     return TC.scalar(Dtype::Double);
 
   if (Name == "transpose" || Name == "ctranspose") {

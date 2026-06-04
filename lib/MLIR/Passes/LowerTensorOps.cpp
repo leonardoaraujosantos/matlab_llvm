@@ -8488,6 +8488,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"sign", "matlab_sign_s"},
         {"log1p", "matlab_log1p_s"}, {"expm1", "matlab_expm1_s"},
         {"factorial", "matlab_factorial_s"}, {"nextpow2", "matlab_nextpow2_s"},
+        {"isprime", "matlab_isprime_s"},
         {"floor", "matlab_floor_s"}, {"ceil", "matlab_ceil_s"},
         {"round", "matlab_round_s"}, {"fix", "matlab_fix_s"},
         /* Integer / type cast builtins — runtime is still f64, but
@@ -8506,6 +8507,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
         static const llvm::StringMap<StringRef> Scalar2 = {
           {"hypot", "matlab_hypot_s"}, {"nthroot", "matlab_nthroot_s"},
           {"gcd", "matlab_gcd_s"}, {"lcm", "matlab_lcm_s"},
+          {"nchoosek", "matlab_nchoosek_s"},
         };
         auto S2 = Scalar2.find(Name);
         if (S2 != Scalar2.end() && Call->getNumOperands() == 2 &&
