@@ -118,6 +118,9 @@ static inline int mat_is_nd(const void *p) {
 matlab_mat   *mat_alloc  (int64_t m, int64_t n);
 matlab_mat_c *mat_c_alloc(int64_t m, int64_t n);
 matlab_mat3  *mat3_alloc (int64_t m, int64_t n, int64_t p);
+/* Complex-aware `*` dispatch (defined in runtime_complex.cpp); called from
+ * matlab_matmul_mm when an operand carries the mat_c magic tag. (#216) */
+matlab_mat_c *matlab_matmul_complex(void *Aptr, void *Bptr);
 /* matN_alloc(ndims, dims): allocates the descriptor + dims/strides + data
  * in one allocation block.  Trailing singleton dims are dropped (so a
  * caller passing (4, [3,2,1,1]) gets a 2-D matlab_mat back, NOT a matN);

@@ -586,6 +586,12 @@ matlab_mat *matlab_transpose(matlab_mat *A);
 
 /* C = A * B. Returns a 0x0 matrix if dimensions don't match. */
 matlab_mat *matlab_matmul_mm(matlab_mat *A, matlab_mat *B) {
+    /* #216: either operand may actually be a complex matlab_mat_c (the ptr ABI
+     * is shared). Reading a mat_c as a real matrix drops the imaginary part, so
+     * dispatch to the complex-aware path, which also handles 1x1 scalar
+     * scaling (`M * complex(a,b)`). The result is a mat_c* returned as ptr. */
+    if (mat_is_complex(A) || mat_is_complex(B))
+        return (matlab_mat *)matlab_matmul_complex(A, B);
     if (A->cols != B->rows) return mat_alloc(0, 0);
     int64_t m = A->rows, k = A->cols, n = B->cols;
     matlab_mat *C = mat_alloc(m, n);
