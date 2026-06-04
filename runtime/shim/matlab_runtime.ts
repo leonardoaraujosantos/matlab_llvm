@@ -2111,10 +2111,11 @@ export function mean(A: any): NDArray | number {
 
 export function min(A: any): NDArray | number {
   const a = asArray(A);
+  if (a.size === 0) return empty_mat();   // min([]) == [] (#212)
   if (a.ndim < 2 || a.rows === 1) {
     let m = Infinity;
     for (let i = 0; i < a.size; i++) if (a.data[i] < m) m = a.data[i];
-    return a.size ? m : 0;
+    return m;
   }
   const out: number[] = new Array(a.cols).fill(Infinity);
   for (let i = 0; i < a.rows; i++)
@@ -2127,10 +2128,11 @@ export function min(A: any): NDArray | number {
 
 export function max(A: any): NDArray | number {
   const a = asArray(A);
+  if (a.size === 0) return empty_mat();   // max([]) == [] (#212)
   if (a.ndim < 2 || a.rows === 1) {
     let m = -Infinity;
     for (let i = 0; i < a.size; i++) if (a.data[i] > m) m = a.data[i];
-    return a.size ? m : 0;
+    return m;
   }
   const out: number[] = new Array(a.cols).fill(-Infinity);
   for (let i = 0; i < a.rows; i++)
