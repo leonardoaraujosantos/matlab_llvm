@@ -662,6 +662,43 @@ bool TensorLowering::rewriteBuiltinCalls() {
                                   ValueRange{Addr, LenV}).getResult();
     };
 
+    /* Size queries on a char array — length / numel / ndims / isempty of a
+     * char literal (`length('hello')`, `isempty('')`). The literal lowers to
+     * matlab.const_char (tensor<1xNxi8>), which the matrix-based runtime
+     * entries (matlab_length etc., signature "p") don't accept, so these used
+     * to hit "unsupported call shape". The shape is carried by the tensor
+     * type, so fold the scalar result at lowering time. (Runtime-built
+     * strings — a matlab_string* ptr — are a separate type-tracking gap.) */
+    if ((Name == "length" || Name == "numel" || Name == "ndims" ||
+         Name == "isempty") && Call->getNumOperands() == 1 &&
+        Call->getNumResults() == 1) {
+      Value Op0 = Call->getOperand(0);
+      auto Tt = mlir::dyn_cast<RankedTensorType>(Op0.getType());
+      Operation *Def = Op0.getDefiningOp();
+      if (Tt && Tt.getElementType().isInteger(8) &&
+          isMatlabOp(Def, "matlab.const_char")) {
+        auto Shape = Tt.getShape();
+        int64_t nel = 1;
+        for (auto d : Shape) nel *= d;
+        int64_t maxd = 0;
+        for (auto d : Shape) if (d > maxd) maxd = d;
+        double val;
+        if (Name == "numel")        val = (double)nel;
+        else if (Name == "ndims")   val = (double)(Shape.size() < 2 ? 2 : Shape.size());
+        else if (Name == "isempty") val = (nel == 0) ? 1.0 : 0.0;
+        else /* length */           val = (nel == 0) ? 0.0 : (double)maxd;
+        B.setInsertionPoint(Call);
+        Value CV = LLVM::ConstantOp::create(B, Call->getLoc(), F64,
+                                            B.getF64FloatAttr(val));
+        if (Call->getResult(0).getType() != F64)
+          Call->getResult(0).setType(F64);
+        Call->getResult(0).replaceAllUsesWith(CV);
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+    }
+
     /* Normalize 1-arg forms of 2-arg shape builtins: `eye(n)` is
      * `eye(n, n)`, same for zeros / ones / rand / randn. The runtime
      * only exposes 2-arg entries (matlab_eye(m, n) etc.), so rewrite
