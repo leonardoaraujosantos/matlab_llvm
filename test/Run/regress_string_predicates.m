@@ -14,3 +14,6 @@ d = endsWith('hello', 'lo');
 e = strcmp('abc', 'abc');
 f = contains('abc', 'xyz');
 fprintf('%.0f %.0f %.0f %.0f %.0f\n', a, b, d, e, f);
+g = str2double('3.14');
+h = str2double('-42');
+fprintf('%.2f %.0f\n', g, h);

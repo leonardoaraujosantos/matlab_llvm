@@ -1205,12 +1205,12 @@ bool TensorLowering::rewriteBuiltinCalls() {
       }
     }
     if (Name == "str2double" && Call->getNumOperands() == 1 &&
-        Call->getNumResults() == 1 &&
-        Call->getOperand(0).getType() == PtrTy) {
+        Call->getNumResults() == 1) {
+      Value A0 = toStrPtr(Call->getOperand(0));  /* str2double('3.14') literal */
+      if (!A0) continue;
       B.setInsertionPoint(Call);
       auto Fn = rt("matlab_str2double", F64, {PtrTy});
-      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
-                                      Call->getOperands());
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{A0});
       if (Call->getResult(0).getType() != F64)
         Call->getResult(0).setType(F64);
       carryName(Call, NC);
