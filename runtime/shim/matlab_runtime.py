@@ -3670,6 +3670,16 @@ def lower(s): return str(s).lower()
 def upper(s): return str(s).upper()
 def strrep(s, old, new): return str(s).replace(str(old), str(new))
 def contains(s, pat): return 1.0 if str(pat) in str(s) else 0.0
+def strfind(s, pat):  # 1-based positions of every (overlapping) match -> 1xk row
+    # NB: the module shadows builtin `range` (stats), so use str.find here.
+    s, pat = str(s), str(pat)
+    if not pat or len(pat) > len(s): return np.zeros((1, 0))
+    pos = []
+    i = s.find(pat)
+    while i != -1:
+        pos.append(i + 1)
+        i = s.find(pat, i + 1)
+    return np.array([pos], dtype=float) if pos else np.zeros((1, 0))
 def strcmp(a, b): return 1.0 if str(a) == str(b) else 0.0
 def strcmpi(a, b): return 1.0 if str(a).lower() == str(b).lower() else 0.0
 def startsWith(s, pat): return 1.0 if str(s).startswith(str(pat)) else 0.0

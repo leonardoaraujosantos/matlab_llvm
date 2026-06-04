@@ -13530,6 +13530,23 @@ double matlab_contains(matlab_string *s, matlab_string *needle) {
     return strstr(s->data, needle->data) != NULL ? 1.0 : 0.0;
 }
 
+/* strfind(s, pat): 1-based starting positions of every (overlapping)
+ * occurrence of pat in s, as a 1xk row vector (empty 1x0 when none / pat
+ * empty / pat longer than s — MATLAB returns [] for an empty pattern). */
+matlab_mat *matlab_strfind(matlab_string *s, matlab_string *pat) {
+    int64_t sl = s ? s->len : 0, pl = pat ? pat->len : 0;
+    if (pl == 0 || pl > sl) return mat_alloc(1, 0);
+    /* First pass counts matches so the result is exactly sized. */
+    int64_t cnt = 0;
+    for (int64_t i = 0; i + pl <= sl; ++i)
+        if (memcmp(s->data + i, pat->data, (size_t)pl) == 0) ++cnt;
+    matlab_mat *R = mat_alloc(1, cnt);
+    int64_t w = 0;
+    for (int64_t i = 0; i + pl <= sl; ++i)
+        if (memcmp(s->data + i, pat->data, (size_t)pl) == 0) R->data[w++] = (double)(i + 1);
+    return R;
+}
+
 /* strcmp(a, b): MATLAB returns 1.0 when the strings are equal, 0.0
  * otherwise (note: opposite sense from C's strcmp). Two strings are equal
  * iff they have the same length and identical bytes. */

@@ -1507,6 +1507,8 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
   if (Name == "uint64")  return TC.scalar(Dtype::UInt64);
   if (Name == "logical") return TC.scalar(Dtype::Logical);
   if (Name == "char")    return TC.arrayOf(Dtype::Char, Shape::unknown());
+  // strfind(s, pat) -> 1xk row vector of 1-based match positions.
+  if (Name == "strfind") return TC.arrayOf(Dtype::Double, Shape::vector(-1));
 
   //===--- Fixed-Point Designer (fi) -------------------------------------===//
   // fi(value) / fi(value, signed, WL) / fi(value, signed, WL, FL).

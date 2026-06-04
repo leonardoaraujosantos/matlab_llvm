@@ -167,7 +167,7 @@ void Resolver::registerBuiltins() {
     "sym_solve_sys", "sym_solve_2x2", "sym_solve_3x3",
     "sprintf", "num2str", "str2double",
     "upper", "lower", "startsWith", "endsWith", "contains",
-    "strtrim", "strrep", "strcat", "strcmp", "strcmpi",
+    "strtrim", "strrep", "strcat", "strcmp", "strcmpi", "strfind",
     "svd", "eig", "inv", "pinv", "det", "rank", "cond",
     "qr", "lu", "chol", "norm", "trace", "kron",
     /* Tier 1.3 — Control System Toolbox roadmap §2.3 (matrix exponential

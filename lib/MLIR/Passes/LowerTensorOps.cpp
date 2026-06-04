@@ -1262,6 +1262,24 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Changed = true;
       continue;
     }
+    /* strfind(s, pat) -> 1xk row vector of 1-based match positions. Both
+     * operands coerce via toStrPtr (string var or char literal). */
+    if (Name == "strfind" && Call->getNumOperands() == 2 &&
+        Call->getNumResults() == 1) {
+      Value S0 = toStrPtr(Call->getOperand(0));
+      Value S1 = toStrPtr(Call->getOperand(1));
+      if (!S0 || !S1) continue;
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_strfind", PtrTy, {PtrTy, PtrTy});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{S0, S1});
+      if (Call->getResult(0).getType() != PtrTy)
+        Call->getResult(0).setType(PtrTy);
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
     if (Name == "str2double" && Call->getNumOperands() == 1 &&
         Call->getNumResults() == 1) {
       Value A0 = toStrPtr(Call->getOperand(0));  /* str2double('3.14') literal */
