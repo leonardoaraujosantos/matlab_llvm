@@ -1195,6 +1195,26 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Changed = true;
       continue;
     }
+    /* strncmp(a, b, n): first-n-chars compare -> scalar. Strings coerce via
+     * toStrPtr (var or literal); n is f64. */
+    if (Name == "strncmp" && Call->getNumOperands() == 3 &&
+        Call->getNumResults() == 1 &&
+        Call->getOperand(2).getType() == F64) {
+      Value A0 = toStrPtr(Call->getOperand(0));
+      Value A1 = toStrPtr(Call->getOperand(1));
+      if (!A0 || !A1) continue;
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_strncmp", F64, {PtrTy, PtrTy, F64});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{A0, A1, Call->getOperand(2)});
+      if (Call->getResult(0).getType() != F64)
+        Call->getResult(0).setType(F64);
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
     if ((Name == "strcat" || Name == "strrep") &&
         Call->getNumResults() == 1 &&
         (Call->getNumOperands() == 2 || Call->getNumOperands() == 3)) {
