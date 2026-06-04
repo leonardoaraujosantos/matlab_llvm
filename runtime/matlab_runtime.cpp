@@ -7603,6 +7603,25 @@ double matlab_nextpow2_s(double x) {
     return ceil(log2(a));
 }
 double matlab_hypot_s(double a, double b) { return hypot(a, b); }
+/* isprime(n): 1.0 if n is a prime integer, else 0.0. */
+double matlab_isprime_s(double nd) {
+    int64_t n = (int64_t)nd;
+    if ((double)n != nd || n < 2) return 0.0;
+    if (n % 2 == 0) return n == 2 ? 1.0 : 0.0;
+    for (int64_t d = 3; d * d <= n; d += 2)
+        if (n % d == 0) return 0.0;
+    return 1.0;
+}
+/* nchoosek(n, k): binomial coefficient C(n,k) for non-negative integers,
+ * computed multiplicatively to limit overflow/rounding. */
+double matlab_nchoosek_s(double nd, double kd) {
+    int64_t n = (int64_t)nd, k = (int64_t)kd;
+    if (k < 0 || n < 0 || k > n) return 0.0;
+    if (k > n - k) k = n - k;
+    double r = 1.0;
+    for (int64_t i = 1; i <= k; ++i) r = r * (double)(n - k + i) / (double)i;
+    return round(r);
+}
 double matlab_nthroot_s(double x, double n) {
     /* Real n-th root; for x<0 only odd integer n is real (MATLAB errors
      * otherwise — we return NaN to match the "not real" case). */
