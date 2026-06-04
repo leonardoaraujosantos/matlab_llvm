@@ -3841,6 +3841,15 @@ export function strrep(s: string, oldv: string, newv: string): string {
 export function contains(s: string, pat: string): number {
   return String(s).includes(String(pat)) ? 1 : 0;
 }
+// strfind(s, pat): 1-based positions of every (overlapping) match -> 1xk row.
+export function strfind(s: any, pat: any): NDArray {
+  const str = String(s), p = String(pat);
+  const pos: number[] = [];
+  if (p.length && p.length <= str.length)
+    for (let i = 0; i + p.length <= str.length; i++)
+      if (str.substr(i, p.length) === p) pos.push(i + 1);
+  return new NDArray(Float64Array.from(pos), [1, pos.length]);
+}
 export function strcmp(a: string, b: string): number {
   return String(a) === String(b) ? 1 : 0;
 }
