@@ -305,6 +305,7 @@ private:
   bool NeedsStdio = false; // will emit puts() / printf()
   bool NeedsIostream = false; // will emit std::cout
   bool NeedsTupleHeader = false; // C++ uses std::tuple / std::tie
+  bool NeedsMath = false; // a NaN/Inf literal emits NAN/INFINITY (<math.h>)
   // Runtime llvm.func declarations that still have at least one call site
   // surviving the IO substitutions. Used to prune dead externs from the
   // prolog so the emitted file doesn't declare functions it never calls.
@@ -3054,8 +3055,9 @@ void Emitter::emitProlog() {
      << ". Do not edit.\n";
   OS << (Cpp ? "#include <cstdint>\n" : "#include <stdint.h>\n");
   if (!Cpp) OS << "#include <stdbool.h>\n";
-  // NAN / INFINITY macros for NaN/Inf literals (#197).
-  OS << (Cpp ? "#include <cmath>\n" : "#include <math.h>\n");
+  // NAN / INFINITY macros for NaN/Inf literals (#197). Conditional so files
+  // without such a literal keep their exact prior output (emitc-shape goldens).
+  if (NeedsMath) OS << (Cpp ? "#include <cmath>\n" : "#include <math.h>\n");
   // IO-substitution headers. When the module has no parfor (no mutex
   // coordination needed) we can collapse the matlab_disp_* runtime calls
   // into direct stdio / iostream output, which reads as hand-written C
@@ -3082,12 +3084,34 @@ void Emitter::precomputeModuleProperties(mlir::ModuleOp M) {
   LiveRuntimeFuncs.clear();
   LiveGlobals.clear();
   NeedsTupleHeader = false;
+  NeedsMath = false;
   bool AnyDispStrLiteral = false;
   bool AnyDispScalar = false;
   // C++ multi-return: any user function with >1 result triggers
   // <tuple> + std::make_tuple in returns + std::tie at call sites.
   M.walk([&](mlir::func::FuncOp F) {
     if (F.getFunctionType().getNumResults() > 1) NeedsTupleHeader = true;
+  });
+  // #197: a NaN/Inf float literal emits the NAN/INFINITY macros, which need
+  // <math.h>/<cmath>. Only pull the header in when such a literal exists, so
+  // the generated source (and the emitc-shape golden tests) is otherwise
+  // unchanged. Scan every op attribute, including float elements nested in an
+  // ArrayAttr (matrix literals).
+  std::function<bool(mlir::Attribute)> attrHasNanInf =
+      [&](mlir::Attribute A) -> bool {
+    if (auto FA = mlir::dyn_cast<mlir::FloatAttr>(A)) {
+      double D = FA.getValueAsDouble();
+      return std::isnan(D) || std::isinf(D);
+    }
+    if (auto AA = mlir::dyn_cast<mlir::ArrayAttr>(A))
+      for (mlir::Attribute E : AA)
+        if (attrHasNanInf(E)) return true;
+    return false;
+  };
+  M.walk([&](mlir::Operation *Op) {
+    if (NeedsMath) return;
+    for (mlir::NamedAttribute NA : Op->getAttrs())
+      if (attrHasNanInf(NA.getValue())) { NeedsMath = true; return; }
   });
   // First pass: detect parfor. IO substitution is gated on its absence,
   // so we need it settled before deciding whether a call survives.
