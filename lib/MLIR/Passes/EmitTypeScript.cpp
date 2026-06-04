@@ -20,6 +20,7 @@
 //     MATLAB names; call sites become `a.plus(b)` / `a.eq(b)`.
 
 #include "matlab/MLIR/Passes/Passes.h"
+#include <cmath>
 #include "matlab/Basic/SourceManager.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -288,6 +289,10 @@ static std::string formatFloatAttr(mlir::FloatAttr FA) {
   // exactly back to D — same approach as EmitPython. JS / TS numbers
   // are IEEE-754 f64, so the round-trip semantics match.
   double D = FA.getValueAsDouble();
+  // NaN / Inf have no numeric literal — `%g` emits bare `nan`/`inf`, which are
+  // not defined in JS/TS. Emit the JS globals instead. (#197)
+  if (std::isnan(D)) return "NaN";
+  if (std::isinf(D)) return D < 0 ? "-Infinity" : "Infinity";
   char Buf[64];
   snprintf(Buf, sizeof(Buf), "%.17g", D);
   std::string Ref17 = Buf;

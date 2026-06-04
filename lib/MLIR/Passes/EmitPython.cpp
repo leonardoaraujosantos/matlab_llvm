@@ -10,6 +10,7 @@
 // shim) and runs on CPython 3.10+.
 
 #include "matlab/MLIR/Passes/Passes.h"
+#include <cmath>
 #include "matlab/Basic/SourceManager.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -392,6 +393,10 @@ static std::string formatFloatAttr(mlir::FloatAttr FA) {
   // `0.050000000000000003`). We also avoid scientific notation when a
   // longer decimal form is available — `10.0` reads better than `1e+01`.
   double D = FA.getValueAsDouble();
+  // NaN / Inf have no Python literal — `%g` would emit bare `nan`/`inf`
+  // (a NameError at runtime). Emit a valid float() constructor. (#197)
+  if (std::isnan(D)) return "float(\"nan\")";
+  if (std::isinf(D)) return D < 0 ? "float(\"-inf\")" : "float(\"inf\")";
   char Buf[64];
   // `%.17g` is the conservative reference: any value round-trips at 17.
   snprintf(Buf, sizeof(Buf), "%.17g", D);
