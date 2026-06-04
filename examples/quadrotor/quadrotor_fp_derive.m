@@ -30,7 +30,7 @@ syms phi theta psi
 syms p q r
 syms u1 u2 u3 u4
 syms m g Ix Iy Iz
-syms l kt kd
+syms l kt kd cyaw
 
 % --- 1. Body -> world rotation matrix (ZYX Euler) --------------------------
 % R = Rz(psi) * Ry(theta) * Rx(phi).  Thrust acts along the body +z axis, so
@@ -43,7 +43,7 @@ disp(simplify(cos(psi)*cos(theta)));
 disp('     R21 = sin(psi)cos(theta)');
 disp(simplify(sin(psi)*cos(theta)));
 disp('     R31 = -sin(theta)');
-disp(simplify(-sin(theta)));
+disp(simplify(sym(0) - sin(theta)));   % '-sin(theta)'; bare -sin(.) crashes, see #241
 disp('   Body z-axis in world (column 3, the thrust direction):');
 disp('     R13 = cos(psi)sin(theta)cos(phi) + sin(psi)sin(phi)');
 disp(simplify(cos(psi)*sin(theta)*cos(phi) + sin(psi)*sin(phi)));
@@ -95,8 +95,8 @@ disp('   u2 (roll)  = l*(f2 - f4) =');
 disp(simplify(l*(f2 - f4)));
 disp('   u3 (pitch) = l*(f3 - f1) =');
 disp(simplify(l*(f3 - f1)));
-disp('   u4 (yaw)   = (kd/kt)*(f1 - f2 + f3 - f4) =');
-disp(simplify((kd/kt)*(f1 - f2 + f3 - f4)));
+disp('   u4 (yaw)   = cyaw*(f1 - f2 + f3 - f4),  cyaw = kd/kt =');
+disp(simplify(cyaw*(f1 - f2 + f3 - f4)));
 
 % --- 5. Hover linearisation -> the controllers' plants ---------------------
 % Trim: phi = theta = psi = 0, u1 = m*g.  Linearising the translational

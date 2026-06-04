@@ -170,6 +170,18 @@ type-inference limits:
 - `fprintf` integer fields use `%g` rather than `%d` (the runtime passes
   a double, which C's `%d` prints as 0).
 
+### `quadrotor_fp_derive.m` — symbolic workaround
+
+- **No bare unary minus on a sym function call.** `simplify(-sin(theta))`
+  segfaults (the unary-minus lowering only routes a *name* operand to the
+  symbolic negation runtime, so `-sin(theta)` falls through to numeric
+  negation on a sym pointer — issue **#241**). The R31 = `-sin(theta)` entry is
+  therefore written `simplify(sym(0) - sin(theta))`. Note `-g*sin(phi)` is
+  fine: it parses as `(-g)*sin(phi)`, i.e. unary minus on the *symbol* `g`.
+
+Verified end-to-end against SymPP 0.5.0
+(`-DMATLAB_LLVM_WITH_SYM=ON`, GMP 6.3.0 / MPFR 4.2.1).
+
 ### `quadrotor_fp_flight.m` — REPL/plotting workarounds
 
 These are written around current bugs (issues filed) and are the reason a
