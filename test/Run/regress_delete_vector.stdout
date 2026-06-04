@@ -2,3 +2,6 @@ mid: 1x4 vals=1 3 4 5
 end: 1x4 last=4
 var: 1x3 vals=10 20 40
 col: 3x1 vals=1 3 4
+rng: 1x3 vals=1 4 5
+vec: 1x3 vals=20 30 50
+msk: 1x3 vals=1 2 3

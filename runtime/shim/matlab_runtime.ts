@@ -2424,8 +2424,19 @@ export function erase_cols(A: any, cols: any): NDArray {
 // Vector element deletion x(idx)=[]: remove 1-based linear positions,
 // preserving orientation (column stays column, else row).
 export function delete_lin(A: any, idx: any): NDArray {
+  // Remove the indexed elements from a vector, preserving orientation. A
+  // same-shape all-0/1 index is a logical mask (x(x>3)=[]); otherwise the
+  // values are 1-based linear positions (scalar, range, or index vector).
   const a = asArray(A);
-  const drop = new Set(Array.from(asArray(idx).data, (v) => (v | 0) - 1));
+  const ix = asArray(idx);
+  const drop = new Set<number>();
+  const isMask = ix.rows === a.rows && ix.cols === a.cols && a.size > 1 &&
+    Array.from(ix.data).every((v) => v === 0 || v === 1);
+  if (isMask) {
+    for (let i = 0; i < ix.size; i++) if (ix.data[i] !== 0) drop.add(i);
+  } else {
+    for (const v of ix.data) drop.add((v | 0) - 1);
+  }
   const kept: number[] = [];
   for (let i = 0; i < a.size; i++) if (!drop.has(i)) kept.push(a.data[i]);
   const isCol = a.cols === 1 && a.rows > 1;

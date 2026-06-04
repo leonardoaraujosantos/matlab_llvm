@@ -3065,18 +3065,24 @@ matlab_mat *matlab_erase_cols(matlab_mat *A, matlab_mat *cols) {
     return Y;
 }
 
-/* Vector element deletion: `x(idx) = []`. Removes the 1-based linear
- * positions listed in `idx` from a vector, preserving orientation (a row
- * vector stays a row, a column stays a column). The index matrix carries
- * plain 1-based positions; logical-mask deletion is resolved to positions by
- * the caller. (#188) */
+/* Vector element deletion: `x(idx) = []`. Removes the indexed elements from a
+ * vector, preserving orientation (a row vector stays a row, a column stays a
+ * column). `idx` is interpreted exactly as on the read side (matlab_slice1):
+ * a same-shape all-0/1 matrix is a logical mask (`x(x>3)=[]`) — kill the set
+ * positions; anything else is a list of 1-based linear positions (a scalar,
+ * range, or index vector). (#188) */
 matlab_mat *matlab_delete_lin(matlab_mat *A, matlab_mat *idx) {
     int64_t total = A ? A->rows * A->cols : 0;
-    int64_t r = idx ? idx->rows * idx->cols : 0;
     char *kill = (char *)calloc((size_t)(total > 0 ? total : 1), 1);
-    for (int64_t k = 0; k < r; ++k) {
-        int64_t p = (int64_t)idx->data[k] - 1;
-        if (p >= 0 && p < total) kill[p] = 1;
+    if (idx_looks_like_mask(idx, A ? A->rows : 0, A ? A->cols : 0)) {
+        for (int64_t k = 0; k < total; ++k)
+            if (idx->data[k] != 0.0) kill[k] = 1;
+    } else {
+        int64_t r = idx ? idx->rows * idx->cols : 0;
+        for (int64_t k = 0; k < r; ++k) {
+            int64_t p = (int64_t)idx->data[k] - 1;
+            if (p >= 0 && p < total) kill[p] = 1;
+        }
     }
     int64_t keep = 0;
     for (int64_t i = 0; i < total; ++i) if (!kill[i]) ++keep;
