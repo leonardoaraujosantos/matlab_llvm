@@ -17252,6 +17252,32 @@ double matlab_cell_numel(matlab_cell *c) {
     return (double)c->n;
 }
 
+/* strjoin(C, delim): join a cell of strings with `delim` between elements.
+ * delim NULL -> single space (the 1-arg strjoin(C) default). */
+matlab_string *matlab_strjoin(matlab_cell *c, matlab_string *delim) {
+    int64_t n = c ? c->n : 0;
+    const char *d = (delim && delim->data) ? delim->data : " ";
+    int64_t dl = delim ? delim->len : 1;
+    int64_t total = 0;
+    for (int64_t i = 0; i < n; ++i) {
+        matlab_string *e = (matlab_string *)matlab_cell_get_str(c, (double)(i + 1));
+        total += e ? e->len : 0;
+        if (i + 1 < n) total += dl;
+    }
+    char *buf = (char *)malloc((size_t)(total > 0 ? total : 1));
+    int64_t w = 0;
+    for (int64_t i = 0; i < n; ++i) {
+        matlab_string *e = (matlab_string *)matlab_cell_get_str(c, (double)(i + 1));
+        if (e && e->len) { memcpy(buf + w, e->data, (size_t)e->len); w += e->len; }
+        if (i + 1 < n && dl) { memcpy(buf + w, d, (size_t)dl); w += dl; }
+    }
+    matlab_string *s = matlab_string_from_literal(buf, total);
+    free(buf);
+    return s;
+}
+/* 1-arg strjoin(C): space delimiter. */
+matlab_string *matlab_strjoin1(matlab_cell *c) { return matlab_strjoin(c, nullptr); }
+
 /* #156: disp of a struct / cell. disp routed these ptrs to
  * matlab_disp_mat_f64, which read them as a matrix descriptor (garbage
  * rows/cols/data) and SIGSEGV'd. Print a MATLAB-ish field / element

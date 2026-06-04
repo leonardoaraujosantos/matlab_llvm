@@ -3832,6 +3832,8 @@ export function string_len(s: string): number { return s.length; }
 export function string_concat(a: string, b: string): string { return String(a) + String(b); }
 export function string_disp(s: string): void { console.log(s); }
 export function strcat(...args: any[]): string { return args.map(String).join(""); }
+export function strjoin(c: any[], delim: any): string { return c.map(String).join(String(delim)); }
+export function strjoin1(c: any[]): string { return c.map(String).join(" "); }
 export function strtrim(s: string): string { return String(s).trim(); }
 export function deblank(s: string): string { return String(s).replace(/\s+$/, ""); }
 export function blanks(n: number): string { return " ".repeat(Math.max(0, n | 0)); }

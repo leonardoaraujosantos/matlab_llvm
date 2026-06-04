@@ -3665,6 +3665,8 @@ def string_len(s): return float(len(s))
 def string_concat(a, b): return str(a) + str(b)
 def string_disp(s): print(s)
 def strcat(*args): return "".join(str(a) for a in args)
+def strjoin(c, delim): return str(delim).join(str(x) for x in c)  # join cell w/ delim
+def strjoin1(c): return " ".join(str(x) for x in c)               # space default
 def strtrim(s): return str(s).strip()
 def deblank(s): return str(s).rstrip()       # strip trailing whitespace only
 def blanks(n):                                # n-space string
