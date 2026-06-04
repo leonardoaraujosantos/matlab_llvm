@@ -3853,6 +3853,14 @@ export function startsWith(s: string, pat: string): number {
 export function endsWith(s: string, pat: string): number {
   return String(s).endsWith(String(pat)) ? 1 : 0;
 }
+// char(code) -> 1-char string; char([codes]) -> joined chars.
+export function char_s(code: number): string { return String.fromCharCode(Math.round(+code)); }
+export function char_m(A: any): string {
+  const a = asArray(A);
+  let s = "";
+  for (let i = 0; i < a.size; i++) s += String.fromCharCode(Math.round(a.data[i]));
+  return s;
+}
 export function num2str(v: number): string { return formatG(+v, 6); }
 export function num2str_mat(A: any): string {
   const a = asArray(A);
