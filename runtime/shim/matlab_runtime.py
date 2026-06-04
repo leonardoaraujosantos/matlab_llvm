@@ -3666,6 +3666,9 @@ def string_concat(a, b): return str(a) + str(b)
 def string_disp(s): print(s)
 def strcat(*args): return "".join(str(a) for a in args)
 def strtrim(s): return str(s).strip()
+def deblank(s): return str(s).rstrip()       # strip trailing whitespace only
+def blanks(n):                                # n-space string
+    k = int(n); return " " * (k if k > 0 else 0)   # NB: shim shadows builtin max
 def lower(s): return str(s).lower()
 def upper(s): return str(s).upper()
 def strrep(s, old, new): return str(s).replace(str(old), str(new))
