@@ -1168,6 +1168,33 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Changed = true;
       continue;
     }
+    /* strjoin(C) / strjoin(C, delim): C is a cell of strings (a matlab_cell*
+     * ptr, used as-is); delim coerces via toStrPtr (string var or literal).
+     * 1-arg form uses a space delimiter. */
+    if (Name == "strjoin" && Call->getNumResults() == 1 &&
+        (Call->getNumOperands() == 1 || Call->getNumOperands() == 2) &&
+        Call->getOperand(0).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      LLVM::CallOp NC;
+      if (Call->getNumOperands() == 1) {
+        auto Fn = rt("matlab_strjoin1", PtrTy, {PtrTy});
+        NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                   ValueRange{Call->getOperand(0)});
+      } else {
+        Value D = toStrPtr(Call->getOperand(1));
+        if (!D) continue;
+        auto Fn = rt("matlab_strjoin", PtrTy, {PtrTy, PtrTy});
+        NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                   ValueRange{Call->getOperand(0), D});
+      }
+      if (Call->getResult(0).getType() != PtrTy)
+        Call->getResult(0).setType(PtrTy);
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
     if ((Name == "strcat" || Name == "strrep") &&
         Call->getNumResults() == 1 &&
         (Call->getNumOperands() == 2 || Call->getNumOperands() == 3)) {
