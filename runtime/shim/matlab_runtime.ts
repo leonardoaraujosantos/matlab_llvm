@@ -393,6 +393,8 @@ export function mrdivide_mm(A: any, B: any): NDArray {
 export function det(A: any): number { return np.linalg.det(A); }
 export function trace(A: any): number { return np.trace(A); }
 export function norm(A: any): number { return np.linalg.norm(A); }
+// norm(x, p) — order delegated to numpy_ts.norm (mirrors runtime matlab_norm_p).
+export function norm_p(A: any, p: number): number { return np.linalg.norm(A, p); }
 
 // SVD / EIG / QR / LU / chol / pinv aren't part of the minimal numpy-ts;
 // the stubs below cover the goldens that don't depend on them.

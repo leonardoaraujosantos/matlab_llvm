@@ -338,11 +338,58 @@ export const linalg = {
     return new NDArray(x, [n, k]);
   },
 
-  norm(A: NDArray | number[][] | number): number {
+  // norm(A) is the Euclidean (vector) / Frobenius (matrix) norm; an optional
+  // `ord` selects the p-norm, mirroring runtime matlab_norm_p: vectors support
+  // 1 / 2 / +-Inf / general p; matrices the induced 1 (max col abs-sum) and
+  // Inf (max row abs-sum), with Frobenius as the p=2 fallback.
+  norm(A: NDArray | number[][] | number, ord?: number): number {
     const a = asArray(A);
-    let s = 0;
-    for (let i = 0; i < a.data.length; i++) s += a.data[i] * a.data[i];
-    return Math.sqrt(s);
+    const fro = (): number => {
+      let s = 0;
+      for (let i = 0; i < a.data.length; i++) s += a.data[i] * a.data[i];
+      return Math.sqrt(s);
+    };
+    if (ord === undefined) return fro();
+    const m = a.rows, n = a.cols;
+    const isVector = m <= 1 || n <= 1;
+    if (isVector) {
+      if (ord === 2) return fro();
+      if (ord === 1) {
+        let s = 0;
+        for (let i = 0; i < a.data.length; i++) s += Math.abs(a.data[i]);
+        return s;
+      }
+      if (!isFinite(ord)) {
+        let best = ord > 0 ? 0 : Infinity;
+        for (let i = 0; i < a.data.length; i++) {
+          const v = Math.abs(a.data[i]);
+          if (ord > 0) { if (v > best) best = v; } else { if (v < best) best = v; }
+        }
+        return a.data.length ? best : 0;
+      }
+      let s = 0;
+      for (let i = 0; i < a.data.length; i++) s += Math.pow(Math.abs(a.data[i]), ord);
+      return Math.pow(s, 1 / ord);
+    }
+    if (ord === 1) {                       // max column abs-sum
+      let best = 0;
+      for (let j = 0; j < n; j++) {
+        let s = 0;
+        for (let i = 0; i < m; i++) s += Math.abs(a.data[i * n + j]);
+        if (s > best) best = s;
+      }
+      return best;
+    }
+    if (!isFinite(ord) && ord > 0) {       // max row abs-sum
+      let best = 0;
+      for (let i = 0; i < m; i++) {
+        let s = 0;
+        for (let j = 0; j < n; j++) s += Math.abs(a.data[i * n + j]);
+        if (s > best) best = s;
+      }
+      return best;
+    }
+    return fro();
   },
 };
 

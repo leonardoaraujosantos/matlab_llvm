@@ -487,6 +487,23 @@ def inv(A):           return np.linalg.inv(_m(A))
 def mldivide_mm(A, B): return np.linalg.solve(_m(A), _m(B))
 def mrdivide_mm(A, B): return _m(A) @ np.linalg.inv(_m(B))
 def det(A):            return float(np.linalg.det(_m(A)))
+def norm_p(A, p):
+    # norm(x, p) — mirrors runtime matlab_norm_p for cross-backend parity:
+    # vectors get 1 / 2 / +-Inf / general p; matrices the induced 1 (max col
+    # abs-sum) and Inf (max row abs-sum), Frobenius as the p=2 fallback.
+    a = _m(A); p = float(p)
+    is_vec = a.ndim < 2 or a.shape[0] == 1 or a.shape[1] == 1
+    if is_vec:
+        f = a.flatten()
+        if p == 2.0: return float(np.sqrt(np.sum(f * f)))
+        if p == 1.0: return float(np.sum(np.abs(f)))
+        if np.isinf(p):
+            if f.size == 0: return 0.0
+            return float(np.max(np.abs(f)) if p > 0 else np.min(np.abs(f)))
+        return float(np.sum(np.abs(f) ** p) ** (1.0 / p))
+    if p == 1.0:                 return float(np.max(np.sum(np.abs(a), axis=0)))
+    if np.isinf(p) and p > 0:    return float(np.max(np.sum(np.abs(a), axis=1)))
+    return float(np.sqrt(np.sum(a * a)))   # Frobenius fallback
 def svd(A):            return np.linalg.svd(_m(A), compute_uv=False).reshape((-1, 1))
 def eig(A):
     """Eigenvalues — polymorphic real/complex return mirroring the C
