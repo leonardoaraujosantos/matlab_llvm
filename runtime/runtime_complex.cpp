@@ -2299,6 +2299,72 @@ matlab_mat_c *matlab_matmul_cc(matlab_mat_c *A, matlab_mat_c *B) {
     return C;
 }
 
+/* Read a real (matlab_mat) or complex (matlab_mat_c) descriptor uniformly:
+ * imaginary part is NULL on the real path (treated as all-zero). (#216) */
+static void load_c_operand(const void *p, int64_t *m, int64_t *n,
+                           const double **re, const double **im) {
+    if (mat_is_complex(p)) {
+        const matlab_mat_c *A = (const matlab_mat_c *)p;
+        *m = A->rows; *n = A->cols; *re = A->re; *im = A->im;
+    } else {
+        const matlab_mat *A = (const matlab_mat *)p;
+        *m = A->rows; *n = A->cols; *re = A->data; *im = NULL;
+    }
+}
+
+/* Complex-aware `*` for when EITHER operand is complex (matlab_mat_c) — the
+ * real `matlab_matmul_mm` path drops the imaginary part because it reads the
+ * mat_c re[] buffer as a real matlab_mat. Mirrors MATLAB: a 1x1 operand scales
+ * the other element-wise (so `M * complex(a,b)` and `complex(a,b) * M`
+ * distribute over M), otherwise it is a true matrix product. The real operand
+ * is promoted (im = 0). Always returns a matlab_mat_c* (the polymorphic ptr
+ * ABI; downstream real()/imag()/disp sniff the magic tag). (#216) */
+matlab_mat_c *matlab_matmul_complex(void *Aptr, void *Bptr) {
+    if (!Aptr || !Bptr) return mat_c_alloc(0, 0);
+    int64_t am, an, bm, bn;
+    const double *are, *aim, *bre, *bim;
+    load_c_operand(Aptr, &am, &an, &are, &aim);
+    load_c_operand(Bptr, &bm, &bn, &bre, &bim);
+    /* Scalar scaling: one operand is 1x1 -> broadcast complex multiply over
+     * the other (result keeps the non-scalar operand's shape). */
+    int a_scalar = (am * an == 1), b_scalar = (bm * bn == 1);
+    if (a_scalar || b_scalar) {
+        int64_t sm, sn;            /* scalar source */
+        const double *sre, *sim;   /* the scalar */
+        const double *vre, *vim;   /* the broadcast operand */
+        int64_t vm, vn;
+        if (a_scalar) { sre = are; sim = aim; vre = bre; vim = bim; vm = bm; vn = bn; }
+        else          { sre = bre; sim = bim; vre = are; vim = aim; vm = am; vn = an; }
+        (void)sm; (void)sn;
+        double kr = sre ? sre[0] : 0.0, ki = sim ? sim[0] : 0.0;
+        matlab_mat_c *C = mat_c_alloc(vm, vn);
+        int64_t tot = vm * vn;
+        for (int64_t k = 0; k < tot; ++k) {
+            double xr = vre ? vre[k] : 0.0, xi = vim ? vim[k] : 0.0;
+            C->re[k] = xr * kr - xi * ki;
+            C->im[k] = xr * ki + xi * kr;
+        }
+        return C;
+    }
+    /* True matrix product (A:m×p) * (B:p×n). */
+    if (an != bm) return mat_c_alloc(0, 0);
+    int64_t m = am, p = an, n = bn;
+    matlab_mat_c *C = mat_c_alloc(m, n);
+    for (int64_t i = 0; i < m; ++i)
+        for (int64_t j = 0; j < n; ++j) {
+            double sr = 0, si = 0;
+            for (int64_t k = 0; k < p; ++k) {
+                double ar = are ? are[i*p + k] : 0.0, ai = aim ? aim[i*p + k] : 0.0;
+                double br = bre ? bre[k*n + j] : 0.0, bi = bim ? bim[k*n + j] : 0.0;
+                sr += ar*br - ai*bi;
+                si += ar*bi + ai*br;
+            }
+            C->re[i*n + j] = sr;
+            C->im[i*n + j] = si;
+        }
+    return C;
+}
+
 /* Transpose variants: `.'` keeps entries as-is; `'` (ctranspose) also
  * conjugates. Both swap dims. */
 matlab_mat_c *matlab_transpose_c(matlab_mat_c *A) {

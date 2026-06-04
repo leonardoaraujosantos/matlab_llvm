@@ -1711,6 +1711,10 @@ matlab_mat_c *matlab_sub_cc(matlab_mat_c *A, matlab_mat_c *B);
 matlab_mat_c *matlab_emul_cc(matlab_mat_c *A, matlab_mat_c *B);
 matlab_mat_c *matlab_ediv_cc(matlab_mat_c *A, matlab_mat_c *B);
 matlab_mat_c *matlab_matmul_cc(matlab_mat_c *A, matlab_mat_c *B);
+/* Complex-aware `*` dispatch: either operand may be real or complex; a 1x1
+ * operand scales element-wise, else a true matrix product. Returns mat_c*
+ * via the polymorphic ptr ABI. (#216) */
+matlab_mat_c *matlab_matmul_complex(void *Aptr, void *Bptr);
 matlab_mat_c *matlab_transpose_c(matlab_mat_c *A);
 matlab_mat_c *matlab_ctranspose_c(matlab_mat_c *A);
 void          matlab_disp_mat_c(matlab_mat_c *A);
