@@ -3674,6 +3674,9 @@ def strcmp(a, b): return 1.0 if str(a) == str(b) else 0.0
 def strcmpi(a, b): return 1.0 if str(a).lower() == str(b).lower() else 0.0
 def startsWith(s, pat): return 1.0 if str(s).startswith(str(pat)) else 0.0
 def endsWith(s, pat): return 1.0 if str(s).endswith(str(pat)) else 0.0
+def char_s(code): return chr(int(round(float(code))))  # char(code) -> 1-char
+def char_m(A):  # char([codes]) -> joined chars
+    return "".join(chr(int(round(c))) for c in _m(A).flatten())
 def num2str(v): return f"{float(v):g}"
 def num2str_mat(A):
     a = _m(A)

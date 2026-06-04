@@ -13339,6 +13339,24 @@ matlab_string *matlab_string_from_literal(const char *src, int64_t len) {
     return s;
 }
 
+/* char(code): build a 1-char string from a numeric code point. char([codes]):
+ * an N-char string from a row/col of code points. The result is a
+ * matlab_string* so it disp's as text and concatenates. (char-as-numeric-array
+ * arithmetic — e.g. 'A'+1 — is a separate, pre-existing gap.) */
+matlab_string *matlab_char_s(double code) {
+    char c = (char)(int)code;
+    return matlab_string_from_literal(&c, 1);
+}
+matlab_string *matlab_char_m(matlab_mat *A) {
+    if (!A) return matlab_string_from_literal("", 0);
+    int64_t n = A->rows * A->cols;
+    char *buf = (char *)malloc((size_t)(n > 0 ? n : 1));
+    for (int64_t i = 0; i < n; ++i) buf[i] = (char)(int)A->data[i];
+    matlab_string *s = matlab_string_from_literal(buf, n);
+    free(buf);
+    return s;
+}
+
 matlab_string *matlab_string_concat(matlab_string *a, matlab_string *b) {
     int64_t la = a ? a->len : 0;
     int64_t lb = b ? b->len : 0;
