@@ -212,7 +212,10 @@ python3 test/Debug/repl_sweep.py "$PWD/build/matlabc" --timeout 20
   float-literal stringifier `formatFloatAttr` used `%g`, which renders NaN/Inf
   as bare tokens. Added NaN/Inf guards: emit-python now emits `float("nan")` /
   `float("inf")` / `float("-inf")`, emit-typescript `NaN` / `Infinity` /
-  `-Infinity`. (AOT and emit-c/cpp were already correct.) Regression
+  `-Infinity`; emit-c/cpp `NAN` / `INFINITY` / `-INFINITY` with a `<math.h>`/
+  `<cmath>` include in the generated preamble (the emit-c/cpp lanes — which the
+  default local gate skips — also emitted bare `nan`, caught by CI). AOT was
+  already correct. Regression
   `test/Run/regress_nan_inf_literal.m` (NaN/Inf/-Inf via comparisons + a
   `[1 NaN 3]` matrix literal; backend-independent — no NaN display; emit-python/
   typescript crashed at the matrix-literal line without the fix; runs on all

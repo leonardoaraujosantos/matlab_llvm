@@ -556,6 +556,12 @@ static std::string formatIntAttr(mlir::IntegerAttr IA, bool Unsigned = false) {
 static std::string formatFloatAttr(mlir::FloatAttr FA) {
   char Buf[64];
   double D = FA.getValueAsDouble();
+  // NaN / Inf have no numeric literal — `%g` emits bare `nan`/`inf`, which are
+  // undeclared identifiers in C/C++. Emit the <math.h>/<cmath> macros (the
+  // generated preamble includes the header). Returned early so the precision
+  // loop + ".0"-suffix logic below don't mangle it. (#197)
+  if (std::isnan(D)) return "NAN";
+  if (std::isinf(D)) return D < 0 ? "-INFINITY" : "INFINITY";
   // Try every `%g` precision from 1..17, keep whichever round-trips AND
   // is shortest — `%.1g` of 10 is "1e+01" (roundtrips but verbose),
   // `%.2g` is "10" (roundtrips, shorter). Ties favour lower precision.
@@ -3048,6 +3054,8 @@ void Emitter::emitProlog() {
      << ". Do not edit.\n";
   OS << (Cpp ? "#include <cstdint>\n" : "#include <stdint.h>\n");
   if (!Cpp) OS << "#include <stdbool.h>\n";
+  // NAN / INFINITY macros for NaN/Inf literals (#197).
+  OS << (Cpp ? "#include <cmath>\n" : "#include <math.h>\n");
   // IO-substitution headers. When the module has no parfor (no mutex
   // coordination needed) we can collapse the matlab_disp_* runtime calls
   // into direct stdio / iostream output, which reads as hand-written C
