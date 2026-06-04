@@ -268,6 +268,7 @@ Verilog-A).
 | `floor`, `ceil`, `round`, `fix`, `mod`, `rem` | ✅ |
 | `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `log2`, `log10`, `sign` | ✅ |
 | `sind`, `cosd`, `tand`, `asind`, `acosd`, `atand`, `atan2d` | ✅ | Degree-argument trigonometry; scalar + matrix runtime entries (`matlab_sind_s` / `matlab_sind_m` / …). |
+| `log1p`, `expm1`, `factorial`, `nextpow2`, `hypot`, `nthroot`, `gcd`, `lcm`, `isprime`, `nchoosek` | ✅ | Scalar forms (the common case); element-wise/vector forms (`primes`, `factor`, vector `isprime`) are follow-ups. |
 | `conj`, `real`, `imag`, `angle` | ✅ | Polymorphic — accept either real or complex input |
 | `fft`, `ifft`, `fft2`, `ifft2` | ✅ | Pure-C Cooley-Tukey radix-2 + Bluestein for general N. See [`docs/complex.md`](complex.md). |
 
@@ -276,7 +277,7 @@ Verilog-A).
 | Function | Status |
 |---|:-:|
 | `sum` (all elements, column-wise, or `sum(A, dim)`) | ✅ |
-| `min`, `max`, `mean`, `prod` (same 3 forms as `sum`) | ✅ |
+| `min`, `max`, `mean`, `prod` (same 3 forms as `sum`) | ✅ | `min([])`/`max([])` return `[]` (0×0); `sum([])=0`, `prod([])=1`, `mean([])=NaN`. |
 | `cumsum`, `cumprod` (single-arg + `(A, dim)`) | ✅ |
 | Dimension-aware reductions (`sum(A, 2)`, `mean(A, 1)`, ...) | ✅ |
 | `std`, `var`, `median`, `mode` | ❌ |
@@ -293,7 +294,7 @@ Verilog-A).
 | `qr` (Gram-Schmidt, 2-return `[Q, R] = qr(A)`) | ✅ | m ≥ n |
 | `chol` (upper-triangular R with R'R = A) | ✅ | SPD-only; error flag on non-SPD input |
 | `pinv` (via normal equations) | ✅ | Full-rank square / tall / wide |
-| `norm` (Frobenius), `trace`, `kron` | ✅ | |
+| `norm` (Frobenius / vector 2-norm), `norm(x, p)` (p = 1 / 2 / Inf; vector + induced matrix), `trace`, `kron` | ✅ | |
 | `eig` (non-symmetric 2-return — eigenvectors) | ❌ | 1-return path shipped (see row above); 2-return form `[V, D] = eig(A)` for non-symmetric A still falls back to symmetrization. Needs eigenvector back-substitution from real Schur form. |
 | `svd` (singular values only) | 🟡 | `U`, `V` not returned |
 | `gram_c(A, B)` / `gram_o(A, C)` (gramians) | ✅ shipped | Tier-3.4 of CST roadmap. Three-line wrappers over `lyap` (Tier 1.4): `gram_c = lyap(A, B B')`, `gram_o = lyap(A', C' C)`. Used by the H₂ system norm `||G||₂ = √trace(B' Wo B) = √trace(C Wc C')` and balanced realisation. The model-object form `gram(sys, 'c')` is a Tier-2.1 follow-on once `ss` constructors land. Functional API names with `_c` / `_o` suffix to avoid string-arg dispatching. 2 unit tests + Run test `ctrl_step_gram.m` (5-lane byte-identical). |
@@ -627,9 +628,13 @@ Per-toolbox plan in [`rf_toolbox_plan.md`](rf_toolbox_plan.md).  Two-commit clos
 | String literal creation, `strlen`, `isstring` | ✅ |
 | Concatenation: `[s1 s2]`, `strcat(a, b)`, `s1 + s2` | ✅ |
 | `sprintf` (literal + single-f64 form), `num2str`, `str2double` | ✅ |
-| `strtrim`, `strrep` | ✅ |
+| `strtrim`, `strrep`, `deblank`, `blanks` | ✅ |
 | `upper`, `lower`, `startsWith`, `endsWith`, `contains` | ✅ |
-| `strsplit`, `strjoin`, `regexp`, `regexprep`, `str2num` | ❌ |
+| `strcmp`, `strcmpi`, `strncmp` | ✅ |
+| `strfind`, `strjoin` | ✅ | `strjoin(C[, delim])` joins a cell of strings; `strfind` returns a 1×k index row vector. |
+| `char(code)` (numeric scalar → 1-char string) | ✅ | Vector `char([codes])` and char-array arithmetic are follow-ups. |
+| char-literal args (`'…'`) to the above string builtins | ✅ | Predicates/transforms/`str2double` materialise `const_char` literals, so both literal and string-variable args work. |
+| `strsplit`, `regexp`, `regexprep`, `str2num` | ❌ | `strsplit` needs cell-result element-kind tracking; regex needs an engine. |
 
 ---
 
