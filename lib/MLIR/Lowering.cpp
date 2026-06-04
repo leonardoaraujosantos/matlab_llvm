@@ -3920,9 +3920,15 @@ void Lowerer::lowerStmt(const Stmt &St) {
                                       PtrTy, loc(A.Range), {Cal});
           lowerLValueStore(*CI->Callee, Res);
         };
-        /* Vector form: x(idx) = []  (#188) */
+        /* Vector form: x(idx) = []  (#188).  Accept any single non-colon
+         * index: a scalar (`x(2)`, `x(end)`, `x(k)`) is boxed to a 1×1
+         * matrix; a range (`x(2:3)`), a vector binding (`idx=[2 3]; x(idx)`),
+         * or a logical mask (`x(x>3)`) already lowers to a matrix ptr and is
+         * passed straight through — matlab_delete_lin resolves a same-shape
+         * 0/1 mask to positions, otherwise treats the values as 1-based
+         * linear positions. */
         if (CI->Args.size() == 1 && CI->Args[0] &&
-            isScalarIdxExpr(CI->Args[0])) {
+            !dynamic_cast<const ColonExpr *>(CI->Args[0])) {
           mlir::Value Base = lowerExpr(*CI->Callee);
           if (Base.getType() != PtrTy) Base.setType(PtrTy);
           SubscriptCtx.push_back({Base, 0}); // dim 0 → numel for `end`
@@ -3932,6 +3938,20 @@ void Lowerer::lowerStmt(const Stmt &St) {
             emitDelete(Base, Idx, "matlab_delete_lin");
             return;
           }
+          /* Matrix-typed index (range / vector / mask): pass directly, no
+           * scalar boxing.  A `matlab.range` / matrix-literal index is
+           * tensor-typed here — leave it so LowerTensorOps materialises it
+           * to a matlab_range / concat call (a ptr); relabelling it to ptr
+           * now would make rewriteRange treat it as already lowered and
+           * skip it.  Only coerce an untyped (None) value. */
+          if (mlir::isa<mlir::NoneType>(Idx.getType())) Idx.setType(PtrTy);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_delete_lin"));
+          mlir::Value Res = emitUnreg("matlab.call_builtin", {Base, Idx},
+                                      PtrTy, loc(A.Range), {Cal});
+          lowerLValueStore(*CI->Callee, Res);
+          return;
         }
         /* 2D row/column form: A(i,:) = [] / A(:,j) = []  (#189) */
         if (CI->Args.size() == 2 && CI->Args[0] && CI->Args[1]) {

@@ -2217,14 +2217,22 @@ def erase_cols(A, cols):
 
 
 def delete_lin(A, idx):
-    # Vector element deletion x(idx)=[]: remove 1-based linear positions,
-    # preserving orientation (column stays column, else row).
+    # Vector element deletion x(idx)=[]: remove the indexed elements,
+    # preserving orientation (column stays column, else row). A same-shape
+    # all-0/1 index is a logical mask (x(x>3)=[]); otherwise the values are
+    # 1-based linear positions (scalar, range, or index vector).
     a = _m(A)
     flat = a.flatten(order='F')
-    p = _m(idx).flatten(order='F').astype(int) - 1
-    mask = np.ones(flat.size, dtype=bool)
-    mask[p] = False
-    kept = flat[mask]
+    im = _m(idx)
+    keep = np.ones(flat.size, dtype=bool)
+    if (im.shape == a.shape and flat.size > 1
+            and np.all((im == 0) | (im == 1))):
+        keep[im.flatten(order='F').astype(bool)] = False
+    else:
+        p = im.flatten(order='F').astype(int) - 1
+        p = p[(p >= 0) & (p < flat.size)]
+        keep[p] = False
+    kept = flat[keep]
     is_col = a.ndim >= 2 and a.shape[1] == 1 and a.shape[0] > 1
     return kept.reshape((-1, 1)) if is_col else kept.reshape((1, -1))
 
