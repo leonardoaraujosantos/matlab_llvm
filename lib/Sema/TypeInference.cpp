@@ -1515,6 +1515,9 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
   if (Name == "char")    return TC.arrayOf(Dtype::Char, Shape::unknown());
   // strfind(s, pat) -> 1xk row vector of 1-based match positions.
   if (Name == "strfind") return TC.arrayOf(Dtype::Double, Shape::vector(-1));
+  // str2num(s) -> numeric matrix parsed from the string (#235). Shape is
+  // data-dependent (scalar / vector / 2-D), so it's unknown until runtime.
+  if (Name == "str2num") return TC.arrayOf(Dtype::Double, Shape::unknown());
 
   //===--- Fixed-Point Designer (fi) -------------------------------------===//
   // fi(value) / fi(value, signed, WL) / fi(value, signed, WL, FL).

@@ -13543,6 +13543,61 @@ double matlab_str2double(matlab_string *s) {
     return v;
 }
 
+/* str2num(s): parse a numeric-literal / array string into a matrix (#235).
+ * Supports a scalar ('3.14'), a row ('1 2 3' or '1,2,3'), and a 2-D array
+ * with ';'/newline row separators, optionally wrapped in one layer of
+ * '[ ]'. Numbers may be separated by whitespace and/or commas. Returns an
+ * empty 0x0 matrix on any parse failure or ragged rows (MATLAB returns []
+ * for input it cannot evaluate). This is the common numeric-literal subset
+ * of MATLAB's eval-based str2num, not a full expression evaluator. */
+matlab_mat *matlab_str2num(matlab_string *s) {
+    if (!s || !s->data) return matlab_empty_mat();
+    std::string in(s->data, (size_t)s->len);
+    auto is_sp = [](char c) { return c == ' ' || c == '\t' || c == '\r'; };
+    /* Trim outer whitespace/newlines. */
+    size_t b = 0, e = in.size();
+    while (b < e && (is_sp(in[b]) || in[b] == '\n')) ++b;
+    while (e > b && (is_sp(in[e - 1]) || in[e - 1] == '\n')) --e;
+    if (b >= e) return matlab_empty_mat();
+    /* Strip one matching layer of surrounding brackets. */
+    if (in[b] == '[' && in[e - 1] == ']') { ++b; --e; }
+    std::string body = in.substr(b, e - b);
+
+    std::vector<std::vector<double>> rows;
+    std::vector<double> cur;
+    size_t i = 0;
+    bool row_started = false;
+    while (i <= body.size()) {
+        char c = (i < body.size()) ? body[i] : '\0';
+        if (c == ';' || c == '\n' || c == '\0') {
+            /* Row terminator. Commit the current row if it has data, or if
+             * an explicit separator created a (possibly empty) row. */
+            if (row_started || !cur.empty()) { rows.push_back(cur); cur.clear(); row_started = false; }
+            if (c == '\0') break;
+            ++i; continue;
+        }
+        if (is_sp(c) || c == ',') { ++i; continue; }   /* element separators */
+        const char *start = body.c_str() + i;
+        char *end = NULL;
+        double v = strtod(start, &end);
+        if (end == start) return matlab_empty_mat();    /* non-numeric token */
+        cur.push_back(v); row_started = true;
+        i += (size_t)(end - start);
+    }
+    if (rows.empty()) return matlab_empty_mat();
+    /* Drop trailing fully-empty rows (e.g. a trailing ';'). */
+    while (!rows.empty() && rows.back().empty()) rows.pop_back();
+    if (rows.empty()) return matlab_empty_mat();
+    size_t ncols = rows[0].size();
+    for (auto &r : rows)
+        if (r.size() != ncols || ncols == 0) return matlab_empty_mat();  /* ragged */
+    matlab_mat *M = mat_alloc((int64_t)rows.size(), (int64_t)ncols);
+    for (size_t r = 0; r < rows.size(); ++r)
+        for (size_t cc = 0; cc < ncols; ++cc)
+            M->data[r * ncols + cc] = rows[r][cc];      /* row-major */
+    return M;
+}
+
 static matlab_string *map_chars(matlab_string *s, int (*f)(int)) {
     if (!s) return matlab_string_from_literal("", 0);
     matlab_string *r = matlab_string_from_literal(s->data, s->len);

@@ -167,7 +167,7 @@ void Resolver::registerBuiltins() {
     "sym_det", "sym_inv", "sym_transpose", "sym_trace", "sym_rank",
     "sym_eigenvals", "sym_linsolve", "sym_dsolve_system",
     "sym_solve_sys", "sym_solve_2x2", "sym_solve_3x3",
-    "sprintf", "num2str", "str2double",
+    "sprintf", "num2str", "str2double", "str2num",
     "upper", "lower", "startsWith", "endsWith", "contains",
     "strtrim", "strrep", "strcat", "strcmp", "strcmpi", "strfind",
     "deblank", "blanks", "strjoin", "strncmp",
