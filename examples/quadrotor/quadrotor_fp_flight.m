@@ -301,9 +301,7 @@ for k = 3:stride:N
     plot3([fx bx rx2 lx], [fy by ry2 ly], [fz bz rz2 lz], 'ko', 'MarkerSize', 7, 'MarkerFaceColor', 'k');
     plot3([fx fx], [fy fy], [fz fz], 'ro', 'MarkerSize', 9, 'MarkerFaceColor', 'r');
     hold off;
-    % axis([...]) 6-arg sets x/y/z limits in one call and resolves on BOTH the
-    % REPL and AOT front doors; zlim() alone is missing from the AOT path (#238).
-    axis([-2.6 2.6 -2.0 2.0 0 2.6]);
+    xlim([-2.6 2.6]); ylim([-2.0 2.0]); zlim([0 2.6]);
     view(-37.5 + k*0.35, 24);
     grid on;
     xlabel('x [m]'); ylabel('y [m]'); zlabel('z [m]');
