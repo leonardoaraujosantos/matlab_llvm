@@ -130,7 +130,7 @@ const llvm::StringSet<> &plotBuiltins() {
     "xticks", "yticks", "xticklabels", "yticklabels",
     "yyaxis", "contourf", "quiver",
     "colorbar", "colormap",
-    "grid", "hold", "axis", "box", "xlim", "ylim", "view",
+    "grid", "hold", "axis", "box", "xlim", "ylim", "zlim", "view",
     "loglog", "semilogx", "semilogy",
     "subplot", "saveas", "print",
     /* Animation capture & video export (docs/plotting.md §4 Tier A/B).
@@ -593,11 +593,13 @@ bool rewriteCallee(Operation *Op, StringRef Callee, Helper &H,
     return true;
   }
 
-  // ---- xlim / ylim — single matrix [lo hi] arg. ----
+  // ---- xlim / ylim / zlim — single matrix [lo hi] arg. ----
   if (Callee == "xlim" && N == 1 && Op->getOperand(0).getType() == H.PtrTy)
     return rewriteMatArgs(Op, H, "matlab_xlim", 1);
   if (Callee == "ylim" && N == 1 && Op->getOperand(0).getType() == H.PtrTy)
     return rewriteMatArgs(Op, H, "matlab_ylim", 1);
+  if (Callee == "zlim" && N == 1 && Op->getOperand(0).getType() == H.PtrTy)
+    return rewriteMatArgs(Op, H, "matlab_zlim", 1);
 
   // ---- view(az, el) — two scalars. ----
   if (Callee == "view" && N == 2) {

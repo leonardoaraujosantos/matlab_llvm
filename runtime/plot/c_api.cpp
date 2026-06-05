@@ -852,6 +852,13 @@ void matlab_ylim(matlab_mat *limits) {
         ax.ylim_set = true;
     }
 }
+void matlab_zlim(matlab_mat *limits) {
+    if (!limits || limits->rows * limits->cols < 2) return;
+    auto &ax = matlab_plot::current_axes();
+    ax.zlim_lo  = limits->data[0];
+    ax.zlim_hi  = limits->data[1];
+    ax.zlim_set = true;
+}
 
 void matlab_yyaxis(const char *side, int64_t n) {
     if (!side || n <= 0) return;
@@ -880,6 +887,13 @@ void matlab_axis_lims(matlab_mat *limits) {
     ax.ylim_lo = limits->data[2];
     ax.ylim_hi = limits->data[3];
     ax.xlim_set = ax.ylim_set = true;
+    /* axis([xmin xmax ymin ymax zmin zmax]) — the 6-element form also pins
+     * the z-axis for 3-D axes (matches MATLAB). */
+    if (limits->rows * limits->cols >= 6) {
+        ax.zlim_lo  = limits->data[4];
+        ax.zlim_hi  = limits->data[5];
+        ax.zlim_set = true;
+    }
 }
 
 void matlab_axis(const char *opt, int64_t n) {

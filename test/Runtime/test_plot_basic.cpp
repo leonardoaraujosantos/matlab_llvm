@@ -884,6 +884,49 @@ static int test_surf_mesh() {
     return 0;
 }
 
+/* ---- Test: zlim pins the z-axis on 3-D axes (xlim/ylim parity, #238). ---- */
+static int test_zlim_3d() {
+    std::vector<double> sx, sy, sz;
+    std::vector<double> X{0, 1, 2}, Y{0, 1, 0}, Z{0, 0.5, 1};
+    matlab_mat x = make_vec(sx, X), y = make_vec(sy, Y), z = make_vec(sz, Z);
+
+    /* Baseline: autoscaled z in [0, 1]. */
+    matlab_close_all();
+    matlab_figure_new();
+    matlab_plot3(&x, &y, &z);
+    matlab_plot_buffer base = matlab_render_png();
+    CHECK(nonempty(base));
+
+    /* Same data, but zlim stretches the box far past the data — the render
+     * must change because the z-axis now spans [-5, 10]. */
+    std::vector<double> slim;
+    std::vector<double> Lim{-5, 10};
+    matlab_mat lim = make_vec(slim, Lim);
+    matlab_close_all();
+    matlab_figure_new();
+    matlab_plot3(&x, &y, &z);
+    matlab_zlim(&lim);
+    matlab_plot_buffer set = matlab_render_png();
+    CHECK(nonempty(set));
+    CHECK(set.size != base.size ||
+          std::memcmp(set.data, base.data, set.size) != 0);
+    matlab_plot_buffer_free(base);
+    matlab_plot_buffer_free(set);
+
+    /* axis([xmin xmax ymin ymax zmin zmax]) 6-arg also pins z; no crash. */
+    std::vector<double> sax;
+    std::vector<double> Ax{-2, 2, -2, 2, 0, 5};
+    matlab_mat axm = make_vec(sax, Ax);
+    matlab_close_all();
+    matlab_figure_new();
+    matlab_plot3(&x, &y, &z);
+    matlab_axis_lims(&axm);
+    matlab_plot_buffer ap = matlab_render_png();
+    CHECK(nonempty(ap));
+    matlab_plot_buffer_free(ap);
+    return 0;
+}
+
 int main() {
     int rc = 0;
     rc |= test_three_formats();
@@ -907,6 +950,7 @@ int main() {
     rc |= test_text_annotations();
     rc |= test_plot3_view();
     rc |= test_surf_mesh();
+    rc |= test_zlim_3d();
     if (rc == 0) std::puts("OK test_plot_basic");
     return rc;
 }
