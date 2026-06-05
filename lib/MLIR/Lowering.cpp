@@ -6047,14 +6047,13 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
   case NodeKind::UnaryOp: {
     auto &U = static_cast<const UnaryOpExpr &>(E);
     mlir::Value A = U.Operand ? lowerExpr(*U.Operand) : mlir::Value{};
-    /* Phase 6: unary minus on a sym-bound name routes to matlab_sym_neg. */
+    /* Phase 6 / #241: unary minus on any sym-valued operand routes to
+     * matlab_sym_neg.  exprIsSym recognises not just a sym-bound *name* but
+     * also sym function-calls (e.g. -sin(theta)) and sym sub-expressions;
+     * the old NameExpr-only check let those fall through to the numeric
+     * matlab_neg_m, which segfaults when handed a sym pointer. */
     if (U.Op == UnOp::Minus && U.Operand) {
-      auto isSymU = [&](const Expr *X) -> bool {
-        if (auto *NE = dynamic_cast<const NameExpr *>(X))
-          return NE->Ref && (SymBindings.count(NE->Ref) || NE->Ref->IsSym);
-        return false;
-      };
-      if (isSymU(U.Operand) && A) {
+      if (exprIsSym(U.Operand) && A) {
         auto PtrTyU = mlir::LLVM::LLVMPointerType::get(&MCtx);
         mlir::NamedAttribute Cal(
             mlir::StringAttr::get(&MCtx, "callee"),
