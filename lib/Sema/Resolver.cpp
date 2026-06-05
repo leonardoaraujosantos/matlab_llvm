@@ -1684,6 +1684,14 @@ void Resolver::applyWorkspaceKind(Binding *NB, std::string_view Name,
   else if (K == 7) NB->IsSym = true;
   /* Kind 8 = matlab_symmat* (Phase 6.1 — symbolic matrix). */
   else if (K == 8) NB->IsSymmat = true;
+  /* Kind 15 = VideoWriter handle (#236).  The REPL kind hook reports this
+   * (in place of the value's storage kind) for a name a prior input bound
+   * via `v = VideoWriter(...)`.  Stamp IsVideoWriter so the MLIR lowering
+   * re-populates VideoWriterBindings and a cross-turn `v.FrameRate = ...`
+   * routes to the dedicated setter instead of the struct-field path. No
+   * InferredType is set — the handle round-trips as an opaque ptr through
+   * matlab_ws_get_mat, like a sym. */
+  else if (K == 15) NB->IsVideoWriter = true;
   /* Kind 6 = matlab_table* (Phase 5.3).  Stamp IsTable so the MLIR
    * lowering re-populates TableBindings and a cross-turn `height(T)` /
    * `width(T)` / `T.col` / `disp(T)` dispatches to the table path

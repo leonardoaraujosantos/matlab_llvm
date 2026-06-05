@@ -81,6 +81,14 @@ struct Binding {
    * `disp(T)` dispatches to the table runtime entries instead of the
    * generic matrix path (which fails the call-shape detector / crashes). */
   bool IsTable = false;
+  /* VideoWriter handle (#236).  Stamped by the Resolver when the REPL
+   * workspace-kind hook reports a prior input bound this name to a
+   * VideoWriter (`v = VideoWriter(...)`).  The MLIR lowering reads it to
+   * re-populate VideoWriterBindings so a cross-turn `v.FrameRate = ...` /
+   * `v.Quality = ...` routes to the dedicated setter instead of the
+   * struct-field path, which corrupted the opaque handle and crashed the
+   * encoder on the next writeVideo. */
+  bool IsVideoWriter = false;
   /* Struct array (kind=14).  Stamped by the Resolver when the REPL
    * workspace-kind hook reports a prior input bound this name to a
    * matlab_struct_arr* (`a(i).x = v`).  The MLIR lowering reads it to
