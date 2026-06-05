@@ -249,6 +249,19 @@ struct Helper {
     auto C = LLVM::CallOp::create(B, L, Fn, Args);
     return C.getResult();
   }
+
+  /* Coerce a value to a matrix pointer (PtrTy). Already-PtrTy values pass
+   * through unchanged; an f64/integer scalar is boxed into a fresh 1×1
+   * matrix via matlab_mat_from_scalar so the matrix-typed runtime entries
+   * accept it. MATLAB treats a scalar coordinate as a length-1 vector
+   * (e.g. plot3(0.5,0.5,0.5,'ko') draws one marker). Returns nullopt for
+   * types we can't coerce. The caller must set the insertion point first. */
+  std::optional<Value> toMatPtr(Location L, Value V) {
+    if (V.getType() == PtrTy) return V;
+    auto F = toF64(L, V);
+    if (!F) return std::nullopt;
+    return callRet(L, "matlab_mat_from_scalar", PtrTy, {F64}, {*F});
+  }
 };
 
 /* Emit matlab_set_series_* runtime calls for each trailing (Name, Value)
@@ -585,12 +598,22 @@ bool rewriteCallee(Operation *Op, StringRef Callee, Helper &H,
     else if (N == 2) PathArg = Op->getOperand(1);
     else return false;
     auto Pair = materializeStringArg(PathArg, H.B, S);
-    if (!Pair) return false;
-    auto [Ptr, Len] = *Pair;
-    H.B.setInsertionPoint(Op);
-    H.callVoid(L, "matlab_savefig", {H.PtrTy, H.I64},
-               {Ptr, H.i64Const(L, Len)});
-    return true;
+    if (Pair) {
+      auto [Ptr, Len] = *Pair;
+      H.B.setInsertionPoint(Op);
+      H.callVoid(L, "matlab_savefig", {H.PtrTy, H.I64},
+                 {Ptr, H.i64Const(L, Len)});
+      return true;
+    }
+    /* Dynamic filename (variable / sprintf result): the path flows in as
+     * a runtime matlab_string* (PtrTy). Forward it to matlab_savefig_str
+     * so per-frame export works, not just string literals (issue #239). */
+    if (PathArg.getType() == H.PtrTy) {
+      H.B.setInsertionPoint(Op);
+      H.callVoid(L, "matlab_savefig_str", {H.PtrTy}, {PathArg});
+      return true;
+    }
+    return false;
   }
 
   // ---- xlim / ylim / zlim — single matrix [lo hi] arg. ----
@@ -938,20 +961,27 @@ bool rewriteCallee(Operation *Op, StringRef Callee, Helper &H,
   }
 
   // plot3(x, y, z) / plot3(x, y, z, 'fmt')
-  if (Callee == "plot3") {
-    if (N == 3) return rewriteMatArgs(Op, H, "matlab_plot3", 3);
-    if (N == 4) {
-      auto Pair = materializeStringArg(Op->getOperand(3), H.B, S);
-      if (!Pair) return false;
-      auto [Ptr, Len] = *Pair;
-      H.B.setInsertionPoint(Op);
-      H.callVoid(L, "matlab_plot3_fmt",
-                 {H.PtrTy, H.PtrTy, H.PtrTy, H.PtrTy, H.I64},
-                 {Op->getOperand(0), Op->getOperand(1), Op->getOperand(2),
-                  Ptr, H.i64Const(L, Len)});
+  // Scalar coordinates are boxed into 1×1 matrices (toMatPtr) so a single
+  // 3-D point plots, matching MATLAB and the 2-D plot family (issue #237).
+  if (Callee == "plot3" && (N == 3 || N == 4)) {
+    H.B.setInsertionPoint(Op);
+    auto X = H.toMatPtr(L, Op->getOperand(0));
+    auto Y = H.toMatPtr(L, Op->getOperand(1));
+    auto Z = H.toMatPtr(L, Op->getOperand(2));
+    if (!X || !Y || !Z) return false;
+    if (N == 3) {
+      H.callVoid(L, "matlab_plot3", {H.PtrTy, H.PtrTy, H.PtrTy},
+                 {*X, *Y, *Z});
       return true;
     }
-    return false;
+    auto Pair = materializeStringArg(Op->getOperand(3), H.B, S);
+    if (!Pair) return false;
+    auto [Ptr, Len] = *Pair;
+    H.B.setInsertionPoint(Op);
+    H.callVoid(L, "matlab_plot3_fmt",
+               {H.PtrTy, H.PtrTy, H.PtrTy, H.PtrTy, H.I64},
+               {*X, *Y, *Z, Ptr, H.i64Const(L, Len)});
+    return true;
   }
 
   return false;
