@@ -28,6 +28,9 @@
 
 #include "runtime_internal.h"
 
+#include <set>
+#include <string>
+
 /* Forward declarations for symbols defined elsewhere in the runtime
  * but called from inside the debug machinery. Mirrors the names the
  * public matlab_runtime.h header would otherwise provide. */
@@ -401,6 +404,35 @@ void matlab_ws_set_handle(const char *name, int64_t len, void *fn) {
  * the kind=13 field's otherwise-unused f64 slot: -1 unknown, 0 scalar,
  * 1 matrix.  set is a no-op if the name isn't a live kind=13 field (it is,
  * because the matlab_ws_set_handle store runs immediately before). */
+/* VideoWriter variable-name registry (#236).  A REPL `v = VideoWriter(...)`
+ * marks `v` here; a later submission's resolver kind-hook reports kind 15 for
+ * a marked name so the binding is re-stamped IsVideoWriter and `v.FrameRate =
+ * ...` routes to the dedicated setter instead of the struct-field path (which
+ * reinterpreted the opaque handle as a struct and crashed the encoder).  The
+ * mark is name-keyed and independent of how the handle value is stored, so it
+ * works regardless of the value's workspace kind.  Reassigning the name to a
+ * non-VideoWriter leaves a stale mark (a documented v1 limitation — the common
+ * pattern keeps `v` a VideoWriter for its lifetime). */
+static std::set<std::string> matlab_videowriter_names;
+
+void matlab_ws_mark_videowriter(const char *name, int64_t len, int32_t on) {
+    if (!name || len <= 0) return;
+    matlab_ws_lock();
+    std::string key(name, (size_t)len);
+    if (on) matlab_videowriter_names.insert(key);
+    else    matlab_videowriter_names.erase(key);
+    matlab_ws_unlock();
+}
+
+int32_t matlab_ws_is_videowriter(const char *name, int64_t len) {
+    if (!name || len <= 0) return 0;
+    matlab_ws_lock();
+    int32_t r =
+        matlab_videowriter_names.count(std::string(name, (size_t)len)) ? 1 : 0;
+    matlab_ws_unlock();
+    return r;
+}
+
 void matlab_ws_set_handle_sig(const char *name, int64_t len, int32_t retkind) {
     matlab_ws_init_if_needed();
     matlab_ws_lock();

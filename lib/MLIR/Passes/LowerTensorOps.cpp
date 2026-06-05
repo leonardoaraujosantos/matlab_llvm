@@ -2143,6 +2143,26 @@ bool TensorLowering::rewriteBuiltinCalls() {
       continue;
     }
 
+    /* #236: VideoWriter name-registry mark. Same (name ptr + len) shape as
+     * matlab_ws_set_handle_sig, with an i32 on/off flag. */
+    if (Name == "matlab_ws_mark_videowriter" && Call->getNumOperands() == 2) {
+      Value NameV = Call->getOperand(0);
+      Value On = Call->getOperand(1);
+      if (!mlir::isa<mlir::IntegerType>(On.getType())) continue;
+      int64_t Len = 0;
+      Value Ptr = fieldNameAddr(NameV, Len);
+      if (!Ptr) continue;
+      B.setInsertionPoint(Call);
+      Value LenV = LLVM::ConstantOp::create(
+          B, Call->getLoc(), I64, B.getI64IntegerAttr(Len));
+      auto Fn = rt("matlab_ws_mark_videowriter", VoidTy,
+                   {PtrTy, I64, B.getI32Type()});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{Ptr, LenV, On});
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+
     if ((Name == "matlab_ws_set_f64" || Name == "matlab_ws_set_mat" ||
          Name == "matlab_ws_set_obj" || Name == "matlab_ws_set_string" ||
          Name == "matlab_ws_set_sym" || Name == "matlab_ws_set_symmat" ||

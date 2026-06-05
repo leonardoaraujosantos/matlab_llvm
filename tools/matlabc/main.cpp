@@ -2244,13 +2244,19 @@ int64_t     matlab_string_get_len (void *s);
  * isstring dispatch fires across compilation boundaries. Defined
  * after main.cpp's runtime-introspection externs because it has to
  * walk matlab_dbg_ws_count/_name/_kind. */
+extern "C" int32_t matlab_ws_is_videowriter(const char *name, int64_t len);
 extern "C" int replWorkspaceKindHook(const char *name, int64_t len) {
   int n = matlab_dbg_ws_count();
   for (int i = 0; i < n; ++i) {
     int64_t got = 0;
     const char *gn = matlab_dbg_ws_name(i, &got);
-    if (got == len && gn && memcmp(gn, name, (size_t)len) == 0)
+    if (got == len && gn && memcmp(gn, name, (size_t)len) == 0) {
+      /* #236: a VideoWriter handle is stored under a generic kind (mat/obj),
+       * which would re-stamp the binding wrong; the name registry overrides
+       * it with kind 15 so the resolver marks the binding IsVideoWriter. */
+      if (matlab_ws_is_videowriter(name, len)) return 15;
       return matlab_dbg_ws_kind(i);
+    }
   }
   return -1;
 }

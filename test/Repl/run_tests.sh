@@ -125,6 +125,37 @@ if [[ "$got_rc" != "0" ]]; then
   echo "FAIL  plot_handle_assign_no_crash (rc=$got_rc)"
 fi
 
+# 5a. Cross-turn VideoWriter property-set (issue #236).  A `v = VideoWriter(...)`
+#     in one turn followed by `v.FrameRate = ...` in a LATER turn used to route
+#     the property store through the generic struct-field path (the new turn's
+#     Lowerer had lost the VideoWriter classification), corrupting the opaque
+#     handle and segfaulting in the encoder on the next writeVideo.  Each line
+#     here is a separate REPL submission; the sentinel only prints if the split
+#     setup left `v` usable.
+run_case "xturn_videowriter_property_set" "$(cat <<'EOF'
+v = VideoWriter('/tmp/repl_vw_236.mp4', 'MPEG-4');
+v.FrameRate = 20;
+open(v);
+figure(1);
+plot([0 1], [0 1]);
+xlim([0 1]); ylim([0 1]);
+writeVideo(v, getframe(gcf));
+close(v);
+disp('VW_XTURN_OK')
+exit
+EOF
+)" "VW_XTURN_OK"
+got_rc="$(printf '%s\n' "v = VideoWriter('/tmp/repl_vw_236.mp4', 'MPEG-4');" \
+                       "v.FrameRate = 20;" "open(v);" "figure(1);" \
+                       "plot([0 1],[0 1]); writeVideo(v, getframe(gcf));" \
+                       "close(v);" "exit" | "$MATLABC" -repl >/dev/null 2>&1; \
+          echo $?)"
+if [[ "$got_rc" != "0" ]]; then
+  fail=$((fail+1))
+  fails+=("xturn_videowriter_property_set (exit rc=$got_rc, expected 0 — #236 handle corruption?)")
+  echo "FAIL  xturn_videowriter_property_set (rc=$got_rc)"
+fi
+
 # 6. Cross-turn anonymous-handle persistence (issue #116).  An anonymous
 #    function handle defined in one REPL turn must survive into the next:
 #    before the fix, `f = @(x) ...` was kept on the local-slot lane and

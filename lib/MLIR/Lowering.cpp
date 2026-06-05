@@ -568,6 +568,12 @@ private:
    * to the video-writer setters instead of the generic struct field path
    * (which would misread the opaque handle as a struct). */
   std::unordered_set<Binding *> VideoWriterBindings;
+  /* #236: same-TU (VideoWriterBindings, set at the `v = VideoWriter(...)`
+   * assignment) OR cross-turn (Binding::IsVideoWriter, stamped by the Resolver
+   * from the kind=15 workspace hook). */
+  bool isVideoWriterBinding(Binding *B) const {
+    return B && (VideoWriterBindings.count(B) || B->IsVideoWriter);
+  }
   /* Phase 5.3: bindings holding a matlab_table * — used to dispatch
    * column accessors (`T.x`), shape (height/width/size), and disp(T). */
   std::unordered_set<Binding *> TableBindings;
@@ -2743,7 +2749,7 @@ void Lowerer::lowerStmt(const Stmt &St) {
           RhsIsTimetable = true;
         if (NE->Name == "timerange") RhsIsTimerange = true;
         if (NE->Name == "VideoWriter") RhsIsVideoWriter = true;
-        if (NE->Ref && VideoWriterBindings.count(NE->Ref))
+        if (isVideoWriterBinding(NE->Ref))
           RhsIsVideoWriter = true;
         /* Known struct-returning builtins. struct() is the textbook
          * literal; linkBudget is the PROP-Tier-2b struct return; stepinfo
@@ -3823,8 +3829,25 @@ void Lowerer::lowerStmt(const Stmt &St) {
     }
     if (RhsIsVideoWriter) {
       for (const Expr *L : A.LHS)
-        if (auto *N = dynamic_cast<const NameExpr *>(L))
+        if (auto *N = dynamic_cast<const NameExpr *>(L)) {
           if (N->Ref) VideoWriterBindings.insert(N->Ref);
+          /* #236: in the REPL, record the name in the runtime VideoWriter
+           * registry so a later submission's `v.FrameRate = ...` re-stamps
+           * the binding (kind=15 hook) and routes to the setter instead of
+           * the struct-field path that corrupted the handle. */
+          if (ReplMode && InScriptBody && N->Ref &&
+              N->Ref->Kind == BindingKind::Var) {
+            mlir::Value NameV = emitFieldNameChar(N->Ref->Name, loc(A.Range));
+            auto I32 = mlir::IntegerType::get(&MCtx, 32);
+            mlir::Value OnV = mlir::arith::ConstantOp::create(
+                B, loc(A.Range), I32, mlir::IntegerAttr::get(I32, 1));
+            mlir::NamedAttribute MCal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_ws_mark_videowriter"));
+            emitUnregOp("matlab.call_builtin", {NameV, OnV},
+                        {mlir::NoneType::get(&MCtx)}, loc(A.Range), {MCal});
+          }
+        }
     }
     if (RhsIsTimetable) {
       for (const Expr *L : A.LHS)
@@ -4001,7 +4024,7 @@ void Lowerer::lowerStmt(const Stmt &St) {
         Binding *SB = BN->Ref;
         if (!StructInitialised.count(SB)) continue;   /* plain struct only */
         if (SB->PinnedClass) continue;                /* not a classdef obj */
-        if (TableBindings.count(SB) || VideoWriterBindings.count(SB)) continue;
+        if (TableBindings.count(SB) || isVideoWriterBinding(SB)) continue;
         auto SlotIt = Slots.find(SB);
         if (SlotIt == Slots.end()) continue;
         auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
@@ -5171,7 +5194,7 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
      * RHS; a non-scalar RHS or an unknown property is silently ignored
      * (property-set is a v1 subset — see docs/plotting.md §4). */
     if (auto *BN = dynamic_cast<const NameExpr *>(F.Base))
-      if (BN->Ref && VideoWriterBindings.count(BN->Ref)) {
+      if (isVideoWriterBinding(BN->Ref)) {
         const char *Setter = nullptr;
         if (F.Field == "FrameRate") Setter = "matlab_videowriter_set_framerate";
         else if (F.Field == "Quality") Setter = "matlab_videowriter_set_quality";
