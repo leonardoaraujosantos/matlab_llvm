@@ -1307,15 +1307,30 @@ bool TensorLowering::rewriteBuiltinCalls() {
     }
     /* char(code): build a 1-char string from a numeric scalar code point.
      * Result is a matlab_string* (char is in isStringReturningBuiltin, so the
-     * frontend treats it as a string for disp / concat / assignment).
-     * A matrix operand (`char([72 73])`) is a documented follow-up: the matrix
-     * literal arrives as an unmaterialised matlab.concat_row here, and forcing
-     * it to ptr would skip that materialisation (cf. the matlab_char_m runtime
-     * entry, which is ready for when the operand-materialisation lands). */
+     * frontend treats it as a string for disp / concat / assignment). */
     if (Name == "char" && Call->getNumOperands() == 1 &&
         Call->getNumResults() == 1 && Call->getOperand(0).getType() == F64) {
       B.setInsertionPoint(Call);
       auto Fn = rt("matlab_char_s", PtrTy, {F64});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Call->getOperand(0)});
+      if (Call->getResult(0).getType() != PtrTy)
+        Call->getResult(0).setType(PtrTy);
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    /* char([codes]): build a string from a vector/matrix of code points
+     * (#234 symptom 3). Once the operand is a materialised matlab_mat (PtrTy)
+     * — the matrix-literal concat_row lowers to one earlier in this fixpoint
+     * pass, and a matrix variable is already PtrTy — route to the ready
+     * matlab_char_m runtime entry. */
+    if (Name == "char" && Call->getNumOperands() == 1 &&
+        Call->getNumResults() == 1 && Call->getOperand(0).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_char_m", PtrTy, {PtrTy});
       auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
                                       ValueRange{Call->getOperand(0)});
       if (Call->getResult(0).getType() != PtrTy)
