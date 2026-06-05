@@ -3763,6 +3763,24 @@ def num2str_mat(A):
 def str2double(s):
     try: return float(s)
     except Exception: return float('nan')
+def str2num(s):
+    # Numeric-literal / array subset of MATLAB str2num (#235). Empty 0x0 on
+    # any parse failure or ragged rows, matching the runtime.
+    s = str(s).strip()
+    if not s: return np.zeros((0, 0))
+    if s.startswith('[') and s.endswith(']'): s = s[1:-1]
+    rows = []
+    for part in s.replace('\n', ';').split(';'):
+        toks = part.replace(',', ' ').split()
+        if not toks: continue
+        try: rows.append([float(t) for t in toks])
+        except Exception: return np.zeros((0, 0))
+    if not rows: return np.zeros((0, 0))
+    ncols = len(rows[0])
+    if ncols == 0: return np.zeros((0, 0))
+    for r in rows:                       # NB: the shim shadows builtin any()
+        if len(r) != ncols: return np.zeros((0, 0))
+    return np.asarray(rows, dtype=float)
 def sprintf_f64(fmt, v): return _c_printf(_expand_escapes(str(fmt)), v)
 
 

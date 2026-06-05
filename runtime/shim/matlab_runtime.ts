@@ -3944,6 +3944,32 @@ export function str2double(s: string): number {
   const f = parseFloat(s);
   return Number.isNaN(f) ? NaN : f;
 }
+// Numeric-literal / array subset of MATLAB str2num (#235). Empty 0x0 on any
+// parse failure or ragged rows, matching the runtime.
+export function str2num(s: string): NDArray {
+  let str = String(s).trim();
+  if (str === "") return np.zeros(0, 0);
+  if (str.startsWith("[") && str.endsWith("]")) str = str.slice(1, -1);
+  const rows: number[][] = [];
+  for (const part of str.replace(/\n/g, ";").split(";")) {
+    const toks = part.replace(/,/g, " ").split(/\s+/).filter((t) => t !== "");
+    if (toks.length === 0) continue;
+    const vals: number[] = [];
+    for (const t of toks) {
+      const v = Number(t);
+      if (Number.isNaN(v)) return np.zeros(0, 0);
+      vals.push(v);
+    }
+    rows.push(vals);
+  }
+  if (rows.length === 0) return np.zeros(0, 0);
+  const ncols = rows[0].length;
+  if (ncols === 0 || rows.some((r) => r.length !== ncols)) return np.zeros(0, 0);
+  const out = new Float64Array(rows.length * ncols);
+  for (let r = 0; r < rows.length; r++)
+    for (let c = 0; c < ncols; c++) out[r * ncols + c] = rows[r][c];
+  return new NDArray(out, [rows.length, ncols]);
+}
 export function sprintf_f64(fmt: string, v: number): string {
   return cPrintf(expandEscapes(fmt), [v]);
 }

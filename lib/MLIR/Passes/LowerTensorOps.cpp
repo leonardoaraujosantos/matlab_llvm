@@ -1359,6 +1359,23 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Changed = true;
       continue;
     }
+    /* str2num(s) -> matrix parsed from the string (#235). Unlike
+     * str2double (scalar f64), the result is a matlab_mat* (PtrTy). */
+    if (Name == "str2num" && Call->getNumOperands() == 1 &&
+        Call->getNumResults() == 1) {
+      Value A0 = toStrPtr(Call->getOperand(0));
+      if (!A0) continue;
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_str2num", PtrTy, {PtrTy});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{A0});
+      if (Call->getResult(0).getType() != PtrTy)
+        Call->getResult(0).setType(PtrTy);
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
     /* sprintf(fmt)          -> matlab_sprintf_str
      * sprintf(fmt, v_f64)   -> matlab_sprintf_f64 */
     if (Name == "sprintf" && Call->getNumResults() == 1 &&
