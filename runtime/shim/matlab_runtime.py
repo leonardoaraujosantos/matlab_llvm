@@ -1958,6 +1958,19 @@ def abs_m(A): return np.abs(_m(A))
 def floor_m(A): return np.floor(_m(A))
 def round_m(A): return np.round(_m(A))
 def sign_m(A): return np.sign(_m(A))
+# Number-theory vector / array forms (#235). NB: the shim defines its own
+# MATLAB-style `range`, so this code uses explicit while loops, not range().
+def primes(n):
+    n = int(n)
+    if n < 2: return np.zeros((1, 0))
+    sieve = np.ones(n + 1, dtype=bool); sieve[:2] = False
+    p = 2
+    while p * p <= n:
+        if sieve[p]: sieve[p * p::p] = False
+        p += 1
+    return np.nonzero(sieve)[0].astype(float).reshape((1, -1))
+def isprime_m(A): return np.vectorize(isprime_s)(_m(A)).astype(float)
+def factorial_m(A): return np.vectorize(factorial_s)(_m(A)).astype(float)
 
 
 # --- reductions ------------------------------------------------------------

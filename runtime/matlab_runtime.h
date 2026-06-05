@@ -1100,6 +1100,12 @@ double matlab_tan_s(double x);
 double matlab_sqrt_s(double x);
 double matlab_abs_s(double x);
 
+// Number-theory vector / array forms (#235). Return a fresh matlab_mat:
+// primes a 1xk row vector; isprime/factorial shape-preserving.
+matlab_mat *matlab_primes(double n);
+matlab_mat *matlab_isprime_m(matlab_mat *A);
+matlab_mat *matlab_factorial_m(matlab_mat *A);
+
 // Fixed-Point Designer (fi) — see docs/emit_fixed_point.md §6.2.
 // Overflow modes: 0 = Wrap, 1 = Saturate.
 // Rounding modes: 0 = Floor, 1 = Nearest, 2 = Zero, 3 = Convergent, 4 = Ceiling.

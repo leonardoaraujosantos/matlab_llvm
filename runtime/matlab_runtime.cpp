@@ -7670,6 +7670,48 @@ double matlab_atan2d_s(double y, double x) {
     return atan2(y, x) * 57.29577951308232;
 }
 
+/*---------- Number-theory vector / array forms (#235) --------------------*
+ * Vector/array companions to the shipped scalar builtins matlab_isprime_s /
+ * matlab_factorial_s, plus primes(n) and factor(n) which have no scalar
+ * form. All return a fresh matlab_mat row vector or shape-preserving array. */
+
+/* primes(n): row vector of all primes <= n (sieve of Eratosthenes).
+ * n < 2 yields a 1x0 empty row, matching MATLAB. */
+matlab_mat *matlab_primes(double nd) {
+    int64_t n = (int64_t)nd;            /* MATLAB floors a non-integer n */
+    if (n < 2) return mat_alloc(1, 0);
+    std::vector<char> sieve((size_t)n + 1, 1);
+    sieve[0] = sieve[1] = 0;
+    for (int64_t p = 2; p * p <= n; ++p)
+        if (sieve[(size_t)p])
+            for (int64_t mm = p * p; mm <= n; mm += p) sieve[(size_t)mm] = 0;
+    int64_t count = 0;
+    for (int64_t i = 2; i <= n; ++i) count += sieve[(size_t)i];
+    matlab_mat *C = mat_alloc(1, count);
+    int64_t j = 0;
+    for (int64_t i = 2; i <= n; ++i)
+        if (sieve[(size_t)i]) C->data[j++] = (double)i;
+    return C;
+}
+
+/* isprime([...]): element-wise logical (0/1) form, shape-preserving. */
+matlab_mat *matlab_isprime_m(matlab_mat *A) {
+    if (!A) return mat_alloc(0, 0);
+    int64_t m = A->rows, n = A->cols;
+    matlab_mat *C = mat_alloc(m, n);
+    for (int64_t k = 0; k < m * n; ++k) C->data[k] = matlab_isprime_s(A->data[k]);
+    return C;
+}
+
+/* factorial([...]): element-wise form, shape-preserving. */
+matlab_mat *matlab_factorial_m(matlab_mat *A) {
+    if (!A) return mat_alloc(0, 0);
+    int64_t m = A->rows, n = A->cols;
+    matlab_mat *C = mat_alloc(m, n);
+    for (int64_t k = 0; k < m * n; ++k) C->data[k] = matlab_factorial_s(A->data[k]);
+    return C;
+}
+
 /* MATLAB `mod(a,b)`: result has same sign as b (or 0). `rem(a,b)`: sign
  * of a. C's fmod uses sign-of-a, so fmod == rem; derive mod from that. */
 double matlab_rem_s(double a, double b) {
