@@ -13190,6 +13190,26 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             return emitUnreg("matlab.call_builtin", {Arg}, F64, L, {Cal});
           }
       }
+      /* numel(s) / length(s) where s is a runtime char/string value produced
+       * inline by a string-returning builtin (blanks, strcat, strtrim, upper,
+       * regexprep, ...). Without this the matlab_string* is read as a
+       * matlab_mat by matlab_length / matlab_numel and the descriptor's bytes
+       * print as a garbage double (#234 — the "minimum safe step": kill the
+       * UB). Routes to matlab_string_len -> the char count, matching MATLAB
+       * (length('     ') == 5). The string-scalar BINDING case
+       * (s = "hi"; length(s) -> 1) is intentionally left unchanged. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          (N->Name == "numel" || N->Name == "length") &&
+          C.Args.size() == 1 &&
+          dynamic_cast<const CallOrIndex *>(C.Args[0]) &&
+          isStringExpr(C.Args[0])) {
+        auto F64 = mlir::Float64Type::get(&MCtx);
+        mlir::Value Arg = lowerExpr(*C.Args[0]);
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_string_len"));
+        return emitUnreg("matlab.call_builtin", {Arg}, F64, L, {Cal});
+      }
       /* numel(s) / length(s) on a scalar struct -> 1. Without this the
        * struct ptr is read as a matlab_mat and numel returns garbage
        * (rows*cols off the struct descriptor). Struct ARRAYS are excluded
