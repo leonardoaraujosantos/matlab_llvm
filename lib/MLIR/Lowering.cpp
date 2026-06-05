@@ -12057,6 +12057,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
               if (Nm == "fgetl" || Nm == "sprintf" || Nm == "num2str" ||
                   Nm == "upper" || Nm == "lower" || Nm == "strtrim" ||
                   Nm == "strrep" || Nm == "strcat" || Nm == "regexprep" ||
+                  Nm == "char" ||  /* #234 — char([codes]) / char(code) is a string */
                   Nm == "bin" || Nm == "hex" || Nm == "dec")
                 IsStr = true;
             }
