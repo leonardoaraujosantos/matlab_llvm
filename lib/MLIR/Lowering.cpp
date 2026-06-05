@@ -798,6 +798,7 @@ bool Lowerer::isStringReturningBuiltin(llvm::StringRef N) {
          N == "upper" || N == "lower" || N == "strtrim" ||
          N == "strrep" || N == "strcat" || N == "char" ||
          N == "deblank" || N == "blanks" || N == "strjoin" ||
+         N == "regexprep" ||  /* #235 — regexp is numeric, regexprep a string */
          N == "bin" || N == "hex" || N == "dec";
 }
 
@@ -12055,7 +12056,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
               auto Nm = CN->Name;
               if (Nm == "fgetl" || Nm == "sprintf" || Nm == "num2str" ||
                   Nm == "upper" || Nm == "lower" || Nm == "strtrim" ||
-                  Nm == "strrep" || Nm == "strcat" ||
+                  Nm == "strrep" || Nm == "strcat" || Nm == "regexprep" ||
                   Nm == "bin" || Nm == "hex" || Nm == "dec")
                 IsStr = true;
             }

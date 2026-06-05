@@ -25,6 +25,8 @@
 #include <vector>    /* Phase-4 RAII scratch buffers */
 #include <string>    /* std::string — fprintf/sprintf variadic format core */
 #include <algorithm> /* std::sort — used by §4.3 medfilt1 / hampel */
+#include <functional>/* std::function — regexp/regexprep CPS matcher (#235) */
+#include <memory>    /* std::unique_ptr — regexp AST nodes (#235) */
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -13756,6 +13758,318 @@ matlab_string *matlab_blanks(double n) {
     matlab_string *s = matlab_string_from_literal(buf, k);
     free(buf);
     return s;
+}
+
+/* ===== Minimal backtracking regex engine for regexp / regexprep (#235) =====
+ * Supported subset (the PCRE-flavoured constructs MATLAB regexp accepts most
+ * often): literals, '.' (any but '\n'), \d \D \w \W \s \S, \<char> escapes,
+ * [...] / [^...] classes with a-z ranges and shorthand, ^ $ anchors, greedy
+ * * + ? and {n} {n,} {n,m}, (...) grouping, and | alternation.
+ * NOT supported: capturing-group backreferences, lazy/possessive quantifiers,
+ * lookaround, named groups, and the cell-returning regexp output modes
+ * ('match' / 'tokens' / 'split') — those need the cell-result typing work
+ * tracked in #233. A bad pattern parses to nullptr (caller no-ops), and a
+ * step cap bounds pathological backtracking so it can never hang.
+ *
+ * These helpers are 'static' because this region sits inside an `extern "C"`
+ * block; struct member functions keep C++ linkage regardless. */
+struct ReNode {
+    enum Kind { Char, Any, Class, Start, End, Star, Plus, Quest,
+                Repeat, Concat, Alt, Group, Empty } kind;
+    char ch = 0;
+    bool cls[256] = {false};
+    bool neg = false;
+    int rmin = 0, rmax = 0;          /* Repeat bounds; rmax < 0 => unbounded */
+    std::vector<std::unique_ptr<ReNode>> kids;
+};
+
+static void re_shorthand(bool *cls, char e) {
+    bool tmp[256] = {false};
+    char w = (e >= 'A' && e <= 'Z') ? (char)(e + 32) : e;   /* lower */
+    bool negc = (e >= 'A' && e <= 'Z');
+    if (w == 'd') { for (int i = '0'; i <= '9'; ++i) tmp[i] = true; }
+    else if (w == 'w') {
+        for (int i = '0'; i <= '9'; ++i) tmp[i] = true;
+        for (int i = 'a'; i <= 'z'; ++i) tmp[i] = true;
+        for (int i = 'A'; i <= 'Z'; ++i) tmp[i] = true;
+        tmp[(unsigned char)'_'] = true;
+    } else if (w == 's') {
+        const char *sp = " \t\n\r\f\v";
+        for (const char *q = sp; *q; ++q) tmp[(unsigned char)*q] = true;
+    }
+    for (int i = 0; i < 256; ++i)
+        if (tmp[i] != negc) cls[i] = true;   /* negc => add the complement */
+}
+
+static char re_unescape(char e) {
+    switch (e) { case 'n': return '\n'; case 't': return '\t';
+                 case 'r': return '\r'; case 'f': return '\f'; case 'v': return '\v';
+                 default:  return e; }
+}
+
+/* Recursive-descent parser to an AST. ok=false on any malformed input. */
+struct ReParser {
+    const char *p, *end; bool ok = true;
+    explicit ReParser(const std::string &s)
+        : p(s.c_str()), end(s.c_str() + s.size()) {}
+    bool eof() const { return p >= end; }
+    char peek() const { return p < end ? *p : 0; }
+    char get() { return p < end ? *p++ : 0; }
+
+    std::unique_ptr<ReNode> parse() {
+        auto n = parseAlt();
+        if (!eof()) ok = false;          /* leftover, e.g. unbalanced ')' */
+        return ok ? std::move(n) : nullptr;
+    }
+    std::unique_ptr<ReNode> mk(ReNode::Kind k) {
+        auto n = std::make_unique<ReNode>(); n->kind = k; return n;
+    }
+    std::unique_ptr<ReNode> parseAlt() {
+        auto left = parseConcat();
+        if (peek() != '|') return left;
+        auto alt = mk(ReNode::Alt);
+        alt->kids.push_back(std::move(left));
+        while (peek() == '|') { get(); alt->kids.push_back(parseConcat()); }
+        return alt;
+    }
+    std::unique_ptr<ReNode> parseConcat() {
+        auto cat = mk(ReNode::Concat);
+        while (!eof() && peek() != '|' && peek() != ')') {
+            auto atom = parseQuant();
+            if (!atom) { ok = false; break; }
+            cat->kids.push_back(std::move(atom));
+        }
+        if (cat->kids.empty()) return mk(ReNode::Empty);
+        if (cat->kids.size() == 1) return std::move(cat->kids[0]);
+        return cat;
+    }
+    std::unique_ptr<ReNode> parseQuant() {
+        auto atom = parseAtom();
+        if (!atom) return nullptr;
+        char c = peek();
+        if (c == '*' || c == '+' || c == '?') {
+            get();
+            auto q = mk(c == '*' ? ReNode::Star
+                        : c == '+' ? ReNode::Plus : ReNode::Quest);
+            q->kids.push_back(std::move(atom));
+            return q;
+        }
+        if (c == '{') {
+            const char *save = p;
+            get();
+            int n1 = 0; bool has1 = false;
+            while (peek() >= '0' && peek() <= '9') { n1 = n1*10 + (get()-'0'); has1 = true; }
+            bool comma = false; int n2 = n1;
+            if (peek() == ',') {
+                comma = true; get();
+                if (peek() >= '0' && peek() <= '9') { n2 = 0; while (peek() >= '0' && peek() <= '9') n2 = n2*10 + (get()-'0'); }
+                else n2 = -1;            /* {n,} unbounded */
+            }
+            if (has1 && peek() == '}') {
+                get();
+                auto q = mk(ReNode::Repeat);
+                q->rmin = n1; q->rmax = comma ? n2 : n1;
+                q->kids.push_back(std::move(atom));
+                return q;
+            }
+            p = save;                    /* not a quantifier — '{' is literal */
+        }
+        return atom;
+    }
+    std::unique_ptr<ReNode> parseAtom() {
+        char c = peek();
+        if (c == 0 || c == ')' || c == '|' || c == '*' || c == '+' || c == '?') {
+            ok = false; return nullptr;
+        }
+        if (c == '(') {
+            get();
+            auto inner = parseAlt();
+            if (peek() != ')') { ok = false; return nullptr; }
+            get();
+            auto g = mk(ReNode::Group); g->kids.push_back(std::move(inner));
+            return g;
+        }
+        if (c == '[') return parseClass();
+        if (c == '.') { get(); return mk(ReNode::Any); }
+        if (c == '^') { get(); return mk(ReNode::Start); }
+        if (c == '$') { get(); return mk(ReNode::End); }
+        if (c == '\\') {
+            get();
+            char e = get();
+            if (e == 0) { ok = false; return nullptr; }
+            if (e=='d'||e=='D'||e=='w'||e=='W'||e=='s'||e=='S') {
+                auto n = mk(ReNode::Class); re_shorthand(n->cls, e); return n;
+            }
+            auto n = mk(ReNode::Char); n->ch = re_unescape(e); return n;
+        }
+        get();
+        auto n = mk(ReNode::Char); n->ch = c; return n;
+    }
+    std::unique_ptr<ReNode> parseClass() {
+        get();                           /* '[' */
+        auto n = mk(ReNode::Class);
+        if (peek() == '^') { n->neg = true; get(); }
+        bool first = true;
+        while (!eof() && (peek() != ']' || first)) {
+            first = false;
+            char c = get();
+            if (c == '\\') {
+                char e = get();
+                if (e=='d'||e=='D'||e=='w'||e=='W'||e=='s'||e=='S') { re_shorthand(n->cls, e); continue; }
+                c = re_unescape(e);
+            }
+            if (peek() == '-' && (p + 1 < end) && *(p + 1) != ']') {
+                get();                   /* '-' */
+                char hi = get();
+                if (hi == '\\') hi = re_unescape(get());
+                for (int i = (unsigned char)c; i <= (unsigned char)hi; ++i) n->cls[i] = true;
+            } else {
+                n->cls[(unsigned char)c] = true;
+            }
+        }
+        if (peek() != ']') { ok = false; return nullptr; }
+        get();                           /* ']' */
+        return n;
+    }
+};
+
+/* CPS backtracking matcher with a step cap. Greedy quantifiers try the
+ * longest expansion first, matching PCRE / MATLAB leftmost-greedy semantics. */
+struct ReMatcher {
+    const std::string &s;
+    long steps = 0;
+    static const long kLimit = 20000000L;
+    explicit ReMatcher(const std::string &str) : s(str) {}
+    bool seq(const std::vector<std::unique_ptr<ReNode>> &kids, size_t i,
+             size_t pos, const std::function<bool(size_t)> &k) {
+        if (i == kids.size()) return k(pos);
+        return m(kids[i].get(), pos,
+                 [&](size_t p) { return seq(kids, i + 1, p, k); });
+    }
+    bool m(const ReNode *n, size_t pos, const std::function<bool(size_t)> &k) {
+        if (++steps > kLimit) return false;
+        switch (n->kind) {
+        case ReNode::Empty: return k(pos);
+        case ReNode::Char:
+            return pos < s.size() && (unsigned char)s[pos] == (unsigned char)n->ch && k(pos + 1);
+        case ReNode::Any:
+            return pos < s.size() && s[pos] != '\n' && k(pos + 1);
+        case ReNode::Class:
+            return pos < s.size() && (n->cls[(unsigned char)s[pos]] != n->neg) && k(pos + 1);
+        case ReNode::Start: return pos == 0 && k(pos);
+        case ReNode::End:   return pos == s.size() && k(pos);
+        case ReNode::Group: return m(n->kids[0].get(), pos, k);
+        case ReNode::Concat: return seq(n->kids, 0, pos, k);
+        case ReNode::Alt:
+            for (auto &kid : n->kids) if (m(kid.get(), pos, k)) return true;
+            return false;
+        case ReNode::Quest:
+            if (m(n->kids[0].get(), pos, k)) return true;
+            return k(pos);
+        case ReNode::Star: {
+            std::function<bool(size_t)> more = [&](size_t pp) -> bool {
+                if (m(n->kids[0].get(), pp,
+                      [&](size_t p2) { return p2 > pp && more(p2); })) return true;
+                return k(pp);
+            };
+            return more(pos);
+        }
+        case ReNode::Plus:
+            return m(n->kids[0].get(), pos, [&](size_t p2) -> bool {
+                std::function<bool(size_t)> more = [&](size_t pp) -> bool {
+                    if (m(n->kids[0].get(), pp,
+                          [&](size_t q) { return q > pp && more(q); })) return true;
+                    return k(pp);
+                };
+                return more(p2);
+            });
+        case ReNode::Repeat: {
+            std::function<bool(size_t, int)> rec = [&](size_t pp, int cnt) -> bool {
+                bool canMore = (n->rmax < 0) || (cnt < n->rmax);
+                if (canMore &&
+                    m(n->kids[0].get(), pp, [&](size_t p2) -> bool {
+                        if (p2 == pp && cnt >= n->rmin) return false;   /* no zero-width inflation */
+                        return rec(p2, cnt + 1);
+                    })) return true;
+                if (cnt >= n->rmin) return k(pp);
+                return false;
+            };
+            return rec(pos, 0);
+        }
+        }
+        return false;
+    }
+};
+
+/* Does a match start exactly at `pos`? On success endOut = the (greedy) end. */
+static bool re_match_at(const ReNode *root, const std::string &s,
+                        size_t pos, size_t &endOut) {
+    ReMatcher mm(s);
+    return mm.m(root, pos, [&](size_t p) { endOut = p; return true; });
+}
+
+/* regexp(str, pat): row vector of 1-based start indices of every
+ * non-overlapping match, scanned left to right. Empty 1x0 on no match or a
+ * malformed pattern. The cell-returning option forms are not handled here. */
+matlab_mat *matlab_regexp(matlab_string *s, matlab_string *pat) {
+    if (!s || !pat) return mat_alloc(1, 0);
+    std::string str(s->data, (size_t)s->len);
+    std::string ps(pat->data, (size_t)pat->len);
+    ReParser pr(ps);
+    auto root = pr.parse();
+    if (!root) return mat_alloc(1, 0);
+    std::vector<double> starts;
+    size_t pos = 0;
+    while (pos <= str.size()) {
+        size_t e = pos;
+        if (re_match_at(root.get(), str, pos, e)) {
+            starts.push_back((double)(pos + 1));
+            pos = (e > pos) ? e : pos + 1;     /* non-overlapping; zero-width advances 1 */
+        } else {
+            ++pos;
+        }
+    }
+    matlab_mat *R = mat_alloc(1, (int64_t)starts.size());
+    for (size_t i = 0; i < starts.size(); ++i) R->data[i] = starts[i];
+    return R;
+}
+
+/* regexprep(str, pat, rep): replace every non-overlapping match with `rep`.
+ * `rep` is literal text except `$0` (whole match) and `$$` (a literal '$').
+ * Group backreferences ($1..) are not supported (see the subset note above).
+ * Returns the input unchanged on a malformed pattern. */
+matlab_string *matlab_regexprep(matlab_string *s, matlab_string *pat,
+                                matlab_string *rep) {
+    if (!s) return matlab_string_from_literal("", 0);
+    std::string str(s->data, (size_t)s->len);
+    if (!pat) return matlab_string_from_literal(str.c_str(), (int64_t)str.size());
+    std::string ps(pat->data, (size_t)pat->len);
+    std::string rp = rep ? std::string(rep->data, (size_t)rep->len) : std::string();
+    ReParser pr(ps);
+    auto root = pr.parse();
+    if (!root) return matlab_string_from_literal(str.c_str(), (int64_t)str.size());
+    std::string out;
+    size_t pos = 0;
+    while (pos <= str.size()) {
+        size_t e = pos;
+        if (re_match_at(root.get(), str, pos, e)) {
+            std::string matched = str.substr(pos, e - pos);
+            for (size_t i = 0; i < rp.size(); ++i) {
+                if (rp[i] == '$' && i + 1 < rp.size()) {
+                    char d = rp[i + 1];
+                    if (d == '0') { out += matched; ++i; continue; }
+                    if (d == '$') { out += '$';     ++i; continue; }
+                }
+                out += rp[i];
+            }
+            if (e > pos) { pos = e; }
+            else { if (pos < str.size()) out += str[pos]; ++pos; }  /* zero-width */
+        } else {
+            if (pos < str.size()) out += str[pos];
+            ++pos;
+        }
+    }
+    return matlab_string_from_literal(out.c_str(), (int64_t)out.size());
 }
 
 /* strrep(s, old, new): every non-overlapping occurrence of `old` in
