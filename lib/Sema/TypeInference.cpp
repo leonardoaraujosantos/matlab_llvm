@@ -1534,6 +1534,10 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
   // str2num(s) -> numeric matrix parsed from the string (#235). Shape is
   // data-dependent (scalar / vector / 2-D), so it's unknown until runtime.
   if (Name == "str2num") return TC.arrayOf(Dtype::Double, Shape::unknown());
+  // regexp(s, pat) default form -> 1xk row vector of 1-based match starts
+  // (#235). The cell-returning option modes ('match'/'tokens') are not
+  // lowered; regexprep returns a string and uses the default (like strrep).
+  if (Name == "regexp") return TC.arrayOf(Dtype::Double, Shape::vector(-1));
 
   //===--- Fixed-Point Designer (fi) -------------------------------------===//
   // fi(value) / fi(value, signed, WL) / fi(value, signed, WL, FL).

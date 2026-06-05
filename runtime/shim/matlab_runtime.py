@@ -3732,6 +3732,35 @@ def lower(s): return str(s).lower()
 def upper(s): return str(s).upper()
 def strrep(s, old, new): return str(s).replace(str(old), str(new))
 def contains(s, pat): return 1.0 if str(pat) in str(s) else 0.0
+def regexp(s, pat):
+    # regexp(s, pat) default form -> 1xk row of 1-based match starts (#235).
+    import re as _re
+    s, pat = str(s), str(pat)
+    try: it = list(_re.finditer(pat, s))
+    except Exception: return np.zeros((1, 0))
+    starts = [float(mo.start() + 1) for mo in it]
+    if not starts: return np.zeros((1, 0))
+    return np.asarray(starts, dtype=float).reshape((1, len(starts)))
+def regexprep(s, pat, rep):
+    # regexprep(s, pat, rep) -> string. rep is literal except $0 (whole match)
+    # and $$ (literal $); group backrefs are unsupported, matching the runtime.
+    import re as _re
+    s, pat, rep = str(s), str(pat), str(rep)
+    try: matches = list(_re.finditer(pat, s))
+    except Exception: return s
+    out = []; last = 0
+    for mo in matches:
+        out.append(s[last:mo.start()])
+        matched = mo.group(0); r = []; i = 0
+        while i < len(rep):
+            if rep[i] == '$' and i + 1 < len(rep):
+                d = rep[i + 1]
+                if d == '0': r.append(matched); i += 2; continue
+                if d == '$': r.append('$'); i += 2; continue
+            r.append(rep[i]); i += 1
+        out.append("".join(r)); last = mo.end()
+    out.append(s[last:])
+    return "".join(out)
 def strfind(s, pat):  # 1-based positions of every (overlapping) match -> 1xk row
     # NB: the module shadows builtin `range` (stats), so use str.find here.
     s, pat = str(s), str(pat)

@@ -1344,6 +1344,44 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Changed = true;
       continue;
     }
+    /* regexp(s, pat) default form -> 1xk row vector of 1-based match starts
+     * (#235). Only the 2-arg form is lowered here; the cell-returning option
+     * modes ('match'/'tokens'/'split') need the #233 cell-result work. */
+    if (Name == "regexp" && Call->getNumOperands() == 2 &&
+        Call->getNumResults() == 1) {
+      Value S0 = toStrPtr(Call->getOperand(0));
+      Value S1 = toStrPtr(Call->getOperand(1));
+      if (!S0 || !S1) continue;
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_regexp", PtrTy, {PtrTy, PtrTy});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{S0, S1});
+      if (Call->getResult(0).getType() != PtrTy)
+        Call->getResult(0).setType(PtrTy);
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    /* regexprep(s, pat, rep) -> string with every match of `pat` replaced by
+     * `rep` (#235). All three operands coerce via toStrPtr. */
+    if (Name == "regexprep" && Call->getNumOperands() == 3 &&
+        Call->getNumResults() == 1) {
+      Value S0 = toStrPtr(Call->getOperand(0));
+      Value S1 = toStrPtr(Call->getOperand(1));
+      Value S2 = toStrPtr(Call->getOperand(2));
+      if (!S0 || !S1 || !S2) continue;
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_regexprep", PtrTy, {PtrTy, PtrTy, PtrTy});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{S0, S1, S2});
+      if (Call->getResult(0).getType() != PtrTy)
+        Call->getResult(0).setType(PtrTy);
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
     if (Name == "str2double" && Call->getNumOperands() == 1 &&
         Call->getNumResults() == 1) {
       Value A0 = toStrPtr(Call->getOperand(0));  /* str2double('3.14') literal */

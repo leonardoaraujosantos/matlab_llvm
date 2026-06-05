@@ -3903,6 +3903,43 @@ export function strfind(s: any, pat: any): NDArray {
       if (str.substr(i, p.length) === p) pos.push(i + 1);
   return new NDArray(Float64Array.from(pos), [1, pos.length]);
 }
+// regexp(s, pat) default form -> 1xk row of 1-based match starts (#235).
+export function regexp(s: any, pat: any): NDArray {
+  const str = String(s);
+  let re: RegExp;
+  try { re = new RegExp(String(pat), "g"); } catch { return new NDArray(new Float64Array(0), [1, 0]); }
+  const starts: number[] = [];
+  let mo: RegExpExecArray | null;
+  while ((mo = re.exec(str)) !== null) {
+    starts.push(mo.index + 1);
+    if (mo.index === re.lastIndex) re.lastIndex++;   // zero-width: advance
+  }
+  return new NDArray(Float64Array.from(starts), [1, starts.length]);
+}
+// regexprep(s, pat, rep) -> string. rep is literal except $0 (whole match)
+// and $$ (literal $); group backrefs are unsupported, matching the runtime.
+export function regexprep(s: any, pat: any, rep: any): string {
+  const str = String(s), rp = String(rep);
+  let re: RegExp;
+  try { re = new RegExp(String(pat), "g"); } catch { return str; }
+  let out = "", last = 0, mo: RegExpExecArray | null;
+  while ((mo = re.exec(str)) !== null) {
+    out += str.slice(last, mo.index);
+    const matched = mo[0];
+    for (let i = 0; i < rp.length; i++) {
+      if (rp[i] === "$" && i + 1 < rp.length) {
+        const d = rp[i + 1];
+        if (d === "0") { out += matched; i++; continue; }
+        if (d === "$") { out += "$"; i++; continue; }
+      }
+      out += rp[i];
+    }
+    last = mo.index + matched.length;
+    if (matched.length === 0) re.lastIndex++;   // zero-width: advance
+  }
+  out += str.slice(last);
+  return out;
+}
 export function strcmp(a: string, b: string): number {
   return String(a) === String(b) ? 1 : 0;
 }
