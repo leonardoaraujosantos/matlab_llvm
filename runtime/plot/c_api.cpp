@@ -999,6 +999,19 @@ int matlab_savefig(const char *path, int64_t plen) {
                                         fmt, p.c_str());
 }
 
+/* saveas(fig, fname) where fname is a runtime string value (a variable or
+ * sprintf result) rather than a constant-folded literal. Extracts the
+ * (data, len) from the matlab_string and forwards to matlab_savefig. The
+ * plot lowering used to only handle literal paths and silently dropped a
+ * dynamic filename, making per-frame export a no-op (issue #239). */
+const char *matlab_string_get_data(void *s, int64_t *len_out);
+int matlab_savefig_str(void *str) {
+    int64_t len = 0;
+    const char *p = matlab_string_get_data(str, &len);
+    if (!p || len <= 0) return -1;
+    return matlab_savefig(p, len);
+}
+
 }  /* extern "C" */
 
 /* -------- IDE integration ------------------------------------------------ */

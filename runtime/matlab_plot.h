@@ -335,6 +335,12 @@ void               matlab_plot_buffer_free(matlab_plot_buffer buf);
  * unsupported extension, -2 on I/O error. */
 int matlab_savefig(const char *path, int64_t plen);
 
+/* saveas with a runtime string value (variable / sprintf result) as the
+ * filename. Reads the path out of the matlab_string and forwards to
+ * matlab_savefig. Used by the plot lowering when the path operand is not
+ * a constant-folded literal (issue #239). */
+int matlab_savefig_str(void *str);
+
 /* --------------------------------------------------------------------------
  * IDE integration (matlab_llvm_ide / Matlab_llvm_ide)
  *
