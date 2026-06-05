@@ -198,6 +198,12 @@ few lines look the way they do:
   marker is therefore drawn as a degenerate 2-point segment, and the
   animation loop starts at `k = 3` so the trail/shadow slices always have
   ≥ 2 points.
+- **Axis limits use `axis([...])`, not `zlim`.** `zlim` is undefined on the
+  AOT/`-emit-*` front door (issue **#238**), so `matlabc quadrotor_fp_flight.m`
+  fails its compile check on it. The 6-arg `axis([xlo xhi ylo yhi zlo zhi])`
+  form resolves on **both** the REPL and AOT paths, so the example uses that.
+  (To actually *run* and get the PNG/MP4, use `-repl` or the `-emit-llvm` →
+  `clang++` → link pipeline — a bare `matlabc file.m` only type-checks/lowers.)
 - **PNG-per-frame export is avoided.** `saveas(gcf, sprintf(...))` with a
   computed filename silently writes nothing — only string literals save
   (issue **#239**) — so animation goes through VideoWriter, not a frame dump.
