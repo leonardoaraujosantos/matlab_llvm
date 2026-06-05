@@ -1038,7 +1038,7 @@ void Resolver::registerBuiltins() {
     "imshow", "imagesc", "pcolor", "surf", "surfc", "mesh", "meshc", "contour",
     "title", "xlabel", "ylabel", "zlabel", "legend", "text",
     "colorbar", "colormap",
-    "grid", "hold", "axis", "box", "xlim", "ylim", "view",
+    "grid", "hold", "axis", "box", "xlim", "ylim", "zlim", "view",
     "loglog", "semilogx", "semilogy",
     "subplot", "saveas", "print",
     "xline", "yline",

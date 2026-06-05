@@ -105,9 +105,10 @@ struct Axes {
     std::string title;
     std::vector<std::string> legend;
     bool grid = false;
-    bool xlim_set = false, ylim_set = false;
+    bool xlim_set = false, ylim_set = false, zlim_set = false;
     double xlim_lo = 0, xlim_hi = 1;
     double ylim_lo = 0, ylim_hi = 1;
+    double zlim_lo = 0, zlim_hi = 1;
     bool hold = false;
     Colormap cmap = Colormap::Parula;
     /* Image semantics: row 1 at top → y-axis inverted compared to math

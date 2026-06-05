@@ -881,6 +881,7 @@ void compute_data_range_3d(const Axes &ax,
     if (!std::isfinite(z_lo) || z_lo == z_hi) { z_lo = 0; z_hi = 1; }
     if (ax.xlim_set) { x_lo = ax.xlim_lo; x_hi = ax.xlim_hi; }
     if (ax.ylim_set) { y_lo = ax.ylim_lo; y_hi = ax.ylim_hi; }
+    if (ax.zlim_set) { z_lo = ax.zlim_lo; z_hi = ax.zlim_hi; }
 }
 
 void draw_box_3d(cairo_t *cr, const Proj3 &P,

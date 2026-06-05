@@ -150,9 +150,10 @@ involved, so the runtime can be regression-tested in isolation.
 
 | Function | Status | Notes |
 |---|---|---|
-| `xlim([lo hi])`, `ylim([lo hi])` | ✅ | Numeric form. |
+| `xlim([lo hi])`, `ylim([lo hi])`, `zlim([lo hi])` | ✅ | Numeric form. `zlim` pins the z-axis on 3-D axes. |
 | `axis('opt')` | ✅ | `equal` / `square` / `tight` / `off` / `on`. |
 | `axis([xmin xmax ymin ymax])` | ✅ | Numeric 4-element form via `matlab_axis_lims`. |
+| `axis([xmin xmax ymin ymax zmin zmax])` | ✅ | 6-element form also pins the z-axis. |
 | `box on` / `box off` | ✅ | Frame on/off independent of ticks. |
 | `view(az, el)` | ✅ | 3D camera angles in degrees. Default (-37.5°, 30°). |
 | `xline(v)`, `yline(v)`, `xline(v, 'lbl')`, `yline(v, 'lbl')` | ✅ | Reference lines spanning the plot area, optional label. |

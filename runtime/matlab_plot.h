@@ -268,6 +268,8 @@ void matlab_title (const char *s, int64_t n);
 /* xlim([lo hi]) — limits passed as a 2-element matlab_mat. */
 void matlab_xlim(matlab_mat *limits);
 void matlab_ylim(matlab_mat *limits);
+/* zlim([lo hi]) — z-axis limits for 3-D axes (plot3/surf/mesh/...). */
+void matlab_zlim(matlab_mat *limits);
 
 /* grid on/off. */
 void matlab_grid_on (void);
