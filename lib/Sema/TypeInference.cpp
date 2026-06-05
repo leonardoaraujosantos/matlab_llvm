@@ -1476,11 +1476,27 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
     return TC.scalar(Dtype::Double);
   }
   /* Scalar math builtins added with the runtime _s forms (scalar args). */
-  if (Name == "log1p" || Name == "expm1" || Name == "factorial" ||
+  if (Name == "log1p" || Name == "expm1" ||
       Name == "nextpow2" || Name == "hypot" || Name == "nthroot" ||
-      Name == "gcd" || Name == "lcm" || Name == "isprime" ||
+      Name == "gcd" || Name == "lcm" ||
       Name == "nchoosek")
     return TC.scalar(Dtype::Double);
+
+  /* primes(n) (#235): always a row vector; the length is data-dependent,
+   * so the column count is unknown (-1). (factor(n) is intentionally not
+   * here — the name collides with the Symbolic Math Toolbox `factor`.) */
+  if (Name == "primes")
+    return TC.arrayOf(Dtype::Double, Shape::vector(-1));
+
+  /* isprime / factorial (#235): element-wise, shape-preserving for an
+   * array argument; scalar otherwise (matches the shipped _s scalar form). */
+  if (Name == "isprime" || Name == "factorial") {
+    if (!ArgTys.empty() && ArgTys[0] && ArgTys[0]->K == Type::Kind::Array) {
+      auto &A = static_cast<const ArrayType &>(*ArgTys[0]);
+      return TC.arrayOf(Dtype::Double, A.S);
+    }
+    return TC.scalar(Dtype::Double);
+  }
 
   if (Name == "transpose" || Name == "ctranspose") {
     if (!ArgTys.empty() && ArgTys[0] && ArgTys[0]->K == Type::Kind::Array) {

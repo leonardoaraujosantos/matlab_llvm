@@ -7170,6 +7170,13 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"ceil",       "matlab_ceil_m",     1, "p"},
       {"round",      "matlab_round_m",    1, "p"},
       {"fix",        "matlab_fix_m",      1, "p"},
+      /* Number-theory vector / array forms (#235). primes takes a scalar n
+       * and returns a row vector; isprime/factorial here are the matrix
+       * forms (scalar f64 args route to the _s Scalar map). factor(n) is
+       * omitted — the name collides with the Symbolic Math Toolbox factor. */
+      {"primes",     "matlab_primes",     1, "f"},
+      {"isprime",    "matlab_isprime_m",  1, "p"},
+      {"factorial",  "matlab_factorial_m",1, "p"},
       {"linspace",   "matlab_linspace",   1, "fff"},
       {"logspace",   "matlab_logspace",   1, "fff"},
       {"mod",        "matlab_mod_s",      0, "ff"},

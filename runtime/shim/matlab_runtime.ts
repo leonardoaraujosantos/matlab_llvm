@@ -1979,6 +1979,20 @@ export const abs_m   = unaryM(Math.abs);
 export const floor_m = unaryM(Math.floor);
 export const round_m = unaryM((x) => Math.round(x));
 export const sign_m  = unaryM(Math.sign);
+// Number-theory vector / array forms (#235). isprime_s/factorial_s and
+// toRow are hoisted function declarations, so referencing them here is safe.
+export const isprime_m   = unaryM((x) => isprime_s(x));
+export const factorial_m = unaryM((x) => factorial_s(x));
+export function primes(n: number): NDArray {
+  n = n | 0;
+  if (n < 2) return toRow([]);
+  const sieve = new Uint8Array(n + 1).fill(1); sieve[0] = 0; sieve[1] = 0;
+  for (let p = 2; p * p <= n; p++)
+    if (sieve[p]) for (let m = p * p; m <= n; m += p) sieve[m] = 0;
+  const out: number[] = [];
+  for (let i = 2; i <= n; i++) if (sieve[i]) out.push(i);
+  return toRow(out);
+}
 
 // --- reductions ------------------------------------------------------------
 
