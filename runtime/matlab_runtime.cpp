@@ -7696,6 +7696,24 @@ matlab_mat *matlab_primes(double nd) {
     return C;
 }
 
+/* factor(n): row vector of the prime factors of n in ascending order, with
+ * multiplicity (so prod(factor(n)) == n). MATLAB requires n >= 1 integer;
+ * factor(1) returns 1. Negative / non-integer -> 1x0 empty row. This is the
+ * numeric form; the symbolic factor(expr, var) routes to matlab_sym_factor
+ * (#235 — the names collide, disambiguated by arg type in the frontend). */
+matlab_mat *matlab_factor(double nd) {
+    int64_t n = (int64_t)nd;
+    if ((double)n != nd || n < 1) return mat_alloc(1, 0);
+    if (n == 1) { matlab_mat *C = mat_alloc(1, 1); C->data[0] = 1.0; return C; }
+    std::vector<double> f;
+    for (int64_t d = 2; d * d <= n; ++d)
+        while (n % d == 0) { f.push_back((double)d); n /= d; }
+    if (n > 1) f.push_back((double)n);
+    matlab_mat *C = mat_alloc(1, (int64_t)f.size());
+    for (size_t k = 0; k < f.size(); ++k) C->data[k] = f[k];
+    return C;
+}
+
 /* isprime([...]): element-wise logical (0/1) form, shape-preserving. */
 matlab_mat *matlab_isprime_m(matlab_mat *A) {
     if (!A) return mat_alloc(0, 0);

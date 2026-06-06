@@ -1482,10 +1482,11 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
       Name == "nchoosek")
     return TC.scalar(Dtype::Double);
 
-  /* primes(n) (#235): always a row vector; the length is data-dependent,
-   * so the column count is unknown (-1). (factor(n) is intentionally not
-   * here — the name collides with the Symbolic Math Toolbox `factor`.) */
-  if (Name == "primes")
+  /* primes(n) / factor(n) (#235): a row vector; the length is data-dependent
+   * so the column count is unknown (-1). Only the 1-arg numeric form is typed
+   * here — the symbolic factor(expr, var) is the 2-arg form and is handled by
+   * the sym path (exprIsSym), so we don't claim it as numeric. */
+  if (Name == "primes" || (Name == "factor" && Args.size() == 1))
     return TC.arrayOf(Dtype::Double, Shape::vector(-1));
 
   /* isprime / factorial (#235): element-wise, shape-preserving for an

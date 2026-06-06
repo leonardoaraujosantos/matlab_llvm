@@ -1969,6 +1969,17 @@ def primes(n):
         if sieve[p]: sieve[p * p::p] = False
         p += 1
     return np.nonzero(sieve)[0].astype(float).reshape((1, -1))
+def factor(n):
+    # Numeric prime factorisation (#235). Empty 1x0 for n<1 / non-integer.
+    n = int(n)
+    if float(n) != float(int(n)) or n < 1: return np.zeros((1, 0))
+    if n == 1: return np.ones((1, 1))
+    f = []; d = 2
+    while d * d <= n:
+        while n % d == 0: f.append(float(d)); n //= d
+        d += 1
+    if n > 1: f.append(float(n))
+    return np.asarray(f, dtype=float).reshape((1, -1))
 def isprime_m(A): return np.vectorize(isprime_s)(_m(A)).astype(float)
 def factorial_m(A): return np.vectorize(factorial_s)(_m(A)).astype(float)
 
