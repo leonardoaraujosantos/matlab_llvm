@@ -7406,6 +7406,15 @@ bool TensorLowering::rewriteBuiltinCalls() {
        * (caller discards). */
       {"matlab_mpc_construct",     "matlab_mpc_construct",     1, "ppff"},
       {"matlab_mpc_move",          "matlab_mpc_move",          1, "pppp"},
+      /* #240 — REPL/JIT fallback. On the AOT path mpcmove(obj,st,ym,r) is
+       * rewritten to matlab_mpc_move in Lowering (gated on the arg-0 mpc
+       * class pin). On the REPL/-dap path the object round-trips through the
+       * workspace and loses that pin, so the rewrite is skipped and the raw
+       * `mpcmove` builtin reaches here. The name is unambiguous (MPC only),
+       * so route the 4-pointer form straight to matlab_mpc_move — this is
+       * what makes the p×ny reference-preview matrix work on REPL, not just
+       * AOT. (5-arg / scalar-arg forms are handled by their own arms.) */
+      {"mpcmove",                  "matlab_mpc_move",          1, "pppp"},
       {"matlab_mpc_move_opt",      "matlab_mpc_move_opt",      1, "ppppp"},
       {"matlab_mpc_move_adaptive", "matlab_mpc_move_adaptive", 1, "ppppppp"},
       {"matlab_mpc_move_tv",       "matlab_mpc_move_tv",       1, "ppppppp"},

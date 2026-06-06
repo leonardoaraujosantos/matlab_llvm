@@ -306,6 +306,16 @@ exit
 EOF
 )" "2"
 
+# 9. #240 — mpcmove with a p×ny reference-preview MATRIX on the REPL/JIT path.
+# The mpc object round-trips through the workspace and loses its class pin, so
+# the AOT `mpcmove -> matlab_mpc_move` rewrite (gated on that pin) is skipped.
+# Without the LowerTensorOps fallback the call errors with "unsupported call
+# shape" and the loop silently degrades (RMS ~1.9 m); with it, the REPL tracks
+# like AOT (RMS ~0.014 m). Uses the real example as the canonical repro; the
+# "RMS = 0.0" substring distinguishes the fixed result from the broken 1.8991.
+QUAD_240="$(cd "$(dirname "$0")/../.." && pwd)/examples/quadrotor/quadrotor_pid_mpc.m"
+run_case "mpcmove_preview_matrix_repl_240" "$(cat "$QUAD_240"; printf '\nexit\n')" "RMS = 0.0"
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 if (( fail > 0 )); then
