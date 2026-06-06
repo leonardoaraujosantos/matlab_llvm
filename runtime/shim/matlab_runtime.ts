@@ -1993,6 +1993,16 @@ export function primes(n: number): NDArray {
   for (let i = 2; i <= n; i++) if (sieve[i]) out.push(i);
   return toRow(out);
 }
+// Numeric prime factorisation (#235). Empty 1x0 for n<1 / non-integer.
+export function factor(nd: number): NDArray {
+  let n = nd | 0;
+  if (n !== nd || n < 1) return toRow([]);
+  if (n === 1) return toRow([1]);
+  const f: number[] = [];
+  for (let d = 2; d * d <= n; d++) while (n % d === 0) { f.push(d); n = (n / d) | 0; }
+  if (n > 1) f.push(n);
+  return toRow(f);
+}
 
 // --- reductions ------------------------------------------------------------
 

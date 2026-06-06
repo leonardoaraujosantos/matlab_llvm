@@ -1103,6 +1103,7 @@ double matlab_abs_s(double x);
 // Number-theory vector / array forms (#235). Return a fresh matlab_mat:
 // primes a 1xk row vector; isprime/factorial shape-preserving.
 matlab_mat *matlab_primes(double n);
+matlab_mat *matlab_factor(double n);   /* numeric factor(n); sym form is separate */
 matlab_mat *matlab_isprime_m(matlab_mat *A);
 matlab_mat *matlab_factorial_m(matlab_mat *A);
 

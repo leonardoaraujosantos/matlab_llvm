@@ -1124,7 +1124,7 @@ bool Lowerer::exprIsSym(const Expr *X) const {
     if (auto *CN = dynamic_cast<const NameExpr *>(CX->Callee)) {
       llvm::StringRef Nm = CN->Name;
       static const llvm::StringSet<> Producers = {
-          "sym", "syms", "str2sym", "simplify", "expand", "factor",
+          "sym", "syms", "str2sym", "simplify", "expand",
           "subs", "vpa", "taylor", "limit",
           "dsolve", "pdsolve", "pdsolve_heat", "pdsolve_wave",
           "laplace", "ilaplace", "fourier", "ifourier",
@@ -1167,7 +1167,10 @@ bool Lowerer::exprIsSym(const Expr *X) const {
           "diff", "int",
           "sin", "cos", "tan", "asin", "acos", "atan",
           "sinh", "cosh", "tanh",
-          "exp", "log", "sqrt", "abs"};
+          "exp", "log", "sqrt", "abs",
+          /* #235 — factor is symbolic only for a sym arg (factor(expr,var));
+           * factor(n) on a number is the numeric prime factorisation. */
+          "factor"};
       if (Overloaded.contains(Nm) && !CX->Args.empty())
         return exprIsSym(CX->Args[0]);
     }
