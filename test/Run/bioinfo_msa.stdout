@@ -1,0 +1,15 @@
+--- alignment ---
+MKTAYIAKQR
+MKTAYIAKNR
+MKTAYIPKNR
+--- consensus ---
+MKTAYIAKNR
+profile 20 x 10
+col1 Met freq: 1.00
+--- nt MSA ---
+ACGTACGT
+ACG-ACGT
+ACGTA-GT
+--- profalign ---
+ACDEF
+AC-EF

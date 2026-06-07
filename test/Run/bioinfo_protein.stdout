@@ -1,0 +1,12 @@
+MW(AG)=146.15
+MW(W)=204.23
+Gly atoms C=2 H=5 N=1 O=2 S=0
+AlaCysAspGluPhe
+C
+--- trypsin digest ---
+AAK
+AARPK
+--- EcoRI digest ---
+GGG
+AATTCGGG
+pI(acidic DDDDD) < pI(basic KKKKK): 1

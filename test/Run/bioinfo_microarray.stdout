@@ -1,0 +1,5 @@
+DataMatrix: 5 x 3
+qnorm row1: 20.0 20.0 20.0
+manorm col means: 1.00 1.00 1.00
+varfilter rows: 5 -> 5
+cluster leaf order: 1 5 3 2 4
