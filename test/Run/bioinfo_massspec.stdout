@@ -1,0 +1,6 @@
+peaks: 2 at mz 5 and 12
+msnorm max: 1.00
+resampled to 10 points, mz1=1.0
+top feature: 1
+folds: 1 2 3 1 2 3
+imputed(2,3)=3.0

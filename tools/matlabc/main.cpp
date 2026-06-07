@@ -2371,7 +2371,7 @@ static std::string buildReplPrelude(const std::string &Src) {
     "comm", "rf", "optim", "mpc", "ident", "gads", "pde", "prop", "sym",
     "stateflow", "antenna", "control", "stats", "images", "curvefit",
     "dsp", "gpu", "finance", "econ", "fusion", "robotics", "navigation",
-    "dlnet", "rl",
+    "dlnet", "rl", "bioinfo",
   };
   std::vector<std::string> Files;
   auto add = [&](const std::string &Leaf) {
@@ -2415,6 +2415,12 @@ static std::string buildReplPrelude(const std::string &Src) {
      * cst_polyadd / cst_polysub helpers); the others have their
      * own per-class files. */
     {false, "tf",                       "cst_classdefs.m"},
+    /* Bioinformatics Tier-4 — the phytree classdef lives in
+     * bioinfo_classdefs.m; seqlinkage / seqneighjoin build it. */
+    {false, "phytree",                  "bioinfo_classdefs.m"},
+    {false, "seqlinkage",               "bioinfo_classdefs.m"},
+    {false, "seqneighjoin",             "bioinfo_classdefs.m"},
+    {false, "DataMatrix",               "bioinfo_classdefs.m"},
     {false, "ss",                       "cst_class_ss.m"},
     {false, "zpk",                      "cst_class_zpk.m"},
     {false, "pid",                      "cst_class_pid.m"},
@@ -11968,6 +11974,8 @@ int main(int Argc, char **Argv) {
       /* Curve Fitting Toolbox Tier-1 — `curvefit_classdefs.m` umbrella. */
       "fit", "cfit", "sfit", "fittype", "fitoptions", "coeffvalues",
       "ppform", "spline", "pchip", "ppmak", "fnder", "fnint",
+      /* Bioinformatics Toolbox Tier-4/6 — `bioinfo_classdefs.m`. */
+      "phytree", "seqlinkage", "seqneighjoin", "DataMatrix",
       /* DSP System Toolbox — `dsp_classdefs.m` umbrella.  The parser folds
        * `dsp.Foo` -> `dsp_Foo`; the source-text scan keys on the dotted
        * package form the user actually wrote. */
@@ -12239,6 +12247,10 @@ int main(int Argc, char **Argv) {
         ClsName == "spline" || ClsName == "pchip" || ClsName == "ppmak" ||
         ClsName == "fnder" || ClsName == "fnint")
       return "curvefit_classdefs.m";
+    /* Bioinformatics Toolbox Tier-4/6 — phytree + DataMatrix classdefs. */
+    if (ClsName == "phytree" || ClsName == "seqlinkage" ||
+        ClsName == "seqneighjoin" || ClsName == "DataMatrix")
+      return "bioinfo_classdefs.m";
     /* DSP System Toolbox umbrella — any `dsp.*` package class. */
     if (ClsName.starts_with("dsp."))
       return "dsp_classdefs.m";
@@ -12448,7 +12460,7 @@ int main(int Argc, char **Argv) {
       "comm", "rf", "optim", "mpc", "ident", "gads", "pde", "prop", "sym",
       "stateflow", "antenna", "control", "stats", "images", "curvefit",
       "dsp", "gpu", "finance", "econ", "fusion", "robotics", "navigation",
-      "dlnet", "rl",
+      "dlnet", "rl", "bioinfo",
     };
     std::vector<std::string> Cands;
     for (const char *Tb : kToolboxDirs) {

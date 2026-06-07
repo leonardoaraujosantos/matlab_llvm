@@ -356,6 +356,38 @@ void Resolver::registerBuiltins() {
     "wpdec", "wprec", "wpcoef", "wprcoef", "besttree", "bestlevt",
     "ewt", "vmd", "emd", "tqwt", "itqwt", "matchingPursuit",
     "waveletScattering", "featureMatrix",
+    /* ===== Bioinformatics Toolbox (Phase A: Tiers 1-2) ===== *
+     * User-facing names only; the runtime mapping goes through the
+     * single-return spec table / multi-return dispatch in LowerTensorOps
+     * (which also coerces const_char sequence/option args to matlab_string).
+     * basecount/aacount return a struct, fastaread a struct array — tagged
+     * in Lowering.cpp. */
+    /* Tier-1 — sequence lane */
+    "nt2int", "int2nt", "aa2int", "int2aa", "nt2aa",
+    "dna2rna", "rna2dna", "seqcomplement", "seqrcomplement", "seqreverse",
+    "basecount", "aacount", "randseq", "fastaread", "fastawrite",
+    /* Tier-2 — pairwise alignment + scoring */
+    "blosum", "nuc44", "nwalign", "swalign", "seqdotplot",
+    /* Tier-3 — MSA + profiles (Phase B). */
+    "multialign", "profalign", "seqconsensus", "seqprofile",
+    /* Tier-4 — distances + phylogenetic trees (Phase B).  `phytree` is a
+     * classdef (prelude); seqlinkage/seqneighjoin alloc+populate it in
+     * Lowering; getnewickstr/get/pdist are phytree methods.  The
+     * matlab_bioinfo_phytree_* forwarders + populate symbols are listed so
+     * the spec-table dispatch in LowerTensorOps lowers the method bodies. */
+    "seqpdist", "seqlinkage", "seqneighjoin", "phytreewrite", "getnewickstr",
+    "matlab_bioinfo_seqlinkage1", "matlab_bioinfo_seqlinkage2",
+    "matlab_bioinfo_seqlinkage3", "matlab_bioinfo_seqneighjoin1",
+    "matlab_bioinfo_seqneighjoin3", "matlab_bioinfo_phytree_newick",
+    "matlab_bioinfo_phytree_get", "matlab_bioinfo_phytree_pdist",
+    "matlab_bioinfo_phytreewrite",
+    /* Tier-5 — protein property + digestion (Phase C). */
+    "molweight", "atomiccomp", "isoelectric", "aminolookup",
+    "cleave", "restrict", "rebasecuts",
+    /* Tier-6 — microarray + mass spec + learning (Phase C). */
+    "quantilenorm", "manorm", "genevarfilter", "generangefilter",
+    "genelowvalfilter", "clustergram", "msnorm", "mslowess", "msbackadj",
+    "mspeaks", "msresample", "rankfeatures", "knnimpute", "crossvalind",
     /* ===== DSP System Toolbox ===== *
      * The `dsp.*` System Objects live in dsp_classdefs.m; the user-facing
      * surface is the constructor + `obj(frame)` call-syntax (lowered to
@@ -2067,6 +2099,12 @@ void Resolver::resolveStmt(Stmt &St, Scope *S) {
           }
           if (NX->Name == "fitoptions") {
             if (ClassDef *C = classByName("fitoptions")) return C;
+          }
+          /* Bioinformatics Tier-4: seqlinkage / seqneighjoin return a
+           * class-pinned phytree so getnewickstr(tr) / pdist(tr) / get(tr,..)
+           * dispatch to the phytree methods. */
+          if (NX->Name == "seqlinkage" || NX->Name == "seqneighjoin") {
+            if (ClassDef *C = classByName("phytree")) return C;
           }
           if (NX->Name == "fittype") {
             if (ClassDef *C = classByName("fittype")) return C;
