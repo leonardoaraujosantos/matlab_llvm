@@ -2974,6 +2974,19 @@ void Lowerer::lowerStmt(const Stmt &St) {
      * string) so `+` / disp / strlen / isstring can dispatch
      * correctly. See Lowerer::isStringExpr. */
     bool RhsIsString = isStringExpr(A.RHS);
+    /* A single-quoted char literal assigned wholesale to a variable
+     * (`c = 'abc'`) lowers to a bare matlab.const_char, which the REPL/DAP
+     * workspace store can't round-trip (matlab_ws_set_mat has no const_char
+     * coercion → "unsupported call shape").  In ReplMode treat it like a
+     * double-quoted string: tag the binding string + materialize the value to
+     * a matlab_string below (kind=3), so the store routes through
+     * matlab_ws_set_string and reloads as text.  AOT (ReplMode=false) keeps
+     * the const_char lane untouched. */
+    bool RhsIsCharLiteralStore =
+        ReplMode && A.RHS && A.RHS->Kind == NodeKind::CharLiteral &&
+        A.LHS.size() == 1 && A.LHS[0] &&
+        dynamic_cast<const NameExpr *>(A.LHS[0]) != nullptr;
+    if (RhsIsCharLiteralStore) RhsIsString = true;
 
     /* Track 3-D bindings: RHS produces a matlab_mat3 — zeros/ones with 3
      * args, cat(3, …), or a builtin that always returns truecolor
@@ -3648,6 +3661,16 @@ void Lowerer::lowerStmt(const Stmt &St) {
     }
 
     mlir::Value Rhs = A.RHS ? lowerExpr(*A.RHS) : mlir::Value{};
+    /* Materialize a wholesale char-literal RHS into a matlab_string so the
+     * ReplMode workspace store (matlab_ws_set_string) gets the right
+     * descriptor — see RhsIsCharLiteralStore above. */
+    if (RhsIsCharLiteralStore && Rhs) {
+      auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+      mlir::NamedAttribute Cal(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, "matlab_string_from_literal"));
+      Rhs = emitUnreg("matlab.call_builtin", {Rhs}, PtrTy, loc(A.Range), {Cal});
+    }
     if (RhsIsHandle) {
       /* Pick up capture spill slots left by the AnonFunction lowering
        * (empty vector for @name and capture-free anons). */
