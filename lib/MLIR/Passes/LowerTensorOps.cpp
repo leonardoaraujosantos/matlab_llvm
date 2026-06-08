@@ -6439,6 +6439,27 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"wpcoef",  "matlab_wavelet_wpcoef",  PtrTy, {PtrTy, F64}},
         {"besttree","matlab_wavelet_besttree",PtrTy, {PtrTy}},
         {"wenergy", "matlab_wavelet_wenergy_wp", PtrTy, {PtrTy}},
+        /* ===== Bluetooth Toolbox — Tier-1 LE PHY =====
+         * Waveforms are complex (matlab_mat_c*); the const_char Mode arg is
+         * coerced to matlab_string by this path. */
+        {"bleWaveformGenerator", "matlab_bluetooth_ble_wavegen", PtrTy, {PtrTy, PtrTy, F64, F64}},
+        {"bleIdealReceiver",     "matlab_bluetooth_ble_rx",      PtrTy, {PtrTy, PtrTy, F64, F64}},
+        /* Tier-2 — BR/EDR PHY */
+        {"bluetoothWaveformGenerator", "matlab_bluetooth_wavegen", PtrTy, {PtrTy, PtrTy, F64}},
+        {"bluetoothIdealReceiver",     "matlab_bluetooth_rx",      PtrTy, {PtrTy, PtrTy, F64}},
+        /* Tier-3 — protocol data units (decode returns a struct). */
+        {"bleLLDataChannelPDU",       "matlab_bluetooth_ll_pdu",        PtrTy, {F64, PtrTy}},
+        {"bleLLDataChannelPDUDecode", "matlab_bluetooth_ll_pdu_decode", PtrTy, {PtrTy}},
+        {"bleL2CAPFrame",             "matlab_bluetooth_l2cap",         PtrTy, {F64, PtrTy}},
+        {"bleL2CAPFrameDecode",       "matlab_bluetooth_l2cap_decode",  PtrTy, {PtrTy}},
+        /* Tier-4 — channel selection + frequency map. */
+        {"bleChannelSelection",        "matlab_bluetooth_chsel",   PtrTy, {F64, F64, F64}},
+        {"bleChannelIndexToFrequency", "matlab_bluetooth_ch2freq", PtrTy, {PtrTy}},
+        /* Tier-5 — localization (AoA). */
+        {"bleAngleEstimate", "matlab_bluetooth_aoa", PtrTy, {PtrTy, F64}},
+        /* Tier-6 — test & measurement. */
+        {"bluetoothFrequencyOffset",    "matlab_bluetooth_freqoffset", PtrTy, {PtrTy}},
+        {"bluetoothFrequencyDeviation", "matlab_bluetooth_freqdev",    PtrTy, {PtrTy, F64}},
         /* ===== Bioinformatics Toolbox (Phase A: Tiers 1-2) =====
          * Sequence args arrive as matlab_string* (PtrTy); a const_char
          * literal is coerced via matlab_string_from_literal by this path. */

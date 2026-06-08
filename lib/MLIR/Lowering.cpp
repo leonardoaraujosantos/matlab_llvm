@@ -2787,6 +2787,8 @@ void Lowerer::lowerStmt(const Stmt &St) {
          * which round-trips NULL faithfully (matlab_struct_get_mat). */
         if (NE->Name == "struct" || NE->Name == "linkBudget" ||
             NE->Name == "stepinfo" ||
+            NE->Name == "bleLLDataChannelPDUDecode" ||
+            NE->Name == "bleL2CAPFrameDecode" ||
             NE->Name == "basecount" || NE->Name == "aacount" ||
             NE->Name == "atomiccomp" ||
             NE->Name == "pde_load_glb" || NE->Name == "pde_load_stl" ||
@@ -3928,9 +3930,21 @@ void Lowerer::lowerStmt(const Stmt &St) {
        * we want the same-TU struct lowering to keep doing its init,
        * just have the cross-input workspace-store route via
        * matlab_ws_set_struct rather than _set_mat. */
+      /* Decode builtins return a struct with a matrix-valued `Payload` field;
+       * record it so `d.Payload` reads via matlab_struct_get_mat instead of
+       * defaulting to get_f64 (the Bioinformatics struct-field-typing fix). */
+      bool rhsHasPayload = false;
+      if (A.RHS && A.RHS->Kind == NodeKind::CallOrIndex)
+        if (auto *Cx = dynamic_cast<const CallOrIndex *>(A.RHS))
+          if (auto *NE = dynamic_cast<const NameExpr *>(Cx->Callee))
+            rhsHasPayload = (NE->Name == "bleLLDataChannelPDUDecode" ||
+                             NE->Name == "bleL2CAPFrameDecode");
       for (const Expr *L : A.LHS)
         if (auto *N = dynamic_cast<const NameExpr *>(L))
-          if (N->Ref) StructBindings.insert(N->Ref);
+          if (N->Ref) {
+            StructBindings.insert(N->Ref);
+            if (rhsHasPayload) MatStructFields.insert({N->Ref, "Payload"});
+          }
     }
     if (RhsIsSym) {
       for (const Expr *L : A.LHS)

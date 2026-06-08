@@ -1,0 +1,6 @@
+LL PDU bits: 96
+LL  LLID=2 Length=10 payloadBER=0.0000
+L2CAP bits: 112
+L2CAP CID=64 Length=10 payloadBER=0.0000
+CSA1 hops: 7 14 21 28 35 5
+freqs MHz: 2402 2440 2480
