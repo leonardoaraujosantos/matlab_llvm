@@ -356,6 +356,23 @@ void Resolver::registerBuiltins() {
     "wpdec", "wprec", "wpcoef", "wprcoef", "besttree", "bestlevt",
     "ewt", "vmd", "emd", "tqwt", "itqwt", "matchingPursuit",
     "waveletScattering", "featureMatrix",
+    /* ===== Bluetooth Toolbox ===== *
+     * User-facing names only; runtime mapping + const_char coercion go through
+     * the LowerTensorOps single-return spec table.  Waveforms are complex
+     * (matlab_mat_c) and flow through the shipped `awgn` as opaque pointers. */
+    /* Tier-1 — LE PHY */
+    "bleWaveformGenerator", "bleIdealReceiver",
+    /* Tier-2 — BR/EDR PHY */
+    "bluetoothWaveformGenerator", "bluetoothIdealReceiver",
+    /* Tier-3 — protocol data units */
+    "bleLLDataChannelPDU", "bleLLDataChannelPDUDecode",
+    "bleL2CAPFrame", "bleL2CAPFrameDecode",
+    /* Tier-4 — channel selection + frequency map */
+    "bleChannelSelection", "bleChannelIndexToFrequency",
+    /* Tier-5 — localization */
+    "bleAngleEstimate",
+    /* Tier-6 — test & measurement */
+    "bluetoothFrequencyDeviation", "bluetoothFrequencyOffset",
     /* ===== DSP System Toolbox ===== *
      * The `dsp.*` System Objects live in dsp_classdefs.m; the user-facing
      * surface is the constructor + `obj(frame)` call-syntax (lowered to
