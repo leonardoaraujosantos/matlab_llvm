@@ -6487,6 +6487,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"triangulate", "matlab_vision_triangulate", PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy}},
         {"disparityBM", "matlab_vision_disparity",   PtrTy, {PtrTy, PtrTy, F64}},
         {"disparityBM", "matlab_vision_disparity2",  PtrTy, {PtrTy, PtrTy}},
+        {"reconstructScene", "matlab_vision_reconstruct", PtrTy, {PtrTy}},
         /* Tier-6 — point cloud */
         {"pcwrite",       "matlab_vision_pcwrite",      PtrTy, {PtrTy, PtrTy}},
         {"pcread",        "matlab_vision_pcread",       PtrTy, {PtrTy}},

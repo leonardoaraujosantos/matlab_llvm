@@ -388,7 +388,7 @@ void Resolver::registerBuiltins() {
     /* Tier-4 — optical flow */
     "opticalFlowLK", "opticalFlowHS",
     /* Tier-5 — camera geometry + stereo */
-    "triangulate", "disparityBM",
+    "triangulate", "disparityBM", "reconstructScene",
     /* Tier-6 — point cloud */
     "pcread", "pcwrite", "pcdownsample", "pcfitplane", "pcregistericp",
     /* ===== Bioinformatics Toolbox (Phase A: Tiers 1-2) ===== *

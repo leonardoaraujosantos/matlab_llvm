@@ -37,6 +37,8 @@ examples/*/*/*
 !examples/*/*/*.m
 !examples/*/*/*.md
 !examples/*/*/*.mflow
+!examples/*/data/
+!examples/*/data/*.png
 
 # Stray CMake artifacts if someone configures from the repo root
 # rather than build/ (canonical layout uses build/, see justfile).

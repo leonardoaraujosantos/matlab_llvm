@@ -1,26 +1,35 @@
 % pointcloud_plane_fit.m — Computer Vision Toolbox Phase-C (Tier-6).
 % ----------------------------------------------------------------------
-% Point-cloud ground-plane extraction: write/read a PLY cloud, voxel-grid
-% downsample it, fit the dominant plane with RANSAC (pcfitplane), and align a
-% transformed copy back with ICP (pcregistericp).
+% From a REAL photograph to a 3-D point cloud and back to geometry: build a
+% stereo disparity map of the facade, back-project it into a 3-D cloud with
+% reconstructScene, persist it as PLY, voxel-downsample it, then fit the
+% dominant plane with RANSAC (pcfitplane).  A fronto-parallel facade
+% reconstructs to a plane whose normal points along the viewing axis.
+% Result image:
+%   /tmp/cv_depth.png — the depth map the cloud was reconstructed from
 
-% a cloud: a planar floor (z~0) plus a few off-plane outlier points.
-floorpts = [0 0 0; 2 0 0; 0 2 0; 2 2 0; 1 1 0; 0.5 1.5 0; 1.5 0.5 0; 1 0 0; 0 1 0];
-outliers = [1 1 3; 0.5 0.5 2];
-cloud = [floorpts; outliers];
+left = imread('data/facade.png');
+bg   = imtranslate(left, [-4 0]);       % background depth layer
+fg   = imtranslate(left, [-10 0]);      % nearer foreground layer
+right = bg;
+right(60:140, 60:140) = fg(60:140, 60:140);
+D = disparityBM(left, right, 16);
 
-pcwrite('/tmp/scene_cloud.ply', cloud);
-c = pcread('/tmp/scene_cloud.ply');
-fprintf('cloud: %d points read from PLY\n', size(c,1));
+cloud = reconstructScene(D);            % N x 3 back-projected 3-D points
+fprintf('reconstructed 3-D points: %d\n', size(cloud,1));
 
-c = pcdownsample(c, 1.2);
-fprintf('after voxel downsample: %d points\n', size(c,1));
+pcwrite('/tmp/facade_cloud.ply', cloud);
+c = pcread('/tmp/facade_cloud.ply');
+fprintf('PLY round-trip: %d points\n', size(c,1));
 
-plane = pcfitplane(cloud, 0.1);
-fprintf('ground-plane normal: (%.1f, %.1f, %.1f)\n', abs(plane(1)), abs(plane(2)), abs(plane(3)));
+ds = pcdownsample(cloud, 12.0);
+fprintf('after voxel downsample: %d points\n', size(ds,1));
 
-% register a translated copy back onto the original.
-% register the floor points (RANSAC plane handled outliers above; ICP wants inliers)
-shifted = floorpts; shifted(:,1) = shifted(:,1) + 0.1;
-T = pcregistericp(shifted, floorpts);
-fprintf('ICP alignment: tx=%.1f (recovers the -0.1 inverse)\n', T(1,4));
+plane = pcfitplane(cloud, 6.0);
+fprintf('facade plane normal: (%.1f, %.1f, %.1f)\n', ...
+        abs(plane(1)), abs(plane(2)), abs(plane(3)));
+
+% Image output: the depth map underpinning the reconstruction.
+depthImg = D ./ 16 .* 255;
+imwrite(depthImg, '/tmp/cv_depth.png');
+fprintf('wrote /tmp/cv_depth.png (%dx%d)\n', size(depthImg,1), size(depthImg,2));

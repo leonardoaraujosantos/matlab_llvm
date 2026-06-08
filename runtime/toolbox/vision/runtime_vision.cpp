@@ -508,8 +508,11 @@ matlab_mat *matlab_vision_insertshape(matlab_mat *Im, void *shapeS, matlab_mat *
     matlab_mat *J = mat_alloc(H, W);
     if (!J||!J->data) return J;
     for (int i=0;i<H*W;i++) J->data[i]=Im->data[i];
-    double mx=0; for(int i=0;i<H*W;i++) mx=std::max(mx,Im->data[i]);
-    double val = mx>0? mx : 1.0;
+    /* draw toward whichever extreme is farther from the mean -> max contrast. */
+    double mn=Im->data[0],mx=Im->data[0],sum=0;
+    for(int i=0;i<H*W;i++){ double v=Im->data[i]; mn=std::min(mn,v); mx=std::max(mx,v); sum+=v; }
+    double mean=sum/(H*W);
+    double val = (mean-mn > mx-mean) ? mn : mx;
     auto setpx=[&](int r,int c){ if(r>=0&&r<H&&c>=0&&c<W) J->data[r*W+c]=val; };
     std::string shape = cv_sstr(shapeS);
     int K = static_cast<int>(pos->rows);
@@ -517,8 +520,8 @@ matlab_mat *matlab_vision_insertshape(matlab_mat *Im, void *shapeS, matlab_mat *
         if (shape=="rectangle"){
             int x=static_cast<int>(pos->data[i*pos->cols])-1, y=static_cast<int>(pos->data[i*pos->cols+1])-1;
             int w=static_cast<int>(pos->data[i*pos->cols+2]), h=static_cast<int>(pos->data[i*pos->cols+3]);
-            for(int c=x;c<=x+w;c++){ setpx(y,c); setpx(y+h,c); }
-            for(int r=y;r<=y+h;r++){ setpx(r,x); setpx(r,x+w); }
+            for(int c=x;c<=x+w;c++){ setpx(y,c); setpx(y+1,c); setpx(y+h,c); setpx(y+h-1,c); }
+            for(int r=y;r<=y+h;r++){ setpx(r,x); setpx(r,x+1); setpx(r,x+w); setpx(r,x+w-1); }
         } else if (shape=="line"){
             int x1=static_cast<int>(pos->data[i*pos->cols])-1, y1=static_cast<int>(pos->data[i*pos->cols+1])-1;
             int x2=static_cast<int>(pos->data[i*pos->cols+2])-1, y2=static_cast<int>(pos->data[i*pos->cols+3])-1;
@@ -539,12 +542,16 @@ matlab_mat *matlab_vision_insertmarker(matlab_mat *Im, matlab_mat *pts) {
     matlab_mat *J = mat_alloc(H, W);
     if(!J||!J->data) return J;
     for(int i=0;i<H*W;i++) J->data[i]=Im->data[i];
-    double mx=0; for(int i=0;i<H*W;i++) mx=std::max(mx,Im->data[i]);
-    double val=mx>0?mx:1.0;
+    double mn=Im->data[0],mx=Im->data[0];
+    for(int i=0;i<H*W;i++){ double v=Im->data[i]; mn=std::min(mn,v); mx=std::max(mx,v); }
+    auto setpx=[&](int r,int c,double v){ if(r>=0&&r<H&&c>=0&&c<W) J->data[r*W+c]=v; };
     int K=static_cast<int>(pts->rows);
+    /* two-tone target marker (bright core + dark ring) -> visible on ANY
+     * background, whether the corner sits on a light pane or a dark frame. */
     for(int i=0;i<K;i++){ int x=static_cast<int>(pts->data[i*2])-1, y=static_cast<int>(pts->data[i*2+1])-1;
-        for(int d=-2;d<=2;d++){ if(y>=0&&y<H&&x+d>=0&&x+d<W) J->data[y*W+x+d]=val;
-                                if(x>=0&&x<W&&y+d>=0&&y+d<H) J->data[(y+d)*W+x]=val; } }
+        for(int dr=-2;dr<=2;dr++) for(int dc=-2;dc<=2;dc++) setpx(y+dr,x+dc,mn); /* 5x5 dark base */
+        for(int dr=-1;dr<=1;dr++) for(int dc=-1;dc<=1;dc++) setpx(y+dr,x+dc,mx); /* 3x3 bright core */
+    }
     return J;
 }
 
@@ -568,6 +575,11 @@ matlab_mat *matlab_vision_oflk(matlab_mat *Ia, matlab_mat *Ib) {
         }
         double det=sxx*syy-sxy*sxy, u=0,v=0;
         if(std::fabs(det)>1e-6){ u=-( syy*sxt - sxy*syt)/det; v=-(-sxy*sxt + sxx*syt)/det; }
+        /* bound the estimate: near-degenerate windows yield meaningless huge
+         * (even non-finite) flow; clamp so downstream stats/images stay sane. */
+        const double LIM=20.0;
+        if(!std::isfinite(u)) u=0; else u=std::min(std::max(u,-LIM),LIM);
+        if(!std::isfinite(v)) v=0; else v=std::min(std::max(v,-LIM),LIM);
         F->data[r*W+c]=u; F->data[(H+r)*W+c]=v;
     }
     return F;
@@ -664,6 +676,25 @@ matlab_mat *matlab_vision_disparity(matlab_mat *Lm, matlab_mat *Rm, double maxD)
 
 matlab_mat *matlab_vision_disparity2(matlab_mat *Lm, matlab_mat *Rm) {
     return matlab_vision_disparity(Lm, Rm, 16);
+}
+
+/* reconstructScene(disparityMap) -> N x 3 point cloud [X Y Z], subsampled on
+ * a grid (Z = scale / disparity for disparity>0).  Keeps the cloud small
+ * enough for the Tier-6 fitters. */
+matlab_mat *matlab_vision_reconstruct(matlab_mat *Dm) {
+    if(!Dm||!Dm->data) return mat_alloc(0,3);
+    int H=static_cast<int>(Dm->rows), W=static_cast<int>(Dm->cols);
+    int step = std::max(1, std::max(H,W)/40);          /* ~<=1600 points */
+    std::vector<double> pts;
+    for(int r=0;r<H;r+=step) for(int c=0;c<W;c+=step){
+        double d=Dm->data[r*W+c]; if(d<=0) continue;
+        double Z = 1000.0 / d;                          /* depth ~ 1/disparity */
+        pts.push_back(c); pts.push_back(r); pts.push_back(Z);
+    }
+    int N=static_cast<int>(pts.size()/3);
+    matlab_mat *R=mat_alloc(N,3);
+    if(R&&R->data) for(int i=0;i<N*3;i++) R->data[i]=pts[i];
+    return R;
 }
 
 /* ===========================================================================

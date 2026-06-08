@@ -111,13 +111,20 @@ reuses the shipped tracking-filter + Munkres assignment surface),
   `estimateGeometricTransform2D`/`estimateFundamentalMatrix` · T3
   `bboxOverlapRatio`/`selectStrongestBbox`/`bbox2points`/`insertShape`/
   `insertMarker` · T4 `opticalFlowLK`/`opticalFlowHS` · T5 `triangulate`/
-  `disparityBM` · T6 `pcread`/`pcwrite`/`pcdownsample`/`pcfitplane`/
-  `pcregistericp`. 4 gating tests
-  (`test/Run/vision_{features,geotrans,bbox_flow,stereo_cloud}.m`) + 4
+  `disparityBM`/`reconstructScene` · T6 `pcread`/`pcwrite`/`pcdownsample`/
+  `pcfitplane`/`pcregistericp`. 4 gating tests
+  (`test/Run/vision_{features,geotrans,bbox_flow,stereo_cloud}.m`) + 5
   examples (`examples/vision/`). Suite: **Run 758/0, frontend 83/0,
   emit-c/py/ts 324/266/231 /0, JIT/DAP gate OK, examples-sweep 0
   regressions** — every example runs identically under AOT and the
   JIT-interpreted (`-dap`) path.
+  **Examples run on REAL photographs and emit image results**: a brick
+  facade (`data/facade.png`) and a hardware-tools photo (`data/tools.png`)
+  are read with the shipped `imread`; each example writes a visual result
+  with `imwrite` — corner overlay + warped panorama (`cv_features`/
+  `cv_panorama`), flow-magnitude map (`cv_flow`), two-layer disparity/depth
+  map (`cv_disparity`/`cv_depth`), and detected-object bounding boxes
+  (`cv_annotated`, the new `object_annotate.m` Tier-3 example).
   **Implementation notes / deviations from the planned API** (documented
   carve-downs — the numeric workflow is faithful, the surface is simplified
   to the robust function lane):
