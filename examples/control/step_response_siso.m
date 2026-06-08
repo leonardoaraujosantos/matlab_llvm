@@ -56,3 +56,8 @@ y3  = step(sys, t3);
 % y(t) = t^2 / 2  for the double integrator.
 disp('double-integrator y(t=2):');
 disp(y3(21));         % 2^2 / 2 = 2.0
+
+% ----- plot the underdamped second-order step response ---------------
+figure; plot(t2, y2, 'b-'); grid on;
+xlabel('t (s)'); ylabel('y'); title('underdamped step (\zeta=0.5)');
+saveas(gcf, '/tmp/ctrl_step.png');

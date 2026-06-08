@@ -47,3 +47,9 @@ disp('damp(A) (full plant):');
 disp(damp(A));
 disp('damp(Ar) (reduced plant — dominant mode only):');
 disp(damp(Ar));
+
+% ----- plot the Hankel SVs (log scale shows the tail to truncate) ----
+figure; bar(log10(H + 1e-12)); grid on;
+xlabel('state'); ylabel('log_{10} HSV');
+title('Hankel SVs: top-2 dominate (truncate to k=2)');
+saveas(gcf, '/tmp/ctrl_balred_hsv.png');

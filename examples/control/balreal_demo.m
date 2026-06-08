@@ -47,3 +47,8 @@ disp(Wcb - Wob);
 % small-HSV states gives a low-order model with controlled error.
 disp('hsvd(Ab, Bb, Cb) — must equal hsvd(A, B, C):');
 disp(hsvd(Ab, Bb, Cb));
+
+% ----- plot the Hankel singular values -------------------------------
+figure; bar(H); grid on;
+xlabel('state'); ylabel('Hankel SV'); title('balanced realization HSVs');
+saveas(gcf, '/tmp/ctrl_balreal_hsv.png');

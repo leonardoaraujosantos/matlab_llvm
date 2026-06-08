@@ -36,3 +36,11 @@ disp(imag(e));
 mag2 = real(e) .* real(e) + imag(e) .* imag(e);
 disp('|e_k|^2 (must be <= 1):');
 disp(mag2);
+
+% ----- plot the plant poles in the complex plane ---------------------
+ea = eig(A); re = real(ea); im = imag(ea);
+figure; scatter(re, im); hold on;
+plot([0 0], [min(im)-1, max(im)+1], 'k-');     % stability boundary (Im axis)
+grid on; axis([min(re)-1, 0.5, min(im)-1, max(im)+1]);
+xlabel('Re'); ylabel('Im'); title('mass-spring-damper poles');
+saveas(gcf, '/tmp/ctrl_poles.png');

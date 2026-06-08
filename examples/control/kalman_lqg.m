@@ -55,3 +55,13 @@ disp(real(eig(A - B * Klqr)));
 fprintf('Kalman estimator poles (real parts):\n');
 disp(real(eig(A - Lkal * C)));
 fprintf('LQG closed-loop spectrum = union of the two — separation principle.\n');
+
+% ----- plot the LQG spectrum: LQR poles U Kalman estimator poles -----
+elqr = eig(A - B * Klqr); ekal = eig(A - Lkal * C);
+re = [real(elqr); real(ekal)]; im = [imag(elqr); imag(ekal)];
+figure; scatter(real(elqr), imag(elqr)); hold on; scatter(real(ekal), imag(ekal));
+plot([0 0], [min(im)-1, max(im)+1], 'k-');     % stability boundary (Im axis)
+grid on; axis([min(re)-1, 0.5, min(im)-1, max(im)+1]);
+xlabel('Re'); ylabel('Im'); title('LQG spectrum = LQR U Kalman estimator poles');
+legend('LQR', 'Kalman');
+saveas(gcf, '/tmp/ctrl_lqg_poles.png');

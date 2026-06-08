@@ -40,3 +40,11 @@ disp('phase margin (deg):');
 disp(Pm);
 disp('gain crossover (rad/s):');
 disp(Wcp);
+
+% ----- plot magnitude (dB) and phase ---------------------------------
+figure;
+subplot(2,1,1); plot(log10(wout), 20*log10(mag), 'b-'); grid on;
+ylabel('|G| (dB)'); title('first-order lowpass Bode');
+subplot(2,1,2); plot(log10(wout), phase, 'b-'); grid on;
+xlabel('log_{10} \omega (rad/s)'); ylabel('phase (deg)');
+saveas(gcf, '/tmp/ctrl_bode_first_order.png');

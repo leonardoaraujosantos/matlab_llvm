@@ -47,3 +47,11 @@ x0 = [1; 0];
 J = x0' * X * x0;
 disp('optimal LQR cost from x0 = [1; 0] (= sqrt(3) for the integrator):');
 disp(J);
+
+% ----- plot the LQR closed-loop poles --------------------------------
+ecl = eig(Acl); re = real(ecl); im = imag(ecl);
+figure; scatter(re, im); hold on;
+plot([0 0], [min(im)-1, max(im)+1], 'k-');     % stability boundary (Im axis)
+grid on; axis([min(re)-1, 0.5, min(im)-1, max(im)+1]);
+xlabel('Re'); ylabel('Im'); title('LQR closed-loop poles (double integrator)');
+saveas(gcf, '/tmp/ctrl_care_poles.png');

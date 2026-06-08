@@ -62,3 +62,10 @@ disp('append Bcl (4 x 2, blkdiag — disjoint input channels):');
 disp(Ba);
 disp('append Ccl (2 x 4, blkdiag — disjoint output channels):');
 disp(Ca);
+
+% ----- plot the closed-loop (feedback) step response -----------------
+yf = step_ss(Acl, Bcl, Ccl, [0], 0.02, 200);
+tg = 0.02 * (0:199)';
+figure; plot(tg, yf, 'b-'); grid on;
+xlabel('t (s)'); ylabel('y'); title('closed-loop feedback step response');
+saveas(gcf, '/tmp/ctrl_interconnect_step.png');

@@ -58,3 +58,14 @@ disp('obsv(A, C):');
 disp(Ob);
 disp('det(Ob) (nonzero → observable):');
 disp(det(Ob));
+
+% ----- plot open-loop vs placed closed-loop poles --------------------
+eo = eig(A); ecl = eig(Acl);
+re = [real(eo); real(ecl)]; im = [imag(eo); imag(ecl)];
+figure; scatter(real(eo), imag(eo)); hold on; scatter(real(ecl), imag(ecl));
+plot([0 0], [min(im)-1, max(im)+1], 'k-');     % stability boundary (Im axis)
+grid on; axis([min(re)-1, max(max(re)+1, 0.5), min(im)-1, max(im)+1]);
+xlabel('Re'); ylabel('Im');
+title('poles: open-loop (one in RHP) placed into the LHP');
+legend('open-loop', 'closed-loop');
+saveas(gcf, '/tmp/ctrl_place.png');

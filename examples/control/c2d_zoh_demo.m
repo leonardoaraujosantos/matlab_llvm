@@ -45,3 +45,9 @@ C_back = d2c(Cd_zoh, 'zoh');
 disp('d2c(c2d(C)) — round-trip Kp:');
 [num, den] = tfdata(C_back);
 disp(num(1));                    % should be ≈ Kp = 2
+
+% ----- plot continuous vs ZOH-discretised step response --------------
+figure; plot(t, y_cont, 'b-'); hold on; stairs(t, y_zoh, 'r-'); grid on;
+xlabel('t (s)'); ylabel('y'); title('PI step: continuous vs ZOH');
+legend('continuous', 'ZOH');
+saveas(gcf, '/tmp/ctrl_c2d.png');

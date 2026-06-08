@@ -48,3 +48,11 @@ fprintf('\nbode_tf vs bode_ss at w = 1.0:\n');
 fprintf('  bode_tf: %.6f\n', mag1(3, 1));
 fprintf('  bode_ss: %.6f\n', mss(3, 1));
 % Difference must be ~ 0 (numerically identical).
+
+% ----- plot the notch magnitude response -----------------------------
+wsw  = logspace(-1, 2, 400)';
+mnsw = bode_tf(b2, a2, wsw);
+figure; plot(log10(wsw), 20*log10(mnsw + 1e-6), 'b-'); grid on;
+xlabel('log_{10} \omega (rad/s)'); ylabel('|H| (dB)');
+title('notch filter (wn=5, zeta=0.1)');
+saveas(gcf, '/tmp/ctrl_notch.png');

@@ -64,3 +64,10 @@ disp('numerator length:');
 disp(length(num));
 disp('denominator length:');
 disp(length(den));
+
+% ----- plot the step response of G(s) = (s+2)/(s^2+3s+5) -------------
+ts = 0:0.05:8;
+ys = step(G, ts);
+figure; plot(ts, ys, 'b-'); grid on;
+xlabel('t (s)'); ylabel('y'); title('step response of G(s)');
+saveas(gcf, '/tmp/ctrl_tf_step.png');

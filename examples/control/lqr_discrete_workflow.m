@@ -57,3 +57,21 @@ x3 = Ad_cl2 * x2;
 fprintf('step 1 position = %.6f\n', x1(1, 1));
 fprintf('step 2 position = %.6f\n', x2(1, 1));
 fprintf('step 3 position = %.6f\n', x3(1, 1));
+
+% ----- plot the discrete closed-loop position rollout ----------------
+% Iterate the 2x2 recurrence with scalars (a matrix product inside the loop
+% would inherit the fragile complex-eig type lattice noted above).
+a11 = Ad_cl2(1,1); a12 = Ad_cl2(1,2);
+a21 = Ad_cl2(2,1); a22 = Ad_cl2(2,2);
+p = x0(1,1); v = x0(2,1);
+N = 80; pos = zeros(N, 1);
+for kk = 1:N
+    pn = a11*p + a12*v;
+    vn = a21*p + a22*v;
+    p = pn; v = vn;
+    pos(kk) = p;
+end
+kidx = (1:N)';
+figure; plot(kidx, pos, 'b.-'); grid on;
+xlabel('step k'); ylabel('position'); title('discrete LQR position decay');
+saveas(gcf, '/tmp/ctrl_dlqr_rollout.png');
