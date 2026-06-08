@@ -2210,6 +2210,7 @@ int  matlab_dbg_is_paused(void);
 int  matlab_dbg_ws_count(void);
 const char *matlab_dbg_ws_name(int i, int64_t *len_out);
 int  matlab_dbg_ws_kind(int i);
+int  matlab_dbg_ws_is_mat3(int i);
 double matlab_dbg_ws_f64(int i);
 void  *matlab_dbg_ws_ptr(int i);
 /* matlab_obj_class_id : matlab_obj* -> int32_t (returned as double).
@@ -2255,6 +2256,11 @@ extern "C" int replWorkspaceKindHook(const char *name, int64_t len) {
        * which would re-stamp the binding wrong; the name registry overrides
        * it with kind 15 so the resolver marks the binding IsVideoWriter. */
       if (matlab_ws_is_videowriter(name, len)) return 15;
+      /* #116: a 3-D array round-trips under the generic mat kind=1, losing
+       * its rank for the next turn's Sema.  Report a distinct kind so the
+       * Resolver re-stamps the binding 3-D (Binding::IsThreeD) and the N-D
+       * subscript store/read detectors fire cross-turn. */
+      if (matlab_dbg_ws_is_mat3(i)) return 16;
       return matlab_dbg_ws_kind(i);
     }
   }

@@ -2759,6 +2759,21 @@ void *matlab_dbg_ws_ptr(int i) {
     return matlab_ws->ptr_vals[i];
 }
 
+/* #116: is the workspace slot `i` a 3-D array (matlab_mat3)?  A 3-D value is
+ * stored under the generic mat kind=1, so the workspace-kind hook can't tell
+ * it apart from a 2-D matrix without inspecting the pointer.  The REPL
+ * workspace-kind hook calls this for kind=1 slots and reports a distinct kind
+ * (16) when true, letting the Resolver re-stamp the binding 3-D so the next
+ * turn's N-D subscript store/read detectors fire (instead of backing off to
+ * "unsupported call shape"). */
+int matlab_dbg_ws_is_mat3(int i) {
+    matlab_ws_init_if_needed();
+    if (!matlab_ws || i < 0 || i >= matlab_ws->nfields) return 0;
+    if (matlab_ws->kinds[i] != 1) return 0;
+    void *p = matlab_ws->ptr_vals[i];
+    return (p && mat_is_3d(p)) ? 1 : 0;
+}
+
 /* Shape accessors used by the DAP `variables` formatter. Thin wrappers
  * around the opaque matlab_mat struct — the DAP server doesn't have
  * access to the internal layout. */
