@@ -1,0 +1,6 @@
+triangulated x100: (20, 10, 200)
+stereo disparity (center): 4
+PLY roundtrip: 7 pts, err 0.00
+fitted plane normal: (0 0 1)
+ICP recovered tx: -0.5
+voxel downsample 3 -> 2
