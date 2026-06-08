@@ -56,6 +56,7 @@ RUNTIME_SRCS=(
   "$ROOT/runtime/toolbox/wavelet/runtime_wavelet.cpp"
   "$ROOT/runtime/toolbox/bioinfo/runtime_bioinfo.cpp"
   "$ROOT/runtime/toolbox/bluetooth/runtime_bluetooth.cpp"
+  "$ROOT/runtime/toolbox/vision/runtime_vision.cpp"
   "$ROOT/runtime/toolbox/dsp/runtime_dsp.cpp"
   "$ROOT/runtime/toolbox/finance/runtime_finance.cpp"
   "$ROOT/runtime/toolbox/econ/runtime_econ.cpp"

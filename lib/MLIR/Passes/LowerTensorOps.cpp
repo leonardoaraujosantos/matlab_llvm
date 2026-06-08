@@ -6460,6 +6460,39 @@ bool TensorLowering::rewriteBuiltinCalls() {
         /* Tier-6 — test & measurement. */
         {"bluetoothFrequencyOffset",    "matlab_bluetooth_freqoffset", PtrTy, {PtrTy}},
         {"bluetoothFrequencyDeviation", "matlab_bluetooth_freqdev",    PtrTy, {PtrTy, F64}},
+        /* ===== Computer Vision Toolbox — Tier-1 features ===== */
+        {"detectHarrisFeatures",   "matlab_vision_harris",   PtrTy, {PtrTy}},
+        {"detectMinEigenFeatures", "matlab_vision_mineigen", PtrTy, {PtrTy}},
+        {"detectFASTFeatures",     "matlab_vision_fast",     PtrTy, {PtrTy}},
+        {"extractFeatures",        "matlab_vision_extract",  PtrTy, {PtrTy, PtrTy}},
+        {"matchFeatures",          "matlab_vision_match",    PtrTy, {PtrTy, PtrTy}},
+        {"extractHOGFeatures",     "matlab_vision_hog",      PtrTy, {PtrTy}},
+        {"extractLBPFeatures",     "matlab_vision_lbp",      PtrTy, {PtrTy}},
+        /* Tier-2 — geometric estimation */
+        {"estgeotform2d",               "matlab_vision_estgeotform", PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"estgeotform2d",               "matlab_vision_estgeotform2",PtrTy, {PtrTy, PtrTy}},
+        {"estimateGeometricTransform2D","matlab_vision_estgeotform", PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"estimateFundamentalMatrix",   "matlab_vision_fundmatrix",  PtrTy, {PtrTy, PtrTy}},
+        /* Tier-3 — bounding boxes + annotation */
+        {"bboxOverlapRatio",  "matlab_vision_bboxiou",      PtrTy, {PtrTy, PtrTy}},
+        {"selectStrongestBbox","matlab_vision_nms",         PtrTy, {PtrTy, PtrTy, F64}},
+        {"selectStrongestBbox","matlab_vision_nms2",        PtrTy, {PtrTy, PtrTy}},
+        {"bbox2points",       "matlab_vision_bbox2pts",     PtrTy, {PtrTy}},
+        {"insertShape",       "matlab_vision_insertshape",  PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"insertMarker",      "matlab_vision_insertmarker", PtrTy, {PtrTy, PtrTy}},
+        /* Tier-4 — optical flow ([Vx; Vy] stacked) */
+        {"opticalFlowLK",     "matlab_vision_oflk",         PtrTy, {PtrTy, PtrTy}},
+        {"opticalFlowHS",     "matlab_vision_ofhs",         PtrTy, {PtrTy, PtrTy}},
+        /* Tier-5 — camera geometry + stereo */
+        {"triangulate", "matlab_vision_triangulate", PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy}},
+        {"disparityBM", "matlab_vision_disparity",   PtrTy, {PtrTy, PtrTy, F64}},
+        {"disparityBM", "matlab_vision_disparity2",  PtrTy, {PtrTy, PtrTy}},
+        /* Tier-6 — point cloud */
+        {"pcwrite",       "matlab_vision_pcwrite",      PtrTy, {PtrTy, PtrTy}},
+        {"pcread",        "matlab_vision_pcread",       PtrTy, {PtrTy}},
+        {"pcdownsample",  "matlab_vision_pcdownsample", PtrTy, {PtrTy, F64}},
+        {"pcfitplane",    "matlab_vision_pcfitplane",   PtrTy, {PtrTy, F64}},
+        {"pcregistericp", "matlab_vision_pcicp",        PtrTy, {PtrTy, PtrTy}},
         /* ===== Bioinformatics Toolbox (Phase A: Tiers 1-2) =====
          * Sequence args arrive as matlab_string* (PtrTy); a const_char
          * literal is coerced via matlab_string_from_literal by this path. */

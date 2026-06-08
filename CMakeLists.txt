@@ -369,6 +369,8 @@ add_library(MatlabRuntime STATIC
     runtime/toolbox/wavelet/runtime_wavelet.cpp
     runtime/toolbox/bioinfo/runtime_bioinfo.cpp
     runtime/toolbox/bluetooth/runtime_bluetooth.cpp
+  runtime/toolbox/vision/runtime_vision.cpp
+    runtime/toolbox/vision/runtime_vision.cpp
     runtime/toolbox/dsp/runtime_dsp.cpp
     runtime/toolbox/finance/runtime_finance.cpp
     runtime/toolbox/econ/runtime_econ.cpp

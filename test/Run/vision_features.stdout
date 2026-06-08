@@ -1,0 +1,8 @@
+matched shift dx: 5
+descriptor length: 121
+self-match identity err: 0
+self-match completeness: 0
+min-eigen detects: 1
+FAST detects: 1
+HOG length: 2916
+LBP length: 256

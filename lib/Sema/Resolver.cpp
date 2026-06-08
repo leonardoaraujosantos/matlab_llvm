@@ -373,6 +373,24 @@ void Resolver::registerBuiltins() {
     "bleAngleEstimate",
     /* Tier-6 — test & measurement */
     "bluetoothFrequencyDeviation", "bluetoothFrequencyOffset",
+    /* ===== Computer Vision Toolbox ===== *
+     * User-facing names only; runtime mapping goes through the LowerTensorOps
+     * single-return spec table.  Images/points/descriptors/boxes/transforms
+     * are all plain real matrices (no classdef, no complex, no 3-D return). */
+    /* Tier-1 — feature detection / description / matching */
+    "detectHarrisFeatures", "detectMinEigenFeatures", "detectFASTFeatures",
+    "extractFeatures", "matchFeatures", "extractHOGFeatures", "extractLBPFeatures",
+    /* Tier-2 — geometric estimation */
+    "estgeotform2d", "estimateGeometricTransform2D", "estimateFundamentalMatrix",
+    /* Tier-3 — bounding boxes + annotation */
+    "bboxOverlapRatio", "selectStrongestBbox", "bbox2points",
+    "insertShape", "insertMarker",
+    /* Tier-4 — optical flow */
+    "opticalFlowLK", "opticalFlowHS",
+    /* Tier-5 — camera geometry + stereo */
+    "triangulate", "disparityBM",
+    /* Tier-6 — point cloud */
+    "pcread", "pcwrite", "pcdownsample", "pcfitplane", "pcregistericp",
     /* ===== Bioinformatics Toolbox (Phase A: Tiers 1-2) ===== *
      * User-facing names only; the runtime mapping goes through the
      * single-return spec table / multi-return dispatch in LowerTensorOps

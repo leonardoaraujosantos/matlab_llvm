@@ -1,0 +1,6 @@
+IoU x1000: 1000 681 0
+NMS kept boxes: 2
+box corners TL=(10,20) BR=(40,60)
+annotation drew (max=255, same size 0)
+LK flow: Vx=1 Vy=0 (expect 1, 0)
+HS flow size 120x60
