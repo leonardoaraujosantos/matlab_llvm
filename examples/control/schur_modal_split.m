@@ -45,3 +45,11 @@ disp(A_back(1, 1));
 % real-spectrum case) holds the eigenvalues, and matches eig(A).
 disp('eig(A) for the lower-triangular plant (matches Schur diag up to permutation):');
 disp(eig(A));
+
+% ----- plot the eigenvalues / Schur modes of A -----------------------
+ea = eig(A); re = real(ea); im = imag(ea);
+figure; scatter(re, im); hold on;
+plot([0 0], [min(im)-1, max(im)+1], 'k-');     % stability boundary (Im axis)
+grid on; axis([min(re)-1, 0.5, min(im)-1, max(im)+1]);
+xlabel('Re'); ylabel('Im'); title('eigenvalues (Schur modes) of A');
+saveas(gcf, '/tmp/ctrl_schur_poles.png');

@@ -55,3 +55,10 @@ areas = regionprops(L, 'Area');
 fprintf('grains detected = %.0f\n', n);
 fprintf('mean grain area = %.1f px\n', mean(areas));
 fprintf('min / max area  = %.0f / %.0f px\n', min(areas), max(areas));
+
+% ----- write the pipeline result images -------------------------------
+imwrite(I,            '/tmp/img_rice_input.png');      % uneven illumination
+imwrite(flat,         '/tmp/img_rice_flattened.png');  % after background subtraction
+imwrite(BW .* 255,    '/tmp/img_rice_mask.png');       % Otsu binary mask
+imwrite(label2rgb(L), '/tmp/img_rice_labels.png');     % coloured components
+fprintf('wrote /tmp/img_rice_{input,flattened,mask,labels}.png\n');

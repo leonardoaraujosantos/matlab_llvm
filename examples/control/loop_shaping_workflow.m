@@ -52,3 +52,9 @@ y_open = lsim_ss(A, B, C, D, u, 0.1);
 % Print three checkpoints of the step response.
 fprintf('open-loop step y(t):  t=0 -> %.4f,  t=1.0 -> %.4f,  t=3.0 -> %.4f\n', ...
         y_open(1, 1), y_open(11, 1), y_open(N, 1));
+
+% ----- plot the open-loop step response ------------------------------
+tg = 0.1 * (0:29)';
+figure; plot(tg, y_open, 'b.-'); grid on;
+xlabel('t (s)'); ylabel('y'); title('type-1 servo open-loop step');
+saveas(gcf, '/tmp/ctrl_loopshape_step.png');

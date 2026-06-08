@@ -66,3 +66,15 @@ disp('discretised Bd(1):');
 disp(EM(1, 3));        % integral of exp(-tau)*1 from 0..0.1 = 0.0951625...
 disp('discretised Bd(2):');
 disp(EM(2, 3));        % 0.5 * (1 - exp(-0.2)) / 2 = 0.0453173...
+
+% ----- plot the free response x(t) = expm(A2 t) x0 -------------------
+tg = 0:0.05:3; Nt = length(tg);
+x1v = zeros(Nt,1); x2v = zeros(Nt,1);
+for kk = 1:Nt
+    xt = expm(A2 * tg(kk)) * x0;
+    x1v(kk) = xt(1,1); x2v(kk) = xt(2,1);
+end
+figure; plot(tg, x1v, 'b-'); hold on; plot(tg, x2v, 'r-'); grid on;
+xlabel('t (s)'); ylabel('state'); title('free response of diag([-1 -2])');
+legend('x_1', 'x_2');
+saveas(gcf, '/tmp/ctrl_expm_decay.png');

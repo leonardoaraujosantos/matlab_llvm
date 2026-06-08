@@ -53,3 +53,10 @@ Rd = Ad * Wcd * Ad' - Wcd + Bd * Bd';
 disp('discrete residual entries:');
 disp(Rd(1, 1));
 disp(Rd(2, 2));
+
+% ----- plot the step response (gramian = impulse-energy of this map) -
+ys = step_ss(A, B, C, [0], 0.05, 200);
+tg = 0.05 * (0:199)';
+figure; plot(tg, ys, 'b-'); grid on;
+xlabel('t (s)'); ylabel('y'); title('mass-spring-damper step response');
+saveas(gcf, '/tmp/ctrl_lyap_step.png');

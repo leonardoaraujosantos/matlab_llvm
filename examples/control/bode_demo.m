@@ -42,3 +42,11 @@ fprintf('\nresonant peak: |H(wp)| = %.6f  at  wp = %.4f rad/s\n', ...
         mpeak(1, 1), wp);
 fprintf('zeta = %.4f, peak prediction 1/(k*2*zeta*sqrt(1-zeta^2)) = %.6f\n', ...
         zeta, 1 / (k * 2 * zeta * sqrt(1 - zeta * zeta)));
+
+% ----- plot the full magnitude response (resonance peak near wn) ------
+wsw = logspace(-1, 1.5, 400)';
+msw = bode_ss(A, B, C, D, wsw);
+figure; plot(log10(wsw), 20*log10(msw), 'b-'); grid on;
+xlabel('log_{10} \omega (rad/s)'); ylabel('|H| (dB)');
+title('mass-spring-damper Bode magnitude');
+saveas(gcf, '/tmp/ctrl_bode_msd.png');

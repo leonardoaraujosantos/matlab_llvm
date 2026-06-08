@@ -36,3 +36,9 @@ fprintf('blurred PSNR vs original  = %.2f dB\n', psnr(blur, I));
 deb  = deconvwnr(blur, psf, 0.005);
 fprintf('restored PSNR vs original = %.2f dB\n', psnr(deb, I));
 fprintf('SSIM restored vs original = %.3f\n', ssim(deb, I));
+
+% ----- write transform / restoration result images --------------------
+imwrite(mat2gray(abs(D)) .* 255, '/tmp/img_dct_magnitude.png'); % DCT energy compaction
+imwrite(blur, '/tmp/img_blur.png');
+imwrite(deb,  '/tmp/img_deblur.png');
+fprintf('wrote /tmp/img_{dct_magnitude,blur,deblur}.png\n');

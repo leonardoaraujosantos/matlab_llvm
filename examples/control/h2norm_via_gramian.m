@@ -46,3 +46,9 @@ fprintf('y(t = 10.0) = %.6f\n', y(200, 1));
 % DC gain = -C A^{-1} B = 1/k:
 DCgain = (0 - C) * inv(A) * B;
 fprintf('DC gain = %.6f\n', DCgain(1, 1));
+
+% ----- plot the step response converging to the DC gain 1/k ----------
+tg = 0.05 * (0:199)';
+figure; plot(tg, y, 'b-'); grid on;
+xlabel('t (s)'); ylabel('y'); title('mass-spring-damper step response');
+saveas(gcf, '/tmp/ctrl_h2_step.png');

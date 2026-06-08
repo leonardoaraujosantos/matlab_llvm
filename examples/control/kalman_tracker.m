@@ -57,3 +57,24 @@ disp(Ld);
 e = eig(Ad - Ld * Cd);
 disp('discrete-estimator pole magnitudes (must be < 1):');
 disp(abs(e));
+
+% ----- simulate + plot a constant-velocity tracking run --------------
+% Steady-state fixed-gain CV tracker (the alpha-beta form of the filter).
+% Deterministic measurement perturbation (no RNG) so AOT and JIT match.
+Nt = 60; truep = zeros(Nt,1); measp = zeros(Nt,1); estp = zeros(Nt,1);
+xt = [0; 1]; ph = 0; vh = 1; alpha = 0.5; beta = 0.1;
+for kk = 1:Nt
+    xt = Ad * xt;                                   % true CV motion
+    mvec = Cd * xt;
+    meas = mvec(1,1) + 0.4*sin(0.9*kk) + 0.3*cos(1.7*kk);  % noisy position
+    ph = ph + Ts * vh;                              % predict position
+    resid = meas - ph;                              % innovation
+    ph = ph + alpha * resid;                        % position correction
+    vh = vh + (beta / Ts) * resid;                  % velocity correction
+    truep(kk) = xt(1,1); measp(kk) = meas; estp(kk) = ph;
+end
+kidx = (1:Nt)';
+figure; plot(kidx, truep, 'k-'); hold on; scatter(kidx, measp); plot(kidx, estp, 'b-'); grid on;
+xlabel('step'); ylabel('position'); title('Kalman tracker: true / measured / estimate');
+legend('true', 'measured', 'estimate');
+saveas(gcf, '/tmp/ctrl_kalman_track.png');

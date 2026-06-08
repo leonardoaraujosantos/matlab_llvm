@@ -50,3 +50,13 @@ B4 = [0; 1; 0.001; 0.001];   % small input coupling to the fast modes
 C4 = [1, 0, 0.01, 0.01];
 disp('redundant 4-state plant — hsvd should rank-order the modes:');
 disp(hsvd(A4, B4, C4));
+
+% ----- plot open-loop vs LQR closed-loop poles -----------------------
+eo = eig(A); ecl = eig(Ac);
+re = [real(eo); real(ecl)]; im = [imag(eo); imag(ecl)];
+figure; scatter(real(eo), imag(eo)); hold on; scatter(real(ecl), imag(ecl));
+plot([0 0], [min(im)-1, max(im)+1], 'k-');     % stability boundary (Im axis)
+grid on; axis([min(re)-1, 0.5, min(im)-1, max(im)+1]);
+xlabel('Re'); ylabel('Im'); title('poles: open-loop vs LQR closed-loop');
+legend('open-loop', 'closed-loop');
+saveas(gcf, '/tmp/ctrl_charac_poles.png');

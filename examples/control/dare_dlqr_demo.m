@@ -72,3 +72,11 @@ At3 = Ad3';
 res = At3*X3*Ad3 - X3 - (At3*X3*Bd3) / (R3 + Bd3'*X3*Bd3) * (Bd3'*X3*Ad3) + Q3;
 disp('discrete Riccati residual (entries ~0 to round-off):');
 disp(res);
+
+% ----- plot closed-loop discrete poles inside the unit circle --------
+ecl = eig(Acl);
+th  = linspace(0, 2*pi, 200);
+figure; plot(cos(th), sin(th), 'k-'); hold on;
+scatter(real(ecl), imag(ecl)); grid on; axis([-1.3 1.3 -1.3 1.3]);
+xlabel('Re'); ylabel('Im'); title('discrete closed-loop poles (unit disk)');
+saveas(gcf, '/tmp/ctrl_dare_poles.png');

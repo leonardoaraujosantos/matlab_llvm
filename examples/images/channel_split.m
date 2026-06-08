@@ -32,3 +32,8 @@ fprintf('after boost, red mean %.1f -> %.1f\n', mean2(red), mean2(out(:, :, 1)))
 
 % ----- luminance of original vs boosted -------------------------------
 fprintf('luminance mean %.1f -> %.1f\n', mean2(rgb2gray(rgb)), mean2(rgb2gray(out)));
+
+% ----- write the colour images (input + red-boosted) ------------------
+imwrite(rgb, '/tmp/img_channels_input.png');
+imwrite(out, '/tmp/img_channels_boosted.png');
+fprintf('wrote /tmp/img_channels_{input,boosted}.png\n');

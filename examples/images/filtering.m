@@ -22,3 +22,10 @@ sharp = imsharpen(I);
 fprintf('sharpen mean = %.1f\n', mean2(sharp));
 eq = histeq(I);
 fprintf('histeq output range = [%.0f %.0f]\n', min(min(eq)), max(max(eq)));
+
+% ----- write before/after result images -------------------------------
+imwrite(noisy,  '/tmp/img_filt_noisy.png');
+imwrite(clean,  '/tmp/img_filt_denoised.png');
+imwrite(smooth, '/tmp/img_filt_gaussian.png');
+imwrite(eq,     '/tmp/img_filt_histeq.png');
+fprintf('wrote /tmp/img_filt_{noisy,denoised,gaussian,histeq}.png\n');

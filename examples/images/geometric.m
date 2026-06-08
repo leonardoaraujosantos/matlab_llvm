@@ -26,3 +26,9 @@ fixed  = [3 5; 5 5; 3 7; 5 7];               % scale 2x + translate (3,5)
 tform  = fitgeotform2d(moving, fixed, 'affine');
 fprintf('recovered scale  = %.2f (true 2.00)\n', tform.T(1, 1));
 fprintf('recovered tx,ty  = %.2f, %.2f (true 3, 5)\n', tform.T(3, 1), tform.T(3, 2));
+
+% ----- write the resampled / warped result images ---------------------
+imwrite(half,   '/tmp/img_geo_resize.png');
+imwrite(rot,    '/tmp/img_geo_rotate.png');
+imwrite(warped, '/tmp/img_geo_warp.png');
+fprintf('wrote /tmp/img_geo_{resize,rotate,warp}.png\n');

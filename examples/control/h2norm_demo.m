@@ -57,3 +57,14 @@ B4 = [1];
 C4 = [1];
 fprintf('unstable plant ||G||_2 = %.6f (must be +Inf)\n', ...
         norm_h2(A4, B4, C4));
+
+% ----- plot ||G||_2 vs damping ratio ---------------------------------
+h2v = zeros(5,1);
+for kk = 1:5
+    zz  = zlist(kk,1);
+    Azz = [0, 1; 0-wn*wn, 0-2*zz*wn];
+    h2v(kk) = norm_h2(Azz, Bz, Cz);
+end
+figure; plot(zlist, h2v, 'b.-'); grid on;
+xlabel('\zeta'); ylabel('||G||_2'); title('H_2 norm decreases with damping');
+saveas(gcf, '/tmp/ctrl_h2_vs_zeta.png');

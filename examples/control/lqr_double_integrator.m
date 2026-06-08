@@ -64,3 +64,8 @@ disp('discrete-time LQR gain Kd:');
 disp(Kd);
 disp('discrete-time closed-loop poles (must lie inside unit circle):');
 disp(abs(ed));
+
+% ----- plot the closed-loop initial-condition response ---------------
+figure; plot(t, y, 'b-'); grid on;
+xlabel('t (s)'); ylabel('position'); title('LQR closed-loop response from x_0=[1;0]');
+saveas(gcf, '/tmp/ctrl_lqr_resp.png');
