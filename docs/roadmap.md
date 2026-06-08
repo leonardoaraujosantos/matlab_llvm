@@ -687,6 +687,7 @@ low and payoff high):
 | 3 | **DSP System + DSP HDL** ✅ | [`dsp_toolbox_roadmap.md`](dsp_toolbox_roadmap.md) | 8 · shipped | Signal filters + `fi` + emit-SV/cocotb lane; **T1 SO model unblocked Comm/RF SO tiers** | `dsphdl_fir_stream.m` (fixed-point FIR → synthesizable SV + cocotb SIL) |
 | 4 | **Sensor Fusion and Tracking** | [`sensor_fusion_toolbox_roadmap.md`](sensor_fusion_toolbox_roadmap.md) | 6 · ~12.5 wk | **EKF/UKF cores already shipped** (Ident T5); ODE + linalg + PRNG | `imu_gps_fusion.m` (IMU+GPS → `insfilterMARG`) |
 | 5 | **Robotics System** | [`robotics_toolbox_roadmap.md`](robotics_toolbox_roadmap.md) | 6 · ~13 wk | **IK is `lsqnonlin`/`fminunc`** (Optim shipped); FK/Jacobian = linalg; URDF meshes reuse the PDE STL importer | `ik_path_trace.m` (`loadrobot`→`inverseKinematics`) |
+| 6 | **Verilog-A analog simulator** (tractable-Simscape path) | [`dae_solver_roadmap.md`](dae_solver_roadmap.md) | 10 · ~14 wk min cut (T1–6) | DAE core extends shipped `ode23s` (LU/FD-Jacobian); MNA assembly reuses **sparse triplets + GMRES-ILU**; `laplace_*` reuses **`tf2ss`/`lsim`**; AC reuses **complex matrix ops**; HB/Monte-Carlo reuse **GPU GEMM** | `diode_rectifier.m` / `amp_ac_noise.m` (import `.va` → MNA → transient/AC/noise) |
 
 **Cross-cutting sequencing:**
 
@@ -746,7 +747,7 @@ folded into the Comm roadmap as priority §3.
 |---|---|
 | **Simulink** + all Simulink-* (`Coder`, `Compiler`, `Compiler SDK`, `Coverage`, `Design Verifier`, `Test`, `Report Generator`, `Real-Time`, `Desktop Real-Time`, `3D Animation`, `Check`, `Code Inspector`, `Control Design`, `Design Optimization`, `FMU Builder`, `Fault Analyzer`, `PLC Coder`, `Copilot`) | Graphical block-diagram UX — replaced by `.mflow` text-DSL |
 | **All Blocksets** (`AUTOSAR`, `C2000`, `DDS`, `Motor Control`, `Powertrain`, `Raspberry Pi`, `STM32`, `Vehicle Dynamics`, `SoC`, `RF Blockset`, `Aerospace Blockset`, `Audio Blockset`, `Mixed-Signal Blockset`) | Same — Simulink-bound |
-| **Simscape** + `Battery` / `Driveline` / `Electrical` / `Fluids` / `Multibody` / `Multibody Link` | Physical-network modeling engine — separate large undertaking |
+| **Simscape** + `Battery` / `Driveline` / `Electrical` / `Fluids` / `Multibody` / `Multibody Link` | Full Simscape (acausal DSL + Pantelides DAE + Simulink integration) stays out. **But the tractable subset — acausal physical/circuit simulation via a DAE core + MNA, driven by imported Verilog-A — is drafted in [`dae_solver_roadmap.md`](dae_solver_roadmap.md)** (no Simscape DSL, no Simulink, no Pantelides for the index-1 device networks in scope). See §16 row 6. |
 | **SimBiology**, **SimEvents** | Simulink-bound |
 | **All Polyspace** (`Access`, `as You Code`, `Bug Finder`, `Code Prover`, `Copilot`, `Products for Ada`, `Test`) | Static-analysis suite — different problem class |
 | **Compliance kits**: DO Qualification (DO-178), IEC Certification (ISO 26262 / IEC 61508) | Documentation/process products |
