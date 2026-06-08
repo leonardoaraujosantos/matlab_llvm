@@ -367,7 +367,7 @@ add_library(MatlabRuntime STATIC
     runtime/toolbox/images/runtime_images.cpp
     runtime/toolbox/curvefit/runtime_curvefit.cpp
     runtime/toolbox/wavelet/runtime_wavelet.cpp
-  runtime/toolbox/bluetooth/runtime_bluetooth.cpp
+    runtime/toolbox/bioinfo/runtime_bioinfo.cpp
     runtime/toolbox/bluetooth/runtime_bluetooth.cpp
     runtime/toolbox/dsp/runtime_dsp.cpp
     runtime/toolbox/finance/runtime_finance.cpp
@@ -760,6 +760,8 @@ set_source_files_properties(
   runtime/toolbox/images/runtime_images.cpp
   runtime/toolbox/curvefit/runtime_curvefit.cpp
   runtime/toolbox/wavelet/runtime_wavelet.cpp
+  runtime/toolbox/bioinfo/runtime_bioinfo.cpp
+  runtime/toolbox/bluetooth/runtime_bluetooth.cpp
   runtime/toolbox/dsp/runtime_dsp.cpp
   runtime/toolbox/finance/runtime_finance.cpp
   runtime/toolbox/econ/runtime_econ.cpp

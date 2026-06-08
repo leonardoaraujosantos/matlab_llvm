@@ -1,0 +1,10 @@
+records: 2
+insulin_A human
+GIVEQCCTSICSLYQLENYCN
+insulin_B human
+insulinB G count: 3
+insulinA Cys count: 4
+insulinA self-align > 0: 1
+roundtrip records: 2
+two
+ACGTACGTACGT

@@ -799,7 +799,18 @@ bool Lowerer::isStringReturningBuiltin(llvm::StringRef N) {
          N == "strrep" || N == "strcat" || N == "char" ||
          N == "deblank" || N == "blanks" || N == "strjoin" ||
          N == "regexprep" ||  /* #235 — regexp is numeric, regexprep a string */
-         N == "bin" || N == "hex" || N == "dec";
+         N == "bin" || N == "hex" || N == "dec" ||
+         /* Bioinformatics sequence transforms return a char sequence
+          * (matlab_string*); tag so length / disp / strcmp on the result
+          * route through the string lane rather than reading it as a matrix. */
+         N == "int2nt" || N == "int2aa" || N == "nt2aa" ||
+         N == "dna2rna" || N == "rna2dna" || N == "seqcomplement" ||
+         N == "seqrcomplement" || N == "seqreverse" || N == "randseq" ||
+         /* Phase B — MSA / consensus / Newick are char-string returns. */
+         N == "multialign" || N == "profalign" || N == "seqconsensus" ||
+         N == "getnewickstr" || N == "matlab_bioinfo_phytree_newick" ||
+         /* Phase C — aminolookup / cleave / restrict return char strings. */
+         N == "aminolookup" || N == "cleave" || N == "restrict";
 }
 
 llvm::StringRef Lowerer::intDtypeSuffixOfType(const Type *T) {
@@ -2724,6 +2735,10 @@ void Lowerer::lowerStmt(const Stmt &St) {
      * builtin (struct(...) itself, plus the PROP linkBudget) or a
      * NameExpr referencing a previously-tagged struct binding. */
     bool RhsIsStruct = false;
+    /* Bioinformatics fastaread returns a struct array (matlab_struct_arr*);
+     * tag the LHS into StructArrayBindings so element field reads route
+     * through the struct-array path. */
+    bool RhsIsStructArray = false;
     /* Phase 6 — Symbolic Math Toolbox. RHS is sym-typed when:
      *  - direct call to a sym-producing builtin
      *  - NameExpr already in SymBindings (re-assignment)
@@ -2774,9 +2789,15 @@ void Lowerer::lowerStmt(const Stmt &St) {
             NE->Name == "stepinfo" ||
             NE->Name == "bleLLDataChannelPDUDecode" ||
             NE->Name == "bleL2CAPFrameDecode" ||
+            NE->Name == "basecount" || NE->Name == "aacount" ||
+            NE->Name == "atomiccomp" ||
             NE->Name == "pde_load_glb" || NE->Name == "pde_load_stl" ||
             NE->Name == "pde_voxelize_surface")
           RhsIsStruct = true;
+        /* Bioinformatics fastaread returns a matlab_struct_arr* — tag the
+         * LHS as a struct array so `s(i).Header` / `length(s)` route through
+         * the struct-array read path (same set the `s(i).x=v` store fills). */
+        if (NE->Name == "fastaread") RhsIsStructArray = true;
       }
     } else if (A.RHS && A.RHS->Kind == NodeKind::NameExpr) {
       auto *NE = static_cast<const NameExpr *>(A.RHS);
@@ -2955,6 +2976,19 @@ void Lowerer::lowerStmt(const Stmt &St) {
      * string) so `+` / disp / strlen / isstring can dispatch
      * correctly. See Lowerer::isStringExpr. */
     bool RhsIsString = isStringExpr(A.RHS);
+    /* A single-quoted char literal assigned wholesale to a variable
+     * (`c = 'abc'`) lowers to a bare matlab.const_char, which the REPL/DAP
+     * workspace store can't round-trip (matlab_ws_set_mat has no const_char
+     * coercion → "unsupported call shape").  In ReplMode treat it like a
+     * double-quoted string: tag the binding string + materialize the value to
+     * a matlab_string below (kind=3), so the store routes through
+     * matlab_ws_set_string and reloads as text.  AOT (ReplMode=false) keeps
+     * the const_char lane untouched. */
+    bool RhsIsCharLiteralStore =
+        ReplMode && A.RHS && A.RHS->Kind == NodeKind::CharLiteral &&
+        A.LHS.size() == 1 && A.LHS[0] &&
+        dynamic_cast<const NameExpr *>(A.LHS[0]) != nullptr;
+    if (RhsIsCharLiteralStore) RhsIsString = true;
 
     /* Track 3-D bindings: RHS produces a matlab_mat3 — zeros/ones with 3
      * args, cat(3, …), or a builtin that always returns truecolor
@@ -3629,6 +3663,16 @@ void Lowerer::lowerStmt(const Stmt &St) {
     }
 
     mlir::Value Rhs = A.RHS ? lowerExpr(*A.RHS) : mlir::Value{};
+    /* Materialize a wholesale char-literal RHS into a matlab_string so the
+     * ReplMode workspace store (matlab_ws_set_string) gets the right
+     * descriptor — see RhsIsCharLiteralStore above. */
+    if (RhsIsCharLiteralStore && Rhs) {
+      auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+      mlir::NamedAttribute Cal(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, "matlab_string_from_literal"));
+      Rhs = emitUnreg("matlab.call_builtin", {Rhs}, PtrTy, loc(A.Range), {Cal});
+    }
     if (RhsIsHandle) {
       /* Pick up capture spill slots left by the AnonFunction lowering
        * (empty vector for @name and capture-free anons). */
@@ -3864,6 +3908,20 @@ void Lowerer::lowerStmt(const Stmt &St) {
       for (const Expr *L : A.LHS)
         if (auto *N = dynamic_cast<const NameExpr *>(L))
           if (N->Ref) TimerangeBindings.insert(N->Ref);
+    }
+    if (RhsIsStructArray) {
+      for (const Expr *L : A.LHS)
+        if (auto *N = dynamic_cast<const NameExpr *>(L))
+          if (N->Ref) {
+            StructArrayBindings.insert(N->Ref);
+            /* fastaread populates each element with char-string Header /
+             * Sequence fields; record them as matrix-valued (read via
+             * matlab_struct_get_mat) so `s(i).Sequence` returns the
+             * matlab_string* — disp/fprintf %s recognise it via the string
+             * registry, and bioinfo functions read it as a sequence ptr. */
+            MatStructFields.insert({N->Ref, "Header"});
+            MatStructFields.insert({N->Ref, "Sequence"});
+          }
     }
     if (RhsIsStruct) {
       /* Tag for workspace-setter routing.  We use a separate set
@@ -9852,6 +9910,43 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           return Obj;
         }
 
+        /* Bioinformatics Tier-4 — seqlinkage / seqneighjoin: alloc a phytree
+         * shell, then populate it from the distance matrix via the runtime
+         * (UPGMA / neighbor-joining).  Arity selects the populate variant:
+         * (D), (D, method), (D, method, names_cell).  Mirrors the `fit`
+         * alloc-then-populate idiom. */
+        if ((Nm == "seqlinkage" || Nm == "seqneighjoin") && C.Args.size() >= 1) {
+          bool nj = (Nm == "seqneighjoin");
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "phytree__phytree"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTy, L, {CtorCal});
+          mlir::Value Dv = lowerExpr(*C.Args[0]);
+          if (Dv.getType() != PtrTy) Dv.setType(PtrTy);
+          llvm::SmallVector<mlir::Value, 4> Args{Obj, Dv};
+          const char *Pop;
+          if (C.Args.size() >= 3) {
+            mlir::Value Mv = lowerExpr(*C.Args[1]);
+            mlir::Value Nv = lowerExpr(*C.Args[2]);
+            if (Mv.getType() != PtrTy) Mv.setType(PtrTy);
+            if (Nv.getType() != PtrTy) Nv.setType(PtrTy);
+            Args.push_back(Mv); Args.push_back(Nv);
+            Pop = nj ? "matlab_bioinfo_seqneighjoin3" : "matlab_bioinfo_seqlinkage3";
+          } else if (C.Args.size() == 2 && !nj) {
+            mlir::Value Mv = lowerExpr(*C.Args[1]);
+            if (Mv.getType() != PtrTy) Mv.setType(PtrTy);
+            Args.push_back(Mv);
+            Pop = "matlab_bioinfo_seqlinkage2";
+          } else {
+            Pop = nj ? "matlab_bioinfo_seqneighjoin1" : "matlab_bioinfo_seqlinkage1";
+          }
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+                                   mlir::StringAttr::get(&MCtx, Pop));
+          emitUnregOp("matlab.call_builtin", Args,
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+
         /* Curve Fitting Tier-6 — ppform constructors.  spline/pchip/ppmak
          * build a fresh ppform; fnder/fnint transform one.  Each allocs the
          * ppform shell then populates it via the runtime. */
@@ -14191,6 +14286,13 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         mlir::Value NameV = emitFieldNameChar(F.Field, L);
         bool WantMat = mlir::isa<mlir::RankedTensorType,
                                   mlir::UnrankedTensorType>(RT);
+        /* A field recorded matrix/string-valued against the array binding
+         * (e.g. fastaread's Header/Sequence) reads via get_mat even when
+         * Sema left the element field type open — without this it defaults
+         * to get_f64 and returns 0 for a char-string field. */
+        if (!WantMat &&
+            MatStructFields.count({NE->Ref, std::string(F.Field)}))
+          WantMat = true;
         llvm::StringRef Callee = WantMat ? "matlab_struct_get_mat"
                                           : "matlab_struct_get_f64";
         mlir::NamedAttribute SCal(
@@ -14379,6 +14481,15 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
       if (auto *BN = dynamic_cast<const NameExpr *>(F.Base))
         if (BN->Ref && MatStructFields.count({BN->Ref, std::string(F.Field)}))
           WantMat = true;
+    /* `s(i).Field` — the base is an index expression, not the array name.
+     * Dig out the underlying struct-array binding so a matrix/string field
+     * recorded against it (e.g. fastaread's Header/Sequence) reads as a
+     * matrix rather than defaulting to get_f64 (which returns 0). */
+    if (!WantMat)
+      if (auto *CI = dynamic_cast<const CallOrIndex *>(F.Base))
+        if (auto *BN = dynamic_cast<const NameExpr *>(CI->Callee))
+          if (BN->Ref && MatStructFields.count({BN->Ref, std::string(F.Field)}))
+            WantMat = true;
     llvm::StringRef Callee = WantMat ? "matlab_struct_get_mat"
                                       : "matlab_struct_get_f64";
     mlir::NamedAttribute Cal(

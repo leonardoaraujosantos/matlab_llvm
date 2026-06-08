@@ -4094,6 +4094,13 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"dwt2",     2, {"matlab_wavelet_dwt2_cA", "matlab_wavelet_dwt2_cH",
                          "matlab_wavelet_dwt2_cV", "matlab_wavelet_dwt2_cD"}},
         {"wavedec2", 3, {"matlab_wavelet_wavedec2_C", "matlab_wavelet_wavedec2_S"}},
+        /* Bioinformatics Toolbox — pairwise alignment: [score, alignment].
+         * Two arities (auto vs named scoring matrix); a single-output
+         * `score = nwalign(...)` matches too (computes only output 0). */
+        {"nwalign", 2, {"matlab_bioinfo_nwalign_score2", "matlab_bioinfo_nwalign_align2"}},
+        {"nwalign", 3, {"matlab_bioinfo_nwalign_score3", "matlab_bioinfo_nwalign_align3"}},
+        {"swalign", 2, {"matlab_bioinfo_swalign_score2", "matlab_bioinfo_swalign_align2"}},
+        {"swalign", 3, {"matlab_bioinfo_swalign_score3", "matlab_bioinfo_swalign_align3"}},
       };
       bool wmatched = false;
       for (const auto &E : wmret) {
@@ -6453,6 +6460,67 @@ bool TensorLowering::rewriteBuiltinCalls() {
         /* Tier-6 — test & measurement. */
         {"bluetoothFrequencyOffset",    "matlab_bluetooth_freqoffset", PtrTy, {PtrTy}},
         {"bluetoothFrequencyDeviation", "matlab_bluetooth_freqdev",    PtrTy, {PtrTy, F64}},
+        /* ===== Bioinformatics Toolbox (Phase A: Tiers 1-2) =====
+         * Sequence args arrive as matlab_string* (PtrTy); a const_char
+         * literal is coerced via matlab_string_from_literal by this path. */
+        {"nt2int",        "matlab_bioinfo_nt2int",        PtrTy, {PtrTy}},
+        {"int2nt",        "matlab_bioinfo_int2nt",        PtrTy, {PtrTy}},
+        {"aa2int",        "matlab_bioinfo_aa2int",        PtrTy, {PtrTy}},
+        {"int2aa",        "matlab_bioinfo_int2aa",        PtrTy, {PtrTy}},
+        {"nt2aa",         "matlab_bioinfo_nt2aa",         PtrTy, {PtrTy}},
+        {"dna2rna",       "matlab_bioinfo_dna2rna",       PtrTy, {PtrTy}},
+        {"rna2dna",       "matlab_bioinfo_rna2dna",       PtrTy, {PtrTy}},
+        {"seqcomplement", "matlab_bioinfo_seqcomplement", PtrTy, {PtrTy}},
+        {"seqrcomplement","matlab_bioinfo_seqrcomplement",PtrTy, {PtrTy}},
+        {"seqreverse",    "matlab_bioinfo_seqreverse",    PtrTy, {PtrTy}},
+        {"basecount",     "matlab_bioinfo_basecount",     PtrTy, {PtrTy}},
+        {"aacount",       "matlab_bioinfo_aacount",       PtrTy, {PtrTy}},
+        {"randseq",       "matlab_bioinfo_randseq",       PtrTy, {F64}},
+        {"fastaread",     "matlab_bioinfo_fastaread",     PtrTy, {PtrTy}},
+        {"fastawrite",    "matlab_bioinfo_fastawrite",    PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"blosum",        "matlab_bioinfo_blosum",        PtrTy, {F64}},
+        {"seqdotplot",    "matlab_bioinfo_seqdotplot",    PtrTy, {PtrTy, PtrTy}},
+        /* Phase B — Tier-3 MSA + profiles. */
+        {"multialign",    "matlab_bioinfo_multialign",    PtrTy, {PtrTy}},
+        {"profalign",     "matlab_bioinfo_profalign",     PtrTy, {PtrTy, PtrTy}},
+        {"seqconsensus",  "matlab_bioinfo_seqconsensus",  PtrTy, {PtrTy}},
+        {"seqprofile",    "matlab_bioinfo_seqprofile",    PtrTy, {PtrTy}},
+        /* Phase B — Tier-4 distances + phytree.  seqpdist has 1/2-arg forms;
+         * phytreewrite + the phytree method/populate forwarders. */
+        {"seqpdist",      "matlab_bioinfo_seqpdist2",      PtrTy, {PtrTy}},
+        {"seqpdist",      "matlab_bioinfo_seqpdist3",      PtrTy, {PtrTy, PtrTy}},
+        {"phytreewrite",  "matlab_bioinfo_phytreewrite",   PtrTy, {PtrTy, PtrTy}},
+        {"matlab_bioinfo_phytreewrite",  "matlab_bioinfo_phytreewrite",  PtrTy, {PtrTy, PtrTy}},
+        {"matlab_bioinfo_seqlinkage1",   "matlab_bioinfo_seqlinkage1",   PtrTy, {PtrTy, PtrTy}},
+        {"matlab_bioinfo_seqlinkage2",   "matlab_bioinfo_seqlinkage2",   PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_bioinfo_seqlinkage3",   "matlab_bioinfo_seqlinkage3",   PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy}},
+        {"matlab_bioinfo_seqneighjoin1", "matlab_bioinfo_seqneighjoin1", PtrTy, {PtrTy, PtrTy}},
+        {"matlab_bioinfo_seqneighjoin3", "matlab_bioinfo_seqneighjoin3", PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy}},
+        {"matlab_bioinfo_phytree_newick","matlab_bioinfo_phytree_newick",PtrTy, {PtrTy}},
+        {"matlab_bioinfo_phytree_get",   "matlab_bioinfo_phytree_get",   PtrTy, {PtrTy, PtrTy}},
+        {"matlab_bioinfo_phytree_pdist", "matlab_bioinfo_phytree_pdist", PtrTy, {PtrTy}},
+        /* Phase C — Tier-5 protein property + digestion. */
+        {"molweight",     "matlab_bioinfo_molweight",     PtrTy, {PtrTy}},
+        {"atomiccomp",    "matlab_bioinfo_atomiccomp",    PtrTy, {PtrTy}},
+        {"isoelectric",   "matlab_bioinfo_isoelectric",   PtrTy, {PtrTy}},
+        {"aminolookup",   "matlab_bioinfo_aminolookup",   PtrTy, {PtrTy}},
+        {"cleave",        "matlab_bioinfo_cleave",        PtrTy, {PtrTy, PtrTy}},
+        {"restrict",      "matlab_bioinfo_restrict",      PtrTy, {PtrTy, PtrTy}},
+        /* Phase C — Tier-6 microarray / mass-spec / learning (matrix lane). */
+        {"quantilenorm",    "matlab_bioinfo_quantilenorm",    PtrTy, {PtrTy}},
+        {"manorm",          "matlab_bioinfo_manorm",          PtrTy, {PtrTy}},
+        {"genevarfilter",   "matlab_bioinfo_genevarfilter",   PtrTy, {PtrTy}},
+        {"generangefilter", "matlab_bioinfo_generangefilter", PtrTy, {PtrTy}},
+        {"genelowvalfilter","matlab_bioinfo_genelowvalfilter",PtrTy, {PtrTy}},
+        {"clustergram",     "matlab_bioinfo_clustergram",     PtrTy, {PtrTy}},
+        {"knnimpute",       "matlab_bioinfo_knnimpute",       PtrTy, {PtrTy}},
+        {"msnorm",          "matlab_bioinfo_msnorm",          PtrTy, {PtrTy, PtrTy}},
+        {"mslowess",        "matlab_bioinfo_mslowess",        PtrTy, {PtrTy, PtrTy}},
+        {"msbackadj",       "matlab_bioinfo_msbackadj",       PtrTy, {PtrTy, PtrTy}},
+        {"mspeaks",         "matlab_bioinfo_mspeaks",         PtrTy, {PtrTy, PtrTy}},
+        {"rankfeatures",    "matlab_bioinfo_rankfeatures",    PtrTy, {PtrTy, PtrTy}},
+        {"msresample",      "matlab_bioinfo_msresample",      PtrTy, {PtrTy, PtrTy, F64}},
+        {"crossvalind",     "matlab_bioinfo_crossvalind",     PtrTy, {PtrTy, F64, F64}},
         /* ===== Sensor Fusion and Tracking Toolbox =====
          * Init functions (constructor-intercept callees) and method runtime
          * symbols register here so the primary dispatcher can lower them. */
