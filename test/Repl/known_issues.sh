@@ -39,19 +39,11 @@ xfail_case() {
   fi
 }
 
-# (#258 plain-struct field matrix-type cross-turn — FIXED for `s.field`
-#  (NameExpr base), promoted to run_tests.sh::xturn_struct_field_matrix.
-#  Still open: the struct-ARRAY element-field case `s(i).Field` (CallOrIndex
-#  base, e.g. bioinfo/fasta_align's `disp(s(1).Header)`), whose per-field kind
-#  is likewise lost cross-turn.) */
-xfail_case "xturn_structarray_field_type" 258 "$(cat <<'EOF'
-s(1).Header = "name1";
-disp(s(1).Header)
-t = s;
-disp(t(1).Header)
-exit
-EOF
-)" "unsupported call shape"
+# (#258 — FULLY FIXED: `s.field`, `s(i).Field`, struct-array fn-return
+#  persistence, and struct-array COPY `t = s` all read matrix/string fields
+#  correctly cross-turn now.  Promoted to run_tests.sh::xturn_struct_field_matrix,
+#  ::xturn_structarray_field_string, ::xturn_structarray_fn_return,
+#  ::xturn_structarray_copy.)
 
 # (#259 timetable summary cross-turn — FIXED, promoted to run_tests.sh::xturn_timetable_summary)
 

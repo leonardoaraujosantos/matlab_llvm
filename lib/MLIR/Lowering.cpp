@@ -2845,6 +2845,12 @@ void Lowerer::lowerStmt(const Stmt &St) {
       if (NE->Ref &&
           (StructInitialised.count(NE->Ref) || NE->Ref->IsStruct))
         RhsIsStruct = true;
+      /* #258: a struct-array COPY `t = s` must propagate struct-array-ness so
+       * `t(i).Field` / `length(t)` route through the struct-array path and the
+       * workspace store persists `t` as kind=14.  Without this the copy lost
+       * the tag and `t(i).Field` fell to resolveStructBase -> undef. */
+      if (NE->Ref && isStructArrayBinding(NE->Ref))
+        RhsIsStructArray = true;
     } else if (A.RHS && A.RHS->Kind == NodeKind::FieldAccess) {
       /* Phase 5.4: TT.Time produces a matlab_datetime_vec *. TT.<col>
        * is a plain matlab_mat — the default lane handles it. */
