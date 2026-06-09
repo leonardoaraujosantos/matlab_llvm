@@ -89,6 +89,13 @@ struct Binding {
    * struct-field path, which corrupted the opaque handle and crashed the
    * encoder on the next writeVideo. */
   bool IsVideoWriter = false;
+  /* Timetable (#259).  Stamped by the Resolver when the REPL workspace-kind
+   * hook reports a prior input bound this name to a timetable (a timetable is
+   * stored generically and would otherwise be mis-stamped as a plain matrix /
+   * table cross-turn).  The MLIR lowering reads it (via isTimetableBinding) so
+   * a cross-turn `summary(TT)` / `head(TT)` / `TT.col` / disp dispatches to
+   * the timetable path instead of backing off to "unsupported call shape". */
+  bool IsTimetable = false;
   /* Struct array (kind=14).  Stamped by the Resolver when the REPL
    * workspace-kind hook reports a prior input bound this name to a
    * matlab_struct_arr* (`a(i).x = v`).  The MLIR lowering reads it to

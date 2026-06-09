@@ -591,6 +591,14 @@ private:
    * `timetable(col1, ..., 'RowTimes', dt)` or `table2timetable(T,
    * 'RowTimes', dt)`. */
   std::unordered_set<Binding *> TimetableBindings;
+  /* #259: same-TU (TimetableBindings, set at the timetable-producing
+   * assignment) OR cross-turn (Binding::IsTimetable, stamped by the Resolver
+   * from the timetable kind hook).  Lets summary/head/disp/column dispatch
+   * recover the timetable-ness a later REPL turn would otherwise lose (a
+   * timetable is stored generically, so it'd read back as a plain matrix). */
+  bool isTimetableBinding(Binding *B) const {
+    return B && (TimetableBindings.count(B) || B->IsTimetable);
+  }
   /* matlab_timerange * — time-interval row subscript. Produced by
    * `tr = timerange(t1, t2, 'closed')`; consumed by `TT(tr, :)`. */
   std::unordered_set<Binding *> TimerangeBindings;
@@ -2609,7 +2617,7 @@ void Lowerer::lowerStmt(const Stmt &St) {
         if (NE->Ref && DurationVecBindings.count(NE->Ref)) DispIsDurationVec = true;
         if (NE->Ref && CategoricalBindings.count(NE->Ref)) DispIsCategorical = true;
         if (NE->Ref && isTableBinding(NE->Ref)) DispIsTable = true;
-        if (NE->Ref && TimetableBindings.count(NE->Ref)) DispIsTimetable = true;
+        if (NE->Ref && isTimetableBinding(NE->Ref)) DispIsTimetable = true;
       }
       llvm::StringRef IntSuf = Lowerer::intDtypeSuffixOf(E.E);
       if (DispIsString) {
@@ -2791,7 +2799,7 @@ void Lowerer::lowerStmt(const Stmt &St) {
           RhsIsTimetable = true;
         /* TT(rowIdx, :) and TT(:, 'colName') both return a new
          * timetable, so the LHS slot inherits the tag. */
-        if (NE->Ref && TimetableBindings.count(NE->Ref))
+        if (NE->Ref && isTimetableBinding(NE->Ref))
           RhsIsTimetable = true;
         if (NE->Name == "timerange") RhsIsTimerange = true;
         if (NE->Name == "VideoWriter") RhsIsVideoWriter = true;
@@ -2832,7 +2840,7 @@ void Lowerer::lowerStmt(const Stmt &St) {
         RhsIsCategorical = true;
       if (NE->Ref && isTableBinding(NE->Ref))
         RhsIsTable = true;
-      if (NE->Ref && TimetableBindings.count(NE->Ref))
+      if (NE->Ref && isTimetableBinding(NE->Ref))
         RhsIsTimetable = true;
       if (NE->Ref &&
           (StructInitialised.count(NE->Ref) || NE->Ref->IsStruct))
@@ -2842,7 +2850,7 @@ void Lowerer::lowerStmt(const Stmt &St) {
        * is a plain matlab_mat — the default lane handles it. */
       auto *FA = static_cast<const FieldAccess *>(A.RHS);
       if (auto *BN = dynamic_cast<const NameExpr *>(FA->Base))
-        if (BN->Ref && TimetableBindings.count(BN->Ref) &&
+        if (BN->Ref && isTimetableBinding(BN->Ref) &&
             FA->Field == "Time")
           RhsIsDatetimeVec = true;
     }
@@ -2991,7 +2999,7 @@ void Lowerer::lowerStmt(const Stmt &St) {
         bool AllTT = true;
         for (const Expr *X : MM->Rows[0]) {
           auto *NE = dynamic_cast<const NameExpr *>(X);
-          if (!NE || !NE->Ref || !TimetableBindings.count(NE->Ref)) {
+          if (!NE || !NE->Ref || !isTimetableBinding(NE->Ref)) {
             AllTT = false; break;
           }
         }
@@ -3929,7 +3937,28 @@ void Lowerer::lowerStmt(const Stmt &St) {
     if (RhsIsTimetable) {
       for (const Expr *L : A.LHS)
         if (auto *N = dynamic_cast<const NameExpr *>(L))
-          if (N->Ref) TimetableBindings.insert(N->Ref);
+          if (N->Ref) {
+            TimetableBindings.insert(N->Ref);
+            /* #259: in the REPL, record the name in the runtime timetable
+             * registry so a later submission re-stamps the binding
+             * (IsTimetable via the kind hook) and `summary(TT)` / `TT.col`
+             * route to the timetable path instead of the plain-matrix path
+             * (which fails the call-shape detector).  Mirrors the
+             * VideoWriter (#236) mark above. */
+            if (ReplMode && InScriptBody &&
+                N->Ref->Kind == BindingKind::Var) {
+              mlir::Value NameV =
+                  emitFieldNameChar(N->Ref->Name, loc(A.Range));
+              auto I32 = mlir::IntegerType::get(&MCtx, 32);
+              mlir::Value OnV = mlir::arith::ConstantOp::create(
+                  B, loc(A.Range), I32, mlir::IntegerAttr::get(I32, 1));
+              mlir::NamedAttribute MCal(
+                  mlir::StringAttr::get(&MCtx, "callee"),
+                  mlir::StringAttr::get(&MCtx, "matlab_ws_mark_timetable"));
+              emitUnregOp("matlab.call_builtin", {NameV, OnV},
+                          {mlir::NoneType::get(&MCtx)}, loc(A.Range), {MCal});
+            }
+          }
     }
     if (RhsIsTimerange) {
       for (const Expr *L : A.LHS)
@@ -4921,6 +4950,12 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
       bool IsDuration = DurationBindings.count(N.Ref) != 0;
       bool IsStruct   = (N.Ref &&
                          (StructBindings.count(N.Ref) || N.Ref->IsStruct));
+      /* #258: a struct-array-returning assignment (`s = fastaread(...)`)
+       * must persist via matlab_ws_set_struct_arr (kind=14) so a later turn's
+       * `s(i).Field` / `length(s)` rehydrates the array (and its elements)
+       * instead of reading a generic matrix.  Without this it fell to set_mat
+       * and `s(1).Header` came back undef cross-turn. */
+      bool IsStructArr = N.Ref && isStructArrayBinding(N.Ref);
       /* Function handle: `f = @sin` / `f = @myFn` / capture-free anon.
        * HandleBindings was populated by the AssignStmt handle-tracking
        * block just above this store.  Only capture-free handles (empty
@@ -4940,13 +4975,14 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
                          : (IsSym ? "matlab_ws_set_sym"
                               : (IsString ? "matlab_ws_set_string"
                               : (IsObj    ? "matlab_ws_set_obj"
+                              : (IsStructArr ? "matlab_ws_set_struct_arr"
                               : (IsStruct ? "matlab_ws_set_struct"
                               : (IsTable  ? "matlab_ws_set_table"
                               : (IsCategorical ? "matlab_ws_set_categorical"
                               : (IsDatetime    ? "matlab_ws_set_datetime"
                               : (IsDuration    ? "matlab_ws_set_duration"
                               : (IsMat ? "matlab_ws_set_mat"
-                                       : "matlab_ws_set_f64"))))))))));
+                                       : "matlab_ws_set_f64")))))))))));
       /* #77: remember whether this workspace var currently holds a matrix
        * so an anon capturing it can reload it as a ptr (matlab_ws_get_mat)
        * rather than mis-typing the capture as f64. */
@@ -5330,7 +5366,7 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
     /* Phase 5.4 (cont.): TT.<colName> = Rhs on a timetable binding.
      * Same shape as table column write — _add_column auto-replaces. */
     if (auto *BN = dynamic_cast<const NameExpr *>(F.Base))
-      if (BN->Ref && TimetableBindings.count(BN->Ref)) {
+      if (BN->Ref && isTimetableBinding(BN->Ref)) {
         mlir::Value Tv = lowerExpr(*F.Base);
         mlir::Value NameV = emitFieldNameChar(F.Field, loc(F.Range));
         mlir::NamedAttribute Cal(
@@ -5345,7 +5381,7 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
      * write targets (VariableNames rename, etc.) to later tasks. */
     if (auto *Inner = dynamic_cast<const FieldAccess *>(F.Base))
       if (auto *BN = dynamic_cast<const NameExpr *>(Inner->Base))
-        if (BN->Ref && TimetableBindings.count(BN->Ref) &&
+        if (BN->Ref && isTimetableBinding(BN->Ref) &&
             Inner->Field == "Properties" && F.Field == "Description") {
           mlir::Value Tv = lowerExpr(*Inner->Base);
           mlir::NamedAttribute VA(
@@ -6333,7 +6369,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             FirstIsDtVec = true;
         if (auto *FA = dynamic_cast<const FieldAccess *>(C.Args[0]))
           if (auto *BN = dynamic_cast<const NameExpr *>(FA->Base))
-            if (BN->Ref && TimetableBindings.count(BN->Ref) &&
+            if (BN->Ref && isTimetableBinding(BN->Ref) &&
                 FA->Field == "Time")
               FirstIsDtVec = true;
         if (FirstIsDtVec) {
@@ -6369,7 +6405,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
      * indexing path (which would error). */
     if (C.Args.size() == 2 && C.Args[0] && C.Args[1])
       if (auto *N = dynamic_cast<const NameExpr *>(C.Callee))
-        if (N->Ref && TimetableBindings.count(N->Ref)) {
+        if (N->Ref && isTimetableBinding(N->Ref)) {
           auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
           /* Column-by-name form: TMW(:, 'colName'). */
           if (dynamic_cast<const ColonExpr *>(C.Args[0])) {
@@ -12295,7 +12331,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
            N->Name == "numel"  || N->Name == "length") &&
           C.Args.size() == 1 && C.Args[0])
         if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0])) {
-          bool IsTT = ArgN->Ref && TimetableBindings.count(ArgN->Ref);
+          bool IsTT = ArgN->Ref && isTimetableBinding(ArgN->Ref);
           bool IsT  = ArgN->Ref && isTableBinding(ArgN->Ref);
           if (IsT || IsTT) {
             auto F64 = mlir::Float64Type::get(&MCtx);
@@ -12315,7 +12351,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
       if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
           N->Name == "size" && C.Args.size() == 2 && C.Args[0])
         if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0])) {
-          bool IsTT = ArgN->Ref && TimetableBindings.count(ArgN->Ref);
+          bool IsTT = ArgN->Ref && isTimetableBinding(ArgN->Ref);
           bool IsT  = ArgN->Ref && isTableBinding(ArgN->Ref);
           if (IsT || IsTT) {
             auto F64 = mlir::Float64Type::get(&MCtx);
@@ -12385,7 +12421,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             return emitUnreg("matlab.call_builtin", {V},
                              mlir::NoneType::get(&MCtx), L, {Cal});
           }
-          if (ArgN->Ref && TimetableBindings.count(ArgN->Ref)) {
+          if (ArgN->Ref && isTimetableBinding(ArgN->Ref)) {
             mlir::Value V = lowerExpr(*C.Args[0]);
             mlir::NamedAttribute Cal(
                 mlir::StringAttr::get(&MCtx, "callee"),
@@ -12886,10 +12922,10 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
       auto exprIsTimetable = [&](const Expr *E) -> bool {
         if (!E) return false;
         if (auto *NE = dynamic_cast<const NameExpr *>(E))
-          return NE->Ref && TimetableBindings.count(NE->Ref);
+          return NE->Ref && isTimetableBinding(NE->Ref);
         if (auto *CX = dynamic_cast<const CallOrIndex *>(E))
           if (auto *NE = dynamic_cast<const NameExpr *>(CX->Callee)) {
-            if (NE->Ref && TimetableBindings.count(NE->Ref)) return true;
+            if (NE->Ref && isTimetableBinding(NE->Ref)) return true;
             if (NE->Name == "timetable" || NE->Name == "table2timetable" ||
                 NE->Name == "retime" || NE->Name == "synchronize" ||
                 NE->Name == "fillmissing" || NE->Name == "movavg" ||
@@ -14279,7 +14315,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
      * value follows the same datetime_vec / matrix flow as the
      * standalone constructors. */
     if (auto *BN = dynamic_cast<const NameExpr *>(F.Base))
-      if (BN->Ref && TimetableBindings.count(BN->Ref)) {
+      if (BN->Ref && isTimetableBinding(BN->Ref)) {
         auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
         mlir::Value Tv = lowerExpr(*F.Base);
         if (F.Field == "Time") {
@@ -14319,6 +14355,17 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
          * to get_f64 and returns 0 for a char-string field. */
         if (!WantMat &&
             MatStructFields.count({NE->Ref, std::string(F.Field)}))
+          WantMat = true;
+        /* #258 (struct-array variant): a struct array that round-trips into a
+         * later REPL turn loses its per-field element-kind (MatStructFields is
+         * same-TU only), so a matrix/string field (`s(1).Header`) defaulted to
+         * a scalar get_f64 and read back 0 / empty.  For a cross-turn struct-
+         * array binding (IsStructArray, re-pinned from kind=14) fetch via
+         * get_mat — kind-aware, boxes a true scalar to 1x1.  Gated to the
+         * cross-turn case (NOT same-TU StructArrayBindings, which carry
+         * MatStructFields), mirroring the plain-struct fix. */
+        if (!WantMat && NE->Ref->IsStructArray &&
+            !StructArrayBindings.count(NE->Ref))
           WantMat = true;
         llvm::StringRef Callee = WantMat ? "matlab_struct_get_mat"
                                           : "matlab_struct_get_f64";
@@ -14517,6 +14564,22 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         if (auto *BN = dynamic_cast<const NameExpr *>(CI->Callee))
           if (BN->Ref && MatStructFields.count({BN->Ref, std::string(F.Field)}))
             WantMat = true;
+    /* #258: a struct that round-trips into a later REPL turn loses its per-
+     * field element-kind (MatStructFields is same-TU only), so a matrix field
+     * (`l2info.Payload`) defaults to get_f64 and a builtin consuming it
+     * (`biterr(a, s.Payload)`) backs off to "unsupported call shape".  For a
+     * cross-turn struct binding (IsStruct, re-pinned from kind=12) whose field
+     * type Sema can't see, fetch via get_mat — matlab_struct_get_mat is kind-
+     * aware and boxes a genuine scalar field into a 1x1, so this is safe for
+     * scalar fields too.  Gated to the cross-turn case (NOT same-TU
+     * StructBindings/StructInitialised, which already carry MatStructFields)
+     * so same-turn scalar-field reads keep their native-f64 fast path. */
+    if (!WantMat)
+      if (auto *BN = dynamic_cast<const NameExpr *>(F.Base))
+        if (BN->Ref && BN->Ref->IsStruct &&
+            !StructBindings.count(BN->Ref) &&
+            !StructInitialised.count(BN->Ref))
+          WantMat = true;
     llvm::StringRef Callee = WantMat ? "matlab_struct_get_mat"
                                       : "matlab_struct_get_f64";
     mlir::NamedAttribute Cal(
@@ -14603,7 +14666,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
       bool AllTT = true;
       for (const Expr *Cx : M.Rows[0]) {
         auto *NE = dynamic_cast<const NameExpr *>(Cx);
-        if (!NE || !NE->Ref || !TimetableBindings.count(NE->Ref)) {
+        if (!NE || !NE->Ref || !isTimetableBinding(NE->Ref)) {
           AllTT = false; break;
         }
       }

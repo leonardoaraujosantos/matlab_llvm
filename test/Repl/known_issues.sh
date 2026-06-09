@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# Known interactive-REPL (-repl) cross-turn defects — xfail tracker.
+#
+# Each case is a MINIMAL reproduction of an open bug under #116 (the REPL
+# workspace round-trip is not fully kind/shape/class-preserving).  This is NOT
+# part of the main gate: it ASSERTS THE BUG IS STILL PRESENT (an "expected
+# failure" marker substring appears in the -repl output).  When a fix lands and
+# a repro stops emitting its marker, this script reports the case as
+# FIXED and exits non-zero — a loud reminder to (1) close the linked issue,
+# and (2) promote the repro into a real passing regression in run_tests.sh.
+#
+# Usage: known_issues.sh <path-to-matlabc>
+set -u
+
+MATLABC="${1:-}"
+if [[ -z "$MATLABC" || ! -x "$MATLABC" ]]; then
+  echo "usage: $0 <path-to-matlabc>" >&2
+  exit 2
+fi
+
+xfail=0      # bug reproduced (still broken) — expected
+fixed=0      # bug no longer reproduces — needs attention
+fixed_names=()
+
+# xfail_case NAME ISSUE INPUT MARKER
+#   Runs INPUT through `matlabc -repl`; the bug is "still present" iff MARKER
+#   (a fixed substring) appears in the combined output.
+xfail_case() {
+  local name="$1" issue="$2" input="$3" marker="$4"
+  local got
+  got="$(printf '%s\n' "$input" | "$MATLABC" -repl 2>&1)"
+  if grep -qF "$marker" <<<"$got"; then
+    xfail=$((xfail+1))
+    echo "xfail  $name (#$issue) — still reproduces"
+  else
+    fixed=$((fixed+1))
+    fixed_names+=("$name (#$issue)")
+    echo "FIXED? $name (#$issue) — marker '$marker' gone; promote to a passing regression and close the issue"
+  fi
+}
+
+# (#258 plain-struct field matrix-type cross-turn — FIXED for `s.field`
+#  (NameExpr base), promoted to run_tests.sh::xturn_struct_field_matrix.
+#  Still open: the struct-ARRAY element-field case `s(i).Field` (CallOrIndex
+#  base, e.g. bioinfo/fasta_align's `disp(s(1).Header)`), whose per-field kind
+#  is likewise lost cross-turn.) */
+xfail_case "xturn_structarray_field_type" 258 "$(cat <<'EOF'
+s(1).Header = "name1";
+disp(s(1).Header)
+t = s;
+disp(t(1).Header)
+exit
+EOF
+)" "unsupported call shape"
+
+# (#259 timetable summary cross-turn — FIXED, promoted to run_tests.sh::xturn_timetable_summary)
+
+# (#260 Symptom A — multi-line classdef block accumulation — FIXED, promoted
+#  to run_tests.sh::repl_classdef_block_accumulation as an absence-assertion.
+#  #260 Symptom B — the multi-classdef umbrella prelude prepend parse error
+#  ("unexpected 'classdef' in expression") — remains open; it only reproduces
+#  inside the full example navigation/nav_rrt_plan.m (it depends on the exact
+#  prepend + trailing-expression context and resists a minimal repro), so it is
+#  tracked there via test/Debug/repl_sweep.py rather than here.)
+
+# (#261 dlnet dlarray pin lost on in-loop reassignment — FIXED (apply the
+#  cross-turn re-pin early for an assigned-in-TU binding), promoted to
+#  run_tests.sh::xturn_dlarray_reassign_in_loop.  This also cleared the
+#  finance/using_timetables_in_finance fillmissing-reassignment residual.)
+#
+# All currently-tracked xfails are open #116 sub-bugs without a minimal-repro
+# promotion path; #258 struct-array COPY + bioinfo fastaread element rehydration
+# and #260 Symptom B (prelude prepend) are tracked via test/Debug/repl_sweep.py.
+
+echo "----"
+echo "known-issue xfails: $xfail still-broken, $fixed now-fixed"
+if (( fixed > 0 )); then
+  printf '  needs promotion: %s\n' "${fixed_names[@]}"
+  exit 1
+fi
+exit 0

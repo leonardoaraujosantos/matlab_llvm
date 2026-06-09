@@ -2233,6 +2233,26 @@ bool TensorLowering::rewriteBuiltinCalls() {
       continue;
     }
 
+    /* #259: timetable name-registry mark. Same shape as the VideoWriter mark
+     * above (name ptr + len + i32 on/off). */
+    if (Name == "matlab_ws_mark_timetable" && Call->getNumOperands() == 2) {
+      Value NameV = Call->getOperand(0);
+      Value On = Call->getOperand(1);
+      if (!mlir::isa<mlir::IntegerType>(On.getType())) continue;
+      int64_t Len = 0;
+      Value Ptr = fieldNameAddr(NameV, Len);
+      if (!Ptr) continue;
+      B.setInsertionPoint(Call);
+      Value LenV = LLVM::ConstantOp::create(
+          B, Call->getLoc(), I64, B.getI64IntegerAttr(Len));
+      auto Fn = rt("matlab_ws_mark_timetable", VoidTy,
+                   {PtrTy, I64, B.getI32Type()});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{Ptr, LenV, On});
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+
     if ((Name == "matlab_ws_set_f64" || Name == "matlab_ws_set_mat" ||
          Name == "matlab_ws_set_obj" || Name == "matlab_ws_set_string" ||
          Name == "matlab_ws_set_sym" || Name == "matlab_ws_set_symmat" ||

@@ -38,6 +38,28 @@ run_case() {
   fi
 }
 
+# Assert a substring is ABSENT from the -repl output (e.g. a parse error that a
+# fix must no longer emit).  The REPL is lenient — it recovers and keeps going
+# after an error — so some fixes (e.g. classdef block accumulation) have no
+# positive output to match; their only observable is the absence of the error.
+run_case_absent() {
+  local name="$1" input="$2" forbidden="$3"
+  local got
+  got="$(printf '%s\n' "$input" | "$MATLABC" -repl 2>&1)"
+  if grep -qF "$forbidden" <<<"$got"; then
+    fail=$((fail+1))
+    fails+=("$name (forbidden substring '$forbidden' present in output)")
+    echo "FAIL  $name"
+    echo "----- got -----"
+    echo "$got"
+    echo "----- forbidden substring -----"
+    echo "$forbidden"
+    echo "---------------"
+  else
+    pass=$((pass+1))
+  fi
+}
+
 # 1. Cross-turn user function: define in one block, call in another.
 run_case "cross_turn_user_fn" "$(cat <<'EOF'
 function y = double_it(x)
@@ -335,6 +357,92 @@ disp(getOccupancy(m, [1 1]))
 exit
 EOF
 )" "1"
+
+# 8e. #259 — a timetable round-trips generically, so a cross-turn `summary(TT)`
+# used to be mis-typed as a plain matrix and back off ("unsupported call shape").
+# The fix marks the var as a timetable at store time (matlab_ws_mark_timetable),
+# the kind hook reports a distinct kind, and the Resolver re-stamps
+# Binding::IsTimetable so summary/head/TT.col route to the timetable path.
+run_case "xturn_timetable_summary" "$(cat <<'EOF'
+TT = timetable([1;2;3], [10;20;30]);
+summary(TT);
+exit
+EOF
+)" "Var2: NumMissing=0  Min=10  Max=30  Mean=20"
+
+# 8f. #260 (Symptom A) — a multi-line classdef block fed to -repl must be
+# accumulated as ONE submission.  blockDepth() now counts properties/methods/
+# events/enumeration as block-openers inside a classdef; without that, the
+# accumulator submitted a partial `classdef ... properties ... end` after the
+# *properties* `end` and the leftover classdef `end` parsed standalone as
+# `'end' is only valid inside indexing`.  Absence-assertion: that error must
+# no longer appear.
+run_case_absent "repl_classdef_block_accumulation" "$(cat <<'EOF'
+classdef Pt
+ properties
+  x
+ end
+end
+disp(7)
+exit
+EOF
+)" "'end' is only valid inside indexing"
+
+# 8g. #258 — a struct round-trips into a later REPL turn without its per-field
+# element-kind, so a matrix field (`s.Payload`) defaulted to a scalar get_f64
+# and a builtin consuming it (`biterr(a, s.Payload)`) backed off to
+# "unsupported call shape".  A cross-turn struct-field read now fetches via
+# get_mat (kind-aware; boxes a true scalar to 1x1).
+run_case "xturn_struct_field_matrix" "$(cat <<'EOF'
+s.Payload = [1 1 0 0];
+a = [1 0 1 0];
+disp(biterr(a, s.Payload))
+exit
+EOF
+)" "0.5"
+
+# 8h. #258 (struct-array variant) — a struct ARRAY field `s(i).Field` loses its
+# element-kind cross-turn too; a string/matrix field read back as scalar 0.
+# A cross-turn IsStructArray element-field read now fetches via get_mat.
+run_case "xturn_structarray_field_string" "$(cat <<'EOF'
+s(1).Header = "name1";
+disp(s(1).Header)
+exit
+EOF
+)" "name1"
+
+# 8j. #258 — a struct-array-RETURNING assignment (`s = fastaread(...)`) must
+# persist via matlab_ws_set_struct_arr (kind=14) so a later turn's `s(i).Field`
+# rehydrates the array + its elements.  Pre-fix it fell to set_mat (kind=1) and
+# `s(1).Sequence` came back undef cross-turn.  Cleared bioinfo/fasta_align.
+run_case "xturn_structarray_fn_return" "$(cat <<'EOF'
+fastawrite("/tmp/reg_sa_xturn.fa", "recA", "ACGT");
+s = fastaread("/tmp/reg_sa_xturn.fa");
+disp(s(1).Sequence)
+exit
+EOF
+)" "ACGT"
+
+# 8i. #261 — a cross-turn class-pinned binding (dlarray weight) that is also
+# REASSIGNED inside a loop turn lost its pin at an earlier read in that turn,
+# because the cross-turn re-pin (applyWorkspaceKind) only ran on the auto-
+# declare path; the reassignment set the pin only after the read.  So
+# `logits = W2_dl * reshape(...)` didn't infer object<dlarray> and the
+# activation (`softmax(logits)`) backed off to "unsupported call shape".  The
+# Resolver now applies the cross-turn pin early for an assigned-in-TU binding.
+# Absence-assertion: the softmax back-off must no longer appear (the loop body
+# fails to compile pre-fix; the lenient REPL would still run a trailing disp).
+run_case_absent "xturn_dlarray_reassign_in_loop" "$(cat <<'EOF'
+W2_dl = dlarray(ones(3, 16));
+for k = 1:2
+    logits = W2_dl * reshape(dlarray(ones(2, 2, 4, 4)), 16, 4);
+    yhat   = softmax(logits);
+    W2_dl  = dlarray(ones(3, 16) - 0.2);
+end
+disp(99)
+exit
+EOF
+)" "unsupported call shape for built-in function 'softmax'"
 
 # 9. #240 — mpcmove with a p×ny reference-preview MATRIX on the REPL/JIT path.
 # The mpc object round-trips through the workspace and loses its class pin, so

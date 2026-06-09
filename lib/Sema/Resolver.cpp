@@ -1769,6 +1769,11 @@ void Resolver::applyWorkspaceKind(Binding *NB, std::string_view Name,
    * InferredType is set — the handle round-trips as an opaque ptr through
    * matlab_ws_get_mat, like a sym. */
   else if (K == 15) NB->IsVideoWriter = true;
+  /* Kind 17 = timetable (#259).  Stamp IsTimetable so the MLIR lowering
+   * re-populates the timetable dispatch (summary / head / TT.col / disp) on
+   * the next turn instead of treating the value as a plain matrix.  No
+   * InferredType (the value round-trips as an opaque ptr, like VideoWriter). */
+  else if (K == 17) NB->IsTimetable = true;
   /* Kind 6 = matlab_table* (Phase 5.3).  Stamp IsTable so the MLIR
    * lowering re-populates TableBindings and a cross-turn `height(T)` /
    * `width(T)` / `T.col` / `disp(T)` dispatches to the table path
@@ -2531,6 +2536,23 @@ void Resolver::resolveExpr(Expr &E, Scope *S) {
     }
     N.Ref = B;
     B->ReadFrom = true;
+    /* #261/#259: a binding that is also REASSIGNED in this TU
+     * (`W2_dl = dlarray(...)` / `TMW = fillmissing(TMW,...)` in a loop)
+     * resolves to its local assignment binding, so the auto-declare path
+     * above (which calls applyWorkspaceKind) is skipped — the cross-turn pin
+     * (PinnedClass / IsTimetable / IsStruct / ...) is then set only by the
+     * reassignment statement, which the resolver processes AFTER this read.
+     * So a read that precedes the reassignment in source order (the loop body
+     * `logits = W2_dl * Y_flat`) sees an unpinned binding and the operator-
+     * overload / call-shape pin is lost.  At loop entry the binding genuinely
+     * holds the cross-turn value, so apply the workspace re-pin now — but only
+     * once, when nothing has been stamped yet (a brand-new in-TU binding the
+     * workspace doesn't know about gets kind -1 and is left untouched). */
+    if (ReplMode && WorkspaceKindHook && B->Kind == BindingKind::Var &&
+        !B->PinnedClass && !B->InferredType && !B->IsTimetable &&
+        !B->IsStruct && !B->IsStructArray && !B->IsHandle && !B->IsTable &&
+        !B->IsSym && !B->IsSymmat && !B->IsVideoWriter && !B->IsThreeD)
+      applyWorkspaceKind(B, N.Name, S);
     break;
   }
   case NodeKind::BinaryOp: {

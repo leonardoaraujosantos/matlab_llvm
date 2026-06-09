@@ -632,15 +632,32 @@ void dumpTokens(const SourceManager &SM, const std::vector<Token> &Ts) {
 
 int blockDepth(const std::vector<Token> &Toks) {
   int d = 0;
+  /* #260: `properties` / `methods` / `events` / `enumeration` are
+   * context-sensitive — they open a block (with a matching `end`) ONLY inside
+   * a classdef.  Outside one they are ordinary functions (`p =
+   * properties(obj)`), so counting them unconditionally would make the REPL
+   * accumulator wait forever for a non-existent `end`.  Track whether a
+   * classdef is open and only treat them as block-openers then; without this
+   * the accumulator submits a partial `classdef ... properties ... end` after
+   * the *properties* `end` (the classdef's own `end` still pending) and the
+   * parser errors (`'end' is only valid inside indexing` / `unexpected
+   * 'properties'`). */
+  bool inClassdef = false;
   for (const auto &T : Toks) {
     switch (T.Kind) {
+    case TokenKind::kw_classdef:
+      inClassdef = true; ++d; break;
+    case TokenKind::kw_properties:
+    case TokenKind::kw_methods:
+    case TokenKind::kw_events:
+    case TokenKind::kw_enumeration:
+      if (inClassdef) ++d; break;
     case TokenKind::kw_if:
     case TokenKind::kw_for:
     case TokenKind::kw_while:
     case TokenKind::kw_switch:
     case TokenKind::kw_try:
     case TokenKind::kw_function:
-    case TokenKind::kw_classdef:
     case TokenKind::kw_parfor:
       ++d; break;
     case TokenKind::kw_end:
@@ -2251,6 +2268,7 @@ int64_t     matlab_string_get_len (void *s);
  * after main.cpp's runtime-introspection externs because it has to
  * walk matlab_dbg_ws_count/_name/_kind. */
 extern "C" int32_t matlab_ws_is_videowriter(const char *name, int64_t len);
+extern "C" int32_t matlab_ws_is_timetable(const char *name, int64_t len);
 extern "C" int replWorkspaceKindHook(const char *name, int64_t len) {
   int n = matlab_dbg_ws_count();
   for (int i = 0; i < n; ++i) {
@@ -2261,6 +2279,10 @@ extern "C" int replWorkspaceKindHook(const char *name, int64_t len) {
        * which would re-stamp the binding wrong; the name registry overrides
        * it with kind 15 so the resolver marks the binding IsVideoWriter. */
       if (matlab_ws_is_videowriter(name, len)) return 15;
+      /* #259: a timetable is stored generically; the name registry overrides
+       * the storage kind with 17 so the Resolver re-stamps the binding
+       * IsTimetable (summary/head/TT.col route to the timetable path). */
+      if (matlab_ws_is_timetable(name, len)) return 17;
       /* #116: a 3-D array round-trips under the generic mat kind=1, losing
        * its rank for the next turn's Sema.  Report a distinct kind so the
        * Resolver re-stamps the binding 3-D (Binding::IsThreeD) and the N-D
