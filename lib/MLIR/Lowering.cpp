@@ -5932,14 +5932,28 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         Bi.Op == BinOp::Le || Bi.Op == BinOp::Gt || Bi.Op == BinOp::Ge;
     auto lowerArithOperand = [&](const Expr *E) -> mlir::Value {
       if (CharArithOp)
-        if (auto *CL = dynamic_cast<const CharLiteral *>(E))
-          if (CL->Value.size() == 1) {
+        if (auto *CL = dynamic_cast<const CharLiteral *>(E)) {
           auto F64 = mlir::Float64Type::get(&MCtx);
-          return emitUnreg(
-              "matlab.const_float", {}, F64, L,
-              {mlir::NamedAttribute(
-                  mlir::StringAttr::get(&MCtx, "value"),
-                  mlir::FloatAttr::get(F64, (double)(unsigned char)CL->Value[0]))});
+          auto codeConst = [&](unsigned char c) {
+            return emitUnreg(
+                "matlab.const_float", {}, F64, L,
+                {mlir::NamedAttribute(
+                    mlir::StringAttr::get(&MCtx, "value"),
+                    mlir::FloatAttr::get(F64, (double)c))});
+          };
+          if (CL->Value.size() == 1)
+            return codeConst((unsigned char)CL->Value[0]);
+          if (CL->Value.size() > 1) {
+            /* Multi-char literal -> a 1xN row of codes, built the same way a
+             * numeric row literal `[65 66]` lowers (concat_row of const_float).
+             * `'AB' + 1` then takes the matrix+scalar arithmetic path. */
+            llvm::SmallVector<mlir::Value, 8> Codes;
+            for (char c : CL->Value)
+              Codes.push_back(codeConst((unsigned char)c));
+            auto RowTy = mlir::RankedTensorType::get(
+                {(int64_t)CL->Value.size()}, F64);
+            return emitUnreg("matlab.concat_row", Codes, RowTy, L);
+          }
         }
       return E ? lowerExpr(*E) : mlir::Value{};
     };
