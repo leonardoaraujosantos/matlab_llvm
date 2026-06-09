@@ -2210,6 +2210,7 @@ int  matlab_dbg_is_paused(void);
 int  matlab_dbg_ws_count(void);
 const char *matlab_dbg_ws_name(int i, int64_t *len_out);
 int  matlab_dbg_ws_kind(int i);
+int  matlab_dbg_ws_is_mat3(int i);
 double matlab_dbg_ws_f64(int i);
 void  *matlab_dbg_ws_ptr(int i);
 /* matlab_obj_class_id : matlab_obj* -> int32_t (returned as double).
@@ -2219,6 +2220,11 @@ void  *matlab_dbg_ws_ptr(int i);
  * matching classdef prelude on subsequent REPL turns. */
 double matlab_obj_class_id(void *o);
 const char *matlab_dbg_class_name(int32_t class_id, int64_t *len_out);
+/* #116: kind-stable class-name lookup for a workspace variable, captured at
+ * obj-store time (matlab_ws_set_obj).  Survives cross-turn ClassId
+ * reassignment, unlike matlab_obj_class_id -> matlab_dbg_class_name. */
+const char *matlab_dbg_ws_obj_class_name(const char *name, int64_t len,
+                                         int64_t *out_len);
 void  matlab_ws_set_f64(const char *name, int64_t len, double v);
 void  matlab_ws_set_mat(const char *name, int64_t len, struct matlab_mat *m);
 void  matlab_ws_set_string(const char *name, int64_t len, void *s);
@@ -2255,6 +2261,11 @@ extern "C" int replWorkspaceKindHook(const char *name, int64_t len) {
        * which would re-stamp the binding wrong; the name registry overrides
        * it with kind 15 so the resolver marks the binding IsVideoWriter. */
       if (matlab_ws_is_videowriter(name, len)) return 15;
+      /* #116: a 3-D array round-trips under the generic mat kind=1, losing
+       * its rank for the next turn's Sema.  Report a distinct kind so the
+       * Resolver re-stamps the binding 3-D (Binding::IsThreeD) and the N-D
+       * subscript store/read detectors fire cross-turn. */
+      if (matlab_dbg_ws_is_mat3(i)) return 16;
       return matlab_dbg_ws_kind(i);
     }
   }
@@ -2278,6 +2289,12 @@ extern "C" const char *replWorkspaceClassNameHook(const char *name,
     if (matlab_dbg_ws_kind(i) != 2) return nullptr;
     void *o = matlab_dbg_ws_ptr(i);
     if (!o) return nullptr;
+    /* #116: prefer the class name captured at store time — the obj's stored
+     * class_id is from its turn of construction and a later turn's registry
+     * may map that id to a different class (per-TU positional ids). */
+    int64_t snLen = 0;
+    const char *sn = matlab_dbg_ws_obj_class_name(name, len, &snLen);
+    if (sn && snLen > 0) { if (len_out) *len_out = snLen; return sn; }
     int32_t cid = (int32_t)matlab_obj_class_id(o);
     return matlab_dbg_class_name(cid, len_out);
   }
@@ -2949,9 +2966,18 @@ static std::string buildReplPrelude(const std::string &Src) {
     if (matlab_dbg_ws_kind(i) != 2) continue;
     void *o = matlab_dbg_ws_ptr(i);
     if (!o) continue;
-    int32_t cid = (int32_t)matlab_obj_class_id(o);
+    /* #116: prefer the store-time class name (kind-stable) over the volatile
+     * class_id -> registry lookup, which can resolve to the wrong class on a
+     * later turn (per-TU positional ClassIds). */
+    int64_t inLen = 0;
+    const char *vn = matlab_dbg_ws_name(i, &inLen);
     int64_t cnLen = 0;
-    const char *cn = matlab_dbg_class_name(cid, &cnLen);
+    const char *cn = (vn && inLen > 0)
+        ? matlab_dbg_ws_obj_class_name(vn, inLen, &cnLen) : nullptr;
+    if (!cn || cnLen <= 0) {
+      int32_t cid = (int32_t)matlab_obj_class_id(o);
+      cn = matlab_dbg_class_name(cid, &cnLen);
+    }
     if (!cn || cnLen <= 0) continue;
     std::string_view CN(cn, (size_t)cnLen);
     for (auto &W : Cls)

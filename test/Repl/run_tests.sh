@@ -306,6 +306,36 @@ exit
 EOF
 )" "2"
 
+# 8c. #116 — a 3-D array (matlab_mat3) round-trips through the workspace under
+# the generic mat kind, so a cross-turn N-D subscript store/read used to back
+# off to "unsupported call shape for __subscript_store".  The Resolver now
+# stamps Binding::IsThreeD from the kind=16 workspace lookup and the lowering
+# re-seeds the 3-D dispatch (isThreeDBinding), so the plane store + element
+# read work across turns.  Without the fix turn 2 fails to compile, `img`
+# stays all-zero, and the read prints 0 instead of 7.
+run_case "xturn_threed_plane_store" "$(cat <<'EOF'
+img = zeros(2, 2, 3);
+img(:, :, 2) = 7;
+disp(img(1, 1, 2))
+exit
+EOF
+)" "7"
+
+# 8d. #116 — a classdef instance (here occupancyMap) used across >=3 turns.
+# ClassId is a per-TU positional counter, so the obj's stored class_id maps to
+# a DIFFERENT class on a later turn (the registry slot is overwritten), and the
+# Resolver fails to re-pin the binding -> a 3rd-turn `getOccupancy`/`setOccupancy`
+# backs off to "unsupported call shape".  The fix captures the class NAME at
+# obj-store time (matlab_ws_set_obj) and resolves cross-turn by name, immune to
+# id reassignment.  Without it, turn 3 errors and prints nothing instead of 1.
+run_case "xturn_obj_class_repin_3turn" "$(cat <<'EOF'
+m = occupancyMap(10, 10);
+setOccupancy(m, [1 1], 1);
+disp(getOccupancy(m, [1 1]))
+exit
+EOF
+)" "1"
+
 # 9. #240 — mpcmove with a p×ny reference-preview MATRIX on the REPL/JIT path.
 # The mpc object round-trips through the workspace and loses its class pin, so
 # the AOT `mpcmove -> matlab_mpc_move` rewrite (gated on that pin) is skipped.

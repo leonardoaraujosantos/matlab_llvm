@@ -1741,6 +1741,16 @@ void Resolver::applyWorkspaceKind(Binding *NB, std::string_view Name,
    * canonical "double array of unknown shape" so the BinaryOp /
    * call_builtin path picks the matrix-mat runtime entries. */
   else if (K == 1) NB->InferredType = TC.arrayOf(Dtype::Double, Shape::unknown());
+  /* Kind 16 = a 3-D array (matlab_mat3) round-tripping under the generic
+   * mat storage (#116).  Stamp the same double-array InferredType as kind 1
+   * (the runtime is uniformly f64, so 2-D matrix ops still dispatch) AND set
+   * IsThreeD so the MLIR lowering re-seeds the 3-D dispatch — without this a
+   * cross-turn `img(:,:,k)=...` / `A(:,:,k)` read backs off to "unsupported
+   * call shape" because Sema lost the rank across the workspace round-trip. */
+  else if (K == 16) {
+    NB->InferredType = TC.arrayOf(Dtype::Double, Shape::unknown());
+    NB->IsThreeD = true;
+  }
   else if (K == 3) NB->InferredType = TC.stringScalar();
   else if (K == 4) NB->InferredType = TC.arrayOf(Dtype::UInt8, Shape::unknown());
   else if (K == 5) NB->InferredType = TC.arrayOf(Dtype::Int32, Shape::unknown());

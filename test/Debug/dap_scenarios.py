@@ -3451,6 +3451,53 @@ def scn_recursive_function_param_attrs(matlabc, program):
 
 # --- entry point -------------------------------------------------------------
 
+def scn_obj_inplace_mutation_124(matlabc, program):
+    """#124: a struct / class-instance mutated *in place* by BARE method
+    calls across statements must stay visible to a later read under -dap
+    (whole-file ReplMode).
+
+    Repro (examples/pde/poisson_disk.m, trimmed — dap_obj_inplace_program.m):
+    `model = createpde()` is stored to the workspace; bare
+    `geometryFromEdges/specifyCoefficients/generateMesh(model, ...)` mutate it
+    in place; `solvepde(model)` reads it.  A `model.Geometry.NumEdges` field
+    access in the middle creates a read-cache struct slot for `model`, blank-
+    inited at function entry.  Before the fix, every NameExpr read of `model`
+    AFTER the slot was created loaded the stale blank slot instead of the live
+    workspace pointer, so `solvepde` ran on an empty model and printed
+    U0=0.0000 — while -repl (per-statement, workspace-only) and AOT correctly
+    printed 0.2489.  The fix (loadBinding) routes struct/obj read-cache
+    bindings to the workspace at every read site, matching resolveStructBase.
+    """
+    import os
+    import time
+    prog = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_obj_inplace_program.m",
+    )
+    with DapClient(matlabc, prog) as c:
+        initialize_and_launch(c, stop_on_entry=False)
+        out = ""
+        deadline = time.monotonic() + 40.0
+        while time.monotonic() < deadline:
+            try:
+                ev = c.wait_event(
+                    "output", timeout=max(0.05, deadline - time.monotonic()))
+            except DapError:
+                break
+            body = ev.get("body") or {}
+            if body.get("category") in ("stdout", "console"):
+                out += body.get("output", "")
+            if "U0=" in out:
+                break
+        assert "U0=0.2489" in out, (
+            "#124 regression: expected U0=0.2489 (bare-call in-place obj "
+            f"mutation visible to solvepde), got {out!r}")
+        assert "U0=0.0000" not in out, (
+            "#124 regression: model read the stale blank read-cache slot "
+            f"(U0=0.0000): {out!r}")
+        c.wait_event("terminated", timeout=10.0)
+
+
 def all_scenarios():
     g = globals()
     return [(name, g[name]) for name in sorted(g) if name.startswith("scn_")]

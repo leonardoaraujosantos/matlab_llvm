@@ -707,6 +707,15 @@ private:
    * A(i,j,k) = v, and size(A, 3) all route to matlab_mat3 runtime
    * entries instead of the 2-D path. */
   std::unordered_set<Binding *> ThreeDBindings;
+  /* True if a binding holds a 3-D value — same-turn (in ThreeDBindings, set
+   * by the RhsIsThreeD assignment path) OR cross-turn (Binding::IsThreeD,
+   * stamped by the Resolver from the kind=16 workspace lookup, #116).  Lets
+   * the N-D subscript store/read dispatch sites recover the 3-D-ness a later
+   * REPL turn would otherwise lose when the mat3 round-trips under the
+   * generic mat kind. */
+  bool isThreeDBinding(Binding *B) const {
+    return B && (ThreeDBindings.count(B) || B->IsThreeD);
+  }
   /* (struct binding, field name) pairs holding a 3-D matlab_mat3 value
    * (#78: `s.T = zeros(3,3,2)`).  Lets `s.T(i,j,k)=v` / `s.T(:,:,k)=…`
    * stores and `s.T(i,j,k)` reads route through the matlab_subscript3_*
@@ -954,7 +963,7 @@ bool Lowerer::exprIsThreeD(const Expr *E,
   if (auto *U = dynamic_cast<const UnaryOpExpr *>(E))
     return exprIsThreeD(U->Operand, Set);
   if (auto *N = dynamic_cast<const NameExpr *>(E))
-    return N->Ref && Set.count(N->Ref);
+    return N->Ref && (Set.count(N->Ref) || N->Ref->IsThreeD);
   return false;
 }
 
@@ -1584,9 +1593,27 @@ mlir::Value Lowerer::loadBinding(Binding *Bnd, const Type *ValTy,
    * left a matlab.range with a !llvm.ptr operand that LowerSeqLoops
    * refused to lower, surviving into the JIT as an unconvertible
    * matlab.* op. */
+  /* #124: a struct / class-instance binding's local slot is only ever a
+   * read-cache in REPL mode — assignments write the workspace (ws_set_*),
+   * never the slot, and `ensureStructSlot` blank-inits the slot at function
+   * entry (a fresh matlab_struct_new()) the first time a field access needs
+   * it.  Under whole-file ReplMode (`-dap`), that blank-init runs *before*
+   * the assigning call (`model = createpde()`) executes, so the slot holds a
+   * stale empty struct disconnected from the workspace value.  NameExpr reads
+   * before the slot is created (re)route to the workspace and see the live,
+   * in-place-mutated pointer; reads after the slot exists fall to the stale
+   * slot load below — the two diverge (poisson_disk: `geometryFromEdges`
+   * mutates the workspace obj, but `solve` reads the blank slot -> u(0)=0).
+   * The workspace is the single source of truth for these bindings (the same
+   * rule `resolveStructBase` already follows for FieldAccess bases), so force
+   * the workspace-read path even when a read-cache slot exists. */
+  bool StructReadCache =
+      Bnd->Kind == BindingKind::Var &&
+      (StructInitialised.count(Bnd) || Bnd->IsStruct ||
+       StructBindings.count(Bnd) || Bnd->PinnedClass != nullptr);
   if (ReplMode && InScriptBody && Bnd->Kind == BindingKind::Var &&
-      Slots.find(Bnd) == Slots.end() && !isLocalHandle(Bnd) &&
-      !isFiBinding(Bnd)) {
+      (Slots.find(Bnd) == Slots.end() || StructReadCache) &&
+      !isLocalHandle(Bnd) && !isFiBinding(Bnd)) {
     bool ScalarDouble = false;
     if (ValTy && ValTy->K == Type::Kind::Array) {
       auto &VA = static_cast<const ArrayType &>(*ValTy);
@@ -5117,7 +5144,7 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
        * needs no write-back. */
       bool Is3D = false;
       if (auto *NE = dynamic_cast<const NameExpr *>(C.Callee))
-        Is3D = NE->Ref && ThreeDBindings.count(NE->Ref);
+        Is3D = isThreeDBinding(NE->Ref);
       else if (auto *F = dynamic_cast<const FieldAccess *>(C.Callee))
         if (auto *BN = dynamic_cast<const NameExpr *>(F->Base))
           Is3D = BN->Ref &&
@@ -13459,7 +13486,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
       if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
           N->Name == "size" && C.Args.size() == 2) {
         if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]))
-          if (ArgN->Ref && ThreeDBindings.count(ArgN->Ref)) {
+          if (isThreeDBinding(ArgN->Ref)) {
             auto F64 = mlir::Float64Type::get(&MCtx);
             mlir::Value A = lowerExpr(*C.Args[0]);
             mlir::Value D = lowerExpr(*C.Args[1]);
@@ -13472,7 +13499,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
       if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
           N->Name == "numel" && C.Args.size() == 1) {
         if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]))
-          if (ArgN->Ref && ThreeDBindings.count(ArgN->Ref)) {
+          if (isThreeDBinding(ArgN->Ref)) {
             auto F64 = mlir::Float64Type::get(&MCtx);
             mlir::Value A = lowerExpr(*C.Args[0]);
             mlir::NamedAttribute Cal(
@@ -13484,7 +13511,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
       if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
           N->Name == "ndims" && C.Args.size() == 1) {
         if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]))
-          if (ArgN->Ref && ThreeDBindings.count(ArgN->Ref)) {
+          if (isThreeDBinding(ArgN->Ref)) {
             auto F64 = mlir::Float64Type::get(&MCtx);
             mlir::Value A = lowerExpr(*C.Args[0]);
             mlir::NamedAttribute Cal(
@@ -14084,7 +14111,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
        * (#78).  Idx[0] is the already-lowered base mat3 ptr in both. */
       bool Is3DRead = false;
       if (auto *NE = dynamic_cast<const NameExpr *>(C.Callee))
-        Is3DRead = NE->Ref && ThreeDBindings.count(NE->Ref);
+        Is3DRead = isThreeDBinding(NE->Ref);
       else if (auto *F = dynamic_cast<const FieldAccess *>(C.Callee))
         if (auto *BN = dynamic_cast<const NameExpr *>(F->Base))
           Is3DRead = BN->Ref &&

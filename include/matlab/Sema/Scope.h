@@ -96,6 +96,15 @@ struct Binding {
    * the workspace, so a cross-turn `a(i).x` / `length(a)` dispatches to
    * the struct-array path instead of allocating a fresh empty array. */
   bool IsStructArray = false;
+  /* #116: true when a cross-REPL-turn binding holds a 3-D array
+   * (matlab_mat3).  A 3-D value round-trips through the workspace under the
+   * generic mat kind, so the next turn's Sema loses its rank and the N-D
+   * subscript store/read detectors (`__subscript_store` 5-arg,
+   * `A(:,:,k)`) back off to "unsupported call shape".  The Resolver stamps
+   * this from the workspace-kind hook (kind=16) and the MLIR lowering reads
+   * it (via isThreeDBinding) to re-seed the 3-D dispatch the way
+   * ThreeDBindings does for same-TU 3-D values. */
+  bool IsThreeD = false;
 };
 
 class Scope {
