@@ -4950,6 +4950,12 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
       bool IsDuration = DurationBindings.count(N.Ref) != 0;
       bool IsStruct   = (N.Ref &&
                          (StructBindings.count(N.Ref) || N.Ref->IsStruct));
+      /* #258: a struct-array-returning assignment (`s = fastaread(...)`)
+       * must persist via matlab_ws_set_struct_arr (kind=14) so a later turn's
+       * `s(i).Field` / `length(s)` rehydrates the array (and its elements)
+       * instead of reading a generic matrix.  Without this it fell to set_mat
+       * and `s(1).Header` came back undef cross-turn. */
+      bool IsStructArr = N.Ref && isStructArrayBinding(N.Ref);
       /* Function handle: `f = @sin` / `f = @myFn` / capture-free anon.
        * HandleBindings was populated by the AssignStmt handle-tracking
        * block just above this store.  Only capture-free handles (empty
@@ -4969,13 +4975,14 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
                          : (IsSym ? "matlab_ws_set_sym"
                               : (IsString ? "matlab_ws_set_string"
                               : (IsObj    ? "matlab_ws_set_obj"
+                              : (IsStructArr ? "matlab_ws_set_struct_arr"
                               : (IsStruct ? "matlab_ws_set_struct"
                               : (IsTable  ? "matlab_ws_set_table"
                               : (IsCategorical ? "matlab_ws_set_categorical"
                               : (IsDatetime    ? "matlab_ws_set_datetime"
                               : (IsDuration    ? "matlab_ws_set_duration"
                               : (IsMat ? "matlab_ws_set_mat"
-                                       : "matlab_ws_set_f64"))))))))));
+                                       : "matlab_ws_set_f64")))))))))));
       /* #77: remember whether this workspace var currently holds a matrix
        * so an anon capturing it can reload it as a ptr (matlab_ws_get_mat)
        * rather than mis-typing the capture as f64. */

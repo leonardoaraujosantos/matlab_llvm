@@ -411,6 +411,18 @@ exit
 EOF
 )" "name1"
 
+# 8j. #258 — a struct-array-RETURNING assignment (`s = fastaread(...)`) must
+# persist via matlab_ws_set_struct_arr (kind=14) so a later turn's `s(i).Field`
+# rehydrates the array + its elements.  Pre-fix it fell to set_mat (kind=1) and
+# `s(1).Sequence` came back undef cross-turn.  Cleared bioinfo/fasta_align.
+run_case "xturn_structarray_fn_return" "$(cat <<'EOF'
+fastawrite("/tmp/reg_sa_xturn.fa", "recA", "ACGT");
+s = fastaread("/tmp/reg_sa_xturn.fa");
+disp(s(1).Sequence)
+exit
+EOF
+)" "ACGT"
+
 # 8i. #261 — a cross-turn class-pinned binding (dlarray weight) that is also
 # REASSIGNED inside a loop turn lost its pin at an earlier read in that turn,
 # because the cross-turn re-pin (applyWorkspaceKind) only ran on the auto-
