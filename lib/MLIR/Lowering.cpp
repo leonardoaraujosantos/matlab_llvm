@@ -2845,6 +2845,12 @@ void Lowerer::lowerStmt(const Stmt &St) {
       if (NE->Ref &&
           (StructInitialised.count(NE->Ref) || NE->Ref->IsStruct))
         RhsIsStruct = true;
+      /* #258: a struct-array COPY `t = s` must propagate struct-array-ness so
+       * `t(i).Field` / `length(t)` route through the struct-array path and the
+       * workspace store persists `t` as kind=14.  Without this the copy lost
+       * the tag and `t(i).Field` fell to resolveStructBase -> undef. */
+      if (NE->Ref && isStructArrayBinding(NE->Ref))
+        RhsIsStructArray = true;
     } else if (A.RHS && A.RHS->Kind == NodeKind::FieldAccess) {
       /* Phase 5.4: TT.Time produces a matlab_datetime_vec *. TT.<col>
        * is a plain matlab_mat — the default lane handles it. */
@@ -5907,8 +5913,38 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         }
       }
     }
-    mlir::Value LHS = Bi.LHS ? lowerExpr(*Bi.LHS) : mlir::Value{};
-    mlir::Value RHS = Bi.RHS ? lowerExpr(*Bi.RHS) : mlir::Value{};
+    /* #234: a char literal in ARITHMETIC / comparison promotes to its numeric
+     * code(s) (`'A' + 1 == 66`), unlike a string ("A") which concatenates. By
+     * here the string-concat and class-overload paths have already returned,
+     * so a remaining CharLiteral operand is genuinely numeric (matched by the
+     * Sema re-typing in visitBinary). Lowering it the default way yields a
+     * matlab_string* and matlab.add(ptr, f64) can't convert; emit its code(s)
+     * instead — a scalar f64 for a single char, a 1xN row matrix otherwise. */
+    bool CharArithOp =
+        Bi.Op == BinOp::Add || Bi.Op == BinOp::Sub || Bi.Op == BinOp::Mul ||
+        Bi.Op == BinOp::Div || Bi.Op == BinOp::LeftDiv || Bi.Op == BinOp::Pow ||
+        Bi.Op == BinOp::ElemMul || Bi.Op == BinOp::ElemDiv ||
+        Bi.Op == BinOp::ElemLeftDiv || Bi.Op == BinOp::ElemPow ||
+        /* comparisons too — Sema only re-types the char operand numeric when
+         * the other operand is numeric (`'A' == 65`); a char-vs-string compare
+         * keeps a string result type and stays on its existing path. */
+        Bi.Op == BinOp::Eq || Bi.Op == BinOp::Ne || Bi.Op == BinOp::Lt ||
+        Bi.Op == BinOp::Le || Bi.Op == BinOp::Gt || Bi.Op == BinOp::Ge;
+    auto lowerArithOperand = [&](const Expr *E) -> mlir::Value {
+      if (CharArithOp)
+        if (auto *CL = dynamic_cast<const CharLiteral *>(E))
+          if (CL->Value.size() == 1) {
+          auto F64 = mlir::Float64Type::get(&MCtx);
+          return emitUnreg(
+              "matlab.const_float", {}, F64, L,
+              {mlir::NamedAttribute(
+                  mlir::StringAttr::get(&MCtx, "value"),
+                  mlir::FloatAttr::get(F64, (double)(unsigned char)CL->Value[0]))});
+        }
+      return E ? lowerExpr(*E) : mlir::Value{};
+    };
+    mlir::Value LHS = Bi.LHS ? lowerArithOperand(Bi.LHS) : mlir::Value{};
+    mlir::Value RHS = Bi.RHS ? lowerArithOperand(Bi.RHS) : mlir::Value{};
     /* Eagerly refine the result type when Sema left the expression
      * type as `any`/none:
      *   - both operands same primitive scalar type  -> same scalar

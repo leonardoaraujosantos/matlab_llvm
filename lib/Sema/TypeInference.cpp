@@ -760,6 +760,59 @@ const Type *TypeInference::visitBinary(BinaryOpExpr &B, Env &Env) {
   const Type *L = B.LHS ? visit(*B.LHS, Env) : TC.any();
   const Type *R = B.RHS ? visit(*B.RHS, Env) : TC.any();
 
+  // #234: a CHAR literal in arithmetic / comparison promotes to its numeric
+  // code(s) — `'A' + 1 == 66`, `'a' - 'A' == 32` — unlike a string literal
+  // ("A"), which concatenates. A CharLiteral is typed stringScalar by visit(),
+  // so without this the result collapses to a string/ptr and the matlab.add
+  // can't lower. Re-type a CharLiteral operand as numeric (scalar for a single
+  // char, 1xN row for a multi-char literal) for the non-concat operators; the
+  // matching lowering converts the operand to its code value. StringLiteral is
+  // left alone so `"A" + 1` still concatenates.
+  {
+    /* ARITHMETIC ops only — NOT comparison.  Char arithmetic (`'A' + 1`) is
+     * unambiguously numeric, but a comparison like `strvar == 'x'` (string
+     * var vs single char) must keep its existing element/string semantics, so
+     * re-typing the char operand numeric there would change behaviour. */
+    bool NumericOp =
+        B.Op == BinOp::Add || B.Op == BinOp::Sub || B.Op == BinOp::Mul ||
+        B.Op == BinOp::Div || B.Op == BinOp::LeftDiv || B.Op == BinOp::Pow ||
+        B.Op == BinOp::ElemMul || B.Op == BinOp::ElemDiv ||
+        B.Op == BinOp::ElemLeftDiv || B.Op == BinOp::ElemPow;
+    if (NumericOp) {
+      auto charNumeric = [&](Expr *Op, const Type *T) -> const Type * {
+        /* Single-char only — the common `'A' + k` case. Multi-char char
+         * arithmetic (`'AB' + 1` -> a code row vector) needs a materialised
+         * code matrix and stays a follow-up; leaving it string-typed keeps
+         * the prior (unsupported) behaviour rather than mis-typing it. */
+        if (Op && Op->Kind == NodeKind::CharLiteral &&
+            static_cast<CharLiteral &>(*Op).Value.size() == 1)
+          return TC.scalar(Dtype::Double);
+        return T;
+      };
+      L = charNumeric(B.LHS, L);
+      R = charNumeric(B.RHS, R);
+    }
+    /* Comparison: re-type a single-char CharLiteral operand numeric ONLY when
+     * the OTHER operand is numeric (`'A' == 65`, `c >= '0'` with c numeric).
+     * Gating on a numeric counterpart keeps `strvar == 'x'` and `'x' == 'y'`
+     * (both string-typed operands) on their existing string/element path, so
+     * no comparison behaviour changes except char-vs-number, which MATLAB
+     * does evaluate on codes. */
+    bool CmpOp = B.Op == BinOp::Eq || B.Op == BinOp::Ne || B.Op == BinOp::Lt ||
+                 B.Op == BinOp::Le || B.Op == BinOp::Gt || B.Op == BinOp::Ge;
+    if (CmpOp) {
+      auto isNumeric = [](const Type *T) {
+        return T && T->K == Type::Kind::Array;
+      };
+      auto isSingleChar = [](Expr *Op) {
+        return Op && Op->Kind == NodeKind::CharLiteral &&
+               static_cast<CharLiteral &>(*Op).Value.size() == 1;
+      };
+      if (isSingleChar(B.LHS) && isNumeric(R)) L = TC.scalar(Dtype::Double);
+      else if (isSingleChar(B.RHS) && isNumeric(L)) R = TC.scalar(Dtype::Double);
+    }
+  }
+
   // #40: arithmetic involving a class instance dispatches to the class's
   // operator overload (plus / minus / mtimes / ...), which by convention
   // returns an instance of the same class. Preserving the object type keeps

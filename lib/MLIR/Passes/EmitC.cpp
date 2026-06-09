@@ -3707,6 +3707,32 @@ bool Emitter::run(mlir::ModuleOp M) {
       });
       for (auto &KV : CallBuiltinExterns) Buf << KV.second;
     }
+    /* The C++ emitter rewrites `matlab_disp_mat(<string-producing call>)`
+     * to `matlab_string_disp(...)` at print time (see the Cpp disp rewrite
+     * below) — a symbol the declaration walks above never see, since the IR
+     * still holds the `matlab_disp_mat` call. Declare it here whenever that
+     * rewrite can fire, mirroring the exact predicate, so strict C++ compiles. */
+    if (Cpp) {
+      bool needsStringDisp = false;
+      M.walk([&](mlir::LLVM::CallOp Call) {
+        if (needsStringDisp) return;
+        auto Callee = Call.getCallee();
+        if (!Callee || *Callee != "matlab_disp_mat" ||
+            Call.getNumOperands() != 1 || Call.getNumResults() != 0)
+          return;
+        if (auto *Def = Call.getOperand(0).getDefiningOp())
+          if (auto Pred = mlir::dyn_cast<mlir::LLVM::CallOp>(Def))
+            if (auto PCallee = Pred.getCallee()) {
+              llvm::StringRef PN = *PCallee;
+              if (PN == "matlab_string_concat" ||
+                  PN == "matlab_string_from_literal" ||
+                  PN == "matlab_num2str" || PN.starts_with("matlab_sprintf"))
+                needsStringDisp = true;
+            }
+      });
+      if (needsStringDisp)
+        Buf << "extern void matlab_string_disp(void*);\n";
+    }
     if (!Buf.str().empty()) {
       OS << "// Runtime prototypes (linked against runtime/matlab_runtime.c).\n";
       if (Cpp) OS << "extern \"C\" {\n";

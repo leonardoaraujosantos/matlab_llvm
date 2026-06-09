@@ -423,6 +423,17 @@ exit
 EOF
 )" "ACGT"
 
+# 8k. #258 — a struct-array COPY `t = s` must propagate struct-array-ness so
+# `t(i).Field` rehydrates cross-turn (and `t` persists as kind=14).  Pre-fix
+# the copy lost the tag and `t(1).Header` fell to undef.
+run_case "xturn_structarray_copy" "$(cat <<'EOF'
+s(1).Header = "name1";
+t = s;
+disp(t(1).Header)
+exit
+EOF
+)" "name1"
+
 # 8i. #261 — a cross-turn class-pinned binding (dlarray weight) that is also
 # REASSIGNED inside a loop turn lost its pin at an earlier read in that turn,
 # because the cross-turn re-pin (applyWorkspaceKind) only ran on the auto-
