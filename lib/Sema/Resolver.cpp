@@ -1769,6 +1769,11 @@ void Resolver::applyWorkspaceKind(Binding *NB, std::string_view Name,
    * InferredType is set — the handle round-trips as an opaque ptr through
    * matlab_ws_get_mat, like a sym. */
   else if (K == 15) NB->IsVideoWriter = true;
+  /* Kind 17 = timetable (#259).  Stamp IsTimetable so the MLIR lowering
+   * re-populates the timetable dispatch (summary / head / TT.col / disp) on
+   * the next turn instead of treating the value as a plain matrix.  No
+   * InferredType (the value round-trips as an opaque ptr, like VideoWriter). */
+  else if (K == 17) NB->IsTimetable = true;
   /* Kind 6 = matlab_table* (Phase 5.3).  Stamp IsTable so the MLIR
    * lowering re-populates TableBindings and a cross-turn `height(T)` /
    * `width(T)` / `T.col` / `disp(T)` dispatches to the table path

@@ -336,6 +336,18 @@ exit
 EOF
 )" "1"
 
+# 8e. #259 — a timetable round-trips generically, so a cross-turn `summary(TT)`
+# used to be mis-typed as a plain matrix and back off ("unsupported call shape").
+# The fix marks the var as a timetable at store time (matlab_ws_mark_timetable),
+# the kind hook reports a distinct kind, and the Resolver re-stamps
+# Binding::IsTimetable so summary/head/TT.col route to the timetable path.
+run_case "xturn_timetable_summary" "$(cat <<'EOF'
+TT = timetable([1;2;3], [10;20;30]);
+summary(TT);
+exit
+EOF
+)" "Var2: NumMissing=0  Min=10  Max=30  Mean=20"
+
 # 9. #240 — mpcmove with a p×ny reference-preview MATRIX on the REPL/JIT path.
 # The mpc object round-trips through the workspace and loses its class pin, so
 # the AOT `mpcmove -> matlab_mpc_move` rewrite (gated on that pin) is skipped.

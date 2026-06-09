@@ -48,13 +48,7 @@ exit
 EOF
 )" "unsupported call shape for built-in function 'biterr'"
 
-# --- #259: timetable conflated with table cross-turn ---
-xfail_case "xturn_timetable_summary" 259 "$(cat <<'EOF'
-TT = timetable([1;2;3], [10;20;30]);
-summary(TT);
-exit
-EOF
-)" "unsupported call shape for built-in function 'summary'"
+# (#259 timetable summary cross-turn — FIXED, promoted to run_tests.sh::xturn_timetable_summary)
 
 # --- #260: REPL does not accumulate a multi-line classdef block ---
 xfail_case "repl_classdef_block_accumulation" 260 "$(cat <<'EOF'

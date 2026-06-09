@@ -526,6 +526,34 @@ int32_t matlab_ws_is_videowriter(const char *name, int64_t len) {
     return r;
 }
 
+/* Timetable variable-name registry (#259).  A REPL `TT = timetable(...)` (or
+ * any timetable-producing op) marks `TT` here; a later submission's resolver
+ * kind-hook reports a distinct kind for a marked name so the binding is
+ * re-stamped IsTimetable and `summary(TT)` / `TT.col` route to the timetable
+ * path instead of the plain-matrix/table path.  Name-keyed and independent of
+ * the value's workspace kind (a timetable is stored generically), mirroring
+ * the VideoWriter registry above.  Reassigning the name to a non-timetable
+ * leaves a stale mark (same v1 limitation as VideoWriter). */
+static std::set<std::string> matlab_timetable_names;
+
+void matlab_ws_mark_timetable(const char *name, int64_t len, int32_t on) {
+    if (!name || len <= 0) return;
+    matlab_ws_lock();
+    std::string key(name, (size_t)len);
+    if (on) matlab_timetable_names.insert(key);
+    else    matlab_timetable_names.erase(key);
+    matlab_ws_unlock();
+}
+
+int32_t matlab_ws_is_timetable(const char *name, int64_t len) {
+    if (!name || len <= 0) return 0;
+    matlab_ws_lock();
+    int32_t r =
+        matlab_timetable_names.count(std::string(name, (size_t)len)) ? 1 : 0;
+    matlab_ws_unlock();
+    return r;
+}
+
 void matlab_ws_set_handle_sig(const char *name, int64_t len, int32_t retkind) {
     matlab_ws_init_if_needed();
     matlab_ws_lock();

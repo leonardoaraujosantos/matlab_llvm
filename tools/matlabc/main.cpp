@@ -2251,6 +2251,7 @@ int64_t     matlab_string_get_len (void *s);
  * after main.cpp's runtime-introspection externs because it has to
  * walk matlab_dbg_ws_count/_name/_kind. */
 extern "C" int32_t matlab_ws_is_videowriter(const char *name, int64_t len);
+extern "C" int32_t matlab_ws_is_timetable(const char *name, int64_t len);
 extern "C" int replWorkspaceKindHook(const char *name, int64_t len) {
   int n = matlab_dbg_ws_count();
   for (int i = 0; i < n; ++i) {
@@ -2261,6 +2262,10 @@ extern "C" int replWorkspaceKindHook(const char *name, int64_t len) {
        * which would re-stamp the binding wrong; the name registry overrides
        * it with kind 15 so the resolver marks the binding IsVideoWriter. */
       if (matlab_ws_is_videowriter(name, len)) return 15;
+      /* #259: a timetable is stored generically; the name registry overrides
+       * the storage kind with 17 so the Resolver re-stamps the binding
+       * IsTimetable (summary/head/TT.col route to the timetable path). */
+      if (matlab_ws_is_timetable(name, len)) return 17;
       /* #116: a 3-D array round-trips under the generic mat kind=1, losing
        * its rank for the next turn's Sema.  Report a distinct kind so the
        * Resolver re-stamps the binding 3-D (Binding::IsThreeD) and the N-D
