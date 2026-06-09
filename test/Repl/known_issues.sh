@@ -50,16 +50,13 @@ EOF
 
 # (#259 timetable summary cross-turn — FIXED, promoted to run_tests.sh::xturn_timetable_summary)
 
-# --- #260: REPL does not accumulate a multi-line classdef block ---
-xfail_case "repl_classdef_block_accumulation" 260 "$(cat <<'EOF'
-classdef Pt
- properties
-  x
- end
-end
-exit
-EOF
-)" "'end' is only valid inside indexing"
+# (#260 Symptom A — multi-line classdef block accumulation — FIXED, promoted
+#  to run_tests.sh::repl_classdef_block_accumulation as an absence-assertion.
+#  #260 Symptom B — the multi-classdef umbrella prelude prepend parse error
+#  ("unexpected 'classdef' in expression") — remains open; it only reproduces
+#  inside the full example navigation/nav_rrt_plan.m (it depends on the exact
+#  prepend + trailing-expression context and resists a minimal repro), so it is
+#  tracked there via test/Debug/repl_sweep.py rather than here.)
 
 # --- #261: dlnet dlarray pin lost on in-loop reassignment + reshape operand ---
 xfail_case "xturn_dlarray_reassign_reshape_matmul" 261 "$(cat <<'EOF'

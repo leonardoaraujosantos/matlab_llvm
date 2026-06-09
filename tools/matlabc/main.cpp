@@ -632,15 +632,32 @@ void dumpTokens(const SourceManager &SM, const std::vector<Token> &Ts) {
 
 int blockDepth(const std::vector<Token> &Toks) {
   int d = 0;
+  /* #260: `properties` / `methods` / `events` / `enumeration` are
+   * context-sensitive — they open a block (with a matching `end`) ONLY inside
+   * a classdef.  Outside one they are ordinary functions (`p =
+   * properties(obj)`), so counting them unconditionally would make the REPL
+   * accumulator wait forever for a non-existent `end`.  Track whether a
+   * classdef is open and only treat them as block-openers then; without this
+   * the accumulator submits a partial `classdef ... properties ... end` after
+   * the *properties* `end` (the classdef's own `end` still pending) and the
+   * parser errors (`'end' is only valid inside indexing` / `unexpected
+   * 'properties'`). */
+  bool inClassdef = false;
   for (const auto &T : Toks) {
     switch (T.Kind) {
+    case TokenKind::kw_classdef:
+      inClassdef = true; ++d; break;
+    case TokenKind::kw_properties:
+    case TokenKind::kw_methods:
+    case TokenKind::kw_events:
+    case TokenKind::kw_enumeration:
+      if (inClassdef) ++d; break;
     case TokenKind::kw_if:
     case TokenKind::kw_for:
     case TokenKind::kw_while:
     case TokenKind::kw_switch:
     case TokenKind::kw_try:
     case TokenKind::kw_function:
-    case TokenKind::kw_classdef:
     case TokenKind::kw_parfor:
       ++d; break;
     case TokenKind::kw_end:

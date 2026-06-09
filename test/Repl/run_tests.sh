@@ -38,6 +38,28 @@ run_case() {
   fi
 }
 
+# Assert a substring is ABSENT from the -repl output (e.g. a parse error that a
+# fix must no longer emit).  The REPL is lenient — it recovers and keeps going
+# after an error — so some fixes (e.g. classdef block accumulation) have no
+# positive output to match; their only observable is the absence of the error.
+run_case_absent() {
+  local name="$1" input="$2" forbidden="$3"
+  local got
+  got="$(printf '%s\n' "$input" | "$MATLABC" -repl 2>&1)"
+  if grep -qF "$forbidden" <<<"$got"; then
+    fail=$((fail+1))
+    fails+=("$name (forbidden substring '$forbidden' present in output)")
+    echo "FAIL  $name"
+    echo "----- got -----"
+    echo "$got"
+    echo "----- forbidden substring -----"
+    echo "$forbidden"
+    echo "---------------"
+  else
+    pass=$((pass+1))
+  fi
+}
+
 # 1. Cross-turn user function: define in one block, call in another.
 run_case "cross_turn_user_fn" "$(cat <<'EOF'
 function y = double_it(x)
@@ -347,6 +369,24 @@ summary(TT);
 exit
 EOF
 )" "Var2: NumMissing=0  Min=10  Max=30  Mean=20"
+
+# 8f. #260 (Symptom A) — a multi-line classdef block fed to -repl must be
+# accumulated as ONE submission.  blockDepth() now counts properties/methods/
+# events/enumeration as block-openers inside a classdef; without that, the
+# accumulator submitted a partial `classdef ... properties ... end` after the
+# *properties* `end` and the leftover classdef `end` parsed standalone as
+# `'end' is only valid inside indexing`.  Absence-assertion: that error must
+# no longer appear.
+run_case_absent "repl_classdef_block_accumulation" "$(cat <<'EOF'
+classdef Pt
+ properties
+  x
+ end
+end
+disp(7)
+exit
+EOF
+)" "'end' is only valid inside indexing"
 
 # 9. #240 — mpcmove with a p×ny reference-preview MATRIX on the REPL/JIT path.
 # The mpc object round-trips through the workspace and loses its class pin, so
