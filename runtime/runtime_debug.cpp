@@ -41,6 +41,7 @@ matlab_struct *matlab_struct_rmfield(matlab_struct *s, const char *name,
 matlab_struct *matlab_struct_get_child_struct(matlab_struct *s,
                                               const char *name, int64_t len);
 const char    *matlab_dbg_class_name(int32_t class_id, int64_t *len_out);
+double         matlab_obj_class_id(matlab_obj *o);
 double         matlab_struct_has_field(matlab_struct *s,
                                        const char *name, int64_t len);
 void           matlab_struct_set_f64(matlab_struct *s, const char *name,
@@ -250,6 +251,94 @@ void matlab_ws_set_struct_arr(const char *name, int64_t len, void *arr) {
     matlab_ws_check_watch(name, len);
 }
 
+/* #116: class NAME captured at obj-store time, keyed by workspace variable
+ * name.  The class-id -> name registry (matlab_dbg.class_ids/names) is NOT
+ * stable across REPL turns: ClassId is a per-TU positional counter (Resolver
+ * assigns 1,2,3… over TU.Classes in order), so the same numeric id maps to a
+ * DIFFERENT class on a later turn depending on which preludes loaded and in
+ * what order, and register_class overwrites the same-id slot.  A stored obj's
+ * header keeps its turn-of-construction id, so a cross-turn class_id->name
+ * lookup silently resolves to the wrong class (e.g. occupancyMap's id=1 reads
+ * back as "se3"), and the Resolver fails to re-pin the binding -> a cross-turn
+ * method/free-function call ("setOccupancy", dlnet activations on a rehydrated
+ * obj, …) backs off to "unsupported call shape".  We sidestep the volatile id
+ * by recording the class name HERE, at store time, when the registry is still
+ * in sync for the just-constructed obj; cross-turn consumers read the name by
+ * variable instead of by id. */
+static struct ws_obj_class_ent {
+    char *var;
+    int64_t var_len;
+    char *cls;
+    int64_t cls_len;
+} g_ws_obj_class[512];
+static int g_ws_obj_class_n = 0;
+
+static char *dup_n(const char *s, int64_t n) {
+    char *p = (char *)malloc((size_t)n + 1);
+    if (!p) return NULL;
+    memcpy(p, s, (size_t)n);
+    p[n] = '\0';
+    return p;
+}
+
+/* Record (var -> class name) for an obj being stored to the workspace.
+ * Resolves the name via the registry NOW (in sync this turn); a no-op when
+ * the class isn't registered (DebugMode off) — the old id-based path still
+ * applies.  MUST be called with the ws lock NOT held: matlab_dbg_class_name
+ * and matlab_ws_lock both take matlab_dbg.mu (a non-recursive mutex), so
+ * resolving the name and updating the table each acquire it separately. */
+static void ws_obj_class_record(const char *name, int64_t len, matlab_obj *o) {
+    if (!o || !name || len <= 0) return;
+    int32_t cid = (int32_t)matlab_obj_class_id(o);
+    int64_t cl = 0;
+    const char *cn = matlab_dbg_class_name(cid, &cl);   /* takes mu internally */
+    if (!cn || cl <= 0) return;
+    char *cc = dup_n(cn, cl);   /* copy out before re-locking (cn aliases the
+                                 * registry slot, which a later register_class
+                                 * could overwrite) */
+    if (!cc) return;
+    matlab_ws_lock();
+    for (int i = 0; i < g_ws_obj_class_n; ++i) {
+        if (g_ws_obj_class[i].var_len == len &&
+            memcmp(g_ws_obj_class[i].var, name, (size_t)len) == 0) {
+            free(g_ws_obj_class[i].cls);
+            g_ws_obj_class[i].cls = cc;
+            g_ws_obj_class[i].cls_len = cl;
+            matlab_ws_unlock();
+            return;
+        }
+    }
+    if (g_ws_obj_class_n >= (int)(sizeof g_ws_obj_class /
+                                  sizeof g_ws_obj_class[0])) {
+        free(cc);
+        matlab_ws_unlock();
+        return;
+    }
+    char *vc = dup_n(name, len);
+    if (!vc) { free(cc); matlab_ws_unlock(); return; }
+    g_ws_obj_class[g_ws_obj_class_n].var = vc;
+    g_ws_obj_class[g_ws_obj_class_n].var_len = len;
+    g_ws_obj_class[g_ws_obj_class_n].cls = cc;
+    g_ws_obj_class[g_ws_obj_class_n].cls_len = cl;
+    g_ws_obj_class_n++;
+    matlab_ws_unlock();
+}
+
+/* Cross-turn class-name lookup for a workspace variable (the kind-stable
+ * companion to matlab_obj_class_id -> matlab_dbg_class_name).  Returns NULL
+ * when no obj was stored under this name. */
+const char *matlab_dbg_ws_obj_class_name(const char *name, int64_t len,
+                                         int64_t *out_len) {
+    for (int i = 0; i < g_ws_obj_class_n; ++i) {
+        if (g_ws_obj_class[i].var_len == len &&
+            memcmp(g_ws_obj_class[i].var, name, (size_t)len) == 0) {
+            if (out_len) *out_len = g_ws_obj_class[i].cls_len;
+            return g_ws_obj_class[i].cls;
+        }
+    }
+    return NULL;
+}
+
 /* Class-instance assignment to the script-level workspace. Stores
  * the obj pointer with kind=2 so matlab_dbg_ws_kind reports it as
  * an object — the DAP formatter then routes through the obj path
@@ -266,6 +355,10 @@ void matlab_ws_set_obj(const char *name, int64_t len, matlab_obj *o) {
     matlab_ws->ptr_vals[idx] = o;
     matlab_dbg_undo_record_set_new_ptr(r, /*new_kind=*/2, o);
     matlab_ws_unlock();
+    /* Record the class name AFTER releasing the ws lock — ws_obj_class_record
+     * re-takes matlab_dbg.mu (via matlab_dbg_class_name and its own table
+     * update), and the mutex is non-recursive. */
+    ws_obj_class_record(name, len, o);
     matlab_ws_check_watch(name, len);
 }
 

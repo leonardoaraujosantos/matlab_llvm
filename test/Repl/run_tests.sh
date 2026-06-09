@@ -321,6 +321,21 @@ exit
 EOF
 )" "7"
 
+# 8d. #116 — a classdef instance (here occupancyMap) used across >=3 turns.
+# ClassId is a per-TU positional counter, so the obj's stored class_id maps to
+# a DIFFERENT class on a later turn (the registry slot is overwritten), and the
+# Resolver fails to re-pin the binding -> a 3rd-turn `getOccupancy`/`setOccupancy`
+# backs off to "unsupported call shape".  The fix captures the class NAME at
+# obj-store time (matlab_ws_set_obj) and resolves cross-turn by name, immune to
+# id reassignment.  Without it, turn 3 errors and prints nothing instead of 1.
+run_case "xturn_obj_class_repin_3turn" "$(cat <<'EOF'
+m = occupancyMap(10, 10);
+setOccupancy(m, [1 1], 1);
+disp(getOccupancy(m, [1 1]))
+exit
+EOF
+)" "1"
+
 # 9. #240 — mpcmove with a p×ny reference-preview MATRIX on the REPL/JIT path.
 # The mpc object round-trips through the workspace and loses its class pin, so
 # the AOT `mpcmove -> matlab_mpc_move` rewrite (gated on that pin) is skipped.
