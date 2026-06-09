@@ -63,18 +63,14 @@ EOF
 #  prepend + trailing-expression context and resists a minimal repro), so it is
 #  tracked there via test/Debug/repl_sweep.py rather than here.)
 
-# --- #261: dlnet dlarray pin lost on in-loop reassignment + reshape operand ---
-xfail_case "xturn_dlarray_reassign_reshape_matmul" 261 "$(cat <<'EOF'
-W2_dl = dlarray(ones(3,16));
-for k = 1:2
-    logits = W2_dl * reshape(dlarray(ones(2,2,4,4)), 16, 4);
-    yhat   = softmax(logits);
-    W2_dl  = dlarray(ones(3,16) - 0.2);
-end
-disp(99)
-exit
-EOF
-)" "unsupported call shape for built-in function 'softmax'"
+# (#261 dlnet dlarray pin lost on in-loop reassignment — FIXED (apply the
+#  cross-turn re-pin early for an assigned-in-TU binding), promoted to
+#  run_tests.sh::xturn_dlarray_reassign_in_loop.  This also cleared the
+#  finance/using_timetables_in_finance fillmissing-reassignment residual.)
+#
+# All currently-tracked xfails are open #116 sub-bugs without a minimal-repro
+# promotion path; #258 struct-array COPY + bioinfo fastaread element rehydration
+# and #260 Symptom B (prelude prepend) are tracked via test/Debug/repl_sweep.py.
 
 echo "----"
 echo "known-issue xfails: $xfail still-broken, $fixed now-fixed"

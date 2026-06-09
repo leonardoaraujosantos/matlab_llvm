@@ -411,6 +411,27 @@ exit
 EOF
 )" "name1"
 
+# 8i. #261 — a cross-turn class-pinned binding (dlarray weight) that is also
+# REASSIGNED inside a loop turn lost its pin at an earlier read in that turn,
+# because the cross-turn re-pin (applyWorkspaceKind) only ran on the auto-
+# declare path; the reassignment set the pin only after the read.  So
+# `logits = W2_dl * reshape(...)` didn't infer object<dlarray> and the
+# activation (`softmax(logits)`) backed off to "unsupported call shape".  The
+# Resolver now applies the cross-turn pin early for an assigned-in-TU binding.
+# Absence-assertion: the softmax back-off must no longer appear (the loop body
+# fails to compile pre-fix; the lenient REPL would still run a trailing disp).
+run_case_absent "xturn_dlarray_reassign_in_loop" "$(cat <<'EOF'
+W2_dl = dlarray(ones(3, 16));
+for k = 1:2
+    logits = W2_dl * reshape(dlarray(ones(2, 2, 4, 4)), 16, 4);
+    yhat   = softmax(logits);
+    W2_dl  = dlarray(ones(3, 16) - 0.2);
+end
+disp(99)
+exit
+EOF
+)" "unsupported call shape for built-in function 'softmax'"
+
 # 9. #240 — mpcmove with a p×ny reference-preview MATRIX on the REPL/JIT path.
 # The mpc object round-trips through the workspace and loses its class pin, so
 # the AOT `mpcmove -> matlab_mpc_move` rewrite (gated on that pin) is skipped.

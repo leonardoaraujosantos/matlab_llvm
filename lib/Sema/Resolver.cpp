@@ -2536,6 +2536,23 @@ void Resolver::resolveExpr(Expr &E, Scope *S) {
     }
     N.Ref = B;
     B->ReadFrom = true;
+    /* #261/#259: a binding that is also REASSIGNED in this TU
+     * (`W2_dl = dlarray(...)` / `TMW = fillmissing(TMW,...)` in a loop)
+     * resolves to its local assignment binding, so the auto-declare path
+     * above (which calls applyWorkspaceKind) is skipped — the cross-turn pin
+     * (PinnedClass / IsTimetable / IsStruct / ...) is then set only by the
+     * reassignment statement, which the resolver processes AFTER this read.
+     * So a read that precedes the reassignment in source order (the loop body
+     * `logits = W2_dl * Y_flat`) sees an unpinned binding and the operator-
+     * overload / call-shape pin is lost.  At loop entry the binding genuinely
+     * holds the cross-turn value, so apply the workspace re-pin now — but only
+     * once, when nothing has been stamped yet (a brand-new in-TU binding the
+     * workspace doesn't know about gets kind -1 and is left untouched). */
+    if (ReplMode && WorkspaceKindHook && B->Kind == BindingKind::Var &&
+        !B->PinnedClass && !B->InferredType && !B->IsTimetable &&
+        !B->IsStruct && !B->IsStructArray && !B->IsHandle && !B->IsTable &&
+        !B->IsSym && !B->IsSymmat && !B->IsVideoWriter && !B->IsThreeD)
+      applyWorkspaceKind(B, N.Name, S);
     break;
   }
   case NodeKind::BinaryOp: {
