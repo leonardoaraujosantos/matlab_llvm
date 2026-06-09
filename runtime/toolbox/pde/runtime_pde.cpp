@@ -959,7 +959,29 @@ matlab_mat *matlab_pde_face_scalar_load_3d(matlab_struct *mesh,
                                             double face_id_d, double q);
 matlab_mat *matlab_pde_sys_F(matlab_struct *sys);
 
+/* No magic tag distinguishes a matlab_struct from a matlab_mat (both are raw
+ * heap records). A failed PDE-model construction or a classdef value that lost
+ * its class on a REPL cross-turn round-trip (#28 / #116) can hand a matlab_mat*
+ * — or stale garbage — to a PDE entry point as a "model"; walking it as a
+ * struct dereferences its data-pointer halves as nfields/names and segfaults
+ * (signal 11, e.g. examples/pde/clamped_plate_pressure.m under -repl).
+ *
+ * Validate the struct header invariants before any field access. A real struct
+ * always satisfies them; a misread mat almost never does — its data pointer's
+ * two 32-bit halves land in nfields/capacity and its row count in `names`.
+ * Observed crash inputs this rejects: {nfields=94673904, capacity=1,
+ * names=0x3} (AOT generateMesh(zeros(3,3))) and {nfields<0, capacity=12,
+ * names=0x0} (REPL femodel that lost its class). */
+static bool pde_model_looks_valid(const matlab_struct *m) {
+    if (!m) return false;
+    if (m->nfields < 0 || m->capacity < 0 || m->nfields > m->capacity)
+        return false;
+    if (m->nfields > 0 && (uintptr_t)m->names < 4096) return false;
+    return true;
+}
+
 matlab_struct *matlab_pde_solve_femodel(matlab_struct *model) {
+    if (!pde_model_looks_valid(model)) return matlab_struct_new();
     /* Pull mesh — fall back to Geometry if Mesh is empty. */
     matlab_struct *mesh = nullptr;
     if (field_holds_struct(model, "Mesh", 4)) {
@@ -1367,6 +1389,7 @@ static bool field_holds_struct(matlab_struct *s, const char *name, int64_t len) 
 }
 
 matlab_struct *matlab_pde_generate_mesh(matlab_struct *model) {
+    if (!pde_model_looks_valid(model)) return matlab_struct_new();
     /* If Mesh is empty (the kwarg ctor never set it), default to
      * Geometry — for multicuboid / voxelize-style inputs, the
      * geometry struct IS the volumetric mesh. */
@@ -3124,6 +3147,7 @@ static matlab_struct *pde_solve_scalar_2d(matlab_struct *model,
                                           matlab_struct *mesh);
 
 matlab_struct *matlab_pde_solve(matlab_struct *model) {
+    if (!pde_model_looks_valid(model)) return matlab_struct_new();
     /* 2-D scalar elliptic lane (issue #28): a triangle mesh (createpde +
      * geometryFromEdges + generateMesh) has no AnalysisType — route it to
      * the dense P1 Poisson solve before the structural dispatch below. */
@@ -7294,6 +7318,7 @@ extern matlab_struct *matlab_pde_voxelize_surface(matlab_struct *surface,
 matlab_struct *matlab_pde_generate_mesh_kw(matlab_struct *model,
                                            void *key, double hmax) {
     (void)key;
+    if (!pde_model_looks_valid(model)) return matlab_struct_new();
 
     /* (a) String geometry → STL import + voxelize. */
     void *gstr = matlab_struct_get_string(model, "Geometry", 8);
