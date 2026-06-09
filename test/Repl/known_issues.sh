@@ -39,14 +39,19 @@ xfail_case() {
   fi
 }
 
-# --- #258: struct/struct-array field read loses its matrix type cross-turn ---
-xfail_case "xturn_struct_field_matrix_type" 258 "$(cat <<'EOF'
-s.Payload = [1 1 0 0];
-a = [1 0 1 0];
-disp(biterr(a, s.Payload))
+# (#258 plain-struct field matrix-type cross-turn — FIXED for `s.field`
+#  (NameExpr base), promoted to run_tests.sh::xturn_struct_field_matrix.
+#  Still open: the struct-ARRAY element-field case `s(i).Field` (CallOrIndex
+#  base, e.g. bioinfo/fasta_align's `disp(s(1).Header)`), whose per-field kind
+#  is likewise lost cross-turn.) */
+xfail_case "xturn_structarray_field_type" 258 "$(cat <<'EOF'
+s(1).Header = "name1";
+disp(s(1).Header)
+t = s;
+disp(t(1).Header)
 exit
 EOF
-)" "unsupported call shape for built-in function 'biterr'"
+)" "unsupported call shape"
 
 # (#259 timetable summary cross-turn — FIXED, promoted to run_tests.sh::xturn_timetable_summary)
 

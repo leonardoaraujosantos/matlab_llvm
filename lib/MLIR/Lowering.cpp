@@ -14546,6 +14546,22 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         if (auto *BN = dynamic_cast<const NameExpr *>(CI->Callee))
           if (BN->Ref && MatStructFields.count({BN->Ref, std::string(F.Field)}))
             WantMat = true;
+    /* #258: a struct that round-trips into a later REPL turn loses its per-
+     * field element-kind (MatStructFields is same-TU only), so a matrix field
+     * (`l2info.Payload`) defaults to get_f64 and a builtin consuming it
+     * (`biterr(a, s.Payload)`) backs off to "unsupported call shape".  For a
+     * cross-turn struct binding (IsStruct, re-pinned from kind=12) whose field
+     * type Sema can't see, fetch via get_mat — matlab_struct_get_mat is kind-
+     * aware and boxes a genuine scalar field into a 1x1, so this is safe for
+     * scalar fields too.  Gated to the cross-turn case (NOT same-TU
+     * StructBindings/StructInitialised, which already carry MatStructFields)
+     * so same-turn scalar-field reads keep their native-f64 fast path. */
+    if (!WantMat)
+      if (auto *BN = dynamic_cast<const NameExpr *>(F.Base))
+        if (BN->Ref && BN->Ref->IsStruct &&
+            !StructBindings.count(BN->Ref) &&
+            !StructInitialised.count(BN->Ref))
+          WantMat = true;
     llvm::StringRef Callee = WantMat ? "matlab_struct_get_mat"
                                       : "matlab_struct_get_f64";
     mlir::NamedAttribute Cal(

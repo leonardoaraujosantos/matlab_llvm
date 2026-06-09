@@ -388,6 +388,19 @@ exit
 EOF
 )" "'end' is only valid inside indexing"
 
+# 8g. #258 — a struct round-trips into a later REPL turn without its per-field
+# element-kind, so a matrix field (`s.Payload`) defaulted to a scalar get_f64
+# and a builtin consuming it (`biterr(a, s.Payload)`) backed off to
+# "unsupported call shape".  A cross-turn struct-field read now fetches via
+# get_mat (kind-aware; boxes a true scalar to 1x1).
+run_case "xturn_struct_field_matrix" "$(cat <<'EOF'
+s.Payload = [1 1 0 0];
+a = [1 0 1 0];
+disp(biterr(a, s.Payload))
+exit
+EOF
+)" "0.5"
+
 # 9. #240 — mpcmove with a p×ny reference-preview MATRIX on the REPL/JIT path.
 # The mpc object round-trips through the workspace and loses its class pin, so
 # the AOT `mpcmove -> matlab_mpc_move` rewrite (gated on that pin) is skipped.
