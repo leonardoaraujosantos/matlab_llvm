@@ -14349,6 +14349,17 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         if (!WantMat &&
             MatStructFields.count({NE->Ref, std::string(F.Field)}))
           WantMat = true;
+        /* #258 (struct-array variant): a struct array that round-trips into a
+         * later REPL turn loses its per-field element-kind (MatStructFields is
+         * same-TU only), so a matrix/string field (`s(1).Header`) defaulted to
+         * a scalar get_f64 and read back 0 / empty.  For a cross-turn struct-
+         * array binding (IsStructArray, re-pinned from kind=14) fetch via
+         * get_mat — kind-aware, boxes a true scalar to 1x1.  Gated to the
+         * cross-turn case (NOT same-TU StructArrayBindings, which carry
+         * MatStructFields), mirroring the plain-struct fix. */
+        if (!WantMat && NE->Ref->IsStructArray &&
+            !StructArrayBindings.count(NE->Ref))
+          WantMat = true;
         llvm::StringRef Callee = WantMat ? "matlab_struct_get_mat"
                                           : "matlab_struct_get_f64";
         mlir::NamedAttribute SCal(

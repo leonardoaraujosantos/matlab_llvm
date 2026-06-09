@@ -401,6 +401,16 @@ exit
 EOF
 )" "0.5"
 
+# 8h. #258 (struct-array variant) — a struct ARRAY field `s(i).Field` loses its
+# element-kind cross-turn too; a string/matrix field read back as scalar 0.
+# A cross-turn IsStructArray element-field read now fetches via get_mat.
+run_case "xturn_structarray_field_string" "$(cat <<'EOF'
+s(1).Header = "name1";
+disp(s(1).Header)
+exit
+EOF
+)" "name1"
+
 # 9. #240 — mpcmove with a p×ny reference-preview MATRIX on the REPL/JIT path.
 # The mpc object round-trips through the workspace and loses its class pin, so
 # the AOT `mpcmove -> matlab_mpc_move` rewrite (gated on that pin) is skipped.
