@@ -780,13 +780,18 @@ const Type *TypeInference::visitBinary(BinaryOpExpr &B, Env &Env) {
         B.Op == BinOp::ElemLeftDiv || B.Op == BinOp::ElemPow;
     if (NumericOp) {
       auto charNumeric = [&](Expr *Op, const Type *T) -> const Type * {
-        /* Single-char only — the common `'A' + k` case. Multi-char char
-         * arithmetic (`'AB' + 1` -> a code row vector) needs a materialised
-         * code matrix and stays a follow-up; leaving it string-typed keeps
-         * the prior (unsupported) behaviour rather than mis-typing it. */
-        if (Op && Op->Kind == NodeKind::CharLiteral &&
-            static_cast<CharLiteral &>(*Op).Value.size() == 1)
-          return TC.scalar(Dtype::Double);
+        /* A single-char literal promotes to a scalar code (`'A' + 1`); a
+         * multi-char literal promotes to a 1xN row of codes (`'AB' + 1` ->
+         * [66 67]). The matching BinaryOp lowering materialises the code(s)
+         * (a const_float scalar or a concat_row matrix). A StringLiteral is
+         * left alone so `"AB" + 1` still concatenates. */
+        if (Op && Op->Kind == NodeKind::CharLiteral) {
+          size_t n = static_cast<CharLiteral &>(*Op).Value.size();
+          if (n == 1) return TC.scalar(Dtype::Double);
+          if (n > 1)
+            return TC.arrayOf(Dtype::Double,
+                              Shape::matrix(1, static_cast<int64_t>(n)));
+        }
         return T;
       };
       L = charNumeric(B.LHS, L);
