@@ -83,6 +83,37 @@ method's `OutputRefs[0]->InferredType` (the analog of P1.1, which covered the
 `obj.method()` FieldAccess-callee form). Without this the rewrite is a
 regression, not a no-op.
 
+## Step-2 implementation status (validated)
+
+`DispatchDesynth` is implemented (`lib/Sema/DispatchDesynth.{h,cpp}`, compiles,
+behavior-neutral with an empty allow-list). End-to-end validation with the pass
+temporarily wired into the `-repl`/JIT Sema site, allow-list `{OptimizationExpression}`:
+
+- **Single-unit (AOT-shape) input** `x=optimvar(); y=optimvar(); e=x+2*y;` →
+  the pass **fires** (`rewrote 2 ops`) and the result is correct. ✓ The rewrite
+  works when operand object types are present on `Expr->Ty` in the same unit.
+- **Cross-turn `-repl`** (`x`/`y` from earlier turns) → the pass is a **no-op**
+  (`rewrote 0 ops`): per-turn compilation doesn't carry `object<Class>` on the
+  operand `Expr->Ty` (only the binding's `PinnedClass` is re-pinned cross-turn).
+  Synthesis handles it as before — `examples/optim/problem_based_lp.m` produces
+  **identical** output (LP x=3,y=1 · QP a=1,b=1 · MILP i=3,j=2) either way.
+
+So the rewrite is **safe everywhere**: it fires where operand types are known
+(whole-program / AOT — exactly where P5 monomorphization runs) and falls back to
+the identical synthesis where they aren't. A later enhancement can key the pass
+off `PinnedClass` too (matching `pinnedFromExpr`) to also fire cross-turn.
+
+### Remaining for the step-2 PR
+- Wire `desynthDispatch` + a re-`TypeInference::run` after the first
+  Resolver+TypeInference at each compile entry point (5 `R.resolve(*TU)` /
+  `Inf.run(*TU)` sites in tools/matlabc/main.cpp — `runReplInput` @1166 and
+  @4284, the breakpoint-merge @12934, and the monomorphize re-Sema lambdas
+  @12974/@13056). A small shared helper avoids duplication. Re-running
+  TypeInference (not Resolver) suffices — synthesized `NameExpr` Refs are set
+  manually (`CD->Self`, a `BindingKind::Class` binding) and `Resolved=Call`.
+- `test/Sema` golden of the rewritten AST for an OptimizationExpression op.
+- Full gate; then add `tf`/`ss`/… one class per PR.
+
 ## Validation per increment
 
 Full local gate (Run / golden / Repl / DAP / repl_sweep / emit-c/cpp/python/ts)

@@ -1,0 +1,35 @@
+TranslationUnit
+  Script
+    Block
+      AssignStmt suppressed
+        LHS
+          Name a (var) [object<Vec2>]
+        RHS
+          Call [object<Vec2>]
+            Name Vec2 (class) [any]
+            IntLit 1 [double]
+            IntLit 2 [double]
+      AssignStmt suppressed
+        LHS
+          Name b (var) [object<Vec2>]
+        RHS
+          Call [object<Vec2>]
+            Name Vec2 (class) [any]
+            IntLit 3 [double]
+            IntLit 4 [double]
+      AssignStmt suppressed
+        LHS
+          Name c (var) [object<Vec2>]
+        RHS
+          Call [object<Vec2>]
+            Field .plus [any]
+              Name a (var) [object<Vec2>]
+            Name b (var) [object<Vec2>]
+      AssignStmt suppressed
+        LHS
+          Name s (var) [object<Vec2>]
+        RHS
+          Call [object<Vec2>]
+            Field .mtimes [any]
+              Name a (var) [object<Vec2>]
+            IntLit 3 [double]
