@@ -255,6 +255,12 @@ public:
   // brace-index `c{i}` recovers the element type instead of Any.
   const CellType *cellOf(const Type *Elt);
   const StructType *structAny();
+  // A struct with known field types (#191 P4.2). OpenSet=true means other
+  // (untyped) fields may also exist — the common incremental `s.a=…; s.b=…`
+  // case. Empty+open collapses to structAny(). Not interned: struct types
+  // accumulate fields per binding, so each update owns a fresh instance.
+  const StructType *structWith(std::map<std::string, const Type *> Fields,
+                               bool OpenSet = true);
   const FuncHandleType *funcHandle();
   // Instance of a user classdef, interned per ClassDef so two requests for
   // the same class hash-equal (constructor-call bucketing relies on this).

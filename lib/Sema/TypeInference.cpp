@@ -395,6 +395,27 @@ TypeInference::Env TypeInference::visitStmt(Stmt &St, Env In) {
             L->Ty = It->second;
           }
         }
+      } else if (auto *FA = dynamic_cast<FieldAccess *>(L);
+                 FA && dynamic_cast<NameExpr *>(FA->Base)) {
+        // #191 P4.2: `s.field = rhs` accumulates the field's type into a
+        // per-binding struct type, so a later `s.field` read recovers it.
+        // OpenSet stays true (other fields may exist / be added later).
+        auto *BN = static_cast<NameExpr *>(FA->Base);
+        const Type *FldT = PerLhsT ? PerLhsT : RhsT;
+        if (BN->Ref) {
+          std::map<std::string, const Type *> Fields;
+          auto It = In.find(BN->Ref);
+          if (It != In.end() && It->second &&
+              It->second->K == Type::Kind::Struct)
+            Fields = static_cast<const StructType &>(*It->second).Fields;
+          Fields[std::string(FA->Field)] = FldT;
+          const Type *ST = TC.structWith(std::move(Fields), /*OpenSet=*/true);
+          In[BN->Ref] = ST;
+          BN->Ty = ST;
+          L->Ty = FldT;
+        } else {
+          visit(*L, In);
+        }
       } else {
         // Indexed LHS (e.g. a(i) = x). For now, keep the root's type as-is
         // and annotate the sub-expression with Any.
@@ -671,6 +692,13 @@ const Type *TypeInference::visit(Expr &E, Env &Env) {
           T = TC.arrayOf(Dtype::Double, A.S);
         }
       }
+    }
+    // #191 P4.2: a struct field read recovers the type recorded when the
+    // field was assigned (`s.x = expr`). Unknown fields stay Any (OpenSet).
+    if (BaseT && BaseT->K == Type::Kind::Struct) {
+      auto &S = static_cast<const StructType &>(*BaseT);
+      auto It = S.Fields.find(std::string(F.Field));
+      if (It != S.Fields.end() && It->second) T = It->second;
     }
     break;
   }
