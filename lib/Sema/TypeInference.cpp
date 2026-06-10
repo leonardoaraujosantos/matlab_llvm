@@ -886,6 +886,10 @@ const Type *TypeInference::visitBinary(BinaryOpExpr &B, Env &Env) {
 
   case BinOp::Mul: {
     // Matrix multiply: (M x K) * (K x N) -> (M x N); scalar * X broadcasts.
+    // Any when an operand isn't a numeric array: object operands are already
+    // handled by the operator-overload path (visitBinary's #40 block above),
+    // so reaching here means a string/cell/unresolved operand whose product
+    // type can't be determined statically.
     if (!L || !R || L->K != Type::Kind::Array || R->K != Type::Kind::Array)
       return TC.any();
     auto &LA = static_cast<const ArrayType &>(*L);
@@ -898,7 +902,7 @@ const Type *TypeInference::visitBinary(BinaryOpExpr &B, Env &Env) {
       if (auto *T = tryFixedBinop(BinOp::Mul)) return T;
     }
     Dtype D = promoteDtype(LA.Elt, RA.Elt);
-    if (D == Dtype::Unknown) return TC.any();
+    if (D == Dtype::Unknown) return TC.any(); // operand dtype unresolved
     if (D == Dtype::Fixed)   return TC.any(); // unresolved fi mul shape
     if (LA.S.K == Shape::Rank::Scalar) return TC.arrayOf(D, RA.S);
     if (RA.S.K == Shape::Rank::Scalar) return TC.arrayOf(D, LA.S);
@@ -910,18 +914,22 @@ const Type *TypeInference::visitBinary(BinaryOpExpr &B, Env &Env) {
     return TC.arrayOf(D, Shape::unknown());
   }
   case BinOp::Div: case BinOp::LeftDiv: {
+    // Any when an operand isn't a numeric array (object overloads handled
+    // earlier; string/cell/unresolved operands have no static quotient type).
     if (!L || !R || L->K != Type::Kind::Array || R->K != Type::Kind::Array)
       return TC.any();
     auto &LA = static_cast<const ArrayType &>(*L);
     auto &RA = static_cast<const ArrayType &>(*R);
     Dtype D = promoteDtype(LA.Elt, RA.Elt);
-    if (D == Dtype::Unknown) return TC.any();
+    if (D == Dtype::Unknown) return TC.any(); // operand dtype unresolved
     if (LA.S.K == Shape::Rank::Scalar && RA.S.K == Shape::Rank::Scalar)
       return TC.scalar(D);
     return TC.arrayOf(D, Shape::unknown());
   }
   case BinOp::Pow: {
     // Scalar^scalar -> scalar. Matrix power has different semantics.
+    // Any when an operand isn't a numeric array (object overloads handled
+    // earlier; otherwise the power result type is statically unknown).
     if (!L || !R || L->K != Type::Kind::Array || R->K != Type::Kind::Array)
       return TC.any();
     auto &LA = static_cast<const ArrayType &>(*L);
@@ -952,6 +960,9 @@ const Type *TypeInference::visitBinary(BinaryOpExpr &B, Env &Env) {
   case BinOp::ShortAnd: case BinOp::ShortOr:
     return TC.scalar(Dtype::Logical);
   }
+  // Defensive: every BinOp is handled in the switch above, so this is
+  // unreachable in practice — Any only if a new operator is added without a
+  // case, where an unknown result type is the safe default.
   return TC.any();
 }
 
@@ -977,6 +988,9 @@ const Type *TypeInference::visitUnary(UnaryOpExpr &U, Env &Env) {
 
 const Type *TypeInference::visitPostfix(PostfixOpExpr &P, Env &Env) {
   const Type *T = P.Operand ? visit(*P.Operand, Env) : TC.any();
+  // Postfix here is transpose (' / .'). On a non-array operand (object with a
+  // transpose overload, string, unresolved) the result type isn't statically
+  // known — object dispatch happens at lowering, so Any is correct.
   if (!T || T->K != Type::Kind::Array) return TC.any();
   auto &A = static_cast<const ArrayType &>(*T);
   // Transpose swaps the two dimensions for matrices; scalars unchanged.
@@ -1037,6 +1051,10 @@ const Type *TypeInference::visitRange(RangeExpr &R, Env &Env) {
 const Type *TypeInference::visitCellIndex(CellIndex &C, Env &Env) {
   if (C.Callee) visit(*C.Callee, Env);
   for (Expr *A : C.Args) if (A) visit(*A, Env);
+  // `c{i}` element type. Cell elements aren't tracked yet
+  // (CellType.ElementUpperBound is usually null), so the element type is
+  // unknown — this is the precise target of #191 P4.3 (cell element typing),
+  // after which a homogeneous cell could yield its element type here.
   return TC.any();
 }
 
@@ -1515,6 +1533,11 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
         }
         return false;
       };
+      // A class-pinned arg routes through the class's method overload at
+      // runtime (`abs`/`sqrt`/… on an object), so the result type is the
+      // method's — not statically known here. Typing it as object<Class> is
+      // the job of #191 P1.1 (method-call result typing, depends on P2.1);
+      // until then Any defers to runtime dispatch (intentional).
       if (argIsClassPinned(Args[0])) return TC.any();
     }
     // Element-wise: preserves shape, promotes to floating.
@@ -1564,6 +1587,8 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
         return TC.arrayOf(A.Elt, Shape::matrix(A.S.Dims[1], A.S.Dims[0]));
       return TC.arrayOf(A.Elt, A.S);
     }
+    // transpose of a non-array (object with a transpose overload, or an
+    // unresolved arg): result type isn't known statically.
     return TC.any();
   }
 
@@ -1631,6 +1656,8 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
     if (!UsedNumerictype && Args.size() >= 3) {
       int64_t Sgn = foldInt(Args[1]);
       int64_t WL  = foldInt(Args[2]);
+      // signedness / word-length didn't fold to a valid constant — the fi
+      // spec is undetermined, so the value's type is unknown.
       if (Sgn < 0 || WL <= 0 || WL > 64) return TC.any();
       Spec.Signed = (Sgn != 0);
       Spec.WordLength = uint8_t(WL);
@@ -1640,6 +1667,7 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
     }
     if (!UsedNumerictype && Args.size() >= 4) {
       int64_t FL = foldInt(Args[3]);
+      // fraction-length didn't fold to a valid constant — fi spec undetermined.
       if (FL < 0 || FL > Spec.WordLength) return TC.any();
       Spec.FractionLength = int8_t(FL);
     }
@@ -1658,6 +1686,8 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
       if (Sgn >= 0 && WL > 0 && WL <= 64 && FL >= 0 && FL <= WL)
         return TC.numerictype(Sgn != 0, uint8_t(WL), int8_t(FL));
     }
+    // non-3-arg form or args that didn't fold to a valid spec — the
+    // numerictype object can't be modelled at compile time.
     return TC.any();
   }
   // fimath('OverflowAction', 'Saturate'|'Wrap',
@@ -1688,6 +1718,8 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
     }
     return TC.fimath(OF, RM);
   }
+  // fipref configures fi *display* preferences and has no numeric value /
+  // type to model — Any is correct (intentional, not a precision gap).
   if (Name == "fipref") return TC.any();
   // int(n) / storedInteger(n) / storedIntegerToDouble(n) — return the native
   // integer behind a fi value. For non-fi inputs, behave like a no-op.
@@ -1705,6 +1737,8 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
         return TC.arrayOf(D, A.S);
       }
     }
+    // int()/storedInteger() on a non-fi / non-array arg: without a fi spec
+    // there's no stored-integer width to infer, so the type is unknown.
     return TC.any();
   }
   if (Name == "storedIntegerToDouble") {
@@ -1718,8 +1752,10 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
   // numerictype without changing storage. The two specs must have
   // matching WL (the storage lane is the same); FL/signedness can swap.
   if (Name == "reinterpretcast") {
+    // missing operands — can't determine the reinterpreted spec.
     if (Args.size() < 2 || ArgTys.size() < 2 || !ArgTys[0] || !ArgTys[1])
       return TC.any();
+    // 2nd arg isn't a resolved numerictype — target spec unknown.
     if (ArgTys[1]->K != Type::Kind::Numerictype) return TC.any();
     auto &NT = static_cast<const NumerictypeType &>(*ArgTys[1]);
     Shape OutShape = Shape::scalar();
@@ -1735,6 +1771,7 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
   // n's; WL/FL stay. removefimath(n) resets both to defaults (Saturate /
   // Floor). For non-fi inputs, both are no-ops.
   if (Name == "removefimath" || Name == "setfimath") {
+    // no array operand to carry/strip a fimath — type unknown.
     if (ArgTys.empty() || !ArgTys[0] || ArgTys[0]->K != Type::Kind::Array)
       return TC.any();
     auto &A = static_cast<const ArrayType &>(*ArgTys[0]);
@@ -1775,6 +1812,9 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
     return TC.any(); // effectively void
   }
 
+  // Default for any builtin not special-cased above: its return type isn't
+  // modelled here, so Any. Builtins whose result feeds further inference
+  // should get an explicit case; this is the catch-all safe default.
   return TC.any();
 }
 
@@ -1812,6 +1852,9 @@ const Type *TypeInference::visitCallOrIndex(CallOrIndex &C, Env &Env) {
         if (!F->OutputRefs.empty() && F->OutputRefs[0]) {
           if (auto *FTy = F->OutputRefs[0]->InferredType) return FTy;
         }
+        // The callee's first output type isn't available (defined later in
+        // the TU, recursive, or itself Any). Inter-procedural propagation for
+        // this case is #191 P2.1; until then Any.
         return TC.any();
       }
       if (N->Ref && N->Ref->Kind == BindingKind::Class &&
@@ -1824,6 +1867,8 @@ const Type *TypeInference::visitCallOrIndex(CallOrIndex &C, Env &Env) {
         return TC.objectOf(N->Ref->ClassDef);
       }
     }
+    // Callee isn't a resolved name (e.g. a computed/handle callee, or a
+    // call through an expression result) — the return type is unknown.
     for (Expr *A : C.Args) if (A) visit(*A, Env);
     return TC.any();
   }
@@ -1954,6 +1999,9 @@ const Type *TypeInference::visitCallOrIndex(CallOrIndex &C, Env &Env) {
       return TC.stringScalar();
     }
   }
+  // Indexing a callee whose type isn't an Array or StringArray (cell, struct,
+  // object, or unresolved): the indexed element type isn't modelled here.
+  // Struct-field and cell-element typing are #191 P4.2 / P4.3.
   return TC.any();
 }
 
