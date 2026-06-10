@@ -1,0 +1,44 @@
+TranslationUnit
+  Script
+    Block
+      AssignStmt suppressed
+        LHS
+          Name f (var) [@handle(2->1)]
+        RHS
+          AnonFn params=(x, y) [@handle(2->1)]
+            BinOp + [any]
+              Name x (param) [any]
+              Name y (param) [any]
+      AssignStmt suppressed
+        LHS
+          Name g (var) [@handle(0->1)]
+        RHS
+          AnonFn params=() [@handle(0->1)]
+            IntLit 42 [double]
+      AssignStmt suppressed
+        LHS
+          Name h (var) [@handle]
+        RHS
+          Handle @sin (builtin) [@handle]
+      AssignStmt suppressed
+        LHS
+          Name k (var) [@handle(3->2)]
+        RHS
+          Handle @myfn (function) [@handle(3->2)]
+  Function myfn
+    Inputs: p[any] q[any] r[any]
+    Outputs: a[any] b[any]
+    Locals:
+    Block
+      AssignStmt suppressed
+        LHS
+          Name a (output) [any]
+        RHS
+          Name p (param) [any]
+      AssignStmt suppressed
+        LHS
+          Name b (output) [any]
+        RHS
+          BinOp + [any]
+            Name q (param) [any]
+            Name r (param) [any]

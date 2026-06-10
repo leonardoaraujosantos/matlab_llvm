@@ -714,12 +714,24 @@ const Type *TypeInference::visit(Expr &E, Env &Env) {
     // Body is typed in a nested scope; simple pass without capturing env
     // changes back (closures are immutable captures semantically).
     if (A.Body) visit(*A.Body, Env);
-    T = TC.funcHandle();
+    // #191 P4.1: an anonymous function has a known input arity (its params)
+    // and always yields a single output.
+    T = TC.funcHandleArity(static_cast<int>(A.Params.size()), 1);
     break;
   }
-  case NodeKind::FuncHandle:
-    T = TC.funcHandle();
+  case NodeKind::FuncHandle: {
+    // #191 P4.1: `@userfn` takes its arity from the resolved function's
+    // declared inputs/outputs; `@builtin` (no FuncDef) stays unknown (-1).
+    auto &H = static_cast<FuncHandle &>(E);
+    if (H.Ref && H.Ref->Kind == BindingKind::Function && H.Ref->FuncDef) {
+      const Function *F = H.Ref->FuncDef;
+      T = TC.funcHandleArity(static_cast<int>(F->Inputs.size()),
+                             static_cast<int>(F->Outputs.size()));
+    } else {
+      T = TC.funcHandle();
+    }
     break;
+  }
   default:
     T = TC.any();
   }

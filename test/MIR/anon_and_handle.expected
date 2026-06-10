@@ -3,7 +3,7 @@ matlab.module() {
     %0 = matlab.make_handle() {callee = @sin} : @handle
     %1 = matlab.alloc() {name = @f} : @handle
     matlab.store(%0, %1)
-    %2 = matlab.make_anon() {params = "x"} : @handle {
+    %2 = matlab.make_anon() {params = "x"} : @handle(1->1) {
       %3 = matlab.load(%4) : any
       %5 = matlab.const_int() {value = 2} : double
       %6 = matlab.epow(%3, %5) : any
@@ -12,7 +12,7 @@ matlab.module() {
       scf.yield(%8)
     }
     %4 = matlab.alloc() {name = @x} : any
-    %9 = matlab.alloc() {name = @g} : @handle
+    %9 = matlab.alloc() {name = @g} : @handle(1->1)
     matlab.store(%2, %9)
     matlab.return()
   }
