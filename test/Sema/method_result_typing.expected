@@ -1,0 +1,32 @@
+TranslationUnit
+  Script
+    Block
+      AssignStmt suppressed
+        LHS
+          Name p (var) [object<Pt>]
+        RHS
+          Call [object<Pt>]
+            Name Pt (class) [any]
+            IntLit 3 [double]
+      AssignStmt suppressed
+        LHS
+          Name q (var) [object<Pt>]
+        RHS
+          Call [object<Pt>]
+            Field .scale [any]
+              Name p (var) [object<Pt>]
+            IntLit 2 [double]
+      AssignStmt suppressed
+        LHS
+          Name d (var) [double]
+        RHS
+          Call [double]
+            Field .dims [any]
+              Name p (var) [object<Pt>]
+      AssignStmt suppressed
+        LHS
+          Name n (var) [any]
+        RHS
+          Call [any]
+            Field .getv [any]
+              Name p (var) [object<Pt>]
