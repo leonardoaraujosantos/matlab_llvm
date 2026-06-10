@@ -1,0 +1,45 @@
+TranslationUnit
+  Script
+    Block
+      AssignStmt suppressed
+        LHS
+          Name c (var) [cell]
+        RHS
+          CellLit rows=1 [cell]
+            Row 0
+              IntLit 1 [double]
+              IntLit 2 [double]
+              IntLit 3 [double]
+      AssignStmt suppressed
+        LHS
+          Name ce (var) [any]
+        RHS
+          CellIndex [any]
+            Name c (var) [cell]
+            IntLit 2 [double]
+      AssignStmt suppressed
+        LHS
+          Name fr (var) [any]
+        RHS
+          Call [any]
+            Name laterfn (function) [@handle]
+            IntLit 4 [double]
+      AssignStmt suppressed
+        LHS
+          Name cc (var) [any]
+        RHS
+          CellIndex [any]
+            Name c (var) [cell]
+            IntLit 1 [double]
+  Function laterfn
+    Inputs: a[any]
+    Outputs: r[any]
+    Locals:
+    Block
+      AssignStmt suppressed
+        LHS
+          Name r (output) [any]
+        RHS
+          BinOp + [any]
+            Name a (param) [any]
+            IntLit 1 [double]
