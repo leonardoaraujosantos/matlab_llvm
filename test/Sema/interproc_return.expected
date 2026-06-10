@@ -1,0 +1,59 @@
+TranslationUnit
+  Script
+    Block
+      AssignStmt suppressed
+        LHS
+          Name d (var) [double]
+        RHS
+          Call [double]
+            Name makeval (function) [@handle]
+      AssignStmt suppressed
+        LHS
+          Name b (var) [logical]
+        RHS
+          Call [logical]
+            Name isready (function) [@handle]
+      AssignStmt suppressed
+        LHS
+          Name a (var) [any]
+        RHS
+          Call [any]
+            Name addone (function) [@handle]
+            IntLit 5 [double]
+      AssignStmt suppressed
+        LHS
+          Name t (var) [logical]
+        RHS
+          Name true (builtin) [logical]
+  Function makeval
+    Inputs:
+    Outputs: r[double]
+    Locals:
+    Block
+      AssignStmt suppressed
+        LHS
+          Name r (output) [double]
+        RHS
+          FPLit 3.14 [double]
+  Function isready
+    Inputs:
+    Outputs: ok[logical]
+    Locals:
+    Block
+      AssignStmt suppressed
+        LHS
+          Name ok (output) [logical]
+        RHS
+          Name true (builtin) [logical]
+  Function addone
+    Inputs: x[any]
+    Outputs: y[any]
+    Locals:
+    Block
+      AssignStmt suppressed
+        LHS
+          Name y (output) [any]
+        RHS
+          BinOp + [any]
+            Name x (param) [any]
+            IntLit 1 [double]
