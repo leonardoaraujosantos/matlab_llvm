@@ -47,6 +47,15 @@ const char *opMethodName(BinOp Op) {
   }
 }
 
+// Classes whose 1-arg constructor implements scalar promotion (`G + 2` ==
+// `G + tf(2)`). Mirrors the lowering's scalar-mixing allow-list; only these
+// box a non-object operand into a constructor call. Other classes (e.g. a
+// user Vec2) take the raw scalar — `a * 3` calls `Vec2__mtimes(a, 3)`.
+bool boxSafe(std::string_view N) {
+  return N == "tf" || N == "ss" || N == "zpk" || N == "pid" || N == "frd" ||
+         N == "OptimizationExpression";
+}
+
 bool classHasMethod(const ClassDef *CD, std::string_view Name) {
   for (const ClassDef *CC = CD; CC; CC = CC->Super)
     for (const Function *M : CC->Methods)
@@ -86,15 +95,27 @@ struct Rewriter {
       B->RHS = rewriteExpr(B->RHS);
       const ClassDef *L = objClassOf(B->LHS);
       const ClassDef *R = objClassOf(B->RHS);
-      const ClassDef *Obj = L ? L : R;
-      if (allowed(Obj)) {
+      // The FieldAccess base must be an object. Determine which operand is the
+      // object and build (base, arg):
+      //   object op X      -> base = object, arg = X (boxed only if box-safe)
+      //   X op object      -> only when the class is box-safe (so X can be
+      //                       boxed into an object base); otherwise leave the
+      //                       BinaryOp for the lowering synthesis to handle.
+      const ClassDef *Obj = nullptr;
+      Expr *Base = nullptr;
+      Expr *Arg = nullptr;
+      if (L) {
+        Obj = L;
+        Base = B->LHS;
+        Arg = (R || !boxSafe(L->Name)) ? B->RHS : boxScalar(L, B->RHS);
+      } else if (R && boxSafe(R->Name)) {
+        Obj = R;
+        Base = boxScalar(R, B->LHS);
+        Arg = B->RHS;
+      }
+      if (Obj && allowed(Obj)) {
         if (const char *M = opMethodName(B->Op)) {
           if (classHasMethod(Obj, M)) {
-            // base = first operand (boxed if not an object), arg = second
-            // (boxed if not an object). Mirrors the lowering's scalar-mixing:
-            // `2 * G` -> `Obj(2).mtimes(G)`.
-            Expr *Base = L ? B->LHS : boxScalar(Obj, B->LHS);
-            Expr *Arg = R ? B->RHS : boxScalar(Obj, B->RHS);
             auto *FA = Ctx.make<FieldAccess>();
             FA->Base = Base;
             FA->Field = M; // string-literal storage, stable

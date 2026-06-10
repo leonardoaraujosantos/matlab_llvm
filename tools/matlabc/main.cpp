@@ -80,6 +80,7 @@
 #include "matlab/Sema/Scope.h"
 #include "matlab/Sema/Type.h"
 #include "matlab/Sema/TypeInference.h"
+#include "matlab/Sema/DispatchDesynth.h"
 
 #include <cmath>
 #include <cstdio>
@@ -1103,6 +1104,22 @@ static void runJitSoftwareLowering(mlir::ModuleOp M) {
   if (getenv("MATLABC_JIT_DUMP")) mlirgen::printModule(std::cerr, M);
 }
 
+
+// #191 P3 — run the dispatch de-synthesis AST rewrite (operator/method dispatch
+// on instances of the allow-listed classes -> explicit method-call nodes) after
+// the first Resolver+TypeInference, then re-type the synthesized nodes. The
+// allow-list grows one class per PR; the lowering synthesis remains the
+// identical fallback for operands whose object type isn't on Expr->Ty (e.g.
+// cross-turn -repl), so this is behavior-preserving. See
+// docs/sema_p3_dispatch_desynth.md.
+static void p3DesynthDispatch(matlab::ASTContext &Ctx,
+                              matlab::TranslationUnit &TU,
+                              matlab::TypeInference &Inf) {
+  static const std::set<std::string> kP3Classes = {"Vec2"};
+  if (matlab::sema::desynthDispatch(Ctx, TU, kP3Classes) > 0)
+    Inf.run(TU);
+}
+
 int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id,
                  std::string *DiagOut = nullptr) {
   /* If the input mentions any CST / Comm classdef name, prepend the
@@ -1166,6 +1183,7 @@ int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id,
   R.resolve(*TU);
   TypeInference Inf(Sema, TC, Diag);
   Inf.run(*TU);
+  p3DesynthDispatch(AstCtx, *TU, Inf);
   if (Diag.hasErrors()) {
     onFail();
     return 1;
@@ -4284,6 +4302,7 @@ bool compileProgram() {
   R.resolve(*TU);
   TypeInference Inf(Sema, TC, Diag);
   Inf.run(*TU);
+  p3DesynthDispatch(AstCtx, *TU, Inf);
   if (Diag.hasErrors()) { Diag.printAll(); return false; }
 
   /* Keep MLIR context alive for the lifetime of the ExecutionEngine
@@ -12934,6 +12953,7 @@ int main(int Argc, char **Argv) {
   if (TU) R.resolve(*TU);
   TypeInference Inf(Sema, TC, Diag);
   if (TU) Inf.run(*TU);
+  if (TU) p3DesynthDispatch(Ctx, *TU, Inf);
 
   if (Opts.Mode == Options::Mode::EmitSema) {
     if (TU) dumpSema(std::cout, *TU);
@@ -12975,6 +12995,7 @@ int main(int Argc, char **Argv) {
         TypeInference Inf2(Sema, TC, Diag);
         // Two passes — see comment on the env-gated path below.
         Inf2.run(*TU);
+        p3DesynthDispatch(Ctx, *TU, Inf2);
         Inf2.run(*TU);
       };
       MonomorphizeStats S =
