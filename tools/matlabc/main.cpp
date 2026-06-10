@@ -643,8 +643,23 @@ int blockDepth(const std::vector<Token> &Toks) {
    * parser errors (`'end' is only valid inside indexing` / `unexpected
    * 'properties'`). */
   bool inClassdef = false;
+  /* An `end` inside `()` / `[]` / `{}` is an indexing `end` (`a(2:end)`,
+   * `x{end}`), NOT a block terminator.  Counting it as a block close drops the
+   * depth early and makes the accumulator submit a still-open if/for/while
+   * block — and a prepended classdef prelude then lands inside that open block
+   * ("unexpected 'classdef' in expression", #260 Symptom B).  Track bracket
+   * nesting and only treat a depth-0 `end` as a block close. */
+  int bracket = 0;
   for (const auto &T : Toks) {
     switch (T.Kind) {
+    case TokenKind::l_paren:
+    case TokenKind::l_square:
+    case TokenKind::l_brace:
+      ++bracket; break;
+    case TokenKind::r_paren:
+    case TokenKind::r_square:
+    case TokenKind::r_brace:
+      if (bracket > 0) --bracket; break;
     case TokenKind::kw_classdef:
       inClassdef = true; ++d; break;
     case TokenKind::kw_properties:
@@ -661,7 +676,7 @@ int blockDepth(const std::vector<Token> &Toks) {
     case TokenKind::kw_parfor:
       ++d; break;
     case TokenKind::kw_end:
-      --d; break;
+      if (bracket == 0) --d; break;
     default: break;
     }
   }

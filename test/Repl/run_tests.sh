@@ -455,6 +455,22 @@ exit
 EOF
 )" "unsupported call shape for built-in function 'softmax'"
 
+# 8h. #260 Symptom B — the REPL line accumulator counted the indexing `end` in
+# `x(2:end)` as a block-`end`, so an if/for/while block containing one was
+# submitted before its real `end`.  A classdef prelude then prepended to that
+# still-open block produced `unexpected 'classdef' in expression`.  blockDepth
+# now ignores an `end` inside ()/[]/{} (indexing), so the block accumulates to
+# its true terminator and runs.  sum(x(2:end)) = 20+30 = 50.
+run_case "repl_block_indexing_end_accum" "$(cat <<'EOF'
+x = [10 20 30];
+if true
+  y = sum(x(2:end));
+  disp(y);
+end
+exit
+EOF
+)" "50"
+
 # 9. #240 — mpcmove with a p×ny reference-preview MATRIX on the REPL/JIT path.
 # The mpc object round-trips through the workspace and loses its class pin, so
 # the AOT `mpcmove -> matlab_mpc_move` rewrite (gated on that pin) is skipped.
