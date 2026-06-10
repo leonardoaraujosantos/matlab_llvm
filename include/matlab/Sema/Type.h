@@ -262,6 +262,10 @@ public:
   const StructType *structWith(std::map<std::string, const Type *> Fields,
                                bool OpenSet = true);
   const FuncHandleType *funcHandle();
+  // A function handle with known arity (#191 P4.1): NumInputs / NumOutputs
+  // from an anonymous fn (`@(x,y)…` -> 2 in, 1 out) or `@userfn`. -1 = unknown
+  // (e.g. `@builtin`). Both -1 collapses to the opaque funcHandle() singleton.
+  const FuncHandleType *funcHandleArity(int NumInputs, int NumOutputs);
   // Instance of a user classdef, interned per ClassDef so two requests for
   // the same class hash-equal (constructor-call bucketing relies on this).
   const ObjectType *objectOf(const ClassDef *CD);
@@ -291,6 +295,7 @@ private:
   std::vector<std::pair<const Type *, const CellType *>> CellOfCache;
   const StructType *StructAnyT = nullptr;
   const FuncHandleType *FuncHandleT = nullptr;
+  std::vector<const FuncHandleType *> FuncHandleArityCache;
   std::vector<const NumerictypeType *> NumerictypeCache;
   std::vector<const FimathType *> FimathCache;
   std::vector<std::pair<const ClassDef *, const ObjectType *>> ObjectCache;

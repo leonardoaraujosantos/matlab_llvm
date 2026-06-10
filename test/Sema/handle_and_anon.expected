@@ -8,9 +8,9 @@ TranslationUnit
           Handle @sin (builtin) [@handle]
       AssignStmt suppressed
         LHS
-          Name g (var) [@handle]
+          Name g (var) [@handle(1->1)]
         RHS
-          AnonFn params=(x) [@handle]
+          AnonFn params=(x) [@handle(1->1)]
             BinOp + [any]
               BinOp .^ [any]
                 Name x (param) [any]
@@ -18,9 +18,9 @@ TranslationUnit
               IntLit 1 [double]
       AssignStmt suppressed
         LHS
-          Name h (var) [@handle]
+          Name h (var) [@handle(2->1)]
         RHS
-          AnonFn params=(a, b) [@handle]
+          AnonFn params=(a, b) [@handle(2->1)]
             BinOp * [any]
               Name a (param) [any]
               Name b (param) [any]

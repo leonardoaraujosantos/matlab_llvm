@@ -193,7 +193,17 @@ std::string Type::toString() const {
   }
   case Kind::Cell:        return "cell";
   case Kind::Struct:      return "struct";
-  case Kind::FuncHandle:  return "@handle";
+  case Kind::FuncHandle: {
+    auto &F = static_cast<const FuncHandleType &>(*this);
+    if (F.NumInputs < 0 && F.NumOutputs < 0) return "@handle";
+    std::ostringstream OS;
+    OS << "@handle(";
+    if (F.NumInputs >= 0) OS << F.NumInputs; else OS << '?';
+    OS << "->";
+    if (F.NumOutputs >= 0) OS << F.NumOutputs; else OS << '?';
+    OS << ')';
+    return OS.str();
+  }
   case Kind::Numerictype: {
     auto &N = static_cast<const NumerictypeType &>(*this);
     std::ostringstream OS;
@@ -312,6 +322,18 @@ const StructType *TypeContext::structWith(
 const FuncHandleType *TypeContext::funcHandle() {
   if (!FuncHandleT) FuncHandleT = own<FuncHandleType>();
   return FuncHandleT;
+}
+
+const FuncHandleType *TypeContext::funcHandleArity(int NumInputs,
+                                                   int NumOutputs) {
+  if (NumInputs < 0 && NumOutputs < 0) return funcHandle();
+  for (auto *E : FuncHandleArityCache)
+    if (E->NumInputs == NumInputs && E->NumOutputs == NumOutputs) return E;
+  auto *T = own<FuncHandleType>();
+  T->NumInputs = NumInputs;
+  T->NumOutputs = NumOutputs;
+  FuncHandleArityCache.push_back(T);
+  return T;
 }
 
 const ObjectType *TypeContext::objectOf(const ClassDef *CD) {
