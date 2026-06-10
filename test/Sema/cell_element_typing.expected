@@ -1,0 +1,41 @@
+TranslationUnit
+  Script
+    Block
+      AssignStmt suppressed
+        LHS
+          Name nums (var) [cell]
+        RHS
+          CellLit rows=1 [cell]
+            Row 0
+              IntLit 1 [double]
+              IntLit 2 [double]
+              IntLit 3 [double]
+      AssignStmt suppressed
+        LHS
+          Name n (var) [double]
+        RHS
+          CellIndex [double]
+            Name nums (var) [cell]
+            IntLit 2 [double]
+      AssignStmt suppressed
+        LHS
+          Name strs (var) [cell]
+        RHS
+          CellLit rows=1 [cell]
+            Row 0
+              StrLit "alpha" [string]
+              StrLit "beta" [string]
+      AssignStmt suppressed
+        LHS
+          Name s (var) [string]
+        RHS
+          CellIndex [string]
+            Name strs (var) [cell]
+            IntLit 1 [double]
+      AssignStmt suppressed
+        LHS
+          Name m (var) [double]
+        RHS
+          BinOp + [double]
+            Name n (var) [double]
+            IntLit 1 [double]

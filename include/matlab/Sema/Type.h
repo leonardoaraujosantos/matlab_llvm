@@ -250,6 +250,10 @@ public:
   const StringArrayType *stringScalar();
   const StringArrayType *stringArray(Shape S);
   const CellType *cellAny();
+  // A cell whose elements share a known type (`{1,2,3}` -> cell of double).
+  // Elt == nullptr (or Any) degrades to cellAny(). Used by #191 P4.3 so a
+  // brace-index `c{i}` recovers the element type instead of Any.
+  const CellType *cellOf(const Type *Elt);
   const StructType *structAny();
   const FuncHandleType *funcHandle();
   // Instance of a user classdef, interned per ClassDef so two requests for
@@ -278,6 +282,7 @@ private:
   std::vector<std::pair<ArrayKey, const ArrayType *>> ArrayCache;
   std::vector<std::pair<Shape, const StringArrayType *>> StringCache;
   const CellType *CellAnyT = nullptr;
+  std::vector<std::pair<const Type *, const CellType *>> CellOfCache;
   const StructType *StructAnyT = nullptr;
   const FuncHandleType *FuncHandleT = nullptr;
   std::vector<const NumerictypeType *> NumerictypeCache;
