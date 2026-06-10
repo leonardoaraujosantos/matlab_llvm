@@ -66,6 +66,23 @@ real AST node visible to TypeInference and the monomorphizer.
 4. P5 (retire the late monomorphiser) becomes possible once dispatch is a
    first-class AST node everywhere.
 
+## Feasibility check (verified)
+
+`a = s2 * s1` and `b = mtimes(s2, s1)` on `ss` objects **both lower to
+`matlab.call @ss__mtimes(ptr, ptr)`** — so the rewrite (`op` → method
+`CallOrIndex`) reuses the existing function-style method dispatch; no new
+lowering is needed.
+
+**Caveat (must fix in PR 1):** the operator-synthesis path sets the result type
+to `ptr` (object), but the function-style method call lowers to result type
+`none` — i.e. it loses the `object<Class>` result type, which breaks a
+downstream typed field access (`b.a`). So the rewrite must be paired with
+**function-style method-call result typing**: when a `CallOrIndex` with a
+NameExpr callee resolves to a method via a class-pinned `arg0`, return that
+method's `OutputRefs[0]->InferredType` (the analog of P1.1, which covered the
+`obj.method()` FieldAccess-callee form). Without this the rewrite is a
+regression, not a no-op.
+
 ## Validation per increment
 
 Full local gate (Run / golden / Repl / DAP / repl_sweep / emit-c/cpp/python/ts)

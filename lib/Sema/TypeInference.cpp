@@ -1904,6 +1904,29 @@ const Type *TypeInference::visitCallOrIndex(CallOrIndex &C, Env &Env) {
 
   if (C.Resolved == CallKind::Call) {
     if (auto *N = dynamic_cast<NameExpr *>(C.Callee)) {
+      // #191 P3 prerequisite — function-style instance-method dispatch:
+      // `meth(obj, ...)` where the first argument is a class instance and the
+      // class (or a super) defines a method `meth` returns that method's
+      // inferred output type, not Any. This mirrors P1.1 (the obj.method()
+      // FieldAccess-callee form) for the NameExpr-callee form, and keeps the P3
+      // operator rewrite (op -> method call) from dropping the object<Class>
+      // result type. Only fires when the class actually has the method, so
+      // generic builtins on objects (size(obj), disp(obj), ...) are unaffected.
+      if (!C.Args.empty() && C.Args[0]) {
+        const Type *A0T = visit(*C.Args[0], Env);
+        if (A0T && A0T->K == Type::Kind::Object) {
+          const ClassDef *CD = static_cast<const ObjectType &>(*A0T).Class;
+          for (const ClassDef *CC = CD; CC; CC = CC->Super)
+            for (Function *M : CC->Methods)
+              if (M && M->Name == N->Name) {
+                for (Expr *A : C.Args) if (A) visit(*A, Env);
+                if (!M->OutputRefs.empty() && M->OutputRefs[0] &&
+                    M->OutputRefs[0]->InferredType)
+                  return M->OutputRefs[0]->InferredType;
+                return TC.any();
+              }
+        }
+      }
       if (N->Ref && N->Ref->Kind == BindingKind::Builtin) {
         return visitBuiltinCall(N->Name, C.Args, Env);
       }

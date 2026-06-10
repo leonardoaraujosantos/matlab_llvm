@@ -1,0 +1,26 @@
+TranslationUnit
+  Script
+    Block
+      AssignStmt suppressed
+        LHS
+          Name p (var) [object<Pt>]
+        RHS
+          Call [object<Pt>]
+            Name Pt (class) [any]
+            IntLit 3 [double]
+      AssignStmt suppressed
+        LHS
+          Name q (var) [object<Pt>]
+        RHS
+          Call [object<Pt>]
+            Name mtimes (builtin) [@handle]
+            Name p (var) [object<Pt>]
+            Name p (var) [object<Pt>]
+      AssignStmt suppressed
+        LHS
+          Name r (var) [object<Pt>]
+        RHS
+          Call [object<Pt>]
+            Field .mtimes [any]
+              Name p (var) [object<Pt>]
+            Name p (var) [object<Pt>]
