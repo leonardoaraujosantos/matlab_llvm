@@ -3,22 +3,6 @@ TranslationUnit
     Block
       AssignStmt suppressed
         LHS
-          Name c (var) [cell]
-        RHS
-          CellLit rows=1 [cell]
-            Row 0
-              IntLit 1 [double]
-              IntLit 2 [double]
-              IntLit 3 [double]
-      AssignStmt suppressed
-        LHS
-          Name ce (var) [any]
-        RHS
-          CellIndex [any]
-            Name c (var) [cell]
-            IntLit 2 [double]
-      AssignStmt suppressed
-        LHS
           Name fr (var) [any]
         RHS
           Call [any]
@@ -26,10 +10,18 @@ TranslationUnit
             IntLit 4 [double]
       AssignStmt suppressed
         LHS
-          Name cc (var) [any]
+          Name mixed (var) [cell]
+        RHS
+          CellLit rows=1 [cell]
+            Row 0
+              IntLit 1 [double]
+              StrLit "two" [string]
+      AssignStmt suppressed
+        LHS
+          Name mx (var) [any]
         RHS
           CellIndex [any]
-            Name c (var) [cell]
+            Name mixed (var) [cell]
             IntLit 1 [double]
   Function laterfn
     Inputs: a[any]

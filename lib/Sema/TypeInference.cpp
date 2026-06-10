@@ -1049,12 +1049,16 @@ const Type *TypeInference::visitRange(RangeExpr &R, Env &Env) {
 }
 
 const Type *TypeInference::visitCellIndex(CellIndex &C, Env &Env) {
-  if (C.Callee) visit(*C.Callee, Env);
+  const Type *CT = C.Callee ? visit(*C.Callee, Env) : nullptr;
   for (Expr *A : C.Args) if (A) visit(*A, Env);
-  // `c{i}` element type. Cell elements aren't tracked yet
-  // (CellType.ElementUpperBound is usually null), so the element type is
-  // unknown — this is the precise target of #191 P4.3 (cell element typing),
-  // after which a homogeneous cell could yield its element type here.
+  // #191 P4.3: a brace-index `c{i}` yields the cell's element type when the
+  // cell was built homogeneously (visitCellLit recorded ElementUpperBound).
+  // A single brace index returns one element; a heterogeneous / untyped cell
+  // (ElementUpperBound null) still falls to Any.
+  if (CT && CT->K == Type::Kind::Cell) {
+    auto &Cell = static_cast<const CellType &>(*CT);
+    if (Cell.ElementUpperBound) return Cell.ElementUpperBound;
+  }
   return TC.any();
 }
 
@@ -1124,9 +1128,19 @@ const Type *TypeInference::visitMatrix(MatrixLiteral &M, Env &Env) {
 }
 
 const Type *TypeInference::visitCellLit(CellLiteral &M, Env &Env) {
+  // #191 P4.3: join the element types so a homogeneous literal (`{1,2,3}`,
+  // `{"a","b"}`) carries an element type and a later `c{i}` recovers it. A
+  // mixed literal joins to Any and degrades to cellAny() (cellOf handles that).
+  const Type *Elt = nullptr;
+  bool Any = false;
   for (auto &R : M.Rows)
-    for (Expr *E : R) if (E) visit(*E, Env);
-  return TC.cellAny();
+    for (Expr *E : R)
+      if (E) {
+        const Type *ET = visit(*E, Env);
+        Elt = Elt ? TC.join(Elt, ET) : ET;
+        if (!Elt || Elt->K == Type::Kind::Any) Any = true;
+      }
+  return (Any || !Elt) ? TC.cellAny() : TC.cellOf(Elt);
 }
 
 //===----------------------------------------------------------------------===//

@@ -284,6 +284,17 @@ const CellType *TypeContext::cellAny() {
   return CellAnyT;
 }
 
+const CellType *TypeContext::cellOf(const Type *Elt) {
+  // No useful element type -> the shared singleton.
+  if (!Elt || Elt->K == Type::Kind::Any) return cellAny();
+  for (auto &E : CellOfCache)
+    if (E.first == Elt) return E.second;
+  auto *T = own<CellType>();
+  T->ElementUpperBound = Elt;
+  CellOfCache.push_back({Elt, T});
+  return T;
+}
+
 const StructType *TypeContext::structAny() {
   if (!StructAnyT) StructAnyT = own<StructType>();
   return StructAnyT;
