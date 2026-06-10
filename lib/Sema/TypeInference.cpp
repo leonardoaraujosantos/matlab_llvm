@@ -1212,6 +1212,20 @@ const Type *TypeInference::visitCellLit(CellLiteral &M, Env &Env) {
 // Builtins
 //===----------------------------------------------------------------------===//
 
+// #191 P3: an arithmetic operator overload (plus/mtimes/mpower/...) conventionally
+// returns an instance of the same class — the same assumption visitBinary's #40
+// block makes for the BinaryOp form. After the P3 rewrite turns `a op b` into a
+// method call, method-result typing must apply the same convention, because some
+// operator method bodies (e.g. tf.mpower's `r=a; while: r=r*a`) have a
+// param-dependent output that infers as Any, which would break a chained
+// expression `(a^2)+b` at lowering. Comparison operators return logical, not the
+// class, so they are excluded.
+static bool isArithOperatorMethod(std::string_view N) {
+  return N == "plus" || N == "minus" || N == "uminus" || N == "uplus" ||
+         N == "mtimes" || N == "mrdivide" || N == "mldivide" || N == "mpower" ||
+         N == "times" || N == "rdivide" || N == "ldivide" || N == "power";
+}
+
 // Parse an integer literal if the expression is one; returns -1 otherwise.
 static int64_t foldInt(Expr *E) {
   if (!E) return -1;
@@ -1920,6 +1934,10 @@ const Type *TypeInference::visitCallOrIndex(CallOrIndex &C, Env &Env) {
             for (Function *M : CC->Methods)
               if (M && M->Name == N->Name) {
                 for (Expr *A : C.Args) if (A) visit(*A, Env);
+                // Arithmetic operator overloads return the class (#40 convention),
+                // even when the body's own output infers as Any (param-dependent).
+                if (isArithOperatorMethod(N->Name))
+                  return TC.objectOf(CD);
                 if (!M->OutputRefs.empty() && M->OutputRefs[0] &&
                     M->OutputRefs[0]->InferredType)
                   return M->OutputRefs[0]->InferredType;
@@ -1980,14 +1998,20 @@ const Type *TypeInference::visitCallOrIndex(CallOrIndex &C, Env &Env) {
       const Type *BaseT = FA->Base ? FA->Base->Ty : nullptr;
       if (BaseT && BaseT->K == Type::Kind::Object) {
         const ClassDef *CD = static_cast<const ObjectType &>(*BaseT).Class;
+        // Arithmetic operator overloads return the class (#40 convention), even
+        // when the method body's own output infers as Any (param-dependent) —
+        // keeps a chained operator rewrite `(a^2).plus(b)` typed object<Class>.
+        if (CD && isArithOperatorMethod(FA->Field))
+          return TC.objectOf(CD);
         if (CD)
-          for (Function *M : CD->Methods)
-            if (M && M->Name == FA->Field) {
-              if (!M->OutputRefs.empty() && M->OutputRefs[0] &&
-                  M->OutputRefs[0]->InferredType)
-                return M->OutputRefs[0]->InferredType;
-              break;
-            }
+          for (const ClassDef *CC = CD; CC; CC = CC->Super)
+            for (Function *M : CC->Methods)
+              if (M && M->Name == FA->Field) {
+                if (!M->OutputRefs.empty() && M->OutputRefs[0] &&
+                    M->OutputRefs[0]->InferredType)
+                  return M->OutputRefs[0]->InferredType;
+                return TC.any();
+              }
       }
       return TC.any();
     }

@@ -95,12 +95,19 @@ struct Rewriter {
       B->RHS = rewriteExpr(B->RHS);
       const ClassDef *L = objClassOf(B->LHS);
       const ClassDef *R = objClassOf(B->RHS);
-      // The FieldAccess base must be an object. Determine which operand is the
-      // object and build (base, arg):
-      //   object op X      -> base = object, arg = X (boxed only if box-safe)
-      //   X op object      -> only when the class is box-safe (so X can be
-      //                       boxed into an object base); otherwise leave the
-      //                       BinaryOp for the lowering synthesis to handle.
+      // The FieldAccess base must be an object operand DIRECTLY: rewrite only
+      // when the LHS is the class instance, so the base is `B->LHS` (already an
+      // object). `obj op X` -> `obj.<op>(X)`, with X boxed only for a box-safe
+      // class (`G + 2` -> `G.plus(tf(2))`), raw otherwise (`a * 3` ->
+      // `a.mtimes(3)`).
+      //
+      // The mirror case `X op obj` (scalar on the LHS, e.g. `2 * G`) would need
+      // the boxed scalar as the FieldAccess base — `(tf(2)).mtimes(G)` — but the
+      // method-dispatch lowering can't yet take a constructor-call base (it
+      // segfaults), so that case is left to the lowering synthesis fallback
+      // (which boxes both operands and emits Class__op directly). Follow-on:
+      // teach the lowering to accept a call-result method base, then rewrite
+      // `X op obj` here too.
       const ClassDef *Obj = nullptr;
       Expr *Base = nullptr;
       Expr *Arg = nullptr;
@@ -108,10 +115,6 @@ struct Rewriter {
         Obj = L;
         Base = B->LHS;
         Arg = (R || !boxSafe(L->Name)) ? B->RHS : boxScalar(L, B->RHS);
-      } else if (R && boxSafe(R->Name)) {
-        Obj = R;
-        Base = boxScalar(R, B->LHS);
-        Arg = B->RHS;
       }
       if (Obj && allowed(Obj)) {
         if (const char *M = opMethodName(B->Op)) {
@@ -123,6 +126,15 @@ struct Rewriter {
             Call->Callee = FA;
             Call->Args.push_back(Arg);
             Call->Resolved = CallKind::Call;
+            // Carry the original operator's inferred type onto the rewritten
+            // call. The pass rewrites bottom-up and TypeInference hasn't re-run
+            // yet, so a freshly-created CallOrIndex has Ty == null; without this
+            // a PARENT operator (`(a*b) / c`) would see a null-typed operand,
+            // skip the rewrite, and lower as a raw matrix op on object pointers
+            // (matlab.matdiv on two tf objects -> crash). The rewritten method
+            // call has the same result type as the operator it replaces.
+            Call->Ty = B->Ty;
+            FA->Ty = B->Ty;
             ++Count;
             return Call;
           }

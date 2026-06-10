@@ -9007,6 +9007,12 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         const ClassDef *PCls = nullptr;
         if (auto *BN = dynamic_cast<const NameExpr *>(FA->Base))
           if (BN->Ref && BN->Ref->PinnedClass) PCls = BN->Ref->PinnedClass;
+        /* #191 P3: recover the class from the base's inferred object type so a
+         * method call whose base is itself an expression (chained-operator
+         * rewrite `(a*b).plus(c)`) dispatches via this path. */
+        if (!PCls && FA->Base && FA->Base->Ty &&
+            FA->Base->Ty->K == Type::Kind::Object)
+          PCls = static_cast<const ObjectType &>(*FA->Base->Ty).Class;
         if (PCls) {
           auto [Owner, Mth] = findMethod(PCls, FA->Field);
           if (Mth) {
