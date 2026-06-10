@@ -245,6 +245,7 @@ add_library(MatlabSema STATIC
   lib/Sema/RewriteDspSoForSv.cpp
   lib/Sema/CallSiteAnalyzer.cpp
   lib/Sema/Monomorphize.cpp
+  lib/Sema/DispatchDesynth.cpp
 )
 target_link_libraries(MatlabSema PUBLIC MatlabAST MatlabBasic)
 
