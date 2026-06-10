@@ -1946,6 +1946,28 @@ const Type *TypeInference::visitCallOrIndex(CallOrIndex &C, Env &Env) {
         return TC.objectOf(N->Ref->ClassDef);
       }
     }
+    // #191 P1.1: `obj.method(args)` — when the base is a class instance, look
+    // up the method on the class and return its inferred first-output type
+    // (e.g. `scale` returning `Pt(...)` makes `p.scale(2)` infer object<Pt>).
+    // The base was already visited above (visit(*C.Callee) recurses into the
+    // FieldAccess base), so its type is annotated. Depends on P2.1 having
+    // inferred the method bodies (run() walks class methods before the script).
+    if (auto *FA = dynamic_cast<FieldAccess *>(C.Callee)) {
+      for (Expr *A : C.Args) if (A) visit(*A, Env);
+      const Type *BaseT = FA->Base ? FA->Base->Ty : nullptr;
+      if (BaseT && BaseT->K == Type::Kind::Object) {
+        const ClassDef *CD = static_cast<const ObjectType &>(*BaseT).Class;
+        if (CD)
+          for (Function *M : CD->Methods)
+            if (M && M->Name == FA->Field) {
+              if (!M->OutputRefs.empty() && M->OutputRefs[0] &&
+                  M->OutputRefs[0]->InferredType)
+                return M->OutputRefs[0]->InferredType;
+              break;
+            }
+      }
+      return TC.any();
+    }
     // Callee isn't a resolved name (e.g. a computed/handle callee, or a
     // call through an expression result) — the return type is unknown.
     for (Expr *A : C.Args) if (A) visit(*A, Env);
