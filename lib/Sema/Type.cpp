@@ -300,6 +300,15 @@ const StructType *TypeContext::structAny() {
   return StructAnyT;
 }
 
+const StructType *TypeContext::structWith(
+    std::map<std::string, const Type *> Fields, bool OpenSet) {
+  if (Fields.empty() && OpenSet) return structAny();
+  auto *T = own<StructType>();
+  T->Fields = std::move(Fields);
+  T->OpenSet = OpenSet;
+  return T;
+}
+
 const FuncHandleType *TypeContext::funcHandle() {
   if (!FuncHandleT) FuncHandleT = own<FuncHandleType>();
   return FuncHandleT;

@@ -1,0 +1,57 @@
+TranslationUnit
+  Script
+    Block
+      AssignStmt suppressed
+        LHS
+          Field .a [double]
+            Name s (var) [struct]
+        RHS
+          IntLit 1 [double]
+      AssignStmt suppressed
+        LHS
+          Field .b [string]
+            Name s (var) [struct]
+        RHS
+          StrLit "hello" [string]
+      AssignStmt suppressed
+        LHS
+          Field .c [double:vec[3]]
+            Name s (var) [struct]
+        RHS
+          MatrixLit rows=1 [double:vec[3]]
+            Row 0
+              IntLit 1 [double]
+              IntLit 2 [double]
+              IntLit 3 [double]
+      AssignStmt suppressed
+        LHS
+          Name x (var) [double]
+        RHS
+          Field .a [double]
+            Name s (var) [struct]
+      AssignStmt suppressed
+        LHS
+          Name y (var) [string]
+        RHS
+          Field .b [string]
+            Name s (var) [struct]
+      AssignStmt suppressed
+        LHS
+          Name z (var) [double:vec[3]]
+        RHS
+          Field .c [double:vec[3]]
+            Name s (var) [struct]
+      AssignStmt suppressed
+        LHS
+          Name w (var) [any]
+        RHS
+          Field .missing [any]
+            Name s (var) [struct]
+      AssignStmt suppressed
+        LHS
+          Name x2 (var) [double]
+        RHS
+          BinOp + [double]
+            Field .a [double]
+              Name s (var) [struct]
+            IntLit 1 [double]
