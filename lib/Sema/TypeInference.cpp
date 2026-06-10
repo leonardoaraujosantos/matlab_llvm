@@ -48,18 +48,34 @@ bool TypeInference::envEqual(const Env &A, const Env &B) {
 //===----------------------------------------------------------------------===//
 
 void TypeInference::run(TranslationUnit &TU) {
-  if (TU.ScriptNode) runScript(*TU.ScriptNode);
-  for (Function *F : TU.Functions) runFunction(*F);
   /* Class methods are ordinary free functions at this stage (Resolver
    * registered them as Function bindings with a class-pinned first
    * param). Walk them too so their bodies get the same type-inference
    * treatment as top-level functions — otherwise comparisons like
    * `nargin == 1` inside a method body keep a NoneType result and
    * scf.if lowering breaks. */
-  for (ClassDef *C : TU.Classes) {
-    for (Function *M : C->Methods) if (M) runFunction(*M);
-    for (Function *M : C->StaticMethods) if (M) runFunction(*M);
-  }
+  auto inferAllFunctions = [&]() {
+    for (Function *F : TU.Functions) runFunction(*F);
+    for (ClassDef *C : TU.Classes) {
+      for (Function *M : C->Methods) if (M) runFunction(*M);
+      for (Function *M : C->StaticMethods) if (M) runFunction(*M);
+    }
+  };
+  /* #191 P2.1 — inter-procedural return-type propagation. A call to a user
+   * function returns the callee's first-output type (visitCallOrIndex reads
+   * OutputRefs[0]->InferredType), but that is only set once the callee's body
+   * has been inferred. Previously the script was walked FIRST, so every call
+   * from the script body to a local function — the usual MATLAB layout, where
+   * functions are defined after the script body — saw a null output type and
+   * fell to Any. Infer all function bodies first (pass 1 populates each output
+   * type), once more (pass 2 resolves one level of forward inter-function
+   * calls: A defined before B but calling B), then the script LAST so its call
+   * sites see fully-populated output types. Two passes (not a fixpoint) keep
+   * this bounded; deeper transitive forward chains degrade to Any as before
+   * rather than looping. */
+  inferAllFunctions();
+  inferAllFunctions();
+  if (TU.ScriptNode) runScript(*TU.ScriptNode);
 }
 
 void TypeInference::runScript(Script &S) {
@@ -639,6 +655,15 @@ const Type *TypeInference::visit(Expr &E, Env &Env) {
          * otherwise `pi * v` (handle * array) infers `any`, which then
          * collapses a following sin/cos to a scalar, dropping the shape. */
         T = TC.scalar(Dtype::Double);
+      } else if (N.Ref->Kind == BindingKind::Builtin &&
+                 (N.Name == "true" || N.Name == "false")) {
+        /* Bare `true` / `false` are logical scalars, not function handles.
+         * Mistyping them as @handle is mostly masked today, but #191 P2.1
+         * propagates a function's return type to its call sites, so a
+         * `function b = f(); b = true; end` would otherwise surface @handle at
+         * every `f()` call. (The `true(n)` array form is a call, handled
+         * elsewhere.) */
+        T = TC.scalar(Dtype::Logical);
       } else if (N.Ref->Kind == BindingKind::Function ||
                  N.Ref->Kind == BindingKind::Builtin) {
         T = TC.funcHandle();

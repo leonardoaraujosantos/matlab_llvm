@@ -48,6 +48,6 @@ TranslationUnit
               IntLit 4 [double]
       AssignStmt suppressed
         LHS
-          Name h (var) [@handle]
+          Name h (var) [logical]
         RHS
-          Name true (builtin) [@handle]
+          Name true (builtin) [logical]
