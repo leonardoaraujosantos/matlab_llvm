@@ -1112,13 +1112,30 @@ static void runJitSoftwareLowering(mlir::ModuleOp M) {
 // identical fallback for operands whose object type isn't on Expr->Ty (e.g.
 // cross-turn -repl), so this is behavior-preserving. See
 // docs/sema_p3_dispatch_desynth.md.
+// KeyOffPinnedClass enables the PinnedClass operand-class fallback in the
+// desynth pass — wanted in whole-program (AOT) compilation where P2/P5 run,
+// but unsafe in cross-turn -repl (the rewritten method call's base is a
+// cross-turn binding the dispatch lowering segfaults on; synthesis handles it).
 static void p3DesynthDispatch(matlab::ASTContext &Ctx,
                               matlab::TranslationUnit &TU,
-                              matlab::TypeInference &Inf) {
+                              matlab::TypeInference &Inf,
+                              bool KeyOffPinnedClass) {
   static const std::set<std::string> kP3Classes = {"Vec2", "tf",  "ss",
                                                     "zpk",  "pid", "frd"};
-  if (matlab::sema::desynthDispatch(Ctx, TU, kP3Classes) > 0)
+  // Iterate to a fixpoint. The first pass rewrites the leaf operators (some
+  // recovered only from a binding's PinnedClass, so their result type isn't
+  // known yet); re-running TypeInference stamps each rewritten method call
+  // with its object<Class> result type, which lets the NEXT pass rewrite a
+  // surrounding operator whose operand is that call. Without the loop a
+  // chained `a*b + c` on PinnedClass-only operands leaves the outer `+` to
+  // the lowering synthesis fallback. Bounded so a non-converging case can't
+  // spin; in practice it settles in 2–3 passes.
+  for (int Iter = 0; Iter < 8; ++Iter) {
+    if (matlab::sema::desynthDispatch(Ctx, TU, kP3Classes, KeyOffPinnedClass) ==
+        0)
+      break;
     Inf.run(TU);
+  }
 }
 
 int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id,
@@ -1184,7 +1201,9 @@ int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id,
   R.resolve(*TU);
   TypeInference Inf(Sema, TC, Diag);
   Inf.run(*TU);
-  p3DesynthDispatch(AstCtx, *TU, Inf);
+  // Interactive -repl / JIT: keep the PinnedClass fallback OFF — its rewrite
+  // crashes the cross-turn dispatch lowering (see p3DesynthDispatch).
+  p3DesynthDispatch(AstCtx, *TU, Inf, /*KeyOffPinnedClass=*/false);
   if (Diag.hasErrors()) {
     onFail();
     return 1;
@@ -4303,7 +4322,9 @@ bool compileProgram() {
   R.resolve(*TU);
   TypeInference Inf(Sema, TC, Diag);
   Inf.run(*TU);
-  p3DesynthDispatch(AstCtx, *TU, Inf);
+  // Interactive -repl / JIT: keep the PinnedClass fallback OFF — its rewrite
+  // crashes the cross-turn dispatch lowering (see p3DesynthDispatch).
+  p3DesynthDispatch(AstCtx, *TU, Inf, /*KeyOffPinnedClass=*/false);
   if (Diag.hasErrors()) { Diag.printAll(); return false; }
 
   /* Keep MLIR context alive for the lifetime of the ExecutionEngine
@@ -12954,7 +12975,11 @@ int main(int Argc, char **Argv) {
   if (TU) R.resolve(*TU);
   TypeInference Inf(Sema, TC, Diag);
   if (TU) Inf.run(*TU);
-  if (TU) p3DesynthDispatch(Ctx, *TU, Inf);
+  // Whole-program (AOT) compile — the path -emit-llvm and the production
+  // Sema-time monomorphizer (below) consume. Enable the PinnedClass fallback
+  // so operators on pinned-but-not-object operands (e.g. a c2d-result tf) are
+  // desynthed too, making them visible to P2/P5.
+  if (TU) p3DesynthDispatch(Ctx, *TU, Inf, /*KeyOffPinnedClass=*/true);
 
   if (Opts.Mode == Options::Mode::EmitSema) {
     if (TU) dumpSema(std::cout, *TU);
@@ -12996,7 +13021,9 @@ int main(int Argc, char **Argv) {
         TypeInference Inf2(Sema, TC, Diag);
         // Two passes — see comment on the env-gated path below.
         Inf2.run(*TU);
-        p3DesynthDispatch(Ctx, *TU, Inf2);
+        // -test-monomorphize diagnostic mode: keep the PinnedClass fallback OFF
+        // so the SemaMono golden tracks the Expr->Ty-only rewrite.
+        p3DesynthDispatch(Ctx, *TU, Inf2, /*KeyOffPinnedClass=*/false);
         Inf2.run(*TU);
       };
       MonomorphizeStats S =

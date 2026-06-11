@@ -120,3 +120,42 @@ Full local gate (Run / golden / Repl / DAP / repl_sweep / emit-c/cpp/python/ts)
 + the class's own toolbox examples, then CI Full ctest gate green before merge.
 A `test/Sema` golden per migrated class asserts the rewritten AST (operator →
 explicit method `CallOrIndex`).
+
+## `MATLAB_LLVM_PROBE_LATE_MONO` (implemented) + what it revealed
+
+The probe is wired at the operator-synthesis site in `lib/MLIR/Lowering.cpp`:
+when the env var is set, every class operator that reaches the lowering
+synthesis fallback emits `[late-mono-probe] op-synth <Class>::<method>
+lhs_obj=<0|1> rhs_obj=<0|1>` to stderr (gated off the var, zero behaviour
+change otherwise). For a fully-migrated class this site must never fire with
+the object on the LHS; a fire names a gap. `test/DesynthProbe/` locks the
+contract in (asserts no migrated-class `lhs_obj=1` fire).
+
+Sweeping the probe over `examples/` + `test/Run/` established:
+
+- **The 6 migrated classes are first-class.** After the `PinnedClass` fix
+  below, `tf`/`ss`/`zpk`/`pid`/`frd`/`Vec2` produce **zero** object-on-LHS
+  synthesis fires. The only residual migrated-class fires are the **scalar-LHS**
+  `k * G` form (`lhs_obj=0`), the separately-tracked deferred gap that needs a
+  constructor-call method base in the lowering.
+- **Full removal of the synthesis sites is NOT reachable by the allow-list
+  rollout alone.** `dlarray` (the autodiff workhorse, ~500 operator sites),
+  `OptimizationExpression` (whose only gate path is per-turn `-repl`, where
+  desynth is a structural no-op), and arbitrary user classdefs all legitimately
+  reach synthesis and are not migrated. The lowering synthesis therefore stays
+  as the general fallback; deleting it would require generalising desynth to
+  *every* class (incl. the `dlarray` autodiff path) plus cross-turn `-repl`
+  firing — large and high blast radius, deferred.
+
+### PinnedClass coverage fix (implemented)
+
+`objClassOf` (the desynth operand-class test) originally keyed only off an
+`object<Class>` `Expr->Ty`. A value carrying the class only via the binding's
+`PinnedClass` — e.g. `Cz = c2d(G, Ts)` is typed `any` but pinned `tf`, or a
+cross-turn `-repl` re-pin — was missed, so `Cz * Cz` fell through to synthesis
+even though the synthesis path (`pinnedFromExpr`) keys off exactly that pin.
+`objClassOf` now mirrors `pinnedFromExpr`: a `NameExpr` whose `Ref->PinnedClass`
+is set resolves to that class. Because such an operand's result type isn't known
+until the rewritten method call is re-typed, `p3DesynthDispatch` now iterates
+desynth + `TypeInference::run` to a fixpoint, so a chained `a*b + c` on
+pinned-only operands rewrites fully across passes.

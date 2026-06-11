@@ -1128,6 +1128,14 @@ if(MATLAB_LLVM_WITH_MLIR)
     COMMAND ${CMAKE_SOURCE_DIR}/test/EmitCFail/run_tests.sh $<TARGET_FILE:matlabc>
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/EmitCFail
   )
+  # #191 P3: dispatch-desynth coverage contract. Via MATLAB_LLVM_PROBE_LATE_MONO,
+  # assert no migrated-class (tf/ss/zpk/pid/frd/Vec2) operator with the object
+  # on the LHS reaches the lowering synthesis fallback (desynth must rewrite it).
+  add_test(
+    NAME desynth-probe-tests
+    COMMAND ${CMAKE_SOURCE_DIR}/test/DesynthProbe/run_tests.sh $<TARGET_FILE:matlabc>
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/DesynthProbe
+  )
   # Shape goldens: diff the exact emitted C / C++ source against a per-
   # input .c.expected / .cpp.expected. Catches cosmetic regressions that
   # the behavioural run-tests lanes miss (they only diff stdout).
