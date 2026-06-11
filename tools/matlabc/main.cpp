@@ -977,7 +977,10 @@ static void runJitSoftwareLowering(mlir::ModuleOp M) {
   }
   // Multi-callsite monomorphisation (matrix-typed / arity-varying /
   // varargin callees).  compileProgram lacked this entirely.
-  if (runMonomorphiseUserCalls(M)) {
+  // #191 P5 scaffolding: MATLAB_LLVM_NO_LATE_MONO=1 bypasses the late
+  // pass so the true Sema-only failure set can be measured (and, once
+  // P3+P5 land, locked at zero).
+  if (!std::getenv("MATLAB_LLVM_NO_LATE_MONO") && runMonomorphiseUserCalls(M)) {
     for (int Iter = 0; Iter < 4; ++Iter) {
       bool A = runLowerScalarsToArith(M);
       bool B = runLowerUserCalls(M);
@@ -14105,7 +14108,9 @@ int main(int Argc, char **Argv) {
         // varargout_basic. The Phase 6 cleanup that retires this call
         // entirely needs the matrix-ptr and arity-varying classes
         // absorbed Sema-side first; documented as a follow-up.
-        if (mlirgen::runMonomorphiseUserCalls(M)) {
+        // #191 P5 scaffolding: MATLAB_LLVM_NO_LATE_MONO=1 bypasses it.
+        if (!std::getenv("MATLAB_LLVM_NO_LATE_MONO") &&
+            mlirgen::runMonomorphiseUserCalls(M)) {
           for (int Iter = 0; Iter < 4; ++Iter) {
             bool A = mlirgen::runLowerScalarsToArith(M);
             bool B = mlirgen::runLowerUserCalls(M);
