@@ -1115,7 +1115,8 @@ static void runJitSoftwareLowering(mlir::ModuleOp M) {
 static void p3DesynthDispatch(matlab::ASTContext &Ctx,
                               matlab::TranslationUnit &TU,
                               matlab::TypeInference &Inf) {
-  static const std::set<std::string> kP3Classes = {"Vec2", "tf", "ss", "zpk", "pid"};
+  static const std::set<std::string> kP3Classes = {"Vec2", "tf",  "ss",
+                                                    "zpk",  "pid", "frd"};
   if (matlab::sema::desynthDispatch(Ctx, TU, kP3Classes) > 0)
     Inf.run(TU);
 }
