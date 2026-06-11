@@ -1900,6 +1900,51 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
       return TC.fixedScalar(*A.FxSpec);
   }
 
+  // #191 P2.2 — general (non-fi) reductions, restricted to the cases whose
+  // lowering representation matches a concrete Sema type. Reduction results
+  // are lowered as boxed matrix pointers, so typing a SCALAR result as an
+  // unboxed scalar disagrees with the body's ptr value (breaks function-return
+  // / slot types); and single-arg min/max also feeds the `[v,i]=min(x)`
+  // multi-output index path that relies on the Any result. We therefore type
+  // only the multi-element (ptr-shaped) results:
+  //   * sum/prod/mean/median/std/var of a MATRIX -> 1xN row vector (default
+  //     dim-1 reduction);
+  //   * min/max(x, y) elementwise with a non-scalar result.
+  // Scalar-result reductions stay Any pending a coordinated lowering change
+  // that unboxes 1x1 reduction results to f64.
+  {
+    bool isMinMax = (Name == "min" || Name == "max");
+    bool isFloatReduce =
+        (Name == "mean" || Name == "median" || Name == "std" || Name == "var");
+    bool isSumProd = (Name == "sum" || Name == "prod");
+    if ((isMinMax || isFloatReduce || isSumProd) && !ArgTys.empty() &&
+        ArgTys[0] && ArgTys[0]->K == Type::Kind::Array) {
+      auto &A = static_cast<const ArrayType &>(*ArgTys[0]);
+      if (A.Elt != Dtype::Fixed) {
+        Dtype RD = A.Elt;
+        if (isFloatReduce)
+          RD = (A.Elt == Dtype::Complex) ? Dtype::Complex : Dtype::Double;
+        else if (A.Elt == Dtype::Logical)
+          RD = Dtype::Double; // sum/prod/min/max of logical promote to double
+
+        // min(x, y) / max(x, y): elementwise. Take the non-scalar operand's
+        // shape (covers max(x, 0) and max(a, b)); only when non-scalar.
+        if (isMinMax && ArgTys.size() == 2 && ArgTys[1] &&
+            ArgTys[1]->K == Type::Kind::Array) {
+          auto &B = static_cast<const ArrayType &>(*ArgTys[1]);
+          const Shape &RS = (A.S.K != Shape::Rank::Scalar) ? A.S : B.S;
+          if (RS.K != Shape::Rank::Scalar && RS.K != Shape::Rank::Unknown)
+            return TC.arrayOf(RD, RS);
+        }
+
+        // sum/prod/mean/median/std/var of a matrix, no explicit dim -> 1xN.
+        if (!isMinMax && ArgTys.size() == 1 &&
+            A.S.K == Shape::Rank::Matrix && A.S.Dims.size() >= 2)
+          return TC.arrayOf(RD, Shape::matrix(1, A.S.Dims[1]));
+      }
+    }
+  }
+
   if (Name == "disp" || Name == "fprintf" || Name == "warning" ||
       Name == "error") {
     return TC.any(); // effectively void
