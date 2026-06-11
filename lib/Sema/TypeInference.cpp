@@ -1908,6 +1908,16 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
   // Default for any builtin not special-cased above: its return type isn't
   // modelled here, so Any. Builtins whose result feeds further inference
   // should get an explicit case; this is the catch-all safe default.
+  // #191 P2.2 probe: name the unmodelled builtins whose args ARE typed
+  // (those are the ones poisoning downstream call-arg precision).
+  if (::getenv("MATLAB_LLVM_PROBE_ANYBUILTIN")) {
+    bool allTyped = !ArgTys.empty();
+    for (const Type *T : ArgTys)
+      if (!T || T->K == Type::Kind::Any) { allTyped = false; break; }
+    if (allTyped)
+      fprintf(stderr, "[any-builtin] %.*s (%zu typed args)\n",
+              (int)Name.size(), Name.data(), ArgTys.size());
+  }
   return TC.any();
 }
 
