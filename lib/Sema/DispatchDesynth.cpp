@@ -11,6 +11,7 @@
 #include "matlab/Sema/DispatchDesynth.h"
 
 #include "matlab/AST/AST.h"
+#include "matlab/Sema/Scope.h" // Binding::PinnedClass
 #include "matlab/Sema/Type.h"
 
 namespace matlab {
@@ -18,10 +19,33 @@ namespace sema {
 
 namespace {
 
-const ClassDef *objClassOf(const Expr *E) {
-  if (!E || !E->Ty || E->Ty->K != Type::Kind::Object)
+const ClassDef *objClassOf(const Expr *E, bool KeyOffPinnedClass) {
+  if (!E)
     return nullptr;
-  return static_cast<const ObjectType &>(*E->Ty).Class;
+  // Primary signal: Sema stamped the operand's type as `object<Class>`.
+  if (E->Ty && E->Ty->K == Type::Kind::Object)
+    return static_cast<const ObjectType &>(*E->Ty).Class;
+  // Fallback (whole-program / AOT only): a class-typed variable whose value
+  // carries only the binding's `PinnedClass`, not an object `Expr->Ty`. This
+  // happens when the value comes from a builtin/function that returns the class
+  // via the pin side-channel (e.g. `sys = c2d(G, Ts)` — a tf, pinned but not
+  // object-typed). The lowering SYNTHESIS path keys off exactly this binding
+  // (`pinnedFromExpr`), so mirroring it here lets desynth cover the same
+  // operators instead of leaving them to synthesis. Re-running TypeInference
+  // after the rewrite (see p3DesynthDispatch) then stamps the rewritten method
+  // call with the proper `object<Class>` result type, so a surrounding operator
+  // in a later pass sees the object and rewrites too.
+  //
+  // OFF for cross-turn -repl: there the operand is a cross-turn binding with no
+  // object Expr->Ty, and desynthing it into a method call whose base is that
+  // binding crashes the dispatch lowering at runtime; the synthesis fallback
+  // (taken because the no-op rewrite leaves the BinaryOp in place) is correct.
+  if (KeyOffPinnedClass && E->Kind == NodeKind::NameExpr) {
+    const auto *NE = static_cast<const NameExpr *>(E);
+    if (NE->Ref && NE->Ref->PinnedClass)
+      return NE->Ref->PinnedClass;
+  }
+  return nullptr;
 }
 
 // MATLAB operator → method name (same mapping the lowering synthesis uses).
@@ -67,10 +91,15 @@ bool classHasMethod(const ClassDef *CD, std::string_view Name) {
 struct Rewriter {
   ASTContext &Ctx;
   const std::set<std::string> &Allow;
+  bool KeyOffPinnedClass = false;
   int Count = 0;
 
   bool allowed(const ClassDef *CD) const {
     return CD && Allow.count(std::string(CD->Name)) > 0;
+  }
+
+  const ClassDef *classOf(const Expr *E) const {
+    return objClassOf(E, KeyOffPinnedClass);
   }
 
   // Box a non-object operand into a one-arg ctor `Class(value)`.
@@ -93,8 +122,8 @@ struct Rewriter {
       auto *B = static_cast<BinaryOpExpr *>(E);
       B->LHS = rewriteExpr(B->LHS);
       B->RHS = rewriteExpr(B->RHS);
-      const ClassDef *L = objClassOf(B->LHS);
-      const ClassDef *R = objClassOf(B->RHS);
+      const ClassDef *L = classOf(B->LHS);
+      const ClassDef *R = classOf(B->RHS);
       // The FieldAccess base must be an object operand DIRECTLY: rewrite only
       // when the LHS is the class instance, so the base is `B->LHS` (already an
       // object). `obj op X` -> `obj.<op>(X)`, with X boxed only for a box-safe
@@ -284,10 +313,11 @@ struct Rewriter {
 } // namespace
 
 int desynthDispatch(ASTContext &Ctx, TranslationUnit &TU,
-                    const std::set<std::string> &AllowClasses) {
+                    const std::set<std::string> &AllowClasses,
+                    bool KeyOffPinnedClass) {
   if (AllowClasses.empty())
     return 0;
-  Rewriter R{Ctx, AllowClasses};
+  Rewriter R{Ctx, AllowClasses, KeyOffPinnedClass};
   if (TU.ScriptNode && TU.ScriptNode->Body)
     R.rewriteBlock(TU.ScriptNode->Body);
   for (Function *F : TU.Functions)

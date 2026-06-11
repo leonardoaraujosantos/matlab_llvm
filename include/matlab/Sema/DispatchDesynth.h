@@ -34,8 +34,18 @@ namespace sema {
 // Rewrite operator dispatch on instances of the allow-listed classes into
 // explicit method-call AST nodes. Returns the number of operator nodes
 // rewritten (0 => the TU is unchanged). Safe to call with an empty allow-list.
+//
+// KeyOffPinnedClass: when true, also recover an operand's class from a
+// NameExpr binding's PinnedClass (not just an object<Class> Expr->Ty),
+// matching the lowering synthesis path (pinnedFromExpr). Safe and wanted in
+// whole-program (AOT) compilation — where P2/P5 run — but must stay OFF for
+// cross-turn -repl: there, a pinned-but-not-object operand desynthed into a
+// method call whose base is a cross-turn binding crashes the dispatch lowering
+// at runtime, and the synthesis fallback (taken when the rewrite is a no-op)
+// handles it correctly.
 int desynthDispatch(ASTContext &Ctx, TranslationUnit &TU,
-                    const std::set<std::string> &AllowClasses);
+                    const std::set<std::string> &AllowClasses,
+                    bool KeyOffPinnedClass = false);
 
 } // namespace sema
 } // namespace matlab

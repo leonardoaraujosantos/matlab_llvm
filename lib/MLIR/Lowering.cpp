@@ -5848,6 +5848,22 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           if (Owner) break;
         }
         if (Owner) {
+          // #191 P3 acceptance probe. When MATLAB_LLVM_PROBE_LATE_MONO is set,
+          // report every class operator that reaches the LOWERING synthesis
+          // path — i.e. one the Sema-time dispatch-desynth pass did NOT rewrite
+          // into an explicit method call. For a fully-migrated class this site
+          // must never fire in whole-program (AOT) compilation; a fire names a
+          // gap to close before the synthesis site can be removed. Diagnostic
+          // only: gated off the env var, zero behaviour change when unset.
+          static const bool ProbeLateMono =
+              ::getenv("MATLAB_LLVM_PROBE_LATE_MONO") != nullptr;
+          if (ProbeLateMono) {
+            bool LhsObj = pinnedFromExpr(Bi.LHS) != nullptr;
+            bool RhsObj = pinnedFromExpr(Bi.RHS) != nullptr;
+            llvm::errs() << "[late-mono-probe] op-synth " << Owner->Name
+                         << "::" << OpMethod << " lhs_obj=" << LhsObj
+                         << " rhs_obj=" << RhsObj << "\n";
+          }
           mlir::Value LHS = Bi.LHS ? lowerExpr(*Bi.LHS) : mlir::Value{};
           mlir::Value RHS = Bi.RHS ? lowerExpr(*Bi.RHS) : mlir::Value{};
           /* Scalar-mixing boxing: when one operand is a class
