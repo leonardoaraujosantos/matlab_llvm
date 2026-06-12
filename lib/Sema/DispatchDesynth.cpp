@@ -144,6 +144,16 @@ struct Rewriter {
         Obj = L;
         Base = B->LHS;
         Arg = (R || !boxSafe(L->Name)) ? B->RHS : boxScalar(L, B->RHS);
+      } else if (R && boxSafe(R->Name)) {
+        // #191 P3: scalar-LHS mirror `X op obj` -> `(Owner(X)).op(obj)`. Only
+        // for a box-safe class (1-arg promoting ctor). The boxed ctor-call base
+        // is typed object<Owner> by the TypeInference re-run that follows the
+        // rewrite (p3DesynthDispatch's fixpoint), and the method-dispatch
+        // lowering recovers the class from that base Ty (Lowering.cpp ~9029),
+        // so no synthesis fallback is needed.
+        Obj = R;
+        Base = boxScalar(R, B->LHS);
+        Arg = B->RHS;
       }
       if (Obj && allowed(Obj)) {
         if (const char *M = opMethodName(B->Op)) {

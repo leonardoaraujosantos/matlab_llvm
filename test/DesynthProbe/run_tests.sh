@@ -5,12 +5,15 @@
 # probe lines the lowering emits when a class operator reaches the SYNTHESIS
 # fallback (i.e. one the Sema-time desynth pass did NOT rewrite). The contract:
 #
-#   * NO migrated class (tf/ss/zpk/pid/frd/Vec2) operator with the object on
-#     the LHS (lhs_obj=1) may reach synthesis — desynth must have rewritten it.
-#     A fire here is a coverage regression.
-#   * The probe must still report SOMETHING (a scalar-LHS `k*G` case, the
-#     deferred gap) — a liveness check so the test can't pass vacuously if the
-#     probe silently stops emitting.
+#   * NO migrated class (tf/ss/zpk/pid/frd/Vec2) operator may reach synthesis,
+#     with the object on EITHER side (lhs_obj=1 obj-op-X, or lhs_obj=0 scalar-
+#     LHS X-op-obj) — desynth must have rewritten it. A fire here is a coverage
+#     regression. (The scalar-LHS `k*G` form, once a deferred gap, is now
+#     desynthed to `(Owner(k)).op(G)`.)
+#   * The probe must still report SOMETHING across the whole suite — a GLOBAL
+#     liveness check so the test can't pass vacuously if the probe silently
+#     stops emitting. `liveness_unmigrated.m` carries a non-allow-listed class
+#     whose operator legitimately synthesizes, providing that signal.
 #
 # Usage: run_tests.sh <path-to-matlabc>
 set -u
@@ -39,17 +42,12 @@ for m in "$TESTDIR"/*.m; do
   fi
 
   probes="$(grep 'late-mono-probe' "$tmperr" || true)"
+  [[ -n "$probes" ]] && any_probe=1
 
-  # Liveness: the probe must have reported at least one line.
-  if [[ -z "$probes" ]]; then
-    echo "FAIL $base: probe emitted nothing (is MATLAB_LLVM_PROBE_LATE_MONO wired?)"
-    fail=$((fail+1)); rm -f "$tmperr"; continue
-  fi
-
-  # Contract: no migrated-class operator with the object on the LHS may have
-  # fallen through to synthesis.
+  # Contract: no migrated-class operator may have fallen through to synthesis,
+  # with the object on either side (lhs_obj=1 obj-op-X, lhs_obj=0 scalar-LHS).
   leaked="$(printf '%s\n' "$probes" \
-            | grep -E "op-synth ${MIGRATED}::[a-z]+ lhs_obj=1" || true)"
+            | grep -E "op-synth ${MIGRATED}::[a-z]+ lhs_obj=[01]" || true)"
   if [[ -n "$leaked" ]]; then
     echo "FAIL $base: migrated-class operator(s) reached lowering synthesis:"
     printf '%s\n' "$leaked" | sed 's/^/    /'
@@ -59,6 +57,13 @@ for m in "$TESTDIR"/*.m; do
   pass=$((pass+1))
   rm -f "$tmperr"
 done
+
+# Global liveness: the probe must have fired at least once across the suite
+# (otherwise it may be silently unwired and every per-fixture check is vacuous).
+if [[ "${any_probe:-0}" -ne 1 ]]; then
+  echo "FAIL: probe emitted nothing across the whole suite (is MATLAB_LLVM_PROBE_LATE_MONO wired?)"
+  fail=$((fail+1))
+fi
 
 echo "----"
 echo "desynth-probe passed: $pass    failed: $fail"
