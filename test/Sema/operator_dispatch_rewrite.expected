@@ -33,3 +33,10 @@ TranslationUnit
             Field .mtimes [any]
               Name a (var) [object<Vec2>]
             IntLit 3 [double]
+      AssignStmt suppressed
+        LHS
+          Name d (var) [object<Vec2>]
+        RHS
+          Call [object<Vec2>]
+            Field .uminus [any]
+              Name a (var) [object<Vec2>]

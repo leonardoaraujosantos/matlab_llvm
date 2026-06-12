@@ -174,6 +174,35 @@ struct Rewriter {
     case NodeKind::UnaryOp: {
       auto *U = static_cast<UnaryOpExpr *>(E);
       U->Operand = rewriteExpr(U->Operand);
+      // #191 P3: de-synthesize a unary operator on a class instance into an
+      // explicit 0-arg method call (`-obj` -> `obj.uminus()`), mirroring the
+      // BinaryOp path so it is visible to P2/P5 instead of synthesized at
+      // lowering (Lowering.cpp UnaryOp class-pinned path). The method-dispatch
+      // lowering passes the base as the implicit first arg, emitting
+      // Owner__uminus(obj) — identical to the synthesis it replaces.
+      const ClassDef *Obj = classOf(U->Operand);
+      if (Obj && allowed(Obj)) {
+        const char *M = nullptr;
+        switch (U->Op) {
+        case UnOp::Minus: M = "uminus"; break;
+        case UnOp::Plus:  M = "uplus";  break;
+        case UnOp::Not:   M = "not";    break;
+        }
+        if (M && classHasMethod(Obj, M)) {
+          auto *FA = Ctx.make<FieldAccess>();
+          FA->Base = U->Operand;
+          FA->Field = M; // string-literal storage, stable
+          auto *Call = Ctx.make<CallOrIndex>();
+          Call->Callee = FA;
+          Call->Resolved = CallKind::Call;
+          // Carry the operator's inferred type so a parent operator sees a
+          // typed operand (see the BinaryOp note above).
+          Call->Ty = U->Ty;
+          FA->Ty = U->Ty;
+          ++Count;
+          return Call;
+        }
+      }
       return U;
     }
     case NodeKind::PostfixOp: {
