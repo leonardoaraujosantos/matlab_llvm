@@ -1952,6 +1952,13 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
     }
   }
 
+  // norm(x) / norm(x, p) / norm(x, 'fro') — always a real scalar. Type it as
+  // a 1x1 MATRIX (ptr-shaped, not a bare scalar) for the same reason as the
+  // reductions above: the result lowers to a boxed matrix pointer.
+  if (Name == "norm" && !ArgTys.empty() && ArgTys[0] &&
+      ArgTys[0]->K == Type::Kind::Array)
+    return TC.arrayOf(Dtype::Double, Shape::matrix(1, 1));
+
   // reshape(x, m, n) — same element type, shape from the (foldable) scalar
   // dim args. Result is a matrix (ptr) so no scalar box/unbox concern. The
   // [m n]-vector form and `[]`-placeholder form fall through to Any.
