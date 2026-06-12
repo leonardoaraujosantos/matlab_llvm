@@ -85,4 +85,18 @@ using UserCallActionWithCaller =
 void walkUserCallsWithCaller(TranslationUnit &TU,
                              const UserCallActionWithCaller &Action);
 
+// #191 P5 — walk every CallOrIndex that dispatches to a CLASS constructor or
+// instance method (the calls the late MLIR monomorphiser owns and a future
+// Sema-time class-mono must absorb). These are invisible to walkUserCalls:
+// constructor calls resolve to a BindingKind::Class NameExpr, and method calls
+// have a FieldAccess callee — both filtered out there. The action receives the
+// call node, the owning ClassDef (walking Super for the defining class is the
+// consumer's job), and the method name (== class name for a constructor). The
+// call's ArgTypes carry the per-site signature.
+using ClassCallAction =
+    std::function<void(Function * /*Caller*/, CallOrIndex &,
+                       const ClassDef & /*Recv*/, std::string_view /*Method*/)>;
+void walkClassCallsWithCaller(TranslationUnit &TU,
+                              const ClassCallAction &Action);
+
 } // namespace matlab

@@ -13064,6 +13064,26 @@ int main(int Argc, char **Argv) {
   // `-dump-call-sites`, `-test-ast-clone`, `-test-monomorphize`) have
   // already returned by this point so they see the pre-mono Sema state.
   // Test-monomorphize runs the same driver as part of its own flow.
+  // #191 P5 measurement: enumerate the class constructor / instance-method
+  // call signatures the late MLIR monomorphiser owns and a future Sema-time
+  // class-mono must absorb. Gated, inert by default. `<Class>::<method>` plus
+  // the arg-type signature; "ctor" marks a constructor (method == class name).
+  if (TU && std::getenv("MATLAB_LLVM_PROBE_CLASSMONO")) {
+    matlab::walkClassCallsWithCaller(
+        *TU, [](matlab::Function *, matlab::CallOrIndex &C,
+                const matlab::ClassDef &Recv, std::string_view Method) {
+          bool IsCtor = (Method == Recv.Name);
+          // argc = syntactic arity (C.Args). sigTypes = how many entries
+          // TypeInference stamped onto C.ArgTypes — currently 0 for class
+          // calls (TypeInference only populates ArgTypes for BindingKind::
+          // Function), which a Sema-time class-mono must fix to bucket them.
+          fprintf(stderr, "[class-mono] %.*s::%.*s%s argc=%zu sigTypes=%zu\n",
+                  (int)Recv.Name.size(), Recv.Name.data(),
+                  (int)Method.size(), Method.data(), IsCtor ? " ctor" : "",
+                  C.Args.size(), C.ArgTypes.size());
+        });
+  }
+
   if (TU) {
     bool IsHwEmit =
         Opts.Mode == Options::Mode::EmitSystemVerilog ||
