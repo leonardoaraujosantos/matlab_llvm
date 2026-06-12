@@ -1906,18 +1906,15 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
       return TC.fixedScalar(*A.FxSpec);
   }
 
-  // #191 P2.2 — general (non-fi) reductions, restricted to the cases whose
-  // lowering representation matches a concrete Sema type. Reduction results
-  // are lowered as boxed matrix pointers, so typing a SCALAR result as an
-  // unboxed scalar disagrees with the body's ptr value (breaks function-return
-  // / slot types); and single-arg min/max also feeds the `[v,i]=min(x)`
-  // multi-output index path that relies on the Any result. We therefore type
-  // only the multi-element (ptr-shaped) results:
-  //   * sum/prod/mean/median/std/var of a MATRIX -> 1xN row vector (default
-  //     dim-1 reduction);
+  // #191 P2.2 — general (non-fi) reductions. Reduction results lower to boxed
+  // matrix pointers, so every typed result here is a ptr-SHAPED type (Matrix
+  // rank, never bare Scalar): a Scalar-rank type would make the slot/return f64
+  // while the body value is a ptr (the gpu/multiret/bode regressions). Cases:
+  //   * sum/prod/mean/median/std/var of a MATRIX -> 1xN row (default dim-1);
+  //   * sum/prod/mean/median/std/var of a VECTOR/SCALAR -> 1x1 matrix;
   //   * min/max(x, y) elementwise with a non-scalar result.
-  // Scalar-result reductions stay Any pending a coordinated lowering change
-  // that unboxes 1x1 reduction results to f64.
+  // Single-arg min/max stays Any: it feeds the `[v,i]=min(x)` multi-output
+  // index path that relies on the Any result.
   {
     bool isMinMax = (Name == "min" || Name == "max");
     bool isFloatReduce =
@@ -1943,10 +1940,14 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
             return TC.arrayOf(RD, RS);
         }
 
-        // sum/prod/mean/median/std/var of a matrix, no explicit dim -> 1xN.
-        if (!isMinMax && ArgTys.size() == 1 &&
-            A.S.K == Shape::Rank::Matrix && A.S.Dims.size() >= 2)
-          return TC.arrayOf(RD, Shape::matrix(1, A.S.Dims[1]));
+        // sum/prod/mean/median/std/var, no explicit dim. Matrix -> 1xN row;
+        // vector/scalar -> 1x1 matrix (ptr-shaped, never bare Scalar).
+        if (!isMinMax && ArgTys.size() == 1) {
+          if (A.S.K == Shape::Rank::Matrix && A.S.Dims.size() >= 2)
+            return TC.arrayOf(RD, Shape::matrix(1, A.S.Dims[1]));
+          if (A.S.K == Shape::Rank::Vector || A.S.K == Shape::Rank::Scalar)
+            return TC.arrayOf(RD, Shape::matrix(1, 1));
+        }
       }
     }
   }

@@ -13,7 +13,7 @@ fprintf('mx %.0f %.0f\n', v, k);
 e = max([1 -2 3], 0);        % elementwise max(x, 0)
 fprintf('e %.0f %.0f %.0f\n', e(1), e(2), e(3));
 
-s = sum([4 5 6]);            % scalar reduction (runtime path)
+s = sum([4 5 6]);            % scalar reduction -> 1x1 (ptr-shaped, not unboxed)
 fprintf('s %.0f\n', s);
 
 cs = sum(M);                 % matrix reduction -> 1x3 row
