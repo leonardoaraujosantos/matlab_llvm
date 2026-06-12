@@ -1589,7 +1589,11 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
   }
 
   if (Name == "abs" || Name == "sqrt" || Name == "exp" ||
-      Name == "log" || Name == "sin"  || Name == "cos" || Name == "tan" ||
+      Name == "log" || Name == "log10" || Name == "log2" ||
+      Name == "sin"  || Name == "cos" || Name == "tan" ||
+      Name == "sinh" || Name == "cosh" || Name == "tanh" ||
+      /* sign — element-wise, real result (drops to floating like the rest). */
+      Name == "sign" ||
       /* Degree-argument trigonometry — element-wise like sin/cos. */
       Name == "sind"  || Name == "cosd"  || Name == "tand" ||
       Name == "asind" || Name == "acosd" || Name == "atand") {
@@ -1642,7 +1646,9 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
     return TC.scalar(Dtype::Double);
   }
   if (Name == "mod" || Name == "rem" || Name == "floor" ||
-      Name == "ceil" || Name == "round" || Name == "fix") {
+      Name == "ceil" || Name == "round" || Name == "fix" ||
+      /* bitshift(a, n) — element-wise on a; preserves a's shape and type. */
+      Name == "bitshift") {
     if (!ArgTys.empty() && ArgTys[0] && ArgTys[0]->K == Type::Kind::Array) {
       auto &A = static_cast<const ArrayType &>(*ArgTys[0]);
       return TC.arrayOf(A.Elt, A.S);
@@ -1943,6 +1949,18 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
           return TC.arrayOf(RD, Shape::matrix(1, A.S.Dims[1]));
       }
     }
+  }
+
+  // reshape(x, m, n) — same element type, shape from the (foldable) scalar
+  // dim args. Result is a matrix (ptr) so no scalar box/unbox concern. The
+  // [m n]-vector form and `[]`-placeholder form fall through to Any.
+  if (Name == "reshape" && ArgTys.size() == 3 && ArgTys[0] &&
+      ArgTys[0]->K == Type::Kind::Array) {
+    auto &A = static_cast<const ArrayType &>(*ArgTys[0]);
+    int64_t R = foldInt(Args[1]);
+    int64_t C = foldInt(Args[2]);
+    if (R > 0 && C > 0)
+      return TC.arrayOf(A.Elt, Shape::matrix(R, C));
   }
 
   if (Name == "disp" || Name == "fprintf" || Name == "warning" ||
