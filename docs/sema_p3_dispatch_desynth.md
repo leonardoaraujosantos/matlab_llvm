@@ -159,3 +159,48 @@ is set resolves to that class. Because such an operand's result type isn't known
 until the rewritten method call is re-typed, `p3DesynthDispatch` now iterates
 desynth + `TypeInference::run` to a fixpoint, so a chained `a*b + c` on
 pinned-only operands rewrites fully across passes.
+
+## P5 (retire the late monomorphiser) — Sema-time class-mono is INFEASIBLE for matrix-param methods (verified, 2026-06-12)
+
+A full Sema-time class constructor/method monomorphizer was built and reverted.
+Recording the result so the approach isn't re-attempted blindly.
+
+**What was built (all behind `MATLAB_LLVM_NO_LATE_MONO`, default path inert):**
+- `runClassMonomorphize` (`lib/Sema/Monomorphize.cpp`): `walkClassCallsWithCaller`
+  → bucket calls by `(method Function*, full param signature)` → `cloneFunction`
+  per signature, append clone to its owner `ClassDef::Methods`, set
+  `Function::EmitSymbol = Owner__method__sN`, record the clone on
+  `CallOrIndex::MonoSpec`, stamp scalar params, iterate to a fixpoint.
+- Lowerer wiring: a chokepoint at the top of `lowerExpr(CallOrIndex)` that, when
+  `C.MonoSpec` is set, emits `matlab.call @EmitSymbol(receiver?, args…)`
+  (receiver prepended for a `FieldAccess` method callee); `lowerFunction` emits a
+  clone under its `EmitSymbol`. Both inert without `MonoSpec`/`EmitSymbol`.
+
+**Result:** mechanically correct — clones are created and dispatched
+(`tf__tf__s0…s9`, `tf__plus__s3`, `tf__mtimes__s2`, …). But the bypass failure
+set got WORSE, not better: **69 → 194** unscoped (the engine touches *every*
+class — `dlarray`'s autodiff tape, runtime-backed toolbox shells, PDE/ident
+classes — and their clones mis-dispatch), and **69 → 70** even scoped to
+`{tf,ss,zpk,pid,frd}` (recovers **zero**, regresses one).
+
+**Root cause — the tensor/ptr boundary.** Matrix-parameter class methods
+(`tf`/`ss` operate on polynomial-coefficient matrices) must be monomorphized at
+the **post-`LowerTensorOps` ptr level** — which is exactly what the late MLIR
+`runMonomorphiseUserCalls` does. An AST-level clone keeps tensor-typed params
+that the pipeline can't bridge to the body's ptr operands (the same reason
+`stampSignatureTypes` deliberately skips non-scalar Array params, deferring them
+to the late pass). Worse, nested ctor/method calls *inside* clone bodies carry
+non-concrete (matrix / `any`) args, so they never specialise. Scalar-signature
+class calls *do* monomorphize, but the matrix-heavy control/mpc/dsp fixtures —
+the bulk of the 69 — cannot.
+
+**Conclusion / recommendation.** P5's literal goal ("delete
+`runMonomorphiseUserCalls`, lock the bypass set at 0 via Sema-time mono") is not
+reachable through AST-level class cloning. The late MLIR mono is fundamentally
+required for matrix-param class dispatch. Either (a) **keep the late mono for
+class calls and close P5 as won't-fix / superseded** (matches the issue's note
+that P5 is conditional), or (b) pursue class monomorphization at the **MLIR
+level**, post-`LowerTensorOps` — which is essentially what the late pass already
+implements, so the ROI of replacing it is low. The reusable, independently
+useful pieces landed: `walkClassCallsWithCaller`, `MATLAB_LLVM_PROBE_CLASSMONO`,
+`ArgTypes` population for class calls, and the `MonoSpec`/`EmitSymbol` AST fields.
