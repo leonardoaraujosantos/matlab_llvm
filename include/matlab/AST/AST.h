@@ -15,6 +15,7 @@ namespace matlab {
 // by the resolver / type inference passes. Parsing alone leaves them null.
 class Type;
 struct Binding;
+class Function; // #191 P5: CallOrIndex::MonoSpec points at a clone Function
 
 //===----------------------------------------------------------------------===//
 // Node kinds
@@ -225,6 +226,13 @@ public:
   // bucket per-callee call sites into concrete signature variants before
   // AST→MLIR lowering. Empty until TypeInference has run.
   std::vector<const Type *> ArgTypes;
+  // #191 P5 — class monomorphizer. When this call dispatches to a class
+  // constructor / instance method that was cloned for this call's signature,
+  // points at the clone Function. Class dispatch is symbol-based at lowering
+  // (not a rewritable NameExpr), so the lowerer reads the clone's EmitSymbol
+  // here to emit the specialised symbol. Null for un-monomorphized or plain
+  // (NameExpr-resolved) calls.
+  Function *MonoSpec = nullptr;
   CallOrIndex() : Expr(NodeKind::CallOrIndex) {}
 };
 
@@ -443,6 +451,15 @@ public:
   // these; every clone starts fresh and growPlan sets them explicitly.
   int NarginOverride = 0;
   int NargoutOverride = 0;
+
+  // #191 P5 — class monomorphizer. A class constructor / instance method is
+  // dispatched by a SYMBOL the lowerer derives from the class + method name
+  // (e.g. `tf__mtimes`), not by a rewritable NameExpr like a plain function.
+  // A per-signature clone of such a method records the symbol the lowerer must
+  // emit/define it under here (e.g. `tf__mtimes__s0`); empty for an un-cloned
+  // method or a plain function. The matching call site carries the clone on
+  // CallOrIndex::MonoSpec. The Cloner does NOT copy this — each clone sets it.
+  std::string EmitSymbol;
 
   Function() : Node(NodeKind::Function) {}
 };
