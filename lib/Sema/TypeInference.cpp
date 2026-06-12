@@ -1252,6 +1252,10 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
   ArgTys.reserve(Args.size());
   for (Expr *A : Args) ArgTys.push_back(A ? visit(*A, Env) : TC.any());
 
+  // #233: strsplit(s[, delim]) -> a cell of string tokens.
+  if (Name == "strsplit")
+    return TC.cellOf(TC.stringScalar());
+
   auto constructorOf = [&](Dtype D) -> const Type * {
     // zeros/ones/eye/rand/randn(n)    -> n x n  (except zeros() = scalar)
     // zeros/ones(m, n)                -> m x n
