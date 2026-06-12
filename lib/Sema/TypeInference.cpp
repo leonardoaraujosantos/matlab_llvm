@@ -1991,6 +1991,16 @@ const Type *TypeInference::visitCallOrIndex(CallOrIndex &C, Env &Env) {
   if (C.Callee) visit(*C.Callee, Env);
 
   if (C.Resolved == CallKind::Call) {
+    // #191 P5: snapshot per-arg inferred types onto the call so the Sema-time
+    // monomorphizer can bucket the call site by signature. Done for plain
+    // function calls below; this helper lets class constructor / instance-
+    // method calls share the same machinery (their args must be visited
+    // first). Call it once the args have been visited in each branch.
+    auto snapshotArgTypes = [&]() {
+      C.ArgTypes.clear();
+      C.ArgTypes.reserve(C.Args.size());
+      for (Expr *A : C.Args) C.ArgTypes.push_back(A ? A->Ty : nullptr);
+    };
     if (auto *N = dynamic_cast<NameExpr *>(C.Callee)) {
       // #191 P3 prerequisite — function-style instance-method dispatch:
       // `meth(obj, ...)` where the first argument is a class instance and the
@@ -2008,6 +2018,7 @@ const Type *TypeInference::visitCallOrIndex(CallOrIndex &C, Env &Env) {
             for (Function *M : CC->Methods)
               if (M && M->Name == N->Name) {
                 for (Expr *A : C.Args) if (A) visit(*A, Env);
+                snapshotArgTypes();
                 // Arithmetic operator overloads return the class (#40 convention),
                 // even when the body's own output infers as Any (param-dependent).
                 if (isArithOperatorMethod(N->Name))
@@ -2058,6 +2069,7 @@ const Type *TypeInference::visitCallOrIndex(CallOrIndex &C, Env &Env) {
         // old `Any`, so the constructor monomorphizer can bucket call sites
         // by class and the lowerer maps the value to a matlab_obj* ptr.
         for (Expr *A : C.Args) if (A) visit(*A, Env);
+        snapshotArgTypes();
         return TC.objectOf(N->Ref->ClassDef);
       }
     }
@@ -2069,6 +2081,7 @@ const Type *TypeInference::visitCallOrIndex(CallOrIndex &C, Env &Env) {
     // inferred the method bodies (run() walks class methods before the script).
     if (auto *FA = dynamic_cast<FieldAccess *>(C.Callee)) {
       for (Expr *A : C.Args) if (A) visit(*A, Env);
+      snapshotArgTypes();
       const Type *BaseT = FA->Base ? FA->Base->Ty : nullptr;
       if (BaseT && BaseT->K == Type::Kind::Object) {
         const ClassDef *CD = static_cast<const ObjectType &>(*BaseT).Class;
