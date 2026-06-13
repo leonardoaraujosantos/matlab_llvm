@@ -73,6 +73,8 @@ void   matlab_toc_print(void);
  * is what makes current-folder function resolution follow `cd`. */
 void   matlab_cd(const char *path, int64_t len);
 void   matlab_cd_home(void);
+/* cd(pathVar) — chdir to a path held in a matlab_string* (passed opaque). */
+void   matlab_cd_str(void *s);
 /* pwd — current working directory as a matlab_string* (returned opaque). */
 void  *matlab_pwd(void);
 

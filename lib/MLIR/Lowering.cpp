@@ -12824,10 +12824,34 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             return emitUnreg("matlab.call_builtin", {PathV},
                              mlir::NoneType::get(&MCtx), L, {Cal});
           }
+          /* Dynamic path: cd(pathVar) / cd(fullfile(...)) / cd(sprintf(...)).
+           * Route any string-valued argument through matlab_cd_str, which
+           * reads the chars from the matlab_string at runtime. Detect strings
+           * the way disp does — current-turn StringBindings (isStringExpr)
+           * plus the Sema StringArray type / persisted InferredType, so a
+           * cross-REPL-turn `p = '...'; cd(p)` is still recognised. */
+          const Expr *PA = C.Args[0];
+          bool ArgIsString = isStringExpr(PA) ||
+                             (PA->Ty && PA->Ty->K == Type::Kind::StringArray);
+          if (!ArgIsString)
+            if (auto *NE = dynamic_cast<const NameExpr *>(PA))
+              if (NE->Ref && NE->Ref->InferredType &&
+                  NE->Ref->InferredType->K == Type::Kind::StringArray)
+                ArgIsString = true;
+          if (ArgIsString) {
+            mlir::Value PathV = lowerExpr(*C.Args[0]);
+            auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+            if (PathV.getType() != PtrTy) PathV.setType(PtrTy);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_cd_str"));
+            return emitUnreg("matlab.call_builtin", {PathV},
+                             mlir::NoneType::get(&MCtx), L, {Cal});
+          }
         }
-        /* Non-literal / multi-arg cd (e.g. cd(pathVar)) is not yet
-         * supported — fall through to the generic path so it reports an
-         * unsupported shape instead of silently changing directory. */
+        /* A non-string argument (e.g. cd(42)) isn't a valid path — fall
+         * through to the generic path so it reports an unsupported shape
+         * instead of silently changing directory. */
       }
       /* #147: isequal on two STRING operands. matlab_isequal takes two
        * matlab_mat* and reads rows/cols/data, but a matlab_string has a

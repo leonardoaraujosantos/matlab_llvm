@@ -1943,6 +1943,18 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Changed = true;
       continue;
     }
+    /* matlab_cd_str(s) — one matlab_string* operand, no result. The dynamic
+     * cd(pathVar) form; the runtime reads the path bytes from the string. */
+    if (Name == "matlab_cd_str" && Call->getNumOperands() == 1) {
+      Value S = Call->getOperand(0);
+      if (S.getType() != PtrTy) continue;
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_cd_str", VoidTy, {PtrTy});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{S});
+      Call->erase();
+      Changed = true;
+      continue;
+    }
     /* pwd — zero operands, returns the cwd as a matlab_string* (ptr). The
      * frontend emits call_builtin @pwd from both the bare-name value path
      * and the pwd() call form. */

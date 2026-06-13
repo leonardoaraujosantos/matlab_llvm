@@ -13560,6 +13560,16 @@ int64_t matlab_string_get_len(void *s) {
     return ms ? ms->len : 0;
 }
 
+/* cd(pathVar): change directory to a path held in a matlab_string (the
+ * dynamic call form, e.g. `p = '/tmp'; cd(p)` or `cd(fullfile(a,b))`).
+ * Reuses matlab_cd's chdir + error reporting. */
+void matlab_cd_str(void *s) {
+    if (!s) return;
+    int64_t len = 0;
+    const char *p = matlab_string_get_data(s, &len);
+    if (p) matlab_cd(p, len);
+}
+
 /* sprintf(fmt, v) -> matlab_string. Only the one-f64 form is wired
  * for now, matching the other fprintf family variants. The expand-
  * escapes helper processes MATLAB-style backslash escapes. */

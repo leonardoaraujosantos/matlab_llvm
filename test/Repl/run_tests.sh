@@ -586,6 +586,25 @@ disp(pwd)
 exit
 EOF
 )" want "$cdroot/beta"
+# Dynamic cd(pathVar): a path held in a (cross-turn) variable, then call a
+# function from the folder it selects.
+run_case_dir "$cdroot" "cd_dynamic_var" "$(cat <<EOF
+p = '$cdroot/alpha';
+cd(p)
+disp(ga(3))
+exit
+EOF
+)" want "1003"
+# pwd round-trip: remember the cwd, cd elsewhere, cd back via the variable.
+run_case_dir "$cdroot/alpha" "cd_pwd_roundtrip" "$(cat <<EOF
+home = pwd;
+cd('$cdroot/beta')
+disp(gb(3))
+cd(home)
+disp(ga(3))
+exit
+EOF
+)" want "1003"
 rm -rf "$cdroot"
 
 echo "----"
