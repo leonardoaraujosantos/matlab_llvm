@@ -17,8 +17,36 @@ default:
     @just --list
 
 # Configure the build (CMake + Ninja). Re-run after CMakeLists.txt edits.
+#
+# On Linux the system may ship several llvm-N toolchains, only some of which
+# include the MLIR development package (libmlir-N-dev). CMake's default search
+# can pick an llvm without MLIR (e.g. llvm-18 here), so find_package(MLIR)
+# fails. We auto-detect the newest /usr/lib/llvm-N that actually provides an
+# MLIRConfig.cmake and pin LLVM_DIR/MLIR_DIR to it. Override by exporting
+# LLVM_DIR and MLIR_DIR yourself. macOS falls through to the Homebrew branch
+# in CMakeLists.txt.
 configure:
-    cmake -S . -B {{BUILD_DIR}} -G Ninja
+    #!/usr/bin/env bash
+    set -euo pipefail
+    args=()
+    if [ -n "${MLIR_DIR:-}" ]; then
+        args+=("-DLLVM_DIR=${LLVM_DIR:?set LLVM_DIR alongside MLIR_DIR}" "-DMLIR_DIR=${MLIR_DIR}")
+    elif [ "$(uname -s)" = "Linux" ]; then
+        mlir_cmake=""
+        for d in $(ls -d /usr/lib/llvm-*/lib/cmake/mlir 2>/dev/null | sort -V -r); do
+            if [ -f "$d/MLIRConfig.cmake" ]; then mlir_cmake="$d"; break; fi
+        done
+        if [ -n "$mlir_cmake" ]; then
+            args+=("-DLLVM_DIR=$(dirname "$mlir_cmake")/llvm" "-DMLIR_DIR=$mlir_cmake")
+        fi
+        # Build with clang when available: gcc rejects a few constructs in the
+        # codebase (e.g. -Wchanges-meaning) that clang accepts. Honour an
+        # explicit CC/CXX if the user set one.
+        if [ -z "${CXX:-}" ] && command -v clang >/dev/null && command -v clang++ >/dev/null; then
+            args+=("-DCMAKE_C_COMPILER=clang" "-DCMAKE_CXX_COMPILER=clang++")
+        fi
+    fi
+    cmake -S . -B {{BUILD_DIR}} -G Ninja "${args[@]}"
 
 # Fast build. Implicitly re-runs CMake if needed.
 build: configure
