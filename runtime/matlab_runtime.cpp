@@ -3260,6 +3260,22 @@ void matlab_toc_print(void) {
     pthread_mutex_unlock(&matlab_io_mutex);
 }
 
+void matlab_cd(const char *path, int64_t len) {
+    if (!path || len <= 0) return;
+    std::string p(path, (size_t)len);
+    if (chdir(p.c_str()) != 0) {
+        /* MATLAB-style diagnostic; leave the cwd as-is on failure. */
+        pthread_mutex_lock(&matlab_io_mutex);
+        fprintf(stderr, "cd: %s: %s\n", p.c_str(), strerror(errno));
+        pthread_mutex_unlock(&matlab_io_mutex);
+    }
+}
+
+void matlab_cd_home(void) {
+    const char *home = getenv("HOME");
+    if (home && *home) matlab_cd(home, (int64_t)strlen(home));
+}
+
 /*---------- Predicates ---------------------------------------------------*/
 
 double matlab_isempty(matlab_mat *A) {
@@ -13455,6 +13471,16 @@ matlab_string *matlab_string_from_literal(const char *src, int64_t len) {
     s->data[s->len] = '\0';
     matlab_string_registry_add(s);
     return s;
+}
+
+/* pwd: the current working directory as a MATLAB string. In the in-process
+ * JIT/REPL this reflects any prior `cd`, so it reports the folder that
+ * current-folder function resolution is using. */
+void *matlab_pwd(void) {
+    char buf[4096];
+    if (getcwd(buf, sizeof(buf)))
+        return matlab_string_from_literal(buf, (int64_t)strlen(buf));
+    return matlab_string_from_literal("", 0);
 }
 
 /* char(code): build a 1-char string from a numeric code point. char([codes]):

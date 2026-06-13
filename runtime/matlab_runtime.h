@@ -61,6 +61,21 @@ void   matlab_tic(void);
 double matlab_toc(void);
 void   matlab_toc_print(void);
 
+/* Working directory (MATLAB `cd`).
+ *   matlab_cd(path, len)  — chdir to `path` (a const-char buffer + length).
+ *                           Prints a MATLAB-style error to stderr on failure
+ *                           and otherwise leaves the cwd unchanged. Backs the
+ *                           command form `cd /dir` / `cd ..` and the call form
+ *                           `cd('/dir')`.
+ *   matlab_cd_home()      — chdir to $HOME (the bare `cd` statement). No-op
+ *                           if $HOME is unset.
+ * The JIT/REPL runs in-process, so the chdir persists across REPL turns and
+ * is what makes current-folder function resolution follow `cd`. */
+void   matlab_cd(const char *path, int64_t len);
+void   matlab_cd_home(void);
+/* pwd — current working directory as a matlab_string* (returned opaque). */
+void  *matlab_pwd(void);
+
 // Parallel / reductions.
 void matlab_parfor_dispatch(double start, double step, double end,
                             matlab_parfor_body_t body, void *state);

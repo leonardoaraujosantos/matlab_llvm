@@ -546,6 +546,48 @@ EOF
 )" absent "99"
 rm -rf "$cfdir"
 
+# cd / pwd (interpreter working directory). Build a parent dir with two child
+# folders, each holding a function file, and drive the REPL from the parent:
+# cd into a child, call its function, and read the cwd back with pwd. Exercises
+# the call form cd('dir'), command forms `cd dir` / `cd ..`, and pwd.
+cdroot="$(mktemp -d)"
+mkdir -p "$cdroot/alpha" "$cdroot/beta"
+cat > "$cdroot/alpha/ga.m" <<'EOF'
+function y = ga(x)
+  y = x + 1000;
+end
+EOF
+cat > "$cdroot/beta/gb.m" <<'EOF'
+function y = gb(x)
+  y = x + 2000;
+end
+EOF
+# cd('dir') call form, then call a function from that folder.
+run_case_dir "$cdroot" "cd_call_form" "$(cat <<EOF
+cd('$cdroot/alpha')
+disp(ga(1))
+exit
+EOF
+)" want "1001"
+# cd dir command form + cd .. to switch folders mid-session.
+run_case_dir "$cdroot" "cd_command_and_dotdot" "$(cat <<EOF
+cd alpha
+disp(ga(2))
+cd ..
+cd beta
+disp(gb(2))
+exit
+EOF
+)" want "2002"
+# pwd reflects a prior cd.
+run_case_dir "$cdroot" "pwd_reflects_cd" "$(cat <<EOF
+cd('$cdroot/beta')
+disp(pwd)
+exit
+EOF
+)" want "$cdroot/beta"
+rm -rf "$cdroot"
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 if (( fail > 0 )); then

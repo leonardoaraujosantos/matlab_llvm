@@ -1875,6 +1875,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
          Name == "matlab_ws_clear" ||
          Name == "matlab_dbg_keyboard_hook" ||
          Name == "matlab_tic" || Name == "matlab_toc_print" ||
+         Name == "matlab_cd_home" ||
          Name == "matlab_pause_keypress") &&
         Call->getNumOperands() == 0) {
       B.setInsertionPoint(Call);
@@ -1921,6 +1922,39 @@ bool TensorLowering::rewriteBuiltinCalls() {
       auto Fn = rt("matlab_ws_clear_one", VoidTy, {PtrTy, I64});
       LLVM::CallOp::create(B, Call->getLoc(), Fn,
                             ValueRange{Ptr, LenV});
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    /* matlab_cd(path) — one const-char operand, no result. Materialise the
+     * (ptr, len) pair from the const_char and call chdir-backed runtime.
+     * Same shape as matlab_ws_clear_one above. */
+    if (Name == "matlab_cd" && Call->getNumOperands() == 1) {
+      Value PathV = Call->getOperand(0);
+      int64_t Len = 0;
+      Value Ptr = fieldNameAddr(PathV, Len);
+      if (!Ptr) continue;
+      B.setInsertionPoint(Call);
+      Value LenV = LLVM::ConstantOp::create(
+          B, Call->getLoc(), I64, B.getI64IntegerAttr(Len));
+      auto Fn = rt("matlab_cd", VoidTy, {PtrTy, I64});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{Ptr, LenV});
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    /* pwd — zero operands, returns the cwd as a matlab_string* (ptr). The
+     * frontend emits call_builtin @pwd from both the bare-name value path
+     * and the pwd() call form. */
+    if (Name == "pwd" && Call->getNumOperands() == 0 &&
+        Call->getNumResults() == 1) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_pwd", PtrTy, {});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{});
+      if (Call->getResult(0).getType() != PtrTy)
+        Call->getResult(0).setType(PtrTy);
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase();
       Changed = true;
       continue;

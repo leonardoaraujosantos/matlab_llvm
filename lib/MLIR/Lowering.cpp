@@ -827,7 +827,9 @@ bool Lowerer::isStringReturningBuiltin(llvm::StringRef N) {
          N == "multialign" || N == "profalign" || N == "seqconsensus" ||
          N == "getnewickstr" || N == "matlab_bioinfo_phytree_newick" ||
          /* Phase C — aminolookup / cleave / restrict return char strings. */
-         N == "aminolookup" || N == "cleave" || N == "restrict";
+         N == "aminolookup" || N == "cleave" || N == "restrict" ||
+         /* pwd returns the current directory as a char string. */
+         N == "pwd";
 }
 
 llvm::StringRef Lowerer::intDtypeSuffixOfType(const Type *T) {
@@ -851,7 +853,10 @@ bool Lowerer::isStringExpr(const Expr *E) const {
   if (!E) return false;
   if (E->Kind == NodeKind::StringLiteral) return true;
   if (auto *N = dynamic_cast<const NameExpr *>(E))
-    return N->Ref && StringBindings.count(N->Ref) > 0;
+    return (N->Ref && StringBindings.count(N->Ref) > 0) ||
+           /* bare `pwd` reads as a char string (it has no parens, so it
+            * never reaches the CallOrIndex branch below). */
+           (N->Ref && N->Ref->Kind == BindingKind::Builtin && N->Name == "pwd");
   /* A char/string-valued struct field (#79.2: `s.name='hello'`). */
   if (auto *F = dynamic_cast<const FieldAccess *>(E))
     if (auto *BN = dynamic_cast<const NameExpr *>(F->Base))
@@ -1806,6 +1811,7 @@ mlir::Value Lowerer::loadBinding(Binding *Bnd, const Type *ValTy,
     if (Bnd->Name == "toc") RetTy = F64;
     else if (Bnd->Name == "gpuDeviceCount") RetTy = F64;
     else if (Bnd->Name == "gpuDevice") RetTy = PtrTy;
+    else if (Bnd->Name == "pwd") RetTy = PtrTy;  /* matlab_string* */
     if (RetTy) {
       mlir::NamedAttribute Cal(
           mlir::StringAttr::get(&MCtx, "callee"),
@@ -2543,6 +2549,10 @@ void Lowerer::lowerStmt(const Stmt &St) {
         else if (NE->Name == "tic")   RN = "matlab_tic";
         else if (NE->Name == "toc")   RN = "matlab_toc_print";
         else if (NE->Name == "pause") RN = "matlab_pause_keypress";
+        /* Bare `cd` with no argument → change to $HOME, matching the
+         * common interactive shortcut. `cd <dir>` is a CommandStmt and
+         * `cd('dir')` a call — both handled separately. */
+        else if (NE->Name == "cd")    RN = "matlab_cd_home";
         if (!RN.empty()) {
           mlir::NamedAttribute Cal(
               mlir::StringAttr::get(&MCtx, "callee"),
@@ -4684,6 +4694,29 @@ void Lowerer::lowerStmt(const Stmt &St) {
                         {mlir::NoneType::get(&MCtx)}, loc(C.Range), {WCal});
           }
         }
+      }
+      return;
+    }
+
+    /* `cd <dir>` / `cd ..` command syntax — chdir the interpreter process.
+     * The parser collects the (possibly space-free) path as a single bare
+     * word argument. In the in-process JIT/REPL the chdir persists across
+     * turns, so current-folder function resolution follows it. A bare `cd`
+     * (no args) is parsed as an expression statement and handled there. */
+    if (C.Name == "cd") {
+      if (!C.Args.empty()) {
+        mlir::Value PathV = emitFieldNameChar(C.Args[0], loc(C.Range));
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_cd"));
+        emitUnregOp("matlab.call_builtin", {PathV},
+                    {mlir::NoneType::get(&MCtx)}, loc(C.Range), {Cal});
+      } else {
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_cd_home"));
+        emitUnregOp("matlab.call_builtin", {},
+                    {mlir::NoneType::get(&MCtx)}, loc(C.Range), {Cal});
       }
       return;
     }
@@ -12674,6 +12707,17 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         return emitUnreg("matlab.call_builtin", {},
                          mlir::NoneType::get(&MCtx), L, {Cal});
       }
+      /* pwd() — current directory as a matlab_string* (ptr). The bare-name
+       * `pwd` form is lowered in the NameExpr value path; both emit
+       * call_builtin @pwd, dispatched to matlab_pwd in LowerTensorOps. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "pwd" && C.Args.empty()) {
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "pwd"));
+        return emitUnreg("matlab.call_builtin", {}, PtrTy, L, {Cal});
+      }
       /* keyboard() — call form drops into the debugger pause same as the
        * bare `keyboard` statement. No-op in release (-g not set). */
       if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
@@ -12749,6 +12793,41 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         }
         return emitUnreg("matlab.undef", {},
                          mlir::NoneType::get(&MCtx), L);
+      }
+      /* cd('dir') / cd("dir") — call form of the change-directory command.
+       * A literal path routes to matlab_cd (chdir, in-process so it persists
+       * across REPL turns). Mirrors `clear`'s literal-arg posture: a
+       * non-literal argument (e.g. cd(pathVar)) is not yet supported. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "cd") {
+        /* Return the call_builtin's result directly (NoneType) rather than a
+         * trailing matlab.undef — a dangling undef survives the lowering
+         * passes and fails LLVM translation. */
+        if (C.Args.empty()) {
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_cd_home"));
+          return emitUnreg("matlab.call_builtin", {},
+                           mlir::NoneType::get(&MCtx), L, {Cal});
+        }
+        if (C.Args.size() == 1) {
+          std::string Path;
+          if (auto *Lit = dynamic_cast<const StringLiteral *>(C.Args[0]))
+            Path = Lit->Value;
+          else if (auto *Lit = dynamic_cast<const CharLiteral *>(C.Args[0]))
+            Path = Lit->Value;
+          if (!Path.empty()) {
+            mlir::Value PathV = emitFieldNameChar(Path, L);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_cd"));
+            return emitUnreg("matlab.call_builtin", {PathV},
+                             mlir::NoneType::get(&MCtx), L, {Cal});
+          }
+        }
+        /* Non-literal / multi-arg cd (e.g. cd(pathVar)) is not yet
+         * supported — fall through to the generic path so it reports an
+         * unsupported shape instead of silently changing directory. */
       }
       /* #147: isequal on two STRING operands. matlab_isequal takes two
        * matlab_mat* and reads rows/cols/data, but a matlab_string has a
