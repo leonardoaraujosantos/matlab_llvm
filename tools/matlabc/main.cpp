@@ -835,7 +835,8 @@ static std::map<std::string, std::string> g_ReplUserFunctions;
  * Returns the combined prelude text (possibly empty).  REPL caller
  * prepends this to the user input before lexing — adds the
  * `classdef` blocks to the same TU so Sema sees the class names. */
-static std::string buildReplPrelude(const std::string &Src);
+static std::string buildReplPrelude(const std::string &Src,
+                                    bool ScanCwd = false);
 
 #ifdef MATLAB_LLVM_WITH_PLOT
 /* IDE integration (Matlab_llvm_ide): defined in runtime/plot/c_api.cpp.
@@ -1150,7 +1151,7 @@ int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id,
    * top-level statements with classdef blocks in that order, and the
    * static-input path uses the same shape (see the loader around
    * `Combined += "\n"; ... PreludePaths`). */
-  std::string Prelude = buildReplPrelude(Src);
+  std::string Prelude = buildReplPrelude(Src, /*ScanCwd=*/true);
   std::string Combined = Prelude.empty() ? Src : Src + "\n" + Prelude;
   SourceManager SM;
   FileID F = SM.addBuffer("<repl:" + std::to_string(Id) + ">", Combined);
@@ -2389,7 +2390,7 @@ extern "C" int replWorkspaceHandleSigHook(const char *name, int64_t len) {
  * here next to replWorkspaceKindHook because both consume
  * `g_MatlabcBinDir` (set in main()) and share the per-class scanning
  * idiom with the static-input prelude wiring. */
-static std::string buildReplPrelude(const std::string &Src) {
+static std::string buildReplPrelude(const std::string &Src, bool ScanCwd) {
   if (g_MatlabcBinDir.empty()) return std::string();
   /* Comment-strip pass — drop everything from `%` to end-of-line so a
    * comment line like `% tf is short for transfer function` doesn't
@@ -3059,7 +3060,8 @@ static std::string buildReplPrelude(const std::string &Src) {
       if (CN == W.Name) { W.active = true; break; }
   }
 
-  for (auto &W : Cls) if (W.active) add(W.File);
+  std::set<std::string> ActiveWant;
+  for (auto &W : Cls) if (W.active) { add(W.File); ActiveWant.insert(W.Name); }
   std::string Out;
   for (auto &P : Files) {
     std::ifstream In(P);
@@ -3113,50 +3115,119 @@ static std::string buildReplPrelude(const std::string &Src) {
       I = Open + 1;
     }
   }
-  std::set<std::string> Wanted;
-  for (auto &P : g_ReplUserFunctions) {
-    if (RedefinedHere.count(P.first)) continue;
-    if (mentions(P.first.c_str())) Wanted.insert(P.first);
+  /* Current-folder functions (#284). MATLAB makes every `.m` file in the
+   * working directory callable by name. Enumerate `./*.m` so a mentioned
+   * basename can be injected exactly like a stashed user function. Only the
+   * file *names* are collected here; contents are read lazily (in bodyOf)
+   * so a turn that mentions nothing pays one cheap directory scan and no
+   * file reads. Precedence: a same-turn redefinition, a session-defined
+   * function (g_ReplUserFunctions), and an active toolbox class all win over
+   * an on-disk file of the same name.
+   *
+   * Gated on ScanCwd: only the REPL opts in. The `-dap` launch path merges
+   * sibling `.m` files itself (see runDapLaunch), so scanning here too would
+   * double-define a mentioned sibling and trip the verifier. */
+  std::map<std::string, std::string> CwdPaths;  // name -> path
+  if (ScanCwd) {
+    if (DIR *D = opendir(".")) {
+      while (struct dirent *E = readdir(D)) {
+        std::string FN = E->d_name;
+        if (FN.size() < 3 || FN.compare(FN.size() - 2, 2, ".m") != 0) continue;
+        std::string Name = FN.substr(0, FN.size() - 2);
+        if (Name.empty()) continue;
+        if (g_ReplUserFunctions.count(Name)) continue;  // session def wins
+        if (RedefinedHere.count(Name)) continue;
+        if (ActiveWant.count(Name)) continue;           // toolbox class wins
+        CwdPaths[Name] = FN;
+      }
+      closedir(D);
+    }
   }
+  /* Lazy body provider: session function source, else the contents of a
+   * current-folder function file (cached). Returns "" for a cwd file that
+   * is not a function file (first non-comment token isn't `function`) — a
+   * script isn't callable by name, so it must not be injected. */
+  std::map<std::string, std::string> CwdBodyCache;
+  auto isFunctionFile = [](const std::string &Body) -> bool {
+    size_t I = 0;
+    while (I < Body.size()) {
+      while (I < Body.size() && std::isspace((unsigned char)Body[I])) I++;
+      if (I < Body.size() && Body[I] == '%') {        // skip comment line
+        while (I < Body.size() && Body[I] != '\n') I++;
+        continue;
+      }
+      break;
+    }
+    return Body.compare(I, 8, "function") == 0 &&
+           (I + 8 >= Body.size() ||
+            std::isspace((unsigned char)Body[I + 8]) || Body[I + 8] == '[');
+  };
+  auto bodyOf = [&](const std::string &Name) -> const std::string & {
+    static const std::string Empty;
+    auto U = g_ReplUserFunctions.find(Name);
+    if (U != g_ReplUserFunctions.end()) return U->second;
+    auto C = CwdBodyCache.find(Name);
+    if (C != CwdBodyCache.end()) return C->second;
+    auto P = CwdPaths.find(Name);
+    if (P == CwdPaths.end()) return Empty;
+    std::ifstream In(P->second);
+    std::string &Slot = CwdBodyCache[Name];
+    if (In) {
+      std::ostringstream Buf;
+      Buf << In.rdbuf();
+      std::string Contents = Buf.str();
+      if (isFunctionFile(Contents)) Slot = std::move(Contents);
+    }
+    return Slot;
+  };
+  /* Candidate universe = session functions ∪ current-folder files. */
+  std::set<std::string> Candidates;
+  for (auto &P : g_ReplUserFunctions)
+    if (!RedefinedHere.count(P.first)) Candidates.insert(P.first);
+  for (auto &P : CwdPaths) Candidates.insert(P.first);
+
+  std::set<std::string> Wanted;
+  for (auto &Name : Candidates)
+    if (mentions(Name.c_str())) Wanted.insert(Name);
+  auto scanBody = [&](const std::string &Body, const std::string &Name) {
+    size_t NL = Name.size();
+    size_t Pos = 0;
+    while ((Pos = Body.find(Name, Pos)) != std::string::npos) {
+      bool LeftWord = (Pos > 0) && (std::isalnum((unsigned char)Body[Pos-1]) ||
+                                      Body[Pos-1] == '_');
+      if (!LeftWord && Pos + NL < Body.size()) {
+        size_t Q = Pos + NL;
+        while (Q < Body.size() && (Body[Q] == ' ' || Body[Q] == '\t')) Q++;
+        if (Q < Body.size() && Body[Q] == '(') return true;
+      }
+      Pos += NL;
+    }
+    return false;
+  };
   bool Grew = true;
   while (Grew) {
     Grew = false;
-    for (auto &P : g_ReplUserFunctions) {
-      if (Wanted.count(P.first)) continue;
-      /* Scan every already-wanted function's body for mentions. */
+    for (auto &Name : Candidates) {
+      if (Wanted.count(Name)) continue;
+      /* Scan every already-wanted function's body for mentions, since one
+       * function (session or cwd) may call another. */
       bool Hit = false;
-      auto scanBody = [&](const std::string &Body, const std::string &Name) {
-        size_t NL = Name.size();
-        size_t Pos = 0;
-        while ((Pos = Body.find(Name, Pos)) != std::string::npos) {
-          bool LeftWord = (Pos > 0) && (std::isalnum((unsigned char)Body[Pos-1]) ||
-                                          Body[Pos-1] == '_');
-          if (!LeftWord && Pos + NL < Body.size()) {
-            size_t Q = Pos + NL;
-            while (Q < Body.size() && (Body[Q] == ' ' || Body[Q] == '\t')) Q++;
-            if (Q < Body.size() && Body[Q] == '(') return true;
-          }
-          Pos += NL;
-        }
-        return false;
-      };
       for (auto &W : Wanted) {
-        auto It = g_ReplUserFunctions.find(W);
-        if (It == g_ReplUserFunctions.end()) continue;
-        if (scanBody(It->second, P.first)) { Hit = true; break; }
+        const std::string &B = bodyOf(W);
+        if (!B.empty() && scanBody(B, Name)) { Hit = true; break; }
       }
-      if (Hit) { Wanted.insert(P.first); Grew = true; }
+      if (Hit) { Wanted.insert(Name); Grew = true; }
     }
   }
   for (auto &Name : Wanted) {
-    auto It = g_ReplUserFunctions.find(Name);
-    if (It == g_ReplUserFunctions.end()) continue;
+    const std::string &B = bodyOf(Name);
+    if (B.empty()) continue;  // not a function file / unreadable
     if (!Out.empty()) Out += '\n';
     Out += "% --- repl-user-fn ";
     Out += Name;
     Out += " ---\n";
-    Out += It->second;
-    if (!It->second.empty() && It->second.back() != '\n') Out += '\n';
+    Out += B;
+    if (B.back() != '\n') Out += '\n';
   }
   if (Out.empty()) return std::string();
   return Out;

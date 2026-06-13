@@ -60,6 +60,31 @@ run_case_absent() {
   fi
 }
 
+# Like run_case, but launches the REPL from <dir> so current-folder `.m`
+# function files are in scope (issue #284). MODE "want"/"absent" selects
+# whether the substring must be present or must NOT appear.
+run_case_dir() {
+  local dir="$1" name="$2" input="$3" mode="$4" sub="$5"
+  local got
+  got="$(cd "$dir" && printf '%s\n' "$input" | "$MATLABC" -repl 2>&1)"
+  local ok=1
+  if [[ "$mode" == "absent" ]]; then
+    grep -qF "$sub" <<<"$got" && ok=0
+  else
+    grep -qF "$sub" <<<"$got" || ok=0
+  fi
+  if (( ok )); then
+    pass=$((pass+1))
+  else
+    fail=$((fail+1))
+    fails+=("$name (substring '$sub' ${mode}-check failed)")
+    echo "FAIL  $name"
+    echo "----- got -----"; echo "$got"
+    echo "----- ${mode} substring -----"; echo "$sub"
+    echo "---------------"
+  fi
+}
+
 # 1. Cross-turn user function: define in one block, call in another.
 run_case "cross_turn_user_fn" "$(cat <<'EOF'
 function y = double_it(x)
@@ -480,6 +505,107 @@ EOF
 # "RMS = 0.0" substring distinguishes the fixed result from the broken 1.8991.
 QUAD_240="$(cd "$(dirname "$0")/../.." && pwd)/examples/quadrotor/quadrotor_pid_mpc.m"
 run_case "mpcmove_preview_matrix_repl_240" "$(cat "$QUAD_240"; printf '\nexit\n')" "RMS = 0.0"
+
+# Current-folder function files (#284). MATLAB makes every `.m` file in the
+# working directory callable by name. Launch the REPL from a scratch dir
+# holding add_two.m (function) + outer.m (which calls add_two), plus a plain
+# script that must NOT become callable.
+cfdir="$(mktemp -d)"
+cat > "$cfdir/add_two.m" <<'EOF'
+function y = add_two(x)
+  y = x + 2;
+end
+EOF
+cat > "$cfdir/outer.m" <<'EOF'
+function y = outer(x)
+  y = add_two(x) * 10;
+end
+EOF
+cat > "$cfdir/plain_script.m" <<'EOF'
+z = 99;
+disp(z)
+EOF
+# Direct call into a current-folder function.
+run_case_dir "$cfdir" "cwd_fn_direct" "$(cat <<'EOF'
+disp(add_two(40))
+exit
+EOF
+)" want "42"
+# Transitive: a cwd function calling another cwd function.
+run_case_dir "$cfdir" "cwd_fn_transitive" "$(cat <<'EOF'
+disp(outer(4))
+exit
+EOF
+)" want "60"
+# A plain script file is not a function and must not be injected/run as one —
+# calling it must not execute its body (no "99").
+run_case_dir "$cfdir" "cwd_script_not_callable" "$(cat <<'EOF'
+plain_script(1);
+exit
+EOF
+)" absent "99"
+rm -rf "$cfdir"
+
+# cd / pwd (interpreter working directory). Build a parent dir with two child
+# folders, each holding a function file, and drive the REPL from the parent:
+# cd into a child, call its function, and read the cwd back with pwd. Exercises
+# the call form cd('dir'), command forms `cd dir` / `cd ..`, and pwd.
+cdroot="$(mktemp -d)"
+mkdir -p "$cdroot/alpha" "$cdroot/beta"
+cat > "$cdroot/alpha/ga.m" <<'EOF'
+function y = ga(x)
+  y = x + 1000;
+end
+EOF
+cat > "$cdroot/beta/gb.m" <<'EOF'
+function y = gb(x)
+  y = x + 2000;
+end
+EOF
+# cd('dir') call form, then call a function from that folder.
+run_case_dir "$cdroot" "cd_call_form" "$(cat <<EOF
+cd('$cdroot/alpha')
+disp(ga(1))
+exit
+EOF
+)" want "1001"
+# cd dir command form + cd .. to switch folders mid-session.
+run_case_dir "$cdroot" "cd_command_and_dotdot" "$(cat <<EOF
+cd alpha
+disp(ga(2))
+cd ..
+cd beta
+disp(gb(2))
+exit
+EOF
+)" want "2002"
+# pwd reflects a prior cd.
+run_case_dir "$cdroot" "pwd_reflects_cd" "$(cat <<EOF
+cd('$cdroot/beta')
+disp(pwd)
+exit
+EOF
+)" want "$cdroot/beta"
+# Dynamic cd(pathVar): a path held in a (cross-turn) variable, then call a
+# function from the folder it selects.
+run_case_dir "$cdroot" "cd_dynamic_var" "$(cat <<EOF
+p = '$cdroot/alpha';
+cd(p)
+disp(ga(3))
+exit
+EOF
+)" want "1003"
+# pwd round-trip: remember the cwd, cd elsewhere, cd back via the variable.
+run_case_dir "$cdroot/alpha" "cd_pwd_roundtrip" "$(cat <<EOF
+home = pwd;
+cd('$cdroot/beta')
+disp(gb(3))
+cd(home)
+disp(ga(3))
+exit
+EOF
+)" want "1003"
+rm -rf "$cdroot"
 
 echo "----"
 echo "passed: $pass    failed: $fail"

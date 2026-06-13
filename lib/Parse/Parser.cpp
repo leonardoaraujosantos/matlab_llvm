@@ -735,6 +735,14 @@ static bool couldStartCommandArg(const Token &T) {
   }
 }
 
+// Commands whose unquoted argument is a filesystem path. For these we accept
+// path-leading tokens (`.`, `/`, `\`, `~`) that couldStartCommandArg rejects,
+// and join no-space-adjacent tokens into a single argument so `cd /a/b` and
+// `cd ..` survive as one path rather than being split or misread as division.
+static bool isPathCommand(std::string_view Name) {
+  return Name == "cd";
+}
+
 CommandStmt *Parser::tryParseCommand() {
   if (!at(TokenKind::identifier)) return nullptr;
   if (!cur().StartsStmt) return nullptr;
@@ -744,7 +752,16 @@ CommandStmt *Parser::tryParseCommand() {
 
   const Token &Next = peek(1);
   if (!Next.LeadingSpace) return nullptr;
-  if (!couldStartCommandArg(Next)) return nullptr;
+  const bool PathCmd = isPathCommand(Name);
+  // Path commands (`cd`) accept any argument start except `=` (assignment)
+  // and a statement terminator; other commands keep the conservative set.
+  if (PathCmd) {
+    if (Next.isOneOf({TokenKind::equal, TokenKind::semi, TokenKind::comma,
+                      TokenKind::newline, TokenKind::eof}))
+      return nullptr;
+  } else if (!couldStartCommandArg(Next)) {
+    return nullptr;
+  }
 
   // Heuristic: if the next token is an identifier followed by `=` (likely
   // an assignment like `x = 1`), not a command. The peek is "ident SPACE ident"
@@ -765,18 +782,25 @@ CommandStmt *Parser::tryParseCommand() {
   ++Idx; // consume command name
 
   // Collect bare-word / literal arguments until statement terminator.
+  auto tokenText = [&](const Token &T) -> std::string {
+    if (T.is(TokenKind::string_literal)) return unescapeDoubleQuoted(T.Text);
+    if (T.is(TokenKind::char_literal)) return unescapeSingleQuoted(T.Text);
+    return std::string(T.Text);
+  };
   while (!isStatementTerminator()) {
-    const Token &T = cur();
-    std::string Arg;
-    if (T.is(TokenKind::string_literal)) {
-      Arg = unescapeDoubleQuoted(T.Text);
-    } else if (T.is(TokenKind::char_literal)) {
-      Arg = unescapeSingleQuoted(T.Text);
-    } else {
-      Arg = std::string(T.Text);
+    std::string Arg = tokenText(cur());
+    ++Idx;
+    // Path commands: a filesystem path lexes as several tokens with no
+    // intervening space (`/`, `tmp`, `/`, `dir` → `/tmp/dir`; `.`, `.` →
+    // `..`). Glue tokens that abut the previous one into a single argument;
+    // a leading space starts a new argument.
+    if (PathCmd) {
+      while (!isStatementTerminator() && !cur().LeadingSpace) {
+        Arg += tokenText(cur());
+        ++Idx;
+      }
     }
     Cmd->Args.push_back(std::move(Arg));
-    ++Idx;
   }
   Cmd->Suppressed = at(TokenKind::semi);
   Cmd->Range.End = cur().Loc;
