@@ -123,6 +123,76 @@ exit
 EOF
 )" "20"
 
+# 3a. #290 — multi-line control blocks entered across several input lines.
+#     The REPL accumulates lines until block/bracket depth returns to 0 (and
+#     past a trailing `...` continuation), then compiles+runs the whole block
+#     as one unit. These lock that behavior for for/if/while/switch/try, a
+#     nested block, a multi-line function def + call, and a `...` continuation.
+run_case "multiline_for_block" "$(cat <<'EOF'
+for i = 1:3
+  disp(i)
+end
+exit
+EOF
+)" "3"
+run_case "multiline_if_else_block" "$(cat <<'EOF'
+x = 5;
+if x > 3
+  disp('big')
+else
+  disp('small')
+end
+exit
+EOF
+)" "big"
+run_case "multiline_while_block" "$(cat <<'EOF'
+k = 0;
+while k < 3
+  k = k + 1;
+end
+disp(k)
+exit
+EOF
+)" "3"
+run_case "multiline_switch_block" "$(cat <<'EOF'
+x = 2;
+switch x
+  case 1
+    disp('one')
+  case 2
+    disp('two')
+end
+exit
+EOF
+)" "two"
+run_case "multiline_try_catch_block" "$(cat <<'EOF'
+try
+  error('boom')
+catch e
+  disp('caught')
+end
+exit
+EOF
+)" "caught"
+run_case "multiline_nested_blocks" "$(cat <<'EOF'
+for i = 1:2
+  for j = 1:2
+    if i == j
+      disp(i*10 + j)
+    end
+  end
+end
+exit
+EOF
+)" "22"
+run_case "multiline_line_continuation" "$(cat <<'EOF'
+v = [1 2 ...
+3 4];
+disp(sum(v))
+exit
+EOF
+)" "10"
+
 # 3b. #286 — a bare, non-suppressed user-function call auto-displays its
 #     result as `ans = <value>` (it previously ran but printed nothing, while
 #     builtins displayed). Covers cross-turn scalar, the matrix-returning
