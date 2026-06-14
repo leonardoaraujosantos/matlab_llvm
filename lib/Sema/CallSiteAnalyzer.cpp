@@ -39,7 +39,8 @@ namespace {
 // (Caller == Callee) from external ones.
 class Walker {
 public:
-  explicit Walker(const UserCallActionWithCaller &Action) : Action(Action) {}
+  explicit Walker(const UserCallActionWithCaller &Action) : Action(&Action) {}
+  explicit Walker(const ClassCallAction &CA) : ClassAct(&CA) {}
 
   void visit(Function &F) {
     Function *Saved = CurrentFn;
@@ -197,15 +198,49 @@ private:
   // Filter and dispatch to the action.
   void visitCall(CallOrIndex &C) {
     if (C.Resolved != CallKind::Call) return;
-    auto *N = dynamic_cast<NameExpr *>(C.Callee);
-    if (!N || !N->Ref) return;
-    if (N->Ref->Kind != BindingKind::Function) return;
-    Function *F = N->Ref->FuncDef;
-    if (!F) return;
-    Action(CurrentFn, C, *N, *F);
+    if (Action) {
+      if (auto *N = dynamic_cast<NameExpr *>(C.Callee))
+        if (N->Ref && N->Ref->Kind == BindingKind::Function && N->Ref->FuncDef)
+          (*Action)(CurrentFn, C, *N, *N->Ref->FuncDef);
+    }
+    if (ClassAct) visitClassCall(C);
   }
 
-  const UserCallActionWithCaller &Action;
+  // #191 P5 — surface class constructor / instance-method dispatch.
+  void visitClassCall(CallOrIndex &C) {
+    // Constructor: `ClassName(args)` — a NameExpr callee bound to a class.
+    if (auto *N = dynamic_cast<NameExpr *>(C.Callee)) {
+      if (N->Ref && N->Ref->Kind == BindingKind::Class && N->Ref->ClassDef)
+        (*ClassAct)(CurrentFn, C, *N->Ref->ClassDef, N->Ref->ClassDef->Name);
+      return;
+    }
+    // Instance method: `obj.method(args)` — a FieldAccess callee whose base
+    // resolves to a class (an object<Class> type, or a PinnedClass binding),
+    // and where some class up the Super chain defines that method.
+    if (auto *FA = dynamic_cast<FieldAccess *>(C.Callee)) {
+      const ClassDef *Recv = recvClassOf(FA->Base);
+      if (Recv && chainHasMethod(Recv, FA->Field))
+        (*ClassAct)(CurrentFn, C, *Recv, FA->Field);
+    }
+  }
+
+  static const ClassDef *recvClassOf(const Expr *Base) {
+    if (!Base) return nullptr;
+    if (auto *N = dynamic_cast<const NameExpr *>(Base))
+      if (N->Ref && N->Ref->PinnedClass) return N->Ref->PinnedClass;
+    if (Base->Ty && Base->Ty->K == Type::Kind::Object)
+      return static_cast<const ObjectType &>(*Base->Ty).Class;
+    return nullptr;
+  }
+  static bool chainHasMethod(const ClassDef *CD, std::string_view Name) {
+    for (const ClassDef *CC = CD; CC; CC = CC->Super)
+      for (const Function *M : CC->Methods)
+        if (M && M->Name == Name) return true;
+    return false;
+  }
+
+  const UserCallActionWithCaller *Action = nullptr;
+  const ClassCallAction *ClassAct = nullptr;
   Function *CurrentFn = nullptr;
 };
 
@@ -213,6 +248,16 @@ private:
 
 void walkUserCallsWithCaller(TranslationUnit &TU,
                              const UserCallActionWithCaller &Action) {
+  Walker W(Action);
+  if (TU.ScriptNode) W.visit(*TU.ScriptNode);
+  for (Function *F : TU.Functions)
+    if (F) W.visit(*F);
+  for (ClassDef *C : TU.Classes)
+    if (C) W.visit(*C);
+}
+
+void walkClassCallsWithCaller(TranslationUnit &TU,
+                              const ClassCallAction &Action) {
   Walker W(Action);
   if (TU.ScriptNode) W.visit(*TU.ScriptNode);
   for (Function *F : TU.Functions)

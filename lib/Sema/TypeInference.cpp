@@ -1252,6 +1252,10 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
   ArgTys.reserve(Args.size());
   for (Expr *A : Args) ArgTys.push_back(A ? visit(*A, Env) : TC.any());
 
+  // #233: strsplit(s[, delim]) -> a cell of string tokens.
+  if (Name == "strsplit")
+    return TC.cellOf(TC.stringScalar());
+
   auto constructorOf = [&](Dtype D) -> const Type * {
     // zeros/ones/eye/rand/randn(n)    -> n x n  (except zeros() = scalar)
     // zeros/ones(m, n)                -> m x n
@@ -1589,7 +1593,11 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
   }
 
   if (Name == "abs" || Name == "sqrt" || Name == "exp" ||
-      Name == "log" || Name == "sin"  || Name == "cos" || Name == "tan" ||
+      Name == "log" || Name == "log10" || Name == "log2" ||
+      Name == "sin"  || Name == "cos" || Name == "tan" ||
+      Name == "sinh" || Name == "cosh" || Name == "tanh" ||
+      /* sign — element-wise, real result (drops to floating like the rest). */
+      Name == "sign" ||
       /* Degree-argument trigonometry — element-wise like sin/cos. */
       Name == "sind"  || Name == "cosd"  || Name == "tand" ||
       Name == "asind" || Name == "acosd" || Name == "atand") {
@@ -1648,6 +1656,19 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
       return TC.arrayOf(A.Elt, A.S);
     }
     return TC.scalar(Dtype::Double);
+  }
+  // bitshift(a, n) — type-PRESERVING: the result is exactly `a`'s type (shape,
+  // dtype, AND fixed-point spec). Return the operand type unchanged rather than
+  // rebuilding it: that keeps an fi's FxSpec, and — critically — keeps an
+  // UNKNOWN operand `any`. HDL function params are `any` at Sema (their fi type
+  // is assigned later from the `% hdl: port` pragma); pinning the result to a
+  // concrete f64 here would override that and emit an unsynthesizable double
+  // into hardware (broke -emit-systemverilog on cordic_step). Do NOT fall back
+  // to double for a non-array operand.
+  if (Name == "bitshift") {
+    if (!ArgTys.empty() && ArgTys[0])
+      return ArgTys[0];
+    return TC.any();
   }
   /* Scalar math builtins added with the runtime _s forms (scalar args). */
   if (Name == "log1p" || Name == "expm1" ||
@@ -1900,6 +1921,74 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
       return TC.fixedScalar(*A.FxSpec);
   }
 
+  // #191 P2.2 — general (non-fi) reductions. Reduction results lower to boxed
+  // matrix pointers, so every typed result here is a ptr-SHAPED type (Matrix
+  // rank, never bare Scalar): a Scalar-rank type would make the slot/return f64
+  // while the body value is a ptr (the gpu/multiret/bode regressions). Cases:
+  //   * sum/prod/mean/median/std/var of a MATRIX -> 1xN row (default dim-1);
+  //   * sum/prod/mean/median/std/var of a VECTOR/SCALAR -> 1x1 matrix;
+  //   * min/max(x, y) elementwise with a non-scalar result.
+  // Single-arg min/max stays Any: it feeds the `[v,i]=min(x)` multi-output
+  // index path that relies on the Any result.
+  {
+    bool isMinMax = (Name == "min" || Name == "max");
+    bool isFloatReduce =
+        (Name == "mean" || Name == "median" || Name == "std" || Name == "var");
+    bool isSumProd = (Name == "sum" || Name == "prod");
+    if ((isMinMax || isFloatReduce || isSumProd) && !ArgTys.empty() &&
+        ArgTys[0] && ArgTys[0]->K == Type::Kind::Array) {
+      auto &A = static_cast<const ArrayType &>(*ArgTys[0]);
+      if (A.Elt != Dtype::Fixed) {
+        Dtype RD = A.Elt;
+        if (isFloatReduce)
+          RD = (A.Elt == Dtype::Complex) ? Dtype::Complex : Dtype::Double;
+        else if (A.Elt == Dtype::Logical)
+          RD = Dtype::Double; // sum/prod/min/max of logical promote to double
+
+        // min(x, y) / max(x, y): elementwise. Take the non-scalar operand's
+        // shape (covers max(x, 0) and max(a, b)); only when non-scalar.
+        if (isMinMax && ArgTys.size() == 2 && ArgTys[1] &&
+            ArgTys[1]->K == Type::Kind::Array) {
+          auto &B = static_cast<const ArrayType &>(*ArgTys[1]);
+          const Shape &RS = (A.S.K != Shape::Rank::Scalar) ? A.S : B.S;
+          if (RS.K != Shape::Rank::Scalar && RS.K != Shape::Rank::Unknown)
+            return TC.arrayOf(RD, RS);
+        }
+
+        // sum/prod/mean/median/std/var, no explicit dim. Matrix -> 1xN row;
+        // vector/scalar -> 1x1 matrix (ptr-shaped, never bare Scalar).
+        if (!isMinMax && ArgTys.size() == 1) {
+          if (A.S.K == Shape::Rank::Matrix && A.S.Dims.size() >= 2)
+            return TC.arrayOf(RD, Shape::matrix(1, A.S.Dims[1]));
+          if (A.S.K == Shape::Rank::Vector || A.S.K == Shape::Rank::Scalar)
+            return TC.arrayOf(RD, Shape::matrix(1, 1));
+        }
+      }
+    }
+  }
+
+  // norm(x) — intentionally LEFT as Any (falls through to the catch-all).
+  // norm is a true scalar that is almost always consumed inside further scalar
+  // arithmetic (`norm(a)*norm(a)/n`, `norm(a)-norm(b)`). Typing it as a 1x1
+  // matrix (ptr-shaped, like the reductions above) poisons that arithmetic into
+  // MATRIX ops (matlab.sub / matlab.matdiv), whose result fprintf can't take
+  // ("unsupported call shape") — it regressed comm/cdma_walsh_demo, tier4_smoke
+  // and tier5_smoke. Any keeps the proven generic runtime path. Unlike a bare
+  // reduction stored to a var and printed directly, the norm idiom is arith-
+  // first, so the box/unbox win isn't worth the downstream poisoning.
+
+  // reshape(x, m, n) — same element type, shape from the (foldable) scalar
+  // dim args. Result is a matrix (ptr) so no scalar box/unbox concern. The
+  // [m n]-vector form and `[]`-placeholder form fall through to Any.
+  if (Name == "reshape" && ArgTys.size() == 3 && ArgTys[0] &&
+      ArgTys[0]->K == Type::Kind::Array) {
+    auto &A = static_cast<const ArrayType &>(*ArgTys[0]);
+    int64_t R = foldInt(Args[1]);
+    int64_t C = foldInt(Args[2]);
+    if (R > 0 && C > 0)
+      return TC.arrayOf(A.Elt, Shape::matrix(R, C));
+  }
+
   if (Name == "disp" || Name == "fprintf" || Name == "warning" ||
       Name == "error") {
     return TC.any(); // effectively void
@@ -1908,6 +1997,16 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
   // Default for any builtin not special-cased above: its return type isn't
   // modelled here, so Any. Builtins whose result feeds further inference
   // should get an explicit case; this is the catch-all safe default.
+  // #191 P2.2 probe: name the unmodelled builtins whose args ARE typed
+  // (those are the ones poisoning downstream call-arg precision).
+  if (::getenv("MATLAB_LLVM_PROBE_ANYBUILTIN")) {
+    bool allTyped = !ArgTys.empty();
+    for (const Type *T : ArgTys)
+      if (!T || T->K == Type::Kind::Any) { allTyped = false; break; }
+    if (allTyped)
+      fprintf(stderr, "[any-builtin] %.*s (%zu typed args)\n",
+              (int)Name.size(), Name.data(), ArgTys.size());
+  }
   return TC.any();
 }
 
@@ -1917,6 +2016,16 @@ const Type *TypeInference::visitCallOrIndex(CallOrIndex &C, Env &Env) {
   if (C.Callee) visit(*C.Callee, Env);
 
   if (C.Resolved == CallKind::Call) {
+    // #191 P5: snapshot per-arg inferred types onto the call so the Sema-time
+    // monomorphizer can bucket the call site by signature. Done for plain
+    // function calls below; this helper lets class constructor / instance-
+    // method calls share the same machinery (their args must be visited
+    // first). Call it once the args have been visited in each branch.
+    auto snapshotArgTypes = [&]() {
+      C.ArgTypes.clear();
+      C.ArgTypes.reserve(C.Args.size());
+      for (Expr *A : C.Args) C.ArgTypes.push_back(A ? A->Ty : nullptr);
+    };
     if (auto *N = dynamic_cast<NameExpr *>(C.Callee)) {
       // #191 P3 prerequisite — function-style instance-method dispatch:
       // `meth(obj, ...)` where the first argument is a class instance and the
@@ -1934,6 +2043,7 @@ const Type *TypeInference::visitCallOrIndex(CallOrIndex &C, Env &Env) {
             for (Function *M : CC->Methods)
               if (M && M->Name == N->Name) {
                 for (Expr *A : C.Args) if (A) visit(*A, Env);
+                snapshotArgTypes();
                 // Arithmetic operator overloads return the class (#40 convention),
                 // even when the body's own output infers as Any (param-dependent).
                 if (isArithOperatorMethod(N->Name))
@@ -1984,6 +2094,7 @@ const Type *TypeInference::visitCallOrIndex(CallOrIndex &C, Env &Env) {
         // old `Any`, so the constructor monomorphizer can bucket call sites
         // by class and the lowerer maps the value to a matlab_obj* ptr.
         for (Expr *A : C.Args) if (A) visit(*A, Env);
+        snapshotArgTypes();
         return TC.objectOf(N->Ref->ClassDef);
       }
     }
@@ -1995,6 +2106,7 @@ const Type *TypeInference::visitCallOrIndex(CallOrIndex &C, Env &Env) {
     // inferred the method bodies (run() walks class methods before the script).
     if (auto *FA = dynamic_cast<FieldAccess *>(C.Callee)) {
       for (Expr *A : C.Args) if (A) visit(*A, Env);
+      snapshotArgTypes();
       const Type *BaseT = FA->Base ? FA->Base->Ty : nullptr;
       if (BaseT && BaseT->K == Type::Kind::Object) {
         const ClassDef *CD = static_cast<const ObjectType &>(*BaseT).Class;

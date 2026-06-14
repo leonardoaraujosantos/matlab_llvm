@@ -1195,6 +1195,32 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Changed = true;
       continue;
     }
+    /* #233: strsplit(s) / strsplit(s, delim) -> matlab_cell* of string tokens.
+     * s / delim coerce via toStrPtr (string var or char literal). Result is a
+     * cell ptr. */
+    if (Name == "strsplit" && Call->getNumResults() == 1 &&
+        (Call->getNumOperands() == 1 || Call->getNumOperands() == 2)) {
+      B.setInsertionPoint(Call);
+      Value S = toStrPtr(Call->getOperand(0));
+      if (!S) continue;
+      LLVM::CallOp NC;
+      if (Call->getNumOperands() == 1) {
+        auto Fn = rt("matlab_strsplit1", PtrTy, {PtrTy});
+        NC = LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{S});
+      } else {
+        Value D = toStrPtr(Call->getOperand(1));
+        if (!D) continue;
+        auto Fn = rt("matlab_strsplit", PtrTy, {PtrTy, PtrTy});
+        NC = LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{S, D});
+      }
+      if (Call->getResult(0).getType() != PtrTy)
+        Call->getResult(0).setType(PtrTy);
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
     /* strncmp(a, b, n): first-n-chars compare -> scalar. Strings coerce via
      * toStrPtr (var or literal); n is f64. */
     if (Name == "strncmp" && Call->getNumOperands() == 3 &&

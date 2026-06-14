@@ -978,7 +978,10 @@ static void runJitSoftwareLowering(mlir::ModuleOp M) {
   }
   // Multi-callsite monomorphisation (matrix-typed / arity-varying /
   // varargin callees).  compileProgram lacked this entirely.
-  if (runMonomorphiseUserCalls(M)) {
+  // #191 P5 scaffolding: MATLAB_LLVM_NO_LATE_MONO=1 bypasses the late
+  // pass so the true Sema-only failure set can be measured (and, once
+  // P3+P5 land, locked at zero).
+  if (!std::getenv("MATLAB_LLVM_NO_LATE_MONO") && runMonomorphiseUserCalls(M)) {
     for (int Iter = 0; Iter < 4; ++Iter) {
       bool A = runLowerScalarsToArith(M);
       bool B = runLowerUserCalls(M);
@@ -13132,6 +13135,26 @@ int main(int Argc, char **Argv) {
   // `-dump-call-sites`, `-test-ast-clone`, `-test-monomorphize`) have
   // already returned by this point so they see the pre-mono Sema state.
   // Test-monomorphize runs the same driver as part of its own flow.
+  // #191 P5 measurement: enumerate the class constructor / instance-method
+  // call signatures the late MLIR monomorphiser owns and a future Sema-time
+  // class-mono must absorb. Gated, inert by default. `<Class>::<method>` plus
+  // the arg-type signature; "ctor" marks a constructor (method == class name).
+  if (TU && std::getenv("MATLAB_LLVM_PROBE_CLASSMONO")) {
+    matlab::walkClassCallsWithCaller(
+        *TU, [](matlab::Function *, matlab::CallOrIndex &C,
+                const matlab::ClassDef &Recv, std::string_view Method) {
+          bool IsCtor = (Method == Recv.Name);
+          // argc = syntactic arity (C.Args). sigTypes = how many entries
+          // TypeInference stamped onto C.ArgTypes — currently 0 for class
+          // calls (TypeInference only populates ArgTypes for BindingKind::
+          // Function), which a Sema-time class-mono must fix to bucket them.
+          fprintf(stderr, "[class-mono] %.*s::%.*s%s argc=%zu sigTypes=%zu\n",
+                  (int)Recv.Name.size(), Recv.Name.data(),
+                  (int)Method.size(), Method.data(), IsCtor ? " ctor" : "",
+                  C.Args.size(), C.ArgTypes.size());
+        });
+  }
+
   if (TU) {
     bool IsHwEmit =
         Opts.Mode == Options::Mode::EmitSystemVerilog ||
@@ -14176,7 +14199,9 @@ int main(int Argc, char **Argv) {
         // varargout_basic. The Phase 6 cleanup that retires this call
         // entirely needs the matrix-ptr and arity-varying classes
         // absorbed Sema-side first; documented as a follow-up.
-        if (mlirgen::runMonomorphiseUserCalls(M)) {
+        // #191 P5 scaffolding: MATLAB_LLVM_NO_LATE_MONO=1 bypasses it.
+        if (!std::getenv("MATLAB_LLVM_NO_LATE_MONO") &&
+            mlirgen::runMonomorphiseUserCalls(M)) {
           for (int Iter = 0; Iter < 4; ++Iter) {
             bool A = mlirgen::runLowerScalarsToArith(M);
             bool B = mlirgen::runLowerUserCalls(M);

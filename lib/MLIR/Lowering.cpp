@@ -687,6 +687,11 @@ private:
    * (the brace-read returns a matlab_string* via get_mat, but without this the
    * disp dispatch would treat it as a numeric matrix and print char codes). */
   std::map<Binding *, std::set<int64_t>> CellStrElems;
+  /* #233: whole-cell "every element is a string" bindings (e.g. from
+   * `parts = strsplit(...)`). Unlike CellStrElems (per constant index), this
+   * routes ANY `parts{i}` brace read — including a runtime/variable index — to
+   * matlab_cell_get_str so the element comes back as a real matlab_string*. */
+  std::set<Binding *> CellAllStrBindings;
   /* Total element count of a cell-literal binding — lets a bare-`end` brace
    * read `c{end}` (effective index = count) consult CellMatElems for the
    * last element's matrix-ness. */
@@ -874,6 +879,9 @@ bool Lowerer::isStringExpr(const Expr *E) const {
   if (auto *CI = dynamic_cast<const CellIndex *>(E)) {
     if (auto *NX = dynamic_cast<const NameExpr *>(CI->Callee))
       if (NX->Ref && CI->Args.size() == 1) {
+        /* #233: a brace read of a whole cell-of-strings binding is a string
+         * for any index (e.g. `parts{i}` after `parts = strsplit(...)`). */
+        if (CellAllStrBindings.count(NX->Ref)) return true;
         auto It = CellStrElems.find(NX->Ref);
         if (It != CellStrElems.end())
           if (auto *IL = dynamic_cast<const IntegerLiteral *>(CI->Args[0])) {
@@ -3027,6 +3035,14 @@ void Lowerer::lowerStmt(const Stmt &St) {
      * string) so `+` / disp / strlen / isstring can dispatch
      * correctly. See Lowerer::isStringExpr. */
     bool RhsIsString = isStringExpr(A.RHS);
+    /* #233: RHS is a cell-of-strings-returning builtin (strsplit) — tag the
+     * LHS so brace reads route to matlab_cell_get_str. */
+    bool RhsIsCellOfStr = false;
+    if (auto *RC = dynamic_cast<const CallOrIndex *>(A.RHS))
+      if (auto *RN = dynamic_cast<const NameExpr *>(RC->Callee))
+        if (RN->Ref && RN->Ref->Kind == BindingKind::Builtin &&
+            RN->Name == "strsplit")
+          RhsIsCellOfStr = true;
     /* A single-quoted char literal assigned wholesale to a variable
      * (`c = 'abc'`) lowers to a bare matlab.const_char, which the REPL/DAP
      * workspace store can't round-trip (matlab_ws_set_mat has no const_char
@@ -4032,6 +4048,11 @@ void Lowerer::lowerStmt(const Stmt &St) {
       for (const Expr *L : A.LHS)
         if (auto *N = dynamic_cast<const NameExpr *>(L))
           if (N->Ref) StringBindings.insert(N->Ref);
+    }
+    if (RhsIsCellOfStr) {
+      for (const Expr *L : A.LHS)
+        if (auto *N = dynamic_cast<const NameExpr *>(L))
+          if (N->Ref) CellAllStrBindings.insert(N->Ref);
     }
     if (RhsIsThreeD) {
       for (const Expr *L : A.LHS) {
@@ -9221,6 +9242,28 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         }
       }
 
+      /* #233: length / numel on a cell -> matlab_cell_numel. The generic
+       * matrix numel reads the cell descriptor as a matlab_mat and returns
+       * garbage. (Our cells are 1-D rows, so length == numel.) */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          (N->Name == "length" || N->Name == "numel") &&
+          C.Args.size() == 1 && C.Args[0]) {
+        bool IsCell = (C.Args[0]->Ty && C.Args[0]->Ty->K == Type::Kind::Cell);
+        if (auto *AN = dynamic_cast<const NameExpr *>(C.Args[0]))
+          if (AN->Ref && (CellAllStrBindings.count(AN->Ref) ||
+                          (AN->Ref->InferredType &&
+                           AN->Ref->InferredType->K == Type::Kind::Cell)))
+            IsCell = true;
+        if (IsCell) {
+          mlir::Value Cv = lowerExpr(*C.Args[0]);
+          auto F64 = mlir::Float64Type::get(&MCtx);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_cell_numel"));
+          return emitUnreg("matlab.call_builtin", {Cv}, F64, L, {Cal});
+        }
+      }
+
       /* length / numel / size on a string scalar — MATLAB treats a
        * "..."-style string as a 1x1 string array (one element whose
        * value is the text), so length/numel are 1 and size is [1 1].
@@ -14405,6 +14448,11 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           }
           auto SIt = CellStrElems.find(NE->Ref);
           if (k > 0 && SIt != CellStrElems.end() && SIt->second.count(k))
+            WantStr = true;
+          /* #233: a whole cell-of-strings (e.g. `parts = strsplit(...)`) reads
+           * every element as a matlab_string* — including a runtime / variable
+           * index that CellStrElems (constant-index only) can't cover. */
+          if (!WantStr && CellAllStrBindings.count(NE->Ref))
             WantStr = true;
           auto It = CellMatElems.find(NE->Ref);
           if (!WantStr && k > 0 && It != CellMatElems.end() &&

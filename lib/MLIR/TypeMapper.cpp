@@ -105,6 +105,11 @@ mlir::Type mapType(mlir::MLIRContext &Ctx, const matlab::Type *T) {
     // opaque pointer end-to-end (same convention as the matrix / cell paths).
     return mlir::LLVM::LLVMPointerType::get(&Ctx);
   case matlab::Type::Kind::Cell:
+    // #233: a cell is a heap-allocated matlab_cell*; carry it as an opaque
+    // pointer (same convention as matrix / object). Without this a
+    // cell-typed binding allocates a `none` slot, so a cell-returning call
+    // (e.g. strsplit) stores/reloads through it and loses the ptr.
+    return mlir::LLVM::LLVMPointerType::get(&Ctx);
   case matlab::Type::Kind::Struct:
   case matlab::Type::Kind::FuncHandle:
     return mlir::NoneType::get(&Ctx);

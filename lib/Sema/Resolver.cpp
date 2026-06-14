@@ -170,7 +170,7 @@ void Resolver::registerBuiltins() {
     "sprintf", "num2str", "str2double", "str2num",
     "upper", "lower", "startsWith", "endsWith", "contains",
     "strtrim", "strrep", "strcat", "strcmp", "strcmpi", "strfind",
-    "deblank", "blanks", "strjoin", "strncmp", "regexp", "regexprep",
+    "deblank", "blanks", "strjoin", "strsplit", "strncmp", "regexp", "regexprep",
     "svd", "eig", "inv", "pinv", "det", "rank", "cond",
     "qr", "lu", "chol", "norm", "trace", "kron",
     /* Tier 1.3 — Control System Toolbox roadmap §2.3 (matrix exponential

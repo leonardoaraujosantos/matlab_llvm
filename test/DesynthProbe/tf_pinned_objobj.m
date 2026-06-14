@@ -9,10 +9,10 @@
 % value typed `any` but pinned `tf` — which the original pass (keying solely
 % off an object Expr->Ty) missed, emitting `tf__mtimes` from lowering instead.
 %
-% The scalar-on-the-LHS form (`k * G`) is a separately-tracked deferred gap
-% (it needs a constructor-call method base in the lowering) and is still
-% allowed to reach the synthesis fallback — the harness uses it as a liveness
-% check that the probe is actually reporting.
+% The scalar-on-the-LHS form (`k * G`) is now also desynthed, into
+% `(tf(k)).mtimes(G)` (the lowering recovers the class from the ctor-call
+% base's object type). So this fixture emits ZERO probe fires — full
+% migration. Liveness for the probe wiring lives in `liveness_unmigrated.m`.
 
 G = tf([1 2], [1 3 5]);
 H = tf([1 1], [1 1]);
@@ -31,6 +31,6 @@ disp(Q.Numerator);
 R = (G * H) + Cz;
 disp(R.Numerator);
 
-% scalar-on-LHS: deferred gap, may still synthesize (liveness signal).
+% scalar-on-LHS: now desynthed to (tf(5)).mtimes(G).
 B = 5 * G;
 disp(B.Numerator);

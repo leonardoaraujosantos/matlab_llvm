@@ -17809,6 +17809,61 @@ matlab_string *matlab_strjoin(matlab_cell *c, matlab_string *delim) {
 /* 1-arg strjoin(C): space delimiter. */
 matlab_string *matlab_strjoin1(matlab_cell *c) { return matlab_strjoin(c, nullptr); }
 
+/* #233: strsplit(s, delim) -> cell of string tokens. Splits on maximal RUNS of
+ * the delimiter (MATLAB's default CollapseDelimiters=true: consecutive
+ * delimiters count as one), so 'a,b,c' -> {'a','b','c'} and 'a,,c' -> {'a','c'};
+ * a leading/trailing delimiter yields a boundary empty token (',a' ->
+ * {'','a'}). Each token is stored as a kind=3 string element. */
+matlab_cell *matlab_strsplit(matlab_string *s, matlab_string *delim) {
+    const char *in = (s && s->data) ? s->data : "";
+    int64_t n = s ? s->len : 0;
+    const char *d = (delim && delim->data && delim->len > 0) ? delim->data : " ";
+    int64_t dl = (delim && delim->len > 0) ? delim->len : 1;
+    /* Whitespace default (1-arg / empty delim): split on any whitespace char. */
+    bool ws = !(delim && delim->data && delim->len > 0);
+
+    std::vector<std::string> toks;
+    std::string cur;
+    int64_t i = 0;
+    auto isDelimAt = [&](int64_t p) -> int64_t {
+        if (ws) {
+            char ch = in[p];
+            return (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') ? 1 : 0;
+        }
+        if (p + dl > n) return 0;
+        return memcmp(in + p, d, (size_t)dl) == 0 ? dl : 0;
+    };
+    while (i < n) {
+        int64_t hit = isDelimAt(i);
+        if (hit) {
+            toks.push_back(cur);
+            cur.clear();
+            i += hit;
+            /* Collapse a run of delimiters into one split point. */
+            while (i < n) {
+                int64_t h2 = isDelimAt(i);
+                if (!h2) break;
+                i += h2;
+            }
+            continue;
+        }
+        cur.push_back(in[i]);
+        ++i;
+    }
+    toks.push_back(cur);
+
+    matlab_cell *c = matlab_cell_new((double)toks.size());
+    for (size_t k = 0; k < toks.size(); ++k)
+        matlab_cell_set_str(c, (double)(k + 1),
+                            matlab_string_from_literal(toks[k].c_str(),
+                                                       (int64_t)toks[k].size()));
+    return c;
+}
+/* 1-arg strsplit(s): whitespace delimiter. */
+matlab_cell *matlab_strsplit1(matlab_string *s) {
+    return matlab_strsplit(s, nullptr);
+}
+
 /* #156: disp of a struct / cell. disp routed these ptrs to
  * matlab_disp_mat_f64, which read them as a matrix descriptor (garbage
  * rows/cols/data) and SIGSEGV'd. Print a MATLAB-ish field / element
