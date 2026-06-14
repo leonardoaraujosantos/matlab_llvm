@@ -1650,14 +1650,25 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
     return TC.scalar(Dtype::Double);
   }
   if (Name == "mod" || Name == "rem" || Name == "floor" ||
-      Name == "ceil" || Name == "round" || Name == "fix" ||
-      /* bitshift(a, n) — element-wise on a; preserves a's shape and type. */
-      Name == "bitshift") {
+      Name == "ceil" || Name == "round" || Name == "fix") {
     if (!ArgTys.empty() && ArgTys[0] && ArgTys[0]->K == Type::Kind::Array) {
       auto &A = static_cast<const ArrayType &>(*ArgTys[0]);
       return TC.arrayOf(A.Elt, A.S);
     }
     return TC.scalar(Dtype::Double);
+  }
+  // bitshift(a, n) — type-PRESERVING: the result is exactly `a`'s type (shape,
+  // dtype, AND fixed-point spec). Return the operand type unchanged rather than
+  // rebuilding it: that keeps an fi's FxSpec, and — critically — keeps an
+  // UNKNOWN operand `any`. HDL function params are `any` at Sema (their fi type
+  // is assigned later from the `% hdl: port` pragma); pinning the result to a
+  // concrete f64 here would override that and emit an unsynthesizable double
+  // into hardware (broke -emit-systemverilog on cordic_step). Do NOT fall back
+  // to double for a non-array operand.
+  if (Name == "bitshift") {
+    if (!ArgTys.empty() && ArgTys[0])
+      return ArgTys[0];
+    return TC.any();
   }
   /* Scalar math builtins added with the runtime _s forms (scalar args). */
   if (Name == "log1p" || Name == "expm1" ||
