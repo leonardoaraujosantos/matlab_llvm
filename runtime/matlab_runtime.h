@@ -1421,6 +1421,9 @@ int32_t       matlab_table_column_kind_idx(matlab_table *t, int32_t idx);
  * is forward-declared here — its full layout lives in the C++ TU. */
 struct matlab_string_s;
 typedef struct matlab_string_s matlab_string;
+/* #265: 1xN row matrix of the character codes of a char/string value, so a
+ * char variable used in arithmetic / comparison evaluates on codes. */
+matlab_mat *matlab_string_to_codes(matlab_string *s);
 matlab_table *matlab_readtable(matlab_string *path);
 matlab_mat   *matlab_readmatrix(matlab_string *path);
 

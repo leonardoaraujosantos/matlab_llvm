@@ -7679,6 +7679,12 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"matlab_modred_B",   "matlab_modred_B",   1, "ppppf"},
       {"matlab_modred_C",   "matlab_modred_C",   1, "ppppf"},
       {"matlab_mat_from_scalar", "matlab_mat_from_scalar", 1, "f"},
+      /* #265: char-array-as-numeric. The frontend wraps a char VARIABLE
+       * operand (a matlab_string* in the REPL lane) in
+       * matlab_string_to_codes before a numeric/comparison op, yielding a
+       * 1xN matlab_mat* of character codes so the _ms/_sm matrix path fires
+       * (`c == 'l'` -> [0 0 1 1 0], `c + 1` -> codes+1). */
+      {"matlab_string_to_codes", "matlab_string_to_codes", 1, "p"},
       /* bode_tf 1-return form returns magnitude (default for plotting).
        * The 2-return [mag, phase] = bode_tf(...) shape goes through the
        * dedicated splitter above. */
@@ -9067,6 +9073,35 @@ bool TensorLowering::rewriteBinaryOps() {
   for (Operation *Op : Binaries) {
     StringRef ML = Op->getName().getStringRef();
     Value A = Op->getOperand(0), BVal = Op->getOperand(1);
+    /* #265: a char-array VARIABLE used in arithmetic / comparison
+     * (`c = 'hello'; c == 'l'`, `c + 1`) arrives here as a `tensor<1xNxi8>`
+     * — the slot-promoted result of a `matlab.const_char`. Neither the
+     * mm/ms/sm dispatch below nor the scalar-coercion block handles an i8
+     * tensor, so the op survived unconverted ("unsupported call shape").
+     * MATLAB evaluates char in a numeric context on the character CODES, so
+     * materialize the literal into a `matlab_mat*` row of f64 codes
+     * (reusing materializeMat → matlab_mat_from_buf); the ms/sm path then
+     * fires exactly as it does for a numeric matrix operand. A char LITERAL
+     * operand (`'hello' == 'l'`) is already folded to codes upstream in
+     * Lowering.cpp, so only the variable/const_char case reaches here. */
+    auto charConstToMat = [&](Value V) -> Value {
+      auto TT = mlir::dyn_cast<RankedTensorType>(V.getType());
+      if (!TT || !TT.getElementType().isInteger(8)) return V;
+      Operation *Def = V.getDefiningOp();
+      if (!Def || !isMatlabOp(Def, "matlab.const_char")) return V;
+      auto Attr = Def->getAttrOfType<StringAttr>("value");
+      if (!Attr) return V;
+      StringRef S = Attr.getValue();
+      if (S.empty()) return V;
+      B.setInsertionPoint(Op);
+      SmallVector<Value, 16> Codes;
+      for (unsigned char ch : S)
+        Codes.push_back(LLVM::ConstantOp::create(
+            B, Op->getLoc(), F64, B.getF64FloatAttr((double)ch)));
+      return materializeMat(Op->getLoc(), 1, (int64_t)S.size(), Codes);
+    };
+    A = charConstToMat(A);
+    BVal = charConstToMat(BVal);
     /* #77: a matrix elementwise op with one matrix (ptr) operand needs its
      * scalar operand as f64 — the runtime `_ms`/`_sm` entries take a double.
      * A boxed comparison like `pred == (x > 0.5)` (pred a workspace scalar

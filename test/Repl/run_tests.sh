@@ -607,6 +607,31 @@ EOF
 )" want "1003"
 rm -rf "$cdroot"
 
+# #265 — a char-array variable in a comparison / arithmetic operates on the
+# character codes (like MATLAB), not as a string. `c == 'l'` used to leave
+# matlab.eq unconverted (so the REPL printed nothing) and `c + 1` wrongly
+# concatenated ("hello1"). The fix converts a char operand to a code matrix
+# (matlab_string_to_codes) before the numeric op; genuine string concat is
+# untouched.
+# Matches the issue's exact repro (a single piped line). The char variable
+# and its use share one compilation unit, so `c` keeps its char-array type.
+run_case "char_var_compare_codes" "$(cat <<'EOF'
+c='hello'; disp(c == 'l')
+exit
+EOF
+)" "1         1         0"
+run_case "char_var_add_codes" "$(cat <<'EOF'
+c='hello'; disp(c + 1)
+exit
+EOF
+)" "105       102       109       109       112"
+# Genuine string concatenation must NOT regress.
+run_case "string_var_concat_unaffected" "$(cat <<'EOF'
+s = "hi"; disp(s + "!")
+exit
+EOF
+)" "hi!"
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 if (( fail > 0 )); then
