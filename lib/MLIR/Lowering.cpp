@@ -5775,8 +5775,29 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
      * matlab.add path would produce f64). When exactly one side is
      * a string and the other is a scalar, the scalar is coerced via
      * matlab_num2str so `"x = " + 25` produces "x = 25". */
-    if (Bi.Op == BinOp::Add &&
-        (isStringExpr(Bi.LHS) || isStringExpr(Bi.RHS))) {
+    /* #265: a CHAR array in `+` is numeric (`'hello' + 1` -> codes + 1),
+     * unlike a double-quoted `string` which concatenates (`"hello" + 1` ->
+     * "hello1"). isStringExpr() is true for a char-array variable too (the
+     * REPL stores char arrays as matlab_string*, so they land in
+     * StringBindings), which used to send `c + 1` down the concat path and
+     * print "hello1". Only take the concat path when a GENUINE string
+     * operand is involved; a char-only / char+numeric `+` falls through to
+     * the numeric CharArithOp path below. */
+    auto isCharArrayExpr = [&](const Expr *X) -> bool {
+      if (!X) return false;
+      if (X->Kind == NodeKind::CharLiteral) return true;
+      auto isCharArr = [](const Type *T) {
+        return T && T->K == Type::Kind::Array &&
+               static_cast<const ArrayType *>(T)->Elt == Dtype::Char;
+      };
+      if (isCharArr(X->Ty)) return true;
+      if (auto *NE = dynamic_cast<const NameExpr *>(X))
+        if (NE->Ref && isCharArr(NE->Ref->InferredType)) return true;
+      return false;
+    };
+    bool LhsRealStr = isStringExpr(Bi.LHS) && !isCharArrayExpr(Bi.LHS);
+    bool RhsRealStr = isStringExpr(Bi.RHS) && !isCharArrayExpr(Bi.RHS);
+    if (Bi.Op == BinOp::Add && (LhsRealStr || RhsRealStr)) {
       auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
       auto F64 = mlir::Float64Type::get(&MCtx);
       mlir::Value LHS = lowerExpr(*Bi.LHS);
@@ -6039,7 +6060,36 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             return emitUnreg("matlab.concat_row", Codes, RowTy, L);
           }
         }
-      return E ? lowerExpr(*E) : mlir::Value{};
+      mlir::Value V = E ? lowerExpr(*E) : mlir::Value{};
+      /* #265: a char-array VARIABLE (not a literal) used numerically. In the
+       * REPL a char array round-trips through the workspace as a
+       * matlab_string* (ptr); the matrix runtime's _ms/_sm path would then
+       * misread the string descriptor as a matlab_mat. Convert it to a 1xN
+       * row of character codes (matlab_string_to_codes) so the op evaluates
+       * element-wise on codes, matching MATLAB. The AOT lane lowers the same
+       * variable to a const_char i8 tensor, which is materialized to a code
+       * matrix later in LowerTensorOps — so only the ptr (string) form is
+       * converted here. Gate on Sema's char-array type so numeric matrices
+       * and double-quoted `string`s are left untouched. */
+      if (CharArithOp && V && E && !dynamic_cast<const CharLiteral *>(E)) {
+        auto isCharArray = [](const Type *T) {
+          return T && T->K == Type::Kind::Array &&
+                 static_cast<const ArrayType *>(T)->Elt == Dtype::Char;
+        };
+        bool charTyped = isCharArray(E->Ty);
+        if (!charTyped)
+          if (auto *NE = dynamic_cast<const NameExpr *>(E))
+            if (NE->Ref) charTyped = isCharArray(NE->Ref->InferredType);
+        if (charTyped &&
+            mlir::isa<mlir::LLVM::LLVMPointerType>(V.getType())) {
+          auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_string_to_codes"));
+          V = emitUnreg("matlab.call_builtin", {V}, PtrTy, L, {Cal});
+        }
+      }
+      return V;
     };
     mlir::Value LHS = Bi.LHS ? lowerArithOperand(Bi.LHS) : mlir::Value{};
     mlir::Value RHS = Bi.RHS ? lowerArithOperand(Bi.RHS) : mlir::Value{};

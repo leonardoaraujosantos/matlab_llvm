@@ -1,0 +1,1 @@
+char-array-as-numeric (matlab_string_to_codes) is wired for the LLVM lane; source-emit backends don't model it yet (#265).

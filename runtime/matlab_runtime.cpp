@@ -13501,6 +13501,21 @@ matlab_string *matlab_char_m(matlab_mat *A) {
     return s;
 }
 
+/* #265: char-array-as-numeric. The inverse of matlab_char_m — build a
+ * 1xN row matrix of the character CODES of a string/char value, so a char
+ * variable used in arithmetic / comparison (`c == 'l'`, `c + 1`) evaluates
+ * element-wise on codes exactly like MATLAB. The REPL stores char arrays as
+ * matlab_string*; the binary-op lowering routes this through the matrix
+ * runtime once the operand is a matlab_mat* of codes. Codes are taken as
+ * unsigned bytes (MATLAB char codes are non-negative). */
+matlab_mat *matlab_string_to_codes(matlab_string *s) {
+    int64_t n = s ? s->len : 0;
+    matlab_mat *A = mat_alloc(n > 0 ? 1 : 0, n);
+    for (int64_t i = 0; i < n; ++i)
+        A->data[i] = (double)(unsigned char)s->data[i];
+    return A;
+}
+
 matlab_string *matlab_string_concat(matlab_string *a, matlab_string *b) {
     int64_t la = a ? a->len : 0;
     int64_t lb = b ? b->len : 0;
