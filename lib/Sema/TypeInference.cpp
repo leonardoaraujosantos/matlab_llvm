@@ -1967,12 +1967,15 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
     }
   }
 
-  // norm(x) / norm(x, p) / norm(x, 'fro') — always a real scalar. Type it as
-  // a 1x1 MATRIX (ptr-shaped, not a bare scalar) for the same reason as the
-  // reductions above: the result lowers to a boxed matrix pointer.
-  if (Name == "norm" && !ArgTys.empty() && ArgTys[0] &&
-      ArgTys[0]->K == Type::Kind::Array)
-    return TC.arrayOf(Dtype::Double, Shape::matrix(1, 1));
+  // norm(x) — intentionally LEFT as Any (falls through to the catch-all).
+  // norm is a true scalar that is almost always consumed inside further scalar
+  // arithmetic (`norm(a)*norm(a)/n`, `norm(a)-norm(b)`). Typing it as a 1x1
+  // matrix (ptr-shaped, like the reductions above) poisons that arithmetic into
+  // MATRIX ops (matlab.sub / matlab.matdiv), whose result fprintf can't take
+  // ("unsupported call shape") — it regressed comm/cdma_walsh_demo, tier4_smoke
+  // and tier5_smoke. Any keeps the proven generic runtime path. Unlike a bare
+  // reduction stored to a var and printed directly, the norm idiom is arith-
+  // first, so the box/unbox win isn't worth the downstream poisoning.
 
   // reshape(x, m, n) — same element type, shape from the (foldable) scalar
   // dim args. Result is a matrix (ptr) so no scalar box/unbox concern. The
