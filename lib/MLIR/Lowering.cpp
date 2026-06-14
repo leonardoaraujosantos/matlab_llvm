@@ -3923,6 +3923,32 @@ void Lowerer::lowerStmt(const Stmt &St) {
             if (elemCount > 0) CellElemCount[N->Ref] = elemCount;
           }
     }
+    /* #292: `c = cell(n)` / `cell(m,n)` preallocation. RHS is a call to the
+     * `cell` builtin; tag the LHS as a cell binding (so numel / brace
+     * reads/writes route through the cell runtime) and record the element
+     * count when the dims are constant. The element kinds (mat/str) are
+     * learned later from each `c{i} = ...` store. */
+    if (auto *RC = dynamic_cast<const CallOrIndex *>(A.RHS))
+      if (auto *RN = dynamic_cast<const NameExpr *>(RC->Callee))
+        if (RN->Ref && RN->Ref->Kind == BindingKind::Builtin &&
+            RN->Name == "cell" && !RC->Args.empty() && RC->Args.size() <= 2) {
+          int64_t count = 1;
+          bool constDims = true;
+          for (const Expr *Arg : RC->Args) {
+            if (auto *IL = dynamic_cast<const IntegerLiteral *>(Arg)) {
+              try { count *= std::stoll(std::string(IL->Text)); }
+              catch (...) { constDims = false; }
+            } else constDims = false;
+          }
+          for (const Expr *L : A.LHS)
+            if (auto *N = dynamic_cast<const NameExpr *>(L))
+              if (N->Ref) {
+                CellBindings.insert(N->Ref);
+                CellMatElems.erase(N->Ref);
+                CellStrElems.erase(N->Ref);
+                if (constDims && count > 0) CellElemCount[N->Ref] = count;
+              }
+        }
     if (RhsIsDict) {
       for (const Expr *L : A.LHS)
         if (auto *N = dynamic_cast<const NameExpr *>(L))
@@ -5341,6 +5367,48 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
                                    mlir::UnrankedTensorType>(Rhs.getType()));
     if (C.Args.size() == 1) {
       mlir::Value Idx = lowerExpr(*C.Args[0]);
+      /* #292: classify the RHS so a matrix/string element stores under the
+       * right setter AND the binding's CellMatElems/CellStrElems are updated
+       * — otherwise a later constant-index read `c{k}` defaults to
+       * matlab_cell_get_f64 and returns 0 for a >1-element value. A char RHS
+       * (matlab.const_char i8 tensor) or a matlab_string* ptr is stored as a
+       * string (matlab_cell_set_str → matlab_cell_get_str); a char const is
+       * first wrapped to a real matlab_string* (set_mat can't take an i8
+       * tensor). */
+      mlir::Operation *RhsDef = Rhs ? Rhs.getDefiningOp() : nullptr;
+      bool RhsIsCharConst =
+          RhsDef && RhsDef->getName().getStringRef() == "matlab.const_char";
+      bool RhsIsStrPtr = false;
+      if (RhsDef && RhsDef->getName().getStringRef() == "matlab.call_builtin")
+        if (auto CA = RhsDef->getAttrOfType<mlir::StringAttr>("callee"))
+          RhsIsStrPtr = CA.getValue() == "matlab_string_from_literal";
+      bool RhsIsStr = RhsIsCharConst || RhsIsStrPtr;
+      int64_t K = -1;
+      if (auto *IL = dynamic_cast<const IntegerLiteral *>(C.Args[0])) {
+        try { K = std::stoll(std::string(IL->Text)); } catch (...) { K = -1; }
+      }
+      Binding *Ref = nullptr;
+      if (auto *NE = dynamic_cast<const NameExpr *>(C.Callee)) Ref = NE->Ref;
+      if (RhsIsStr) {
+        mlir::Value Str = Rhs;
+        if (RhsIsCharConst) {
+          mlir::NamedAttribute SCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_string_from_literal"));
+          Str = emitUnreg("matlab.call_builtin", {Rhs}, PtrTy, loc(C.Range),
+                          {SCal});
+        }
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_cell_set_str"));
+        emitUnregOp("matlab.call_builtin", {Cell, Idx, Str},
+                    {mlir::NoneType::get(&MCtx)}, loc(C.Range), {Cal});
+        if (Ref && K > 0) {
+          CellStrElems[Ref].insert(K);
+          CellMatElems[Ref].insert(K); /* string is ptr-stored too */
+        }
+        return;
+      }
       llvm::StringRef Callee = IsMat ? "matlab_cell_set_mat"
                                       : "matlab_cell_set_f64";
       mlir::NamedAttribute Cal(
@@ -5348,6 +5416,10 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
           mlir::StringAttr::get(&MCtx, Callee));
       emitUnregOp("matlab.call_builtin", {Cell, Idx, Rhs},
                   {mlir::NoneType::get(&MCtx)}, loc(C.Range), {Cal});
+      if (Ref && K > 0) {
+        if (IsMat) { CellMatElems[Ref].insert(K); CellStrElems[Ref].erase(K); }
+        else { CellMatElems[Ref].erase(K); CellStrElems[Ref].erase(K); }
+      }
       return;
     }
     mlir::Value R = lowerExpr(*C.Args[0]);

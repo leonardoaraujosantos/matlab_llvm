@@ -1,0 +1,1 @@
+Cell element kind-tracking (CellMatElems/CellStrElems) + cell(m,n) preallocation are wired for the LLVM lane; source-emit backends don't model them yet (#292).

@@ -7679,6 +7679,11 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"matlab_modred_B",   "matlab_modred_B",   1, "ppppf"},
       {"matlab_modred_C",   "matlab_modred_C",   1, "ppppf"},
       {"matlab_mat_from_scalar", "matlab_mat_from_scalar", 1, "f"},
+      /* #292: cell preallocation. cell(n) -> a 1xn capacity cell;
+       * cell(m,n) -> an m x n cell. Lets `c = cell(1,N); c{i} = ...`
+       * preallocate before filling. (cell() 0-arg empty handled elsewhere.) */
+      {"cell", "matlab_cell_new",    1, "f"},
+      {"cell", "matlab_cell_new_2d", 1, "ff"},
       /* #265: char-array-as-numeric. The frontend wraps a char VARIABLE
        * operand (a matlab_string* in the REPL lane) in
        * matlab_string_to_codes before a numeric/comparison op, yielding a
