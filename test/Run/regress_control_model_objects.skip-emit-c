@@ -1,0 +1,1 @@
+Control model objects (tf/ss classdef + c2d/ssdata/tfdata/disp) target the LLVM lane; source-emit backends don't model them (#293).
