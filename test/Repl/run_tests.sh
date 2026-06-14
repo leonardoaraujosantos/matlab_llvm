@@ -123,6 +123,55 @@ exit
 EOF
 )" "20"
 
+# 3b. #286 — a bare, non-suppressed user-function call auto-displays its
+#     result as `ans = <value>` (it previously ran but printed nothing, while
+#     builtins displayed). Covers cross-turn scalar, the matrix-returning
+#     case, and that `ans` is reusable in a later turn.
+run_case "bare_user_fn_autodisplay_ans" "$(cat <<'EOF'
+function y = f(x)
+y = x + 2;
+end
+f(40)
+exit
+EOF
+)" "ans ="
+run_case "bare_user_fn_autodisplay_value" "$(cat <<'EOF'
+function y = f(x)
+y = x + 2;
+end
+f(40)
+exit
+EOF
+)" "42"
+# Result binds to `ans` and is reusable on a later turn.
+run_case "bare_user_fn_ans_reuse" "$(cat <<'EOF'
+function y = f(x)
+y = x + 2;
+end
+f(40)
+ans + 1
+exit
+EOF
+)" "43"
+# Matrix-returning bare call displays the matrix (not a scalar mis-disp).
+run_case "bare_user_fn_matrix_autodisplay" "$(cat <<'EOF'
+function M = mk()
+M = [1 2; 3 4];
+end
+mk()
+exit
+EOF
+)" "ans ="
+# Suppressed bare call must NOT auto-display.
+run_case_absent "bare_user_fn_suppressed_no_display" "$(cat <<'EOF'
+function y = f(x)
+y = x + 2;
+end
+f(40);
+exit
+EOF
+)" "ans ="
+
 # 4. Function defined but never called: no error message printed.
 run_case "uncalled_user_fn" "$(cat <<'EOF'
 function y = unused(x)

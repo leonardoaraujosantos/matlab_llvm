@@ -292,6 +292,13 @@ private:
    * so Vars declared inside a user function keep their slot-local
    * semantics. */
   bool InScriptBody = false;
+  /* #286: the CallOrIndex node currently being lowered as the bare,
+   * non-suppressed top-level expression of an ExprStmt (the implicit
+   * `ans = ...` display path). Only this exact node gets its open
+   * (NoneType) user-function result type nudged to a concrete type so the
+   * display fires — every other call site is left untouched, keeping the
+   * fix's blast radius to one statement. nullptr outside that path. */
+  const void *BareDisplayCall = nullptr;
   /* Set during lower() so lowerScript can iterate the TU's classdefs
    * to emit class-name registrations. nullptr outside lower(). */
   const TranslationUnit *CurTU = nullptr;
@@ -2571,7 +2578,14 @@ void Lowerer::lowerStmt(const Stmt &St) {
         }
       }
     }
+    /* #286: mark the bare top-level call so its open user-function result
+     * type gets nudged to concrete (see CallOrIndex lowering) — but only
+     * when this statement will actually display (non-suppressed). */
+    const void *SavedBareDisplay = BareDisplayCall;
+    if (!E.Suppressed && dynamic_cast<const CallOrIndex *>(E.E))
+      BareDisplayCall = E.E;
     mlir::Value V = lowerExpr(*E.E);
+    BareDisplayCall = SavedBareDisplay;
     /* Implicit display on a non-suppressed bare expression: MATLAB
      * prints `name =\n<value>` for a NameExpr and `ans =\n<value>`
      * for any other expression, and additionally binds the value to
@@ -14023,6 +14037,39 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           };
           if (F64Ret.contains(N->Name)) ResTy = F64;
           else if (PtrRet.contains(N->Name)) ResTy = PtrTy;
+        }
+        /* #286: the same NoneType-result gap affects user functions. Sema
+         * commonly leaves a user function's call result open (E.Ty == any)
+         * — especially at the REPL, where the callee was defined in an
+         * earlier input so the consuming statement can't see its inferred
+         * output type. That left a bare `f(40)` lowering to a NoneType
+         * matlab.call, so the ExprStmt implicit-display path skipped it and
+         * no `ans = 42` was printed (builtins already dodged this via the
+         * block above).
+         *
+         * Scope this strictly to the bare, non-suppressed top-level call of
+         * an ExprStmt (BareDisplayCall): that's the only site that needs a
+         * concrete type for the implicit display, which is lowered by an
+         * early LowerTensorOps pass that runs before the late call-result
+         * reconciliation. Refining every call site instead over-types
+         * model-object methods (`ys = step(G, ts)`, library-classdef
+         * methods not in CurTU->Classes), leaving unconverted
+         * matlab.store/alloc behind them. */
+        if (N->Ref->Kind == BindingKind::Function && N->Ref->FuncDef &&
+            BareDisplayCall == static_cast<const void *>(&C) &&
+            mlir::isa<mlir::NoneType>(ResTy) &&
+            !N->Ref->FuncDef->OutputRefs.empty()) {
+          /* Prefer Sema's concrete inferred output type (covers a
+           * matrix-returning `mk() = [1 2; 3 4]`, typed → ptr); fall back
+           * to f64 for an output whose type depends on the arg (the common
+           * `f(x) = x + 2` interactive case). */
+          mlir::Type RT0;
+          if (N->Ref->FuncDef->OutputRefs[0] &&
+              N->Ref->FuncDef->OutputRefs[0]->InferredType)
+            RT0 = mirTy(N->Ref->FuncDef->OutputRefs[0]->InferredType);
+          ResTy = (RT0 && !mlir::isa<mlir::NoneType>(RT0))
+                      ? RT0
+                      : (mlir::Type)mlir::Float64Type::get(&MCtx);
         }
         return emitUnreg(N->Ref->Kind == BindingKind::Builtin
                               ? "matlab.call_builtin" : "matlab.call",
