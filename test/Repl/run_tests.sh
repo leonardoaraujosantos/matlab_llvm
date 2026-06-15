@@ -751,6 +751,36 @@ exit
 EOF
 )" "hi!"
 
+# #291 — persistent REPL history. With MATLABC_HISTFILE set, each entered
+# line is appended to the file, and a later session loads it back. A piped
+# run with no env var must NOT create ~/.matlabc_history (no pollution).
+histfile="$(mktemp)"
+printf 'aa = 1;\nbb = 2;\nexit\n' | MATLABC_HISTFILE="$histfile" "$MATLABC" -repl >/dev/null 2>&1
+printf 'cc = 3;\nexit\n'          | MATLABC_HISTFILE="$histfile" "$MATLABC" -repl >/dev/null 2>&1
+hist="$(cat "$histfile" 2>/dev/null)"
+if [[ "$hist" == $'aa = 1;\nbb = 2;\ncc = 3;' ]]; then
+  pass=$((pass+1))
+else
+  fail=$((fail+1))
+  fails+=("repl_persistent_history (history file content unexpected)")
+  echo "FAIL  repl_persistent_history"
+  echo "----- got -----"; echo "$hist"
+fi
+rm -f "$histfile"
+# Pollution guard: a piped session without the env var leaves no default file.
+# (Only meaningful if the dev box has no pre-existing ~/.matlabc_history.)
+if [[ ! -e "$HOME/.matlabc_history" ]]; then
+  printf 'dd = 4;\nexit\n' | "$MATLABC" -repl >/dev/null 2>&1
+  if [[ -e "$HOME/.matlabc_history" ]]; then
+    fail=$((fail+1))
+    fails+=("repl_history_no_pollution (piped run created ~/.matlabc_history)")
+    echo "FAIL  repl_history_no_pollution"
+    rm -f "$HOME/.matlabc_history"
+  else
+    pass=$((pass+1))
+  fi
+fi
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 if (( fail > 0 )); then

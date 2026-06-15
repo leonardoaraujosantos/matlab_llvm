@@ -1914,6 +1914,18 @@ class ReplLineEditor {
 public:
   ReplLineEditor() : TtyMode(isatty(STDIN_FILENO)) {
     if (TtyMode) tcgetattr(STDIN_FILENO, &OrigTermios);
+    /* #291: persistent history. Path comes from MATLABC_HISTFILE when set
+     * (the regression test points this at a temp file), else
+     * $HOME/.matlabc_history for an interactive (TTY) session. A piped /
+     * scripted run with no explicit env var does NOT persist, so CI and
+     * heredoc invocations don't pollute the user's history. */
+    if (const char *Env = std::getenv("MATLABC_HISTFILE")) {
+      HistPath = Env;
+    } else if (TtyMode) {
+      if (const char *Home = std::getenv("HOME"))
+        HistPath = std::string(Home) + "/.matlabc_history";
+    }
+    loadHistory();
   }
   ~ReplLineEditor() { restoreTermios(); }
 
@@ -1922,6 +1934,13 @@ public:
     if (!History.empty() && History.back() == line) return;
     History.push_back(line);
     if (History.size() > kMaxHistory) History.erase(History.begin());
+    /* Append the new entry to the on-disk history so it survives across
+     * sessions. Appending (rather than rewriting) keeps concurrent REPLs
+     * from clobbering each other's lines. */
+    if (!HistPath.empty()) {
+      std::ofstream Out(HistPath, std::ios::app);
+      if (Out) Out << line << '\n';
+    }
   }
 
   std::optional<std::string> readLine(const char *prompt) {
@@ -1934,9 +1953,23 @@ private:
   bool TtyMode;
   struct termios OrigTermios;
   std::vector<std::string> History;
+  std::string HistPath;
 
   void restoreTermios() {
     if (TtyMode) tcsetattr(STDIN_FILENO, TCSAFLUSH, &OrigTermios);
+  }
+
+  /* Load up to the last kMaxHistory lines of the history file so ↑/↓ recall
+   * entries from previous sessions. Missing file is fine (first run). */
+  void loadHistory() {
+    if (HistPath.empty()) return;
+    std::ifstream In(HistPath);
+    if (!In) return;
+    std::string Line;
+    while (std::getline(In, Line))
+      if (!Line.empty()) History.push_back(Line);
+    if (History.size() > kMaxHistory)
+      History.erase(History.begin(), History.end() - kMaxHistory);
   }
 
   std::optional<std::string> readLineCooked(const char *prompt) {
@@ -2078,6 +2111,44 @@ private:
         }
         continue;
       }
+      /* #291: Tab completion of the identifier just before the cursor.
+       * Candidates are session-defined functions plus a curated set of
+       * MATLAB keywords / common builtins. A unique completion (or the
+       * longest common prefix of several) is inserted; multiple matches
+       * are listed below the line. */
+      if (c == '\t') {
+        size_t Start = Cursor;
+        while (Start > 0 &&
+               (std::isalnum((unsigned char)Buf[Start - 1]) ||
+                Buf[Start - 1] == '_'))
+          --Start;
+        std::string Word = Buf.substr(Start, Cursor - Start);
+        if (Word.empty()) continue;
+        std::vector<std::string> Cands = completionsFor(Word);
+        if (Cands.empty()) { writeStr("\a"); continue; }
+        std::string Lcp = Cands.front();
+        for (const std::string &Cd : Cands) {
+          size_t j = 0;
+          while (j < Lcp.size() && j < Cd.size() && Lcp[j] == Cd[j]) ++j;
+          Lcp.resize(j);
+        }
+        if (Lcp.size() > Word.size()) {
+          std::string Add = Lcp.substr(Word.size());
+          Buf.insert(Cursor, Add);
+          Cursor += Add.size();
+          redraw();
+        } else if (Cands.size() > 1) {
+          std::string Out = "\n";
+          for (size_t i = 0; i < Cands.size(); ++i) {
+            Out += Cands[i];
+            if (i + 1 < Cands.size()) Out += "  ";
+          }
+          Out += "\n";
+          writeStr(Out);
+          redraw();
+        }
+        continue;
+      }
       /* Printable. */
       if ((unsigned char)c >= 32 && c != 127) {
         Buf.insert(Cursor, 1, c);
@@ -2085,6 +2156,34 @@ private:
         redraw();
       }
     }
+  }
+
+  /* Names (session functions + keywords/common builtins) that start with
+   * `word`, de-duplicated and sorted. Used by Tab completion. */
+  static std::vector<std::string> completionsFor(const std::string &Word) {
+    std::vector<std::string> Out;
+    std::set<std::string> Seen;
+    auto consider = [&](const std::string &Name) {
+      if (Name.size() >= Word.size() &&
+          Name.compare(0, Word.size(), Word) == 0 && Seen.insert(Name).second)
+        Out.push_back(Name);
+    };
+    for (const auto &P : g_ReplUserFunctions) consider(P.first);
+    static const char *const kCommon[] = {
+        "disp", "display", "zeros", "ones", "eye", "rand", "randn", "size",
+        "length", "numel", "ndims", "reshape", "repmat", "linspace", "find",
+        "sort", "unique", "sum", "prod", "mean", "median", "max", "min",
+        "abs", "sqrt", "exp", "log", "sin", "cos", "tan", "floor", "ceil",
+        "round", "mod", "rem", "isempty", "isequal", "cell", "struct",
+        "fieldnames", "strcmp", "strcmpi", "strsplit", "strrep", "sprintf",
+        "fprintf", "num2str", "str2num", "str2double", "error", "warning",
+        "plot", "figure", "hold", "xlabel", "ylabel", "title", "legend",
+        "if", "else", "elseif", "end", "for", "while", "switch", "case",
+        "otherwise", "function", "return", "break", "continue", "try",
+        "catch", "true", "false", "clear", "who", "whos", "exit"};
+    for (const char *K : kCommon) consider(K);
+    std::sort(Out.begin(), Out.end());
+    return Out;
   }
 };
 

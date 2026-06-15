@@ -817,6 +817,14 @@ add_test(
   COMMAND ${CMAKE_SOURCE_DIR}/test/Repl/run_tests.sh $<TARGET_FILE:matlabc>
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Repl
 )
+# #291 — PTY-driven REPL tests (tab completion needs an interactive TTY).
+# Self-skips when no pseudo-terminal/banner is available.
+add_test(
+  NAME repl-pty-tests
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/test/Repl/run_pty_tests.py
+          $<TARGET_FILE:matlabc>
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Repl
+)
 add_test(
   NAME flowchart-tests
   COMMAND ${CMAKE_SOURCE_DIR}/test/Flowchart/run_tests.sh $<TARGET_FILE:matlabc>
