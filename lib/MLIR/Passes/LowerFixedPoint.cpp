@@ -428,13 +428,22 @@ bool rewriteFiMul(Operation *Op, ModuleOp M) {
   FiSpec Out = readSpec(Op, "fi");
   FiSpec Ls = readSpec(Op, "fi_lhs");
   FiSpec Rs = readSpec(Op, "fi_rhs");
-  unsigned WorkBits = storageBits(Out.WL);
+  // Natural FL = Ls.FL + Rs.FL. If output FL is narrower, shift right.
+  int NaturalFL = Ls.FL + Rs.FL;
+  // #294: the integer product of an Ls.WL-bit and Rs.WL-bit value needs up
+  // to Ls.WL + Rs.WL bits. Computing it in only storageBits(Out.WL) (e.g.
+  // `fi * 2`, where the plain scalar is encoded with a wide WL/FL) overflows
+  // the work integer, so the result scaled back to a double came out 0 /
+  // garbage. Size the work width to hold the full product, plus any
+  // left-shift headroom when the output FL is wider than the natural FL.
+  unsigned NeedBits = Ls.WL + Rs.WL;
+  if (NaturalFL < Out.FL) NeedBits += (unsigned)(Out.FL - NaturalFL);
+  if (Out.WL > NeedBits) NeedBits = Out.WL;
+  unsigned WorkBits = storageBits(NeedBits);
 
   Value LE = extendOrTruncate(B, L, Lhs, WorkBits, Ls.Signed);
   Value RE = extendOrTruncate(B, L, Rhs, WorkBits, Rs.Signed);
   Value Prod = arith::MulIOp::create(B, L, LE, RE);
-  // Natural FL = Ls.FL + Rs.FL. If output FL is narrower, shift right.
-  int NaturalFL = Ls.FL + Rs.FL;
   if (NaturalFL > Out.FL) {
     Prod = emitRoundingShift(B, L, M, Prod,
                              (unsigned)(NaturalFL - Out.FL),

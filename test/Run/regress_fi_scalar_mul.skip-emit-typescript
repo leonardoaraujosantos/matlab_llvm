@@ -1,0 +1,1 @@
+fi value semantics are not fully modeled by the TypeScript runtime (matches fi_mac_scalar / fi_mul_keep).
