@@ -112,6 +112,17 @@ struct Binding {
    * it (via isThreeDBinding) to re-seed the 3-D dispatch the way
    * ThreeDBindings does for same-TU 3-D values. */
   bool IsThreeD = false;
+  /* #289: true when a cross-REPL-turn binding holds a CHAR array
+   * (`c = 'abc'`).  A char array round-trips through the workspace as a
+   * matlab_string* — indistinguishable from a genuine "..." string by value
+   * alone — so the next turn would treat `c == 'l'` as a string compare and
+   * `c + 1` as concatenation instead of evaluating on character codes.  The
+   * store routes char arrays through a dedicated workspace kind (kind=18,
+   * matlab_ws_set_char) and the Resolver stamps this flag from the
+   * workspace-kind hook; the MLIR lowering (lowerArithOperand) reads it to
+   * convert the operand to its code matrix in arithmetic / comparison, while
+   * disp / concat / reads continue to treat it as a string. */
+  bool IsChar = false;
 };
 
 class Scope {

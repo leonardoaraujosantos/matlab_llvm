@@ -163,7 +163,9 @@ void *matlab_ws_get_string(const char *name, int64_t len) {
     void *out = NULL;
     if (matlab_ws) {
         for (int32_t i = 0; i < matlab_ws->nfields; ++i) {
-            if (matlab_ws->kinds[i] != 3) continue;
+            /* kind 3 = "..." string, kind 18 = char array (#289); both store
+             * a matlab_string* and read back the same way. */
+            if (matlab_ws->kinds[i] != 3 && matlab_ws->kinds[i] != 18) continue;
             const char *fn = matlab_ws->names[i];
             if ((int64_t)strlen(fn) != len) continue;
             if (memcmp(fn, name, (size_t)len) != 0) continue;
@@ -384,6 +386,26 @@ void matlab_ws_set_string(const char *name, int64_t len, void *s) {
     matlab_ws->f64_vals[idx] = 0.0;
     matlab_ws->ptr_vals[idx] = s;
     matlab_dbg_undo_record_set_new_ptr(r, /*new_kind=*/3, s);
+    matlab_ws_unlock();
+    matlab_ws_check_watch(name, len);
+}
+
+/* #289: char-array assignment to the workspace. Identical storage to
+ * matlab_ws_set_string (the value is a matlab_string*), but tagged kind=18
+ * so matlab_dbg_ws_kind / the Resolver can recover that this name holds a
+ * CHAR array (not a "..." string) on a later REPL turn, and route `c == 'l'`
+ * / `c + 1` through the character-code path. Reads go through
+ * matlab_ws_get_string, which accepts kind 18 as well. */
+void matlab_ws_set_char(const char *name, int64_t len, void *s) {
+    matlab_ws_init_if_needed();
+    matlab_ws_lock();
+    struct matlab_dbg_undo_rec *r =
+        matlab_ws_push_undo_locked(name, len, /*kind=*/2);
+    int32_t idx = struct_reserve(matlab_ws, name, (int32_t)len);
+    matlab_ws->kinds[idx] = 18;
+    matlab_ws->f64_vals[idx] = 0.0;
+    matlab_ws->ptr_vals[idx] = s;
+    matlab_dbg_undo_record_set_new_ptr(r, /*new_kind=*/18, s);
     matlab_ws_unlock();
     matlab_ws_check_watch(name, len);
 }
@@ -830,6 +852,15 @@ void matlab_ws_whos(void) {
             printf("  %-16s %-16s %-8s\n", name, shape, "double");
         } else if (matlab_ws->kinds[i] == 3) {
             printf("  %-16s %-16s %-8s\n", name, "1x1", "string");
+        } else if (matlab_ws->kinds[i] == 18) {
+            /* #289 — char array (stored as a matlab_string*, which shares the
+             * {char*, int64} layout; matlab_string is opaque in this TU). */
+            struct cs_layout { char *data; int64_t len; };
+            cs_layout *cs = (cs_layout *)matlab_ws->ptr_vals[i];
+            char shape[32];
+            snprintf(shape, sizeof shape, "1x%lld",
+                     (long long)(cs ? cs->len : 0));
+            printf("  %-16s %-16s %-8s\n", name, shape, "char");
         } else if (matlab_ws->kinds[i] == 13) {
             printf("  %-16s %-16s %-8s\n", name, "1x1", "function_handle");
         } else {

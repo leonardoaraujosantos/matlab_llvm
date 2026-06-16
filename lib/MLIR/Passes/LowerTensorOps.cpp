@@ -2327,6 +2327,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
 
     if ((Name == "matlab_ws_set_f64" || Name == "matlab_ws_set_mat" ||
          Name == "matlab_ws_set_obj" || Name == "matlab_ws_set_string" ||
+         Name == "matlab_ws_set_char" ||
          Name == "matlab_ws_set_sym" || Name == "matlab_ws_set_symmat" ||
          Name == "matlab_ws_set_table" || Name == "matlab_ws_set_categorical" ||
          Name == "matlab_ws_set_datetime" || Name == "matlab_ws_set_duration" ||
@@ -2350,6 +2351,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
        * is always a pointer at this point. */
       bool IsObj = (Name == "matlab_ws_set_obj");
       bool IsString = (Name == "matlab_ws_set_string");
+      bool IsChar = (Name == "matlab_ws_set_char");  /* #289 */
       bool IsSym = (Name == "matlab_ws_set_sym");
       bool IsSymmat = (Name == "matlab_ws_set_symmat");
       bool IsTable = (Name == "matlab_ws_set_table");
@@ -2359,7 +2361,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
       bool IsStruct   = (Name == "matlab_ws_set_struct");
       bool IsHandle   = (Name == "matlab_ws_set_handle");
       bool IsStructArr = (Name == "matlab_ws_set_struct_arr");
-      bool IsPtrSticky = IsObj || IsString || IsSym || IsSymmat ||
+      bool IsPtrSticky = IsObj || IsString || IsChar || IsSym || IsSymmat ||
                          IsTable || IsCategorical || IsDatetime ||
                          IsDuration || IsStruct || IsHandle || IsStructArr;
       bool IsMat;
@@ -2407,6 +2409,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
           : (IsSymmat    ? "matlab_ws_set_symmat"
                          : (IsSym ? "matlab_ws_set_sym"
                               : (IsString      ? "matlab_ws_set_string"
+                              : (IsChar        ? "matlab_ws_set_char"
                               : (IsObj         ? "matlab_ws_set_obj"
                               : (IsStruct      ? "matlab_ws_set_struct"
                               : (IsTable       ? "matlab_ws_set_table"
@@ -2414,7 +2417,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
                               : (IsDatetime    ? "matlab_ws_set_datetime"
                               : (IsDuration    ? "matlab_ws_set_duration"
                               : (IsMat         ? "matlab_ws_set_mat"
-                                               : "matlab_ws_set_f64")))))))))));
+                                               : "matlab_ws_set_f64"))))))))))));
       B.setInsertionPoint(Call);
       Value LenV = LLVM::ConstantOp::create(
           B, Call->getLoc(), I64, B.getI64IntegerAttr(Len));

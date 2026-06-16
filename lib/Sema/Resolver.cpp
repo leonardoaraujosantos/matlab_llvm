@@ -1752,6 +1752,17 @@ void Resolver::applyWorkspaceKind(Binding *NB, std::string_view Name,
     NB->IsThreeD = true;
   }
   else if (K == 3) NB->InferredType = TC.stringScalar();
+  /* Kind 18 = char array (#289).  The value round-trips as a matlab_string*,
+   * so keep the same stringScalar InferredType as kind 3 — every read / disp
+   * / concat then behaves exactly like a string.  The extra IsChar stamp is
+   * what the BinaryOp lowering (lowerArithOperand) keys on to convert the
+   * operand to its character-code matrix in arithmetic / comparison, so a
+   * cross-turn `c == 'l'` / `c + 1` evaluates on codes rather than string
+   * compare / concat. */
+  else if (K == 18) {
+    NB->InferredType = TC.stringScalar();
+    NB->IsChar = true;
+  }
   else if (K == 4) NB->InferredType = TC.arrayOf(Dtype::UInt8, Shape::unknown());
   else if (K == 5) NB->InferredType = TC.arrayOf(Dtype::Int32, Shape::unknown());
   /* Kind 7 = matlab_sym* (Phase 6 — Symbolic Math Toolbox).  No
