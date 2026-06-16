@@ -751,6 +751,47 @@ exit
 EOF
 )" "hi!"
 
+# #289 — CROSS-TURN char arithmetic. The char variable is defined in one REPL
+# input and used in a later one, so it round-trips through the workspace. It's
+# stored under the dedicated char kind (matlab_ws_set_char, kind=18) and the
+# Resolver stamps Binding::IsChar, so `c == 'l'` / `c + 1` still evaluate on
+# character codes across turns. disp(c) must still print TEXT (not codes), and
+# a genuine "..." string must still concatenate.
+run_case "xturn_char_compare_codes" "$(cat <<'EOF'
+c = 'hello';
+disp(c == 'l')
+exit
+EOF
+)" "1         1         0"
+run_case "xturn_char_add_codes" "$(cat <<'EOF'
+c = 'hello';
+disp(c + 1)
+exit
+EOF
+)" "105       102       109       109       112"
+# disp of the char var across a turn still renders text, not a code matrix.
+run_case "xturn_char_disp_text" "$(cat <<'EOF'
+c = 'hello';
+disp(c)
+exit
+EOF
+)" "hello"
+# A genuine string across a turn must still concatenate (not codes-convert).
+run_case "xturn_string_concat_unaffected" "$(cat <<'EOF'
+s = "hi";
+disp(s + "!")
+exit
+EOF
+)" "hi!"
+# A char binding reassigned to a "..." string drops its char-ness.
+run_case "xturn_char_then_string" "$(cat <<'EOF'
+c = 'ab';
+c = "xy";
+disp(c + "z")
+exit
+EOF
+)" "xyz"
+
 # #291 — persistent REPL history. With MATLABC_HISTFILE set, each entered
 # line is appended to the file, and a later session loads it back. A piped
 # run with no env var must NOT create ~/.matlabc_history (no pollution).

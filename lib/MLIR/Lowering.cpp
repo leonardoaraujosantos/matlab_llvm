@@ -3070,6 +3070,17 @@ void Lowerer::lowerStmt(const Stmt &St) {
         A.LHS.size() == 1 && A.LHS[0] &&
         dynamic_cast<const NameExpr *>(A.LHS[0]) != nullptr;
     if (RhsIsCharLiteralStore) RhsIsString = true;
+    /* #289: stamp / clear Binding::IsChar on a char-literal store so the
+     * workspace store below routes it through the dedicated char kind
+     * (matlab_ws_set_char) and a same-turn read keys on it. A re-store from a
+     * genuine "..." string clears it. */
+    if (ReplMode && A.LHS.size() == 1)
+      if (auto *LN = dynamic_cast<const NameExpr *>(A.LHS[0]))
+        if (LN->Ref) {
+          if (RhsIsCharLiteralStore) LN->Ref->IsChar = true;
+          else if (A.RHS && A.RHS->Kind == NodeKind::StringLiteral)
+            LN->Ref->IsChar = false;
+        }
 
     /* Track 3-D bindings: RHS produces a matlab_mat3 — zeros/ones with 3
      * args, cat(3, …), or a builtin that always returns truecolor
@@ -5033,6 +5044,15 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
         IsString = true;
       else if (N.Ty && N.Ty->K == Type::Kind::StringArray)
         IsString = true;
+      /* #289: a char-array store (`c = 'abc'`) round-trips as a
+       * matlab_string* but must stay distinguishable from a genuine "..."
+       * string on a later turn so `c == 'l'` / `c + 1` evaluate on the
+       * character codes (not string compare / concat). Route it through a
+       * dedicated char kind (matlab_ws_set_char, kind=18); the stored value
+       * is still a matlab_string*, so every read / disp / concat behaves
+       * exactly like a string — only the cross-turn arithmetic path keys on
+       * the Resolver-stamped Binding::IsChar (see lowerArithOperand). */
+      bool IsChar = N.Ref && N.Ref->IsChar && IsString;
       bool IsSym = SymBindings.count(N.Ref) != 0;
       bool IsSymmat = SymmatBindings.count(N.Ref) != 0;
       /* Phase 5 heterogeneous types — route through their dedicated
@@ -5073,6 +5093,7 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
           IsHandle       ? "matlab_ws_set_handle"
           : (IsSymmat    ? "matlab_ws_set_symmat"
                          : (IsSym ? "matlab_ws_set_sym"
+                              : (IsChar ? "matlab_ws_set_char"
                               : (IsString ? "matlab_ws_set_string"
                               : (IsObj    ? "matlab_ws_set_obj"
                               : (IsStructArr ? "matlab_ws_set_struct_arr"
@@ -5082,7 +5103,7 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
                               : (IsDatetime    ? "matlab_ws_set_datetime"
                               : (IsDuration    ? "matlab_ws_set_duration"
                               : (IsMat ? "matlab_ws_set_mat"
-                                       : "matlab_ws_set_f64")))))))))));
+                                       : "matlab_ws_set_f64"))))))))))));
       /* #77: remember whether this workspace var currently holds a matrix
        * so an anon capturing it can reload it as a ptr (matlab_ws_get_mat)
        * rather than mis-typing the capture as f64. */
@@ -5864,7 +5885,9 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
       };
       if (isCharArr(X->Ty)) return true;
       if (auto *NE = dynamic_cast<const NameExpr *>(X))
-        if (NE->Ref && isCharArr(NE->Ref->InferredType)) return true;
+        if (NE->Ref &&
+            (isCharArr(NE->Ref->InferredType) || NE->Ref->IsChar))
+          return true; /* #289: cross-turn char binding (kind=18) */
       return false;
     };
     bool LhsRealStr = isStringExpr(Bi.LHS) && !isCharArrayExpr(Bi.LHS);
@@ -6151,7 +6174,10 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         bool charTyped = isCharArray(E->Ty);
         if (!charTyped)
           if (auto *NE = dynamic_cast<const NameExpr *>(E))
-            if (NE->Ref) charTyped = isCharArray(NE->Ref->InferredType);
+            if (NE->Ref)
+              /* #289: a cross-turn char binding (kind=18) keeps a stringScalar
+               * InferredType but carries IsChar; treat it as char here. */
+              charTyped = isCharArray(NE->Ref->InferredType) || NE->Ref->IsChar;
         if (charTyped &&
             mlir::isa<mlir::LLVM::LLVMPointerType>(V.getType())) {
           auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
