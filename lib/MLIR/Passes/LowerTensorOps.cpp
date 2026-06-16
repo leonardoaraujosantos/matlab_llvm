@@ -6927,6 +6927,9 @@ bool TensorLowering::rewriteBuiltinCalls() {
         /* ===== Deep Learning Toolbox Tiers 1-2 (dlarray + autodiff) ===== */
         {"matlab_dlnet_dlarray_init",   "matlab_dlnet_dlarray_init",   PtrTy, {PtrTy, PtrTy}},
         {"matlab_dlnet_extractdata",    "matlab_dlnet_extractdata",    PtrTy, {PtrTy}},
+        /* #296 — trainingOptions handle constructor (solver ptr, lr, epochs).
+         * Emitted directly by the frontend Name-Value parse, so it self-maps. */
+        {"matlab_dlnet_training_options", "matlab_dlnet_training_options", PtrTy, {PtrTy, F64, F64}},
         {"matlab_dlnet_plus",           "matlab_dlnet_plus",           PtrTy, {PtrTy, PtrTy, PtrTy}},
         {"matlab_dlnet_minus",          "matlab_dlnet_minus",          PtrTy, {PtrTy, PtrTy, PtrTy}},
         {"matlab_dlnet_mtimes",         "matlab_dlnet_mtimes",         PtrTy, {PtrTy, PtrTy, PtrTy}},
@@ -7775,6 +7778,11 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"netPredict",       "matlab_dlnet_net_predict",    1, "pp"},
       {"netNumLayers",     "matlab_dlnet_net_num_layers", 0, "p"},
       {"trainnet",         "matlab_dlnet_net_train",      0, "pppff"},
+      /* #296 — MATLAB API: net = trainnet(X, T, net, lossFcn, options). All
+       * five operands are ptrs (matrices / handles / string), so this is
+       * distinguished from the custom pppff form by arg type, and returns
+       * the trained net handle (ptr). */
+      {"trainnet",         "matlab_dlnet_trainnet_opts",  1, "ppppp"},
       /* im2col helper exposed to user code so callers can write their
        * own GEMM-based conv (e.g. depthwise, dilation, stride>1). */
       {"im2col_2d",    "matlab_im2col_2d",    1, "pff"},
