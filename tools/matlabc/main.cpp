@@ -234,6 +234,10 @@ struct Options {
    * follow-up). */
   bool SvConstMulOpt = true;
   std::string InputPath;
+  /* #295: output directory for the GPU bundle emitters
+   * (-emit-{cuda,metal,opencl} -o <dir>). Empty => the default
+   * <stem>_<target> next to the input. */
+  std::string OutDir;
   /* Additional input files. When multiple `.m` files are passed, the
    * driver concatenates their contents in CLI order — the first file
    * (kept in InputPath for backward compat with single-file modes) is
@@ -356,8 +360,11 @@ int usage(const char *Prog) {
                "             -emit-hardware-report | -dump-flow |\n"
                "             -dump-chart | -emit-trace |\n"
                "             -emit-matlab |\n"
+               "             -emit-cuda | -emit-metal | -emit-opencl |\n"
                "             -format | -repl | -dap]\n"
-               "            [-no-line | -line] [-doxygen] [-cpp-auto] [-g]  FILE.m\n";
+               "            [-no-line | -line] [-doxygen] [-cpp-auto] [-g]\n"
+               "            [-o <dir>  (output dir for -emit-{cuda,metal,opencl})]"
+               "  FILE.m\n";
   return 64;
 }
 
@@ -545,6 +552,14 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
         std::cerr << "--discretize must be `forward_euler` or `tustin`\n";
         return false;
       }
+    }
+    else if (A == "-o" || A == "--output") {
+      /* #295: explicit output directory for the GPU bundle emitters. */
+      if (++I >= Argc) {
+        std::cerr << "-o requires a directory argument\n";
+        return false;
+      }
+      Opts.OutDir = Argv[I];
     }
     else if (A == "-opt" || A == "-O") Opts.Opt = true;
     else if (A == "-no-line" || A == "--no-line") Opts.NoLine = true;
@@ -13465,8 +13480,12 @@ int main(int Argc, char **Argv) {
           "    const int n)";
       ThreadIdLine = "  int tid = get_global_id(0);";
     }
-    /* Pick the output dir. */
-    std::string OutDir = Stem + "_" + Target;
+    /* Pick the output dir: an explicit `-o <dir>` wins (#295), else the
+     * default <stem>_<target> next to the input. A trailing slash on the
+     * -o value is tolerated. */
+    std::string OutDir = !Opts.OutDir.empty() ? Opts.OutDir
+                                              : (Stem + "_" + Target);
+    while (OutDir.size() > 1 && OutDir.back() == '/') OutDir.pop_back();
     std::error_code Ec;
     /* Use mkdir(2) — std::filesystem available in C++17 but the rest of
      * the tool uses cstdio shapes; mkdir/EEXIST is simpler. */
