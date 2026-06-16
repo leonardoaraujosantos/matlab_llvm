@@ -400,6 +400,7 @@ See [`docs/ode.md`](ode.md) for the full surface, ABI notes, and call shapes.
 | Struct arrays (`s(i).x`) | ✅ shipped (Phase 2) | New `matlab_struct_arr` runtime descriptor (vector of `matlab_struct *`); `s(i).x = v` auto-promotes the binding, `s(i).x` reads the i-th element, `length(s)` / `numel(s)` / `size(s, dim)` all dispatch correctly. Scalar fields work fully; matrix-valued fields (`s(i).vec = [1 2 3]`) carry the same pre-existing tensor->ptr conversion gap as the scalar struct path (`s.vec = [1 2 3]`) and are out of scope for this slice. Python and TypeScript runtimes ship parity. Gating test: `test/Run/struct_arr_basic.m`. |
 | `fieldnames(s)` | 🟡 | Needs char-matrix dtype |
 | Cell: 1-D literal, read/write, `numel`, `iscell` | ✅ | Auto-grows on OOB write |
+| Cell: `c{i} = matrix / string`, `cell(m,n)` preallocation | ✅ shipped (#292) | A dynamic element store records the element kind (`CellMatElems` / `CellStrElems`) so a later `c{k}` read picks `matlab_cell_get_mat` / `_str` instead of defaulting to `get_f64` (which returned 0 for a matrix); a char RHS is wrapped to a `matlab_string*` and stored via `matlab_cell_set_str`. `cell(n)` / `cell(m,n)` lower to `matlab_cell_new[_2d]`. Subscripting a brace-read result (`c{i}(k)`) already worked. Gating test: `test/Run/regress_cell_element_assign.m`. |
 | Cell: 2-D literals + `C{r, k}` indexing | ✅ shipped (Phase 1.3) | `{a, b; c, d}` -> `matlab_cell_new_2d` + per-cell `matlab_cell_set_<f64\|mat>_2d`; `C{r, k}` reads / writes via the matching get / set entries. `size(C, dim)` routes to `matlab_cell_size_dim`. Python (`cell_*_2d`) and TypeScript (`Cell2D` wrapper) runtimes ship with byte-identical output. |
 | Cell: concatenation (`[A, B]`, `[A; B]`) | ✅ shipped (Phase 1.3) | Bracket-concat of all-cell elements chains `matlab_cell_concat_row` / `_col`; assignment auto-tags the LHS as a cell binding so `size` / `iscell` keep dispatching through the cell runtime. Spread-into-cell (`{C{:}, x}`) still missing — needs `varargin`-style unpacking at the literal site. |
 | `cellfun`, `arrayfun` (beyond trivial cases) | 🟡 | Registered; not all wired |
@@ -632,7 +633,8 @@ Per-toolbox plan in [`rf_toolbox_plan.md`](rf_toolbox_plan.md).  Two-commit clos
 | `upper`, `lower`, `startsWith`, `endsWith`, `contains` | ✅ |
 | `strcmp`, `strcmpi`, `strncmp` | ✅ |
 | `strfind`, `strjoin` | ✅ | `strjoin(C[, delim])` joins a cell of strings; `strfind` returns a 1×k index row vector. |
-| `char(code)` (numeric scalar → 1-char string) | ✅ | Vector `char([codes])` and char-array arithmetic are follow-ups. |
+| `char(code)` (numeric scalar → 1-char string) | ✅ | Vector `char([codes])` is a follow-up. |
+| char-array arithmetic / comparison on codes (`'hello' == 'l'`, `c + 1`) | ✅ | A char value in a numeric/comparison op evaluates on character codes (literals folded; variables materialized to an f64 code matrix — AOT i8-tensor and REPL `matlab_string*` lanes). Works **cross-turn** in the REPL via a dedicated char workspace kind (kind=18) + `Binding::IsChar`, so `disp`/concat stay string-semantic (#265, #289). |
 | char-literal args (`'…'`) to the above string builtins | ✅ | Predicates/transforms/`str2double` materialise `const_char` literals, so both literal and string-variable args work. |
 | `strsplit`, `regexp`, `regexprep`, `str2num` | ❌ | `strsplit` needs cell-result element-kind tracking; regex needs an engine. |
 
@@ -727,7 +729,7 @@ through every existing backend.
 | Diagnostics with source-location | ✅ |
 | `#line` directives in emitted C / C++ | ✅ |
 | Formatter (AST pretty-printer, idempotent) | ✅ | `matlabc -format` / `just format`. Drops comments (not in AST). |
-| REPL / interactive interpreter | 🟡 | JIT via MLIR ExecutionEngine, persistent workspace, implicit display, `who`/`whos`/`clear`. `matlabc -repl`. See `docs/repl.md`. |
+| REPL / interactive interpreter | 🟡 | JIT via MLIR ExecutionEngine, persistent workspace, implicit display, `who`/`whos`/`clear`. **Line editing** (history ↑/↓, Ctrl-A/E/U/K/L), **multi-line block input** (#290), **persistent history** (`$MATLABC_HISTFILE`) + **tab completion** (#291). `matlabc -repl`. See `docs/repl.md`. |
 | Language Server (LSP) | 🟡 | `matlab-lsp` binary: initialize/shutdown, didOpen/didChange/didClose, publishDiagnostics, definition, documentSymbol. Accepts both `.m` and `.mflow` URIs (the latter routes through the flowchart loader + builder before Sema). No completion / hover / rename / workspace-symbol yet. See `docs/lsp.md`. |
 | Debugger (DAP) | 🟡 | `matlabc -dap FILE.m` speaks the full Debug Adapter Protocol over stdio: breakpoints (`setBreakpoints`), step (`next`/`stepIn`/`stepOut`), stack trace, `Locals` scope via the workspace snapshot, stdout forwarded as `output` events, clean `disconnect`. Plus the lightweight aids: `dbg(x)` prints to stderr, `who`/`whos`/`clear` list and purge the workspace, `#line` directives in emitted C / C++ so gdb/lldb step `.m` source. Deferred: pushing a stack frame on user-function entry (single `<script>` frame for now), `setVariable`, `evaluate`, conditional breakpoints. See `docs/debug.md`. |
 | Unit-test framework (MATLAB `matlab.unittest`) | ❌ |

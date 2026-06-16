@@ -206,6 +206,25 @@ plots).
 
 ---
 
+## Recently shipped (REPL + cross-turn + toolbox-polish arc, 2026-06-14 → 2026-06-16)
+
+An eight-issue arc closed via one PR each (#297–#304), every PR CI-green with a
+regression test. Roadmap-side summary; authoritative status in
+[`feature_status.md`](feature_status.md):
+
+| Issue | What | Gating test |
+|---|---|---|
+| #290 | REPL multi-line block input (`for`/`if`/`while`/`switch`/`try`/`function`, `...` continuation) — verified already-working, locked | `test/Repl/run_tests.sh` (multiline_*) |
+| #291 | REPL **persistent history** (`$MATLABC_HISTFILE` / `~/.matlabc_history`) + **tab completion** (session fns + builtins/keywords) | `test/Repl/run_pty_tests.py` (`repl-pty-tests`) |
+| #292 | Cells — `c{i} = matrix/string` element assignment (kind-tracked read-back) + `cell(m,n)` preallocation | `regress_cell_element_assign.m` |
+| #293 | Control model objects — `tfdata`/`ssdata`/`c2d`/`disp(tf)` verified + locked | `regress_control_model_objects.m` |
+| #294 | Fixed-point `fi * <scalar>` — widened the product work-integer (`Ls.WL+Rs.WL`) to fix overflow → 0 | `regress_fi_scalar_mul.m` |
+| #296 | Deep Learning — `trainingOptions(solver,…)` + `trainnet(X,T,net,loss,opts)` MATLAB API on the dlnetwork trainer (adam/sgdm/rmsprop) | `regress_dl_trainnet.m` |
+| #289 | Char arrays — cross-turn REPL `c == 'l'` / `c + 1` operate on codes (new kind=18 + `Binding::IsChar`; disp/concat unchanged); follows #265 | `test/Repl/run_tests.sh` (xturn_char_*) |
+| #295 | GPU `-emit-{cuda,metal,opencl} -o <dir>` output-dir flag — completes the AOT bundle API (bundle built + ran on RTX 5060) | `run_gpu_emit_tests.sh` (`gpu-emit-tests`) |
+
+---
+
 ## Near-term (~1 month)
 
 ### 1. HDL Verification with CocoTB 🔵
@@ -498,19 +517,19 @@ verification, simulation, or porting.
 
 ### 10. REPL: line editing + history + JIT cache 🟡
 
-Today `matlabc -repl` is a minimal stdin loop. The major missing
-ergonomics:
+Most of the ergonomics shipped (#290 / #291):
 
-- **Readline** for history navigation (↑/↓), Ctrl-R search,
-  Ctrl-A / Ctrl-E line motion.
-- **Multi-line input** for `for ... end`, `function ... end`,
-  `if ... end` blocks (today everything must be on one line).
-- **Persistent JIT cache** keyed by hashed source so repeated
-  function definitions don't re-JIT cold.
-- **Tab completion** for variables in workspace + builtins.
+- ✅ **Line editing** — history navigation (↑/↓), Ctrl-A/E motion,
+  Ctrl-U/K kill, Ctrl-L clear, in `readLineRaw`.
+- ✅ **Multi-line input** — `for`/`if`/`while`/`switch`/`try`/`function`
+  blocks accumulate until block + bracket depth return to 0 (#290).
+- ✅ **Persistent history** — `$MATLABC_HISTFILE` (or `~/.matlabc_history`
+  for a TTY session); piped/CI runs don't persist (#291).
+- ✅ **Tab completion** — session functions + curated builtins/keywords (#291).
+- 🔵 **Persistent JIT cache** keyed by hashed source so repeated
+  function definitions don't re-JIT cold. *(the remaining item)*
 
-**Effort.** ~1.5 weeks (most of it is editline / linenoise
-integration; the rest is JIT cache wiring).
+**Effort.** ~0.5 week (JIT cache wiring only).
 
 ---
 
