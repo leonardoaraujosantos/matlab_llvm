@@ -7410,6 +7410,60 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                     {mlir::NoneType::get(&MCtx)}, L, {Cal});
         return Obj;
       }
+      /* #296 — trainingOptions(solver, 'Name', val, ...). The MATLAB training
+       * options object. Parse the recognized Name-Value options (MaxEpochs,
+       * InitialLearnRate) from the (literal) name strings and emit
+       * matlab_dlnet_training_options(solverStr, lr, epochs); unknown options
+       * are accepted but ignored. The returned handle is consumed by the
+       * trainnet(X, T, net, lossFcn, options) MATLAB form. */
+      if (N && N->Name == "trainingOptions" && !C.Args.empty()) {
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        auto F64 = mlir::Float64Type::get(&MCtx);
+        auto litStr = [&](const Expr *E) -> std::string {
+          if (auto *CL = dynamic_cast<const CharLiteral *>(E)) return CL->Value;
+          if (auto *SL = dynamic_cast<const StringLiteral *>(E)) return SL->Value;
+          return std::string();
+        };
+        auto constF64 = [&](double d) -> mlir::Value {
+          return emitUnreg("matlab.const_float", {}, F64, L,
+                           {mlir::NamedAttribute(
+                               mlir::StringAttr::get(&MCtx, "value"),
+                               mlir::FloatAttr::get(F64, d))});
+        };
+        // solver name -> matlab_string*
+        mlir::NamedAttribute SVA(mlir::StringAttr::get(&MCtx, "value"),
+                                 mlir::StringAttr::get(&MCtx, litStr(C.Args[0])));
+        mlir::Value SCh = emitUnreg("matlab.const_char", {},
+                                    mlir::NoneType::get(&MCtx), L, {SVA});
+        mlir::NamedAttribute SfromLit(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_string_from_literal"));
+        mlir::Value SolverV =
+            emitUnreg("matlab.call_builtin", {SCh}, PtrTy, L, {SfromLit});
+        // Name-Value scan (defaults match the runtime).
+        mlir::Value LrV = constF64(0.01);
+        mlir::Value EpV = constF64(30.0);
+        auto toF64 = [&](mlir::Value V) -> mlir::Value {
+          if (V.getType() == F64) return V;
+          if (auto IT = mlir::dyn_cast<mlir::IntegerType>(V.getType())) {
+            if (IT.getWidth() == 1)
+              return mlir::arith::UIToFPOp::create(B, L, F64, V);
+            return mlir::arith::SIToFPOp::create(B, L, F64, V);
+          }
+          return V;
+        };
+        for (size_t i = 1; i + 1 < C.Args.size(); i += 2) {
+          std::string Name = litStr(C.Args[i]);
+          mlir::Value Val = toF64(lowerExpr(*C.Args[i + 1]));
+          if (Name == "InitialLearnRate") LrV = Val;
+          else if (Name == "MaxEpochs") EpV = Val;
+        }
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_dlnet_training_options"));
+        return emitUnreg("matlab.call_builtin", {SolverV, LrV, EpV}, PtrTy, L,
+                         {Cal});
+      }
       /* Reinforcement Learning Tier 1 — rlPredefinedEnv("BasicGridWorld").
        * A free function returning an rlMDPEnv carrier; the runtime fills the
        * grid-world transition/reward tensors.  (Only BasicGridWorld ships in

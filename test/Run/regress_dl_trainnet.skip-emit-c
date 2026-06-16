@@ -1,0 +1,1 @@
+Deep-learning training (dlnetwork carrier + trainnet/trainingOptions) targets the LLVM lane; the source-emit backends don't model the net carrier (#296, matches dl_cnn_classifier / dl_digit_classifier).

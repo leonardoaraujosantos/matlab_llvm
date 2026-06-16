@@ -4586,8 +4586,11 @@ matlab_mat *matlab_dlnet_net_predict(matlab_mat *h, matlab_mat *X) {
 /* train(handle, X, Y, lr, n_iter, b1=0.9, b2=0.999, eps=1e-8) -> final MSE.
  * Forward chains apply_layer; backward walks layers in reverse using the
  * stashed forward activations + analytic per-op gradient.  Adam per FC layer. */
-double matlab_dlnet_net_train(matlab_mat *h, matlab_mat *X, matlab_mat *Y,
-                               double lr, double n_iter) {
+/* #296: parameterised trainer. solver: 0=adam, 1=sgdm, 2=rmsprop. The public
+ * matlab_dlnet_net_train (custom 5-arg form) is a thin Adam wrapper; the
+ * trainingOptions/trainnet MATLAB API drives this with the chosen solver. */
+static double net_train_impl(matlab_mat *h, matlab_mat *X, matlab_mat *Y,
+                             double lr, double n_iter, int solver) {
     using namespace dlnet_net;
     int idx = handle_to_idx(h);
     if (idx < 0 || !X || !Y) return 0.0;
@@ -4604,10 +4607,33 @@ double matlab_dlnet_net_train(matlab_mat *h, matlab_mat *X, matlab_mat *Y,
         }
     }
     double b1 = 0.9, b2 = 0.999, eps = 1e-8;
+    double mom = 0.9, rho = 0.9;  /* SGDM momentum / RMSProp decay */
     double final_loss = 0.0;
     int64_t N = static_cast<int64_t>(n_iter);
     if (N < 1) N = 1;
     int64_t Xc = X->cols;
+    /* Per-parameter optimizer step over an array of length n. m / v hold the
+     * first / second moment state (allocated per FC layer). */
+    auto applyUpdate = [&](matlab_mat *P, matlab_mat *m, matlab_mat *v,
+                           matlab_mat *g, int64_t n, int64_t t) {
+        double bc1 = 1.0 - std::pow(b1, static_cast<double>(t));
+        double bc2 = 1.0 - std::pow(b2, static_cast<double>(t));
+        for (int64_t i = 0; i < n; ++i) {
+            if (solver == 1) {           /* SGD with momentum */
+                m->data[i] = mom * m->data[i] + g->data[i];
+                P->data[i] -= lr * m->data[i];
+            } else if (solver == 2) {    /* RMSProp */
+                v->data[i] = rho * v->data[i] + (1.0 - rho) * g->data[i] * g->data[i];
+                P->data[i] -= lr * g->data[i] / (std::sqrt(v->data[i]) + eps);
+            } else {                     /* Adam */
+                m->data[i] = b1 * m->data[i] + (1.0 - b1) * g->data[i];
+                v->data[i] = b2 * v->data[i] + (1.0 - b2) * g->data[i] * g->data[i];
+                double mhat = m->data[i] / bc1;
+                double vhat = v->data[i] / bc2;
+                P->data[i] -= lr * mhat / (std::sqrt(vhat) + eps);
+            }
+        }
+    };
     for (int64_t t = 1; t <= N; ++t) {
         /* Forward — stash activations per layer. */
         std::vector<matlab_mat *> acts;
@@ -4654,23 +4680,9 @@ double matlab_dlnet_net_train(matlab_mat *h, matlab_mat *X, matlab_mat *Y,
                 matlab_mat *Wt = mat_alloc(in_n, k);
                 for (int64_t i = 0; i < k; ++i) for (int64_t j = 0; j < in_n; ++j) Wt->data[j * k + i] = L.W->data[i * in_n + j];
                 next_grad = matlab_matmul_mm(Wt, grad);
-                /* Adam on W. */
-                double bc1 = 1.0 - std::pow(b1, static_cast<double>(t));
-                double bc2 = 1.0 - std::pow(b2, static_cast<double>(t));
-                for (int64_t i = 0; i < k * in_n; ++i) {
-                    L.mW->data[i] = b1 * L.mW->data[i] + (1.0 - b1) * dW->data[i];
-                    L.vW->data[i] = b2 * L.vW->data[i] + (1.0 - b2) * dW->data[i] * dW->data[i];
-                    double mhat = L.mW->data[i] / bc1;
-                    double vhat = L.vW->data[i] / bc2;
-                    L.W->data[i] -= lr * mhat / (std::sqrt(vhat) + eps);
-                }
-                for (int64_t i = 0; i < L.b->rows * L.b->cols; ++i) {
-                    L.mb->data[i] = b1 * L.mb->data[i] + (1.0 - b1) * db->data[i];
-                    L.vb->data[i] = b2 * L.vb->data[i] + (1.0 - b2) * db->data[i] * db->data[i];
-                    double mhat = L.mb->data[i] / bc1;
-                    double vhat = L.vb->data[i] / bc2;
-                    L.b->data[i] -= lr * mhat / (std::sqrt(vhat) + eps);
-                }
+                /* Parameter update under the selected solver. */
+                applyUpdate(L.W, L.mW, L.vW, dW, k * in_n, t);
+                applyUpdate(L.b, L.mb, L.vb, db, L.b->rows * L.b->cols, t);
             } else if (L.kind == L_RELU) {
                 next_grad = mat_alloc(grad->rows, grad->cols);
                 int64_t nn = grad->rows * grad->cols;
@@ -4704,6 +4716,71 @@ double matlab_dlnet_net_train(matlab_mat *h, matlab_mat *X, matlab_mat *Y,
         }
     }
     return final_loss;
+}
+
+/* Custom 5-arg form kept for existing callers: Adam, MSE, returns loss. */
+double matlab_dlnet_net_train(matlab_mat *h, matlab_mat *X, matlab_mat *Y,
+                              double lr, double n_iter) {
+    return net_train_impl(h, X, Y, lr, n_iter, /*solver=*/0);
+}
+
+}  // extern "C"
+
+/* #296 — MATLAB training API.
+ *
+ *   options = trainingOptions(solver, "MaxEpochs", N, "InitialLearnRate", lr)
+ *   net     = trainnet(X, T, net, lossFcn, options)
+ *
+ * trainingOptions stores {solver, lr, maxEpochs} in a thread-local registry
+ * and returns a 1x1 handle (1-based index). trainnet unpacks it, runs the
+ * shared trainer with the chosen solver, and returns the (in-place trained)
+ * net handle. Loss is MSE for now; lossFcn is accepted for API shape (the
+ * dlnetwork carrier's analytic backward path is the MSE-through-layers one). */
+namespace {
+struct TrainOpts { int solver; double lr; double maxEpochs; };
+thread_local std::vector<TrainOpts> g_train_opts;
+int solver_id(void *s) {
+    /* matlab_string is opaque in this TU; it shares the {char*,int64} layout
+     * of the local dlnet_string_s used elsewhere here. */
+    auto *p = reinterpret_cast<const dlnet_string_s *>(s);
+    if (p && p->data) {
+        std::string v(p->data, static_cast<size_t>(p->len));
+        if (v == "sgdm") return 1;
+        if (v == "rmsprop") return 2;
+    }
+    return 0; /* adam (default) */
+}
+}  // namespace
+
+extern "C" {
+
+matlab_mat *matlab_dlnet_training_options(void *solver, double lr,
+                                          double max_epochs) {
+    TrainOpts o;
+    o.solver = solver_id(solver);
+    o.lr = (lr > 0.0) ? lr : 0.01;
+    o.maxEpochs = (max_epochs >= 1.0) ? max_epochs : 30.0;
+    g_train_opts.push_back(o);
+    matlab_mat *h = mat_alloc(1, 1);
+    h->data[0] = static_cast<double>(g_train_opts.size()); /* 1-based handle */
+    return h;
+}
+
+matlab_mat *matlab_dlnet_trainnet_opts(matlab_mat *X, matlab_mat *T,
+                                       matlab_mat *net, void * /*loss*/,
+                                       matlab_mat *opts) {
+    double lr = 0.01, epochs = 30.0;
+    int solver = 0;
+    if (opts && opts->data) {
+        int i = static_cast<int>(opts->data[0]) - 1;
+        if (i >= 0 && i < static_cast<int>(g_train_opts.size())) {
+            lr = g_train_opts[static_cast<size_t>(i)].lr;
+            epochs = g_train_opts[static_cast<size_t>(i)].maxEpochs;
+            solver = g_train_opts[static_cast<size_t>(i)].solver;
+        }
+    }
+    net_train_impl(net, X, T, lr, epochs, solver);
+    return net; /* trained in place; return the handle */
 }
 
 }  // extern "C"

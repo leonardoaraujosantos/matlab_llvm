@@ -805,7 +805,7 @@ void Resolver::registerBuiltins() {
     "onnxEndNode", "onnxSave",
     "dlnetGpu", "dlnetGpuActive",
     "dlnetwork", "addFC", "addRelu", "addSigmoid", "addTanh", "addSoftmax",
-    "netPredict", "netNumLayers", "trainnet",
+    "netPredict", "netNumLayers", "trainnet", "trainingOptions",
     "objArrayNew", "objArrayAppend", "objArrayLen", "objArrayGet",
     /* Inverse Tustin: discrete-to-continuous. */
     "d2c_tustin",
