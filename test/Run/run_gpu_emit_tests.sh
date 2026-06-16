@@ -96,6 +96,32 @@ for target in cuda metal opencl; do
   pass=$((pass+1))
 done
 
+# 4. #295 — explicit output directory via `-o <dir>`. The bundle must land
+#    in the requested directory (not the default <stem>_<target>), with the
+#    same 4 artifacts. A trailing slash on the -o value is tolerated.
+cd "$TMP"
+rm -rf custom_out custom_out_slash
+if "$MATLABC" -emit-cuda "$SRC" -o custom_out 2>"$TMP/o.err" \
+   && [[ -f "$TMP/custom_out/gpu_emit_src_kernel.cu" \
+      && -f "$TMP/custom_out/gpu_emit_src_main.cpp" \
+      && -f "$TMP/custom_out/Makefile" \
+      && -f "$TMP/custom_out/README.md" ]]; then
+  echo "PASS cuda -o <dir>"
+  pass=$((pass+1))
+else
+  echo "FAIL cuda -o <dir>: bundle not written to custom_out/"
+  sed 's/^/  /' "$TMP/o.err" 2>/dev/null | head -5
+  fail=$((fail+1))
+fi
+if "$MATLABC" -emit-cuda "$SRC" -o custom_out_slash/ 2>/dev/null \
+   && [[ -f "$TMP/custom_out_slash/gpu_emit_src_kernel.cu" ]]; then
+  echo "PASS cuda -o <dir>/ (trailing slash)"
+  pass=$((pass+1))
+else
+  echo "FAIL cuda -o <dir>/: trailing-slash output dir"
+  fail=$((fail+1))
+fi
+
 # On macOS, also confirm the Metal bundle BUILDS (host driver compiles
 # against the system Metal SDK).  Validates the bundle is link-ready
 # even without running.
