@@ -16,13 +16,9 @@ function out_dest = router_tick(in_mode, in_val, ev_tick)
   persistent init_done;
   persistent r_chart_root;
   persistent l_dest;
-  persistent l_mode;
-  persistent l_val;
   if isempty(init_done)
     init_done = 0;
     r_chart_root = 0;
-    l_mode = 0;
-    l_val = 0;
     l_dest = 0;
   end
   l_mode = in_mode;

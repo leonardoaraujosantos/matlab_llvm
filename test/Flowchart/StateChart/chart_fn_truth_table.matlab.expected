@@ -12,14 +12,10 @@ end
 function out_open = gate_tick(in_lit, in_ready, ev_step)
   persistent init_done;
   persistent r_chart_root;
-  persistent l_lit;
   persistent l_open;
-  persistent l_ready;
   if isempty(init_done)
     init_done = 0;
     r_chart_root = 0;
-    l_lit = 0;
-    l_ready = 0;
     l_open = 0;
   end
   l_lit = in_lit;

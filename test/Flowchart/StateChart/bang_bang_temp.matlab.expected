@@ -15,13 +15,9 @@ function out_heater = bang_bang_tick(in_temp, in_setpoint, ev_tick)
   persistent r_chart_root;
   persistent l_delta;
   persistent l_heater;
-  persistent l_setpoint;
-  persistent l_temp;
   if isempty(init_done)
     init_done = 0;
     r_chart_root = 0;
-    l_temp = 0;
-    l_setpoint = 0;
     l_heater = 0;
     l_delta = 1.0;
   end

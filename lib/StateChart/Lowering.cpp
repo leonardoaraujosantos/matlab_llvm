@@ -1205,10 +1205,10 @@ private:
     if (L_.UsesTemporal)
       for (auto &P : C_.States)
         OS << "  persistent t_" << sanitize(P.first) << ";\n";
-    // Mealy outputs are combinational (reset + driven each tick), not
-    // persistent — see ChartLayout::MealyOutputs.
+    // Mealy outputs are combinational (reset + driven each tick) and
+    // inputs are bound fresh each tick — neither is persistent state.
     for (auto &N : L_.Locals)
-      if (!L_.MealyOutputs.count(N))
+      if (!L_.MealyOutputs.count(N) && !isInputName(N))
         OS << "  persistent l_" << N << ";\n";
     // Counter-style temporal slots (temporalCount + duration).
     for (auto &P : L_.TempCounts)
@@ -1242,12 +1242,12 @@ private:
         OS << "    " << S.StartSlot << " = 0;\n";
       }
     for (auto &S : C_.Symbols.Data) {
-      if (L_.MealyOutputs.count(S.Name)) continue;
+      if (L_.MealyOutputs.count(S.Name) || isInputName(S.Name)) continue;
       OS << "    l_" << S.Name << " = ";
       OS << (S.Initial.empty() ? "0" : Rewriter_.rewrite(S.Initial)) << ";\n";
     }
-    for (auto &N : C_.Sig.Inputs)
-      if (!hasDataSymbol(N)) OS << "    l_" << N << " = 0;\n";
+    // Inputs are not state — they are bound from in_<N> below, every
+    // tick, so they get no isempty initialiser.
     for (auto &N : C_.Sig.Outputs)
       if (!hasDataSymbol(N) && !L_.MealyOutputs.count(N))
         OS << "    l_" << N << " = 0;\n";
@@ -1326,6 +1326,17 @@ private:
 
   bool hasDataSymbol(const std::string &Name) const {
     for (auto &S : C_.Symbols.Data) if (S.Name == Name) return true;
+    return false;
+  }
+
+  // Chart inputs are bound fresh from the tick params every call
+  // (`l_<in> = in_<in>`), so they are NOT state — emitting them as
+  // persistent flip-flops is both wrong (an extra register on a pure
+  // input wire) and breaks matlabc's SV type inference (a persistent
+  // assigned from a parameter doesn't inherit the param's integer
+  // type, collapsing to f64). Lower them as plain locals instead.
+  bool isInputName(const std::string &Name) const {
+    for (auto &N : C_.Sig.Inputs) if (N == Name) return true;
     return false;
   }
 
@@ -1445,14 +1456,14 @@ private:
     if (L_.UsesTemporal)
       for (auto &P : C_.States)
         persIsempty("t_" + sanitize(P.first), IntT + "(0)");
-    // Mealy outputs are combinational — driven each tick, never
-    // registered (see ChartLayout::MealyOutputs).
+    // Mealy outputs are combinational and inputs are bound fresh each
+    // tick — neither is a registered slot (see ChartLayout::MealyOutputs
+    // / isInputName). Inputs as plain locals also keep matlabc's SV type
+    // inference from collapsing a param-fed persistent to f64.
     for (auto &S : C_.Symbols.Data)
-      if (!L_.MealyOutputs.count(S.Name))
+      if (!L_.MealyOutputs.count(S.Name) && !isInputName(S.Name))
         persIsempty("l_" + S.Name,
                     IntT + "(" + (S.Initial.empty() ? "0" : S.Initial) + ")");
-    for (auto &N : C_.Sig.Inputs)
-      if (!hasDataSymbol(N)) persIsempty("l_" + N, IntT + "(0)");
     for (auto &N : C_.Sig.Outputs)
       if (!hasDataSymbol(N) && !L_.MealyOutputs.count(N))
         persIsempty("l_" + N, IntT + "(0)");

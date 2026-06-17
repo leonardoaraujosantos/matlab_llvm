@@ -16,13 +16,9 @@ function out_gear = transmission_tick(in_speed, in_throttle, ev_step)
   persistent init_done;
   persistent r_chart_root;
   persistent l_gear;
-  persistent l_speed;
-  persistent l_throttle;
   if isempty(init_done)
     init_done = 0;
     r_chart_root = 0;
-    l_speed = 0;
-    l_throttle = 0;
     l_gear = 1;
   end
   l_speed = in_speed;

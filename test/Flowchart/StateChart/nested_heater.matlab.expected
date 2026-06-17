@@ -24,15 +24,11 @@ function [out_heat, out_fan_cmd] = heater_tick(in_temp, in_setpoint, ev_tick)
   persistent r_thermo;
   persistent l_fan_cmd;
   persistent l_heat;
-  persistent l_setpoint;
-  persistent l_temp;
   if isempty(init_done)
     init_done = 0;
     r_chart_root = 0;
     r_fan = 0;
     r_thermo = 0;
-    l_temp = 0;
-    l_setpoint = 0;
     l_heat = 0;
     l_fan_cmd = 0;
   end

@@ -98,6 +98,7 @@ PY
 chart_cocotb_smoke traffic_light_moore   traffic_light_tick
 chart_cocotb_smoke vending_machine_mealy vending_tick
 chart_cocotb_smoke model_air_temperature_controller air_controller_tick
+chart_cocotb_smoke pipelined_mac         pipemac_tick
 
 echo "----"
 echo "passed: $pass    failed: $fail"

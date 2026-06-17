@@ -38,6 +38,50 @@ standard `(clk, rst_n, inputs..., outputs...)` surface, an
 `always_ff @(posedge clk or negedge rst_n)` block for the
 state registers.
 
+In the lowering, the three roles map to the canonical RTL forms:
+
+- **Moore outputs** (assigned by entry/during actions) → registered
+  flip-flops; the value is state-resident and survives between ticks.
+- **Mealy outputs** (assigned by a transition's condition/transition
+  action) → combinational signals driven from state + input, reset to
+  their default each tick (a one-cycle pulse). No registered entry
+  action can clobber them.
+- **Inputs** → plain input ports (combinational), never registers.
+
+## pipelined_mac.mflow — a control FSM driving a pipelined datapath
+
+The harder case: production RTL usually couples a small controller
+with a *pipelined* datapath. `pipelined_mac.mflow` is a 2-state
+controller (`Idle` / `Run`) gating a **3-stage arithmetic pipeline**
+that computes `y = sample*3 + 7`, one result per clock, 3-cycle
+latency. The pipeline registers (`s1..s3`) and a parallel valid-bit
+shift register (`v1..v3`) are chart locals; `Run`'s `during` action
+advances them once per clock:
+
+```matlab
+result = s3; valid_out = v3;     % drain the tail of the pipe
+s3 = s2;     v3 = v2;            % stage 3 <- stage 2
+s2 = s1 + 7; v2 = v1;            % stage 2 <- stage 1 (+ bias)
+s1 = sample * 3; v1 = 1;         % stage 1 <- new input
+```
+
+Because each assignment reads the *previous* (registered) stage value
+before overwriting it, the SV lowering emits a textbook pipeline
+(`s3 <= s2; s2 <= s1 + 7; s1 <= sample*3; ...`) with `result` /
+`valid_out` as registered Moore outputs — no combinational
+input→output path, so it is timing-friendly for synthesis. `matlabc`
+even strength-reduces `sample*3` to `(sample<<2) - sample`.
+
+```
+matlabc -emit-systemverilog examples/stateflow/pipelined_mac.mflow
+matlabc -emit-cocotb        examples/stateflow/pipelined_mac.mflow -cocotb-out=build/pm
+```
+
+Note the one-clock-per-call SV model: `chart_tick` advances the FSM by
+at most one transition per region per call, so a chart authored for
+synthesis should keep its datapath in `during` actions (one clock =
+one shift), exactly as here.
+
 ## get_started_create_chart.mflow
 
 Reference: [Get Started: Create a Stateflow Chart](https://www.mathworks.com/help/stateflow/gs/get-started-create-chart.html)

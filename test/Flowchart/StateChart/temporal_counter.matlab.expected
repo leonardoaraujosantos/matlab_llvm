@@ -19,7 +19,6 @@ function out_alarm = sampler_tick(in_pressure, ev_sample)
   persistent t_warn;
   persistent t_watch;
   persistent l_alarm;
-  persistent l_pressure;
   persistent tc_watch_sample;
   persistent dur_warn_0_act;
   persistent dur_warn_0_start;
@@ -33,7 +32,6 @@ function out_alarm = sampler_tick(in_pressure, ev_sample)
     tc_watch_sample = 0;
     dur_warn_0_act = 0;
     dur_warn_0_start = 0;
-    l_pressure = 0;
     l_alarm = 0;
   end
   l_pressure = in_pressure;
