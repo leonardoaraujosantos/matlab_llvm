@@ -82,6 +82,18 @@ PY
     fails+=("$stem (Python harness check failed)")
     return
   fi
+  # Lint the emitted RTL when verilator is available (independent of
+  # cocotb). -Wall catches dead/unused signals; DECLFILENAME is just a
+  # file-vs-module naming convention (the bundle names the file after
+  # the .mflow stem, not the module) so it is silenced.
+  if command -v verilator >/dev/null 2>&1; then
+    if ! verilator --lint-only -Wall -Wno-DECLFILENAME "$out/$stem.sv" \
+         >"$SCRATCH/$stem.lint" 2>&1; then
+      fail=$((fail+1))
+      fails+=("$stem (verilator lint — $(grep -m1 -E 'Warning-|Error' "$SCRATCH/$stem.lint"))")
+      return
+    fi
+  fi
   # End-to-end SIL when the toolchain is available.
   if command -v cocotb-config >/dev/null 2>&1 \
      && command -v verilator >/dev/null 2>&1; then

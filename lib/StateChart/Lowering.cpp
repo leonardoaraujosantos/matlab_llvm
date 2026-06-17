@@ -1589,11 +1589,18 @@ private:
     if (!S) return;
     OwnerScope Owner(L_, Sid);
     if (S->Decomp == Decomposition::Or && !S->ChildStateIds.empty()) {
-      // Walk via the currently-active code in this region.
+      // Walk via the currently-active code in this region. Only wrap a
+      // child in `if Var == code … end` when that child actually has
+      // exit work to do — otherwise the guard is dead code, and the SV
+      // backend turns the unused `Var == code` predicate into an
+      // unread temp (verilator -Wall UNUSEDSIGNAL).
       std::string Var = L_.RegionVar.at(Sid);
       for (auto &Cid : S->ChildStateIds) {
+        std::ostringstream Body;
+        emitExitChain(Body, Cid, Pad + "  ");
+        if (Body.str().empty()) continue;
         OS << Pad << "if " << Var << " == " << codeText(L_.codeOf(Cid)) << "\n";
-        emitExitChain(OS, Cid, Pad + "  ");
+        OS << Body.str();
         OS << Pad << "end\n";
       }
       if (S->HasHistory)
