@@ -152,6 +152,67 @@ def main(matlabc: str) -> int:
     else:
         print(f"PASS  continue:    t={t_end:.4f}")
 
+    # ----------------------------------------------------------------
+    # #310 coverage: configureSolver / resetSimulation commands and the
+    # simulationTime / signalSample / snapshotTaken event stream. These
+    # are implemented in the --sim-dap server but were previously
+    # unguarded by any test.
+    # ----------------------------------------------------------------
+
+    # configureSolver → success ack (live-tuning hook is a follow-up; the
+    # contract here is only that the IDE's solver pane doesn't error).
+    req("configureSolver", {"relTol": 1e-4, "maxStep": 0.02})
+    cs = wait_for(lambda f: is_resp(f, "configureSolver"),
+                  "configureSolver resp")
+    if cs and cs.get("success"):
+        print("PASS  configureSolver: ack")
+    else:
+        fail(f"configureSolver did not ack success: {cs}")
+
+    # resetSimulation → success ack, a stopped(entry, "reset"), and the
+    # clock rewound to t = 0.
+    req("resetSimulation")
+    rs = wait_for(lambda f: is_resp(f, "resetSimulation"),
+                  "resetSimulation resp")
+    if rs and rs.get("success"):
+        print("PASS  resetSimulation: ack")
+    else:
+        fail(f"resetSimulation did not ack success: {rs}")
+    reset_stop = wait_for(
+        lambda f: is_stopped(f, "entry"), "stopped(entry) after reset")
+    if reset_stop:
+        desc = reset_stop.get("body", {}).get("description")
+        if desc != "reset":
+            fail(f"expected reset stop description='reset', got {desc!r}")
+        else:
+            print("PASS  reset stop:  description='reset'")
+    t_reset = get_t()
+    if t_reset != 0.0:
+        fail(f"expected t=0 after resetSimulation, got {t_reset}")
+    else:
+        print(f"PASS  reset t=0:   {t_reset}")
+
+    # One major step from the reset entry must emit the live event stream
+    # the IDE renders: simulationTime (clock), signalSample (per-block
+    # values), and snapshotTaken (snapshot ring). Collect every event
+    # until the trailing stopped(step) and assert all three appeared.
+    req("next")
+    seen_events: set[str] = set()
+
+    def collect_until_stopped(f):
+        ev = f.get("event")
+        if ev:
+            seen_events.add(ev)
+        return is_stopped(f, "step")
+
+    wait_for(collect_until_stopped, "stopped(step) after reset+next")
+    for ev in ("simulationTime", "signalSample", "snapshotTaken"):
+        if ev in seen_events:
+            print(f"PASS  event emitted: {ev}")
+        else:
+            fail(f"expected `{ev}` event on major step, "
+                 f"saw {sorted(seen_events)}")
+
     # 6. disconnect → clean exit.
     req("disconnect")
     proc.stdin.close()
