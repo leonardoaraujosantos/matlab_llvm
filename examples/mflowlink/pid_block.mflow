@@ -1,0 +1,65 @@
+{
+  "entry" : "pid_block",
+  "flows" : [
+    {
+      "edges" : [
+        { "id" : "e_ref", "kind" : "data", "from" : { "node" : "ref", "port" : "out" }, "to" : { "node" : "err", "port" : "in1" } },
+        { "id" : "e_fb",  "kind" : "data", "from" : { "node" : "plant", "port" : "out" }, "to" : { "node" : "err", "port" : "in2" } },
+        { "id" : "e_err", "kind" : "data", "from" : { "node" : "err", "port" : "out" }, "to" : { "node" : "pid", "port" : "in" } },
+        { "id" : "e_u",   "kind" : "data", "from" : { "node" : "pid", "port" : "out" }, "to" : { "node" : "plant", "port" : "in" } },
+        { "id" : "e_y",   "kind" : "data", "from" : { "node" : "plant", "port" : "out" }, "to" : { "node" : "scope", "port" : "in" } }
+      ],
+      "id" : "flow_pid",
+      "kind" : "program",
+      "name" : "pid_block",
+      "nodes" : [
+        {
+          "id" : "ref",
+          "kind" : "signal_step",
+          "data" : { "log_signal" : true, "params" : { "stepTime" : 0, "initialValue" : 0, "finalValue" : 1 } },
+          "ports" : { "in" : [], "out" : [ { "id" : "out" } ] }
+        },
+        {
+          "id" : "err",
+          "kind" : "signal_sum",
+          "data" : { "params" : { "signs" : "+-" } },
+          "ports" : { "in" : [ { "id" : "in1" }, { "id" : "in2" } ], "out" : [ { "id" : "out" } ] }
+        },
+        {
+          "id" : "pid",
+          "kind" : "signal_pid",
+          "data" : { "log_signal" : true, "params" : { "Kp" : 4, "Ki" : 6, "Kd" : 0.5, "N" : 20 } },
+          "ports" : { "in" : [ { "id" : "in" } ], "out" : [ { "id" : "out" } ] }
+        },
+        {
+          "id" : "plant",
+          "kind" : "signal_transfer_fcn",
+          "data" : { "log_signal" : true, "params" : { "num" : "1", "den" : "1, 1" } },
+          "ports" : { "in" : [ { "id" : "in" } ], "out" : [ { "id" : "out" } ] }
+        },
+        {
+          "id" : "scope",
+          "kind" : "signal_scope",
+          "data" : { "params" : { "title" : "PID step tracking" } },
+          "ports" : { "in" : [ { "id" : "in" } ], "out" : [] }
+        }
+      ],
+      "signature" : { "inputs" : [], "outputs" : [] }
+    }
+  ],
+  "schema" : "matforge.flowchart",
+  "settings" : {
+    "kind" : "signal_flow",
+    "solver" : {
+      "type" : "variable_step",
+      "algorithm" : "ode45",
+      "startTime" : 0,
+      "stopTime" : 8,
+      "relTol" : 0.001,
+      "absTol" : 1e-06,
+      "zeroCrossing" : false,
+      "algebraicLoopMethod" : "trust_region"
+    }
+  },
+  "version" : "0.1.0"
+}

@@ -83,6 +83,9 @@ const KindInfo *lookupKind(const std::string &K) {
     add("signal_transfer_fcn", {true, true, false, false, false, CONT});
     add("signal_state_space",  {true, true, false, false, false, CONT});
     add("signal_zero_pole",    {true, true, false, false, false, CONT});
+    // Parallel PID with derivative filter. Direct-feedthrough
+    // (C(∞) = Kp + Kd·N is finite), so it is NOT a loop breaker.
+    add("signal_pid",          {true, true, false, false, false, CONT});
     add("signal_transport_delay",
                                {true, true, false, true,  false, CONT});
     // Discrete.
@@ -950,6 +953,13 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
     B.IsLoopBreaker = KI->LoopBreakerAlways;
     if (N.Kind == "signal_integrator") {
       B.ContStateCount = 1;
+    } else if (N.Kind == "signal_pid") {
+      // Parallel PID with a first-order derivative filter: two continuous
+      // states (integral accumulator + derivative-filter state). Output
+      // depends on the current error (Kp and filtered-D both feed through),
+      // so PID is not a loop breaker — KI->LoopBreakerAlways is already
+      // false; an enclosing loop is broken by the plant's dynamics.
+      B.ContStateCount = 2;
     } else if (N.Kind == "signal_transfer_fcn") {
       int DenDeg = polyDegree(N.getParam("den") ? *N.getParam("den") : "1");
       int NumDeg = polyDegree(N.getParam("num") ? *N.getParam("num") : "1");

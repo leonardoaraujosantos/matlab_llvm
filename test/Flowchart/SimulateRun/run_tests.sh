@@ -60,6 +60,16 @@ PID_LAST=$(printf '%s\n' "$PID" | tail -1 | awk -F, '{print $3}')
 check "pid_tracking header" "[[ '$PID_HEAD' == 't,ref,out_scope' ]]" ""
 check "pid tracks step"     "awk 'BEGIN{exit !($PID_LAST >= 0.98)}'" ""
 
+#--- pid_block: first-class signal_pid in a closed loop -------------------
+# Step ref - plant feedback -> signal_pid -> 1/(s+1) plant. The integral
+# term drives steady-state error to ~0, so the plant output tracks the unit
+# step. Columns: t,ref,pid,plant,scope.
+PB="$("$MATLABC" -simulate "$EX/pid_block.mflow")"
+PB_HEAD=$(printf '%s\n' "$PB" | head -1)
+PB_PLANT=$(printf '%s\n' "$PB" | tail -1 | awk -F, '{print $4}')
+check "pid_block header"     "[[ '$PB_HEAD' == 't,ref,pid,plant,scope' ]]" ""
+check "pid_block tracks step" "awk 'BEGIN{exit !($PB_PLANT >= 0.98 && $PB_PLANT <= 1.02)}'" ""
+
 #--- multirate (Tier E): sine -> ZOH @ 0.1 s -> 1st-order plant -----------
 MR="$("$MATLABC" -simulate "$EX/multirate.mflow")"
 # The ZOH samples sin(2π·t) at t=0.1, expecting sin(0.628)≈0.5878.

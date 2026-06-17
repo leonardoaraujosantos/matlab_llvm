@@ -752,6 +752,10 @@ void MflowLinkSim::reset() {
     const auto &B = M_.Blocks[I];
     if (B.Kind == "signal_integrator") {
       Y_[StateOffset_[I]] = paramD(B, "initialCondition", 0.0);
+    } else if (B.Kind == "signal_pid") {
+      size_t Off = StateOffset_[I];
+      Y_[Off + 0] = paramD(B, "initialIntegral", 0.0);
+      Y_[Off + 1] = 0.0; // derivative filter starts at rest
     } else if (B.Kind == "signal_state_space") {
       // x0 may be a vector literal — Tier C reads scalar only; vector
       // ICs are picked up when state_space gets its full evaluator.
@@ -1062,6 +1066,40 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       size_t Off = StateOffset_[I];
       Out_[I] = State[Off];
       if (Deriv) Deriv[Off] = inputOf(I, "in");
+    } else if (K == "signal_pid") {
+      // Continuous parallel-form PID with a first-order derivative filter:
+      //   C(s) = Kp + Ki/s + Kd*N/(s+N)
+      // States: x0 = ∫e dt, x1 = N/(s+N)·e (a low-pass of the error).
+      //   x0' = e
+      //   x1' = N*(e - x1)
+      //   u   = Kp*e + Ki*x0 + Kd*N*(e - x1)
+      // Optional output saturation (upperLimit/lowerLimit) with clamping
+      // anti-windup: the integrator is frozen while the output is pinned to
+      // a limit and the error would drive it further past that limit.
+      size_t Off = StateOffset_[I];
+      double E = sumInput(I, "in");
+      double Kp = paramD(B, "Kp", 1.0);
+      double Ki = paramD(B, "Ki", 0.0);
+      double Kd = paramD(B, "Kd", 0.0);
+      double Nf = paramD(B, "N", 100.0);
+      if (Nf <= 0.0)
+        Nf = 100.0;
+      double Xi = State[Off + 0];
+      double Xd = State[Off + 1];
+      double U = Kp * E + Ki * Xi + Kd * Nf * (E - Xd);
+      double Hi = paramD(B, "upperLimit", std::numeric_limits<double>::infinity());
+      double Lo = paramD(B, "lowerLimit", -std::numeric_limits<double>::infinity());
+      bool AtHi = U > Hi, AtLo = U < Lo;
+      if (AtHi)
+        U = Hi;
+      else if (AtLo)
+        U = Lo;
+      Out_[I] = U;
+      if (Deriv) {
+        bool Freeze = (AtHi && E > 0.0) || (AtLo && E < 0.0);
+        Deriv[Off + 0] = Freeze ? 0.0 : E;
+        Deriv[Off + 1] = Nf * (E - Xd);
+      }
     } else if (K == "signal_transfer_fcn") {
       const auto &TF = TFCache_[I];
       int N = static_cast<int>(TF.Den.size()) - 1;
