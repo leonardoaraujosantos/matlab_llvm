@@ -905,6 +905,15 @@ add_test(
           $<TARGET_FILE:matlabc>
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/SimulateDap
 )
+# #310 regression — the `matlabc` usage banner must advertise the
+# top-level `-simulate` mode (and its `--sim-dap` live-DAP transport),
+# which it previously omitted.
+add_test(
+  NAME flowchart-simulate-dap-usage-tests
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/test/Flowchart/SimulateDap/run_usage.py
+          $<TARGET_FILE:matlabc>
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/SimulateDap
+)
 # mStateflow DAP smoke lane — drive a chart `.mflow` over DAP, inject
 # locals + events, and verify the chart transitions through the
 # expected state trajectory. Exercises the temporalCount / duration
@@ -1289,6 +1298,7 @@ endif()
 #      hang, never false-fails (these run in well under a minute).
 foreach(_t flowchart-simulate-dap-tests flowchart-simulate-dap-block-tests
            flowchart-simulate-dap-breakpoint-tests flowchart-simulate-dap-chart-tests
+           flowchart-simulate-dap-usage-tests
            flowchart-dap-tests debug-dap-tests debug-dap-jit-userfn-tests)
   if(TEST ${_t})
     set_tests_properties(${_t} PROPERTIES TIMEOUT 300)

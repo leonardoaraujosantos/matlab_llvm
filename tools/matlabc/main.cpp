@@ -365,6 +365,7 @@ int usage(const char *Prog) {
                "             -dump-chart | -emit-trace |\n"
                "             -emit-matlab |\n"
                "             -emit-cuda | -emit-metal | -emit-opencl |\n"
+               "             -simulate [--sim-dap | --dry-run] |\n"
                "             -format | -repl | -dap]\n"
                "            [-no-line | -line] [-doxygen] [-cpp-auto] [-g]\n"
                "            [-o <dir>  (output dir for -emit-{cuda,metal,opencl})]"
