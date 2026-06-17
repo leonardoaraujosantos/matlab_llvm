@@ -657,7 +657,7 @@ Items marked ✓ closed since the original list was written.
 | BDF stiff solver | ○ open | §16 open — only `ode23s` Rosenbrock is wired elsewhere | `ode15s`-style implicit integration for stiff chemistry / electronics / thermal models |
 | Per-flow solver overrides | ○ open | §16 open | Model-reference flows with different solver settings than the parent |
 | Cross-dialect composition | ○ open | §9 follow-up | `-emit-cpp` linking `runtime_mflowlink` so a `.m` script can call into a baked signal-flow simulation |
-| `bouncing_ball.mflow` demo | ○ open | §12 example carve-out | Integrator-with-external-reset-port (~50 LOC block-parameter extension) |
+| `bouncing_ball.mflow` demo | ✓ done | §12 example carve-out | `signal_integrator` external `reset`/`init` ports ship; `examples/mflowlink/bouncing_ball.mflow` is a SimulateRun fixture (zero-crossing → state-reset, energy-dissipating bounces) |
 | Discrete filter — FIR path | ○ open | `signal_discrete_filter` ships the pole half of direct-form-II only | Pure-FIR designs need a `u`-history buffer (taps on the input side) |
 | Backward Euler / Trapezoidal | ○ open | `signal_discrete_integrator` parses the method param but uses the Forward Euler single-sample approximation | True implicit / averaged discrete integration |
 | MATLAB Function block — JIT | ✓ closed | §17.5 #8 — `tools/matlabc/MflowLinkJit.cpp` synthesises a one-level wrapper (driver + `mflowlink_jit_entry` shim + user body), runs the full lex/parse/Sema/MLIR/LLVM-ORC pipeline, casts the resolved entrypoint to a flat `(double, ...) → double` function pointer. Bodies the wrapper can't refine (e.g. triple-helper chains, `n`-as-loop-bound) fall back to the AST interpreter automatically | Demo: `examples/mflowlink/matlab_fcn_jit.mflow` |
