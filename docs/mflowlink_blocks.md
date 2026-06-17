@@ -52,6 +52,7 @@ diagnostic) until its evaluator lands.
 | Kind | Tier-C | Params | Notes |
 |---|---|---|---|
 | `signal_integrator`   | ✓ | `initialCondition: 0.0`                                  | One continuous state; loop-breaker |
+| `signal_pid`          | ✓ | `Kp: 1.0`, `Ki: 0.0`, `Kd: 0.0`, `N: 100.0`, `initialIntegral: 0.0`, `upperLimit: +inf`, `lowerLimit: -inf` | Parallel form `C(s) = Kp + Ki/s + Kd·N/(s+N)`. Two continuous states (integral + derivative-filter). Direct-feedthrough ⇒ **not** a loop-breaker. Optional output saturation with clamping anti-windup (integrator frozen while pinned to a limit) |
 | `signal_derivative`   |   | *(none)*                                                 | Reserved — needs filtered derivative |
 | `signal_transfer_fcn` | ✓ | `num: "1"`, `den: "1, 1"`                                | Comma-separated coefficients, highest order first. Tier-C: strictly proper only (`degNum < degDen` ⇒ loop-breaker) |
 | `signal_state_space`  | ✓ | `A: "0"`, `B: "1"`, `C: "1"`, `D: 0.0`, `x0: "0"`        | MATLAB-style matrix literals (`"[0 1; -1 0]"`). Tier-C: SISO with `D = 0` |
