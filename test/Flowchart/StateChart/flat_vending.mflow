@@ -24,7 +24,7 @@
           "ports": { "in": [], "out": [{"id": "out"}] } },
         { "id": "idle", "kind": "state",
           "data": {
-            "entryAction": "credit = 0; dispense = 0",
+            "entryAction": "credit = 0",
             "params": { "decomposition": "leaf" }
           },
           "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },

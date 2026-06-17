@@ -14,28 +14,20 @@ end
 
 function [out_bell, out_lamp] = alarm_tick(ev_intruder, ev_all_clear, ev_test)
   persistent init_done;
-  persistent tick_count;
   persistent r_chart_root;
-  persistent t_alarming;
-  persistent t_armed;
   persistent l_bell;
   persistent l_lamp;
   if isempty(init_done)
     init_done = 0;
-    tick_count = 0;
     r_chart_root = 0;
-    t_alarming = 0;
-    t_armed = 0;
     l_bell = 0;
     l_lamp = 0;
   end
   if init_done == 0
     r_chart_root = 2;
-    t_armed = tick_count;
     l_bell = 0; l_lamp = 0;
     init_done = 1;
   end
-  tick_count = tick_count + 1;
   fired = true;
   iter = 0;
   while fired
@@ -47,7 +39,6 @@ function [out_bell, out_lamp] = alarm_tick(ev_intruder, ev_all_clear, ev_test)
       if r_chart_root == 2
         if ~fired && ev_intruder && (l_lamp==1)
           r_chart_root = 1;
-          t_alarming = tick_count;
           l_bell = 1; l_lamp = 1;
           fired = true;
         end
@@ -62,7 +53,6 @@ function [out_bell, out_lamp] = alarm_tick(ev_intruder, ev_all_clear, ev_test)
         if ~fired && ev_all_clear
           l_bell = 0;
           r_chart_root = 2;
-          t_armed = tick_count;
           l_bell = 0; l_lamp = 0;
           fired = true;
         end

@@ -12,20 +12,14 @@ end
 
 function out_heater = bang_bang_tick(in_temp, in_setpoint, ev_tick)
   persistent init_done;
-  persistent tick_count;
   persistent r_chart_root;
-  persistent t_off;
-  persistent t_on;
   persistent l_delta;
   persistent l_heater;
   persistent l_setpoint;
   persistent l_temp;
   if isempty(init_done)
     init_done = 0;
-    tick_count = 0;
     r_chart_root = 0;
-    t_off = 0;
-    t_on = 0;
     l_temp = 0;
     l_setpoint = 0;
     l_heater = 0;
@@ -35,11 +29,9 @@ function out_heater = bang_bang_tick(in_temp, in_setpoint, ev_tick)
   l_setpoint = in_setpoint;
   if init_done == 0
     r_chart_root = 1;
-    t_off = tick_count;
     l_heater = 0;
     init_done = 1;
   end
-  tick_count = tick_count + 1;
   fired = true;
   iter = 0;
   while fired
@@ -51,7 +43,6 @@ function out_heater = bang_bang_tick(in_temp, in_setpoint, ev_tick)
       if r_chart_root == 1
         if ~fired && ev_tick && (l_temp <= l_setpoint - l_delta)
           r_chart_root = 2;
-          t_on = tick_count;
           l_heater = 1;
           fired = true;
         end
@@ -59,7 +50,6 @@ function out_heater = bang_bang_tick(in_temp, in_setpoint, ev_tick)
       if r_chart_root == 2
         if ~fired && ev_tick && (l_temp >= l_setpoint + l_delta)
           r_chart_root = 1;
-          t_off = tick_count;
           l_heater = 0;
           fired = true;
         end

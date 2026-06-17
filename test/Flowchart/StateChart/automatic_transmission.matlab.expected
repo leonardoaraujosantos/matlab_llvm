@@ -14,23 +14,13 @@ end
 
 function out_gear = transmission_tick(in_speed, in_throttle, ev_step)
   persistent init_done;
-  persistent tick_count;
   persistent r_chart_root;
-  persistent t_first;
-  persistent t_fourth;
-  persistent t_second;
-  persistent t_third;
   persistent l_gear;
   persistent l_speed;
   persistent l_throttle;
   if isempty(init_done)
     init_done = 0;
-    tick_count = 0;
     r_chart_root = 0;
-    t_first = 0;
-    t_fourth = 0;
-    t_second = 0;
-    t_third = 0;
     l_speed = 0;
     l_throttle = 0;
     l_gear = 1;
@@ -39,11 +29,9 @@ function out_gear = transmission_tick(in_speed, in_throttle, ev_step)
   l_throttle = in_throttle;
   if init_done == 0
     r_chart_root = 1;
-    t_first = tick_count;
     l_gear = 1;
     init_done = 1;
   end
-  tick_count = tick_count + 1;
   fired = true;
   iter = 0;
   while fired
@@ -55,7 +43,6 @@ function out_gear = transmission_tick(in_speed, in_throttle, ev_step)
       if r_chart_root == 1
         if ~fired && ev_step && (l_speed > 25 && l_throttle > 0.3)
           r_chart_root = 3;
-          t_second = tick_count;
           l_gear = 2;
           fired = true;
         end
@@ -63,13 +50,11 @@ function out_gear = transmission_tick(in_speed, in_throttle, ev_step)
       if r_chart_root == 3
         if ~fired && ev_step && (l_speed > 45 && l_throttle > 0.4)
           r_chart_root = 4;
-          t_third = tick_count;
           l_gear = 3;
           fired = true;
         end
         if ~fired && ev_step && (l_speed < 15)
           r_chart_root = 1;
-          t_first = tick_count;
           l_gear = 1;
           fired = true;
         end
@@ -77,13 +62,11 @@ function out_gear = transmission_tick(in_speed, in_throttle, ev_step)
       if r_chart_root == 4
         if ~fired && ev_step && (l_speed > 65 && l_throttle > 0.5)
           r_chart_root = 2;
-          t_fourth = tick_count;
           l_gear = 4;
           fired = true;
         end
         if ~fired && ev_step && (l_speed < 35)
           r_chart_root = 3;
-          t_second = tick_count;
           l_gear = 2;
           fired = true;
         end
@@ -91,7 +74,6 @@ function out_gear = transmission_tick(in_speed, in_throttle, ev_step)
       if r_chart_root == 2
         if ~fired && ev_step && (l_speed < 55)
           r_chart_root = 4;
-          t_third = tick_count;
           l_gear = 3;
           fired = true;
         end

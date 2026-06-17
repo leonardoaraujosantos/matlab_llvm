@@ -16,22 +16,14 @@ end
 
 function [out_red, out_yellow, out_green] = traffic_light_tick(ev_step)
   persistent init_done;
-  persistent tick_count;
   persistent r_chart_root;
-  persistent t_S_green;
-  persistent t_S_red;
-  persistent t_S_yellow;
   persistent l_green;
   persistent l_red;
   persistent l_timer;
   persistent l_yellow;
   if isempty(init_done)
     init_done = 0;
-    tick_count = 0;
     r_chart_root = 0;
-    t_S_green = 0;
-    t_S_red = 0;
-    t_S_yellow = 0;
     l_red = 0;
     l_yellow = 0;
     l_green = 0;
@@ -39,11 +31,9 @@ function [out_red, out_yellow, out_green] = traffic_light_tick(ev_step)
   end
   if init_done == 0
     r_chart_root = 2;
-    t_S_red = tick_count;
     l_red = 1; l_yellow = 0; l_green = 0; l_timer = 0;
     init_done = 1;
   end
-  tick_count = tick_count + 1;
   fired = true;
   iter = 0;
   while fired
@@ -55,7 +45,6 @@ function [out_red, out_yellow, out_green] = traffic_light_tick(ev_step)
       if r_chart_root == 2
         if ~fired && ev_step && (l_timer >= 30)
           r_chart_root = 1;
-          t_S_green = tick_count;
           l_red = 0; l_yellow = 0; l_green = 1; l_timer = 0;
           fired = true;
         end
@@ -66,7 +55,6 @@ function [out_red, out_yellow, out_green] = traffic_light_tick(ev_step)
       if r_chart_root == 1
         if ~fired && ev_step && (l_timer >= 25)
           r_chart_root = 3;
-          t_S_yellow = tick_count;
           l_red = 0; l_yellow = 1; l_green = 0; l_timer = 0;
           fired = true;
         end
@@ -77,7 +65,6 @@ function [out_red, out_yellow, out_green] = traffic_light_tick(ev_step)
       if r_chart_root == 3
         if ~fired && ev_step && (l_timer >= 5)
           r_chart_root = 2;
-          t_S_red = tick_count;
           l_red = 1; l_yellow = 0; l_green = 0; l_timer = 0;
           fired = true;
         end

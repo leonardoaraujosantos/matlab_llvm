@@ -15,30 +15,19 @@ end
 
 function [out_room_key, out_wake_up] = hotel_check_in_tick(ev_arrived, ev_paid, ev_departed, ev_alarm_time)
   persistent init_done;
-  persistent tick_count;
   persistent r_chart_root;
-  persistent t_in_room;
-  persistent t_lobby;
-  persistent t_registering;
   persistent l_room_key;
-  persistent l_wake_up;
   if isempty(init_done)
     init_done = 0;
-    tick_count = 0;
     r_chart_root = 0;
-    t_in_room = 0;
-    t_lobby = 0;
-    t_registering = 0;
     l_room_key = 0;
-    l_wake_up = 0;
   end
   if init_done == 0
     r_chart_root = 2;
-    t_lobby = tick_count;
     l_room_key = 0; l_wake_up = 0;
     init_done = 1;
   end
-  tick_count = tick_count + 1;
+  l_wake_up = 0;
   fired = true;
   iter = 0;
   while fired
@@ -50,14 +39,12 @@ function [out_room_key, out_wake_up] = hotel_check_in_tick(ev_arrived, ev_paid, 
       if r_chart_root == 2
         if ~fired && ev_arrived
           r_chart_root = 3;
-          t_registering = tick_count;
           fired = true;
         end
       end
       if r_chart_root == 3
         if ~fired && ev_paid
           r_chart_root = 1;
-          t_in_room = tick_count;
           l_room_key = 1;
           fired = true;
         end
@@ -70,7 +57,6 @@ function [out_room_key, out_wake_up] = hotel_check_in_tick(ev_arrived, ev_paid, 
         if ~fired && ev_departed
           l_room_key = 0; l_wake_up = 0;
           r_chart_root = 2;
-          t_lobby = tick_count;
           l_room_key = 0; l_wake_up = 0;
           fired = true;
         end

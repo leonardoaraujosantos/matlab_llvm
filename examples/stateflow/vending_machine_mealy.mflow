@@ -36,19 +36,16 @@
       "nodes": [
         { "id": "Idle", "kind": "state",
           "data": {
-            "entryAction": "dispense = 0",
             "params": { "decomposition": "leaf", "isInitial": "true" }
           },
           "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
         { "id": "Coin1", "kind": "state",
           "data": {
-            "entryAction": "dispense = 0",
             "params": { "decomposition": "leaf" }
           },
           "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
         { "id": "Coin2", "kind": "state",
           "data": {
-            "entryAction": "dispense = 0",
             "params": { "decomposition": "leaf" }
           },
           "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } }

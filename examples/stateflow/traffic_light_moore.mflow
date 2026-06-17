@@ -38,18 +38,21 @@
         { "id": "Red", "kind": "state",
           "data": {
             "entryAction": "red = 1; yellow = 0; green = 0; timer = 0",
+            "duringAction": "timer = timer + 1",
             "params": { "decomposition": "leaf", "isInitial": "true" }
           },
           "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
         { "id": "Green", "kind": "state",
           "data": {
             "entryAction": "red = 0; yellow = 0; green = 1; timer = 0",
+            "duringAction": "timer = timer + 1",
             "params": { "decomposition": "leaf" }
           },
           "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
         { "id": "Yellow", "kind": "state",
           "data": {
             "entryAction": "red = 0; yellow = 1; green = 0; timer = 0",
+            "duringAction": "timer = timer + 1",
             "params": { "decomposition": "leaf" }
           },
           "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } }
