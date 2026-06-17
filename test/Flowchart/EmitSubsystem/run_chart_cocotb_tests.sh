@@ -94,6 +94,20 @@ PY
       return
     fi
   fi
+  # Logic-synthesis check via yosys when available — proves the RTL is
+  # synthesizable, not merely lint-clean. Known yosys SV-frontend gaps
+  # (it rejects some constructs verilator accepts) are skipped, not
+  # failed, mirroring the EmitSV lane.
+  if command -v yosys >/dev/null 2>&1; then
+    if ! yosys -p "read_verilog -sv $out/$stem.sv; synth -top $tick_fn" \
+         >"$SCRATCH/$stem.ysynth" 2>&1; then
+      if ! grep -qE "syntax error|Unknown.*type|Failed to" "$SCRATCH/$stem.ysynth"; then
+        fail=$((fail+1))
+        fails+=("$stem (yosys synth — see $SCRATCH/$stem.ysynth)")
+        return
+      fi
+    fi
+  fi
   # End-to-end SIL when the toolchain is available.
   if command -v cocotb-config >/dev/null 2>&1 \
      && command -v verilator >/dev/null 2>&1; then
