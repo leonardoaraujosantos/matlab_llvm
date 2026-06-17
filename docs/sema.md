@@ -137,8 +137,10 @@ for them for now.
 ### 3.1 Builtins are pre-declared in the global scope
 
 `Resolver::registerBuiltins` (`lib/Sema/Resolver.cpp:21`) seeds the
-global scope with around 150 builtin names — `zeros`, `disp`, `fft`,
-`save`, `load`, etc. They are declared with `BindingKind::Builtin`.
+global scope with the full builtin name set — `zeros`, `disp`, `fft`,
+`save`, `load`, etc. The list has grown with each toolbox and now
+registers well over 2,000 names (≈2,300 as of this writing). They are
+declared with `BindingKind::Builtin`.
 This is how a call to `disp(x)` resolves without any `import` or
 linker step: `disp` is just a binding with `Kind == Builtin`, and
 the lowerer special-cases that kind to emit a runtime call.

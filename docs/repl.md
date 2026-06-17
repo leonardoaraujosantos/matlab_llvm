@@ -29,6 +29,35 @@ a function-local slot keep their slot-local semantics within their
 scope; only bindings that are pure "script workspace" variables route
 through the runtime table.
 
+## User functions and classes persist across turns
+
+A `function ... end` block typed at the prompt stays available on later
+lines. When a turn defines a function, its source text is captured into
+an in-process registry (`g_ReplUserFunctions` in
+`tools/matlabc/main.cpp`); any later turn that mentions the name pulls
+the definition back in by prepending it to that turn's input
+(`buildReplPrelude`). Redefining a function replaces the stored copy,
+and transitively-referenced helpers are pulled in too.
+
+```
+>> function y = sq(x)
+     y = x * x;
+   end
+>> sq(7)
+ans =
+49
+```
+
+`classdef` blocks persist the same way: a class defined (or instantiated)
+on one turn is re-prepended on later turns that use it, so an object can
+be created on one line and used several lines later. Coverage lives in
+`test/Repl/run_tests.sh` (`cross_turn_user_fn`, `transitive_user_fns`,
+`redef_user_fn`, and the `xturn_obj_class_repin_3turn` classdef case).
+
+Definitions that are never referenced again simply aren't re-emitted, so
+function-definition-only turns do no JIT work — the source is stashed and
+the turn returns immediately.
+
 ## Multi-line blocks
 
 `if` / `for` / `while` / `switch` / `try` / `function` / `classdef`
@@ -139,10 +168,10 @@ inline in `tools/matlabc/main.cpp` — straightforward to extend.
   module and ExecutionEngine. Fast enough for human-paced use,
   noticeable on tight benchmark loops.
 - History is in-memory only; no persistence across sessions.
-- User-defined functions declared inside the REPL are compiled into
-  the current module and disappear after the line runs; a follow-up
-  call in the next line won't find them.
-- `classdef` inside the REPL: same limitation as user functions.
+- User functions and `classdef`s persist across turns by re-prepending
+  their captured source on later turns (see "User functions and classes
+  persist across turns" above), not by caching compiled code — so each
+  referencing turn re-parses and re-lowers the definition.
 
 ---
 
