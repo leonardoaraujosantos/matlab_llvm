@@ -9,6 +9,16 @@
 # Usage: run_tests.sh <path-to-matlabc>
 set -u
 
+# Pin a C numeric locale. The value checks below extract and compare
+# CSV columns with awk, and awk converts a field to a number through
+# the locale's decimal separator. Under a comma-decimal locale (e.g.
+# LC_NUMERIC=pt_BR.UTF-8) mawk reads "0.25" as 0 — it stops at the '.'
+# — so row selection (`$1+0==1`) and every numeric comparison fail
+# spuriously (issue #307). Forcing LC_ALL=C makes '.' the decimal
+# separator for both matlabc's CSV output and awk's parsing, so the
+# lane is reproducible regardless of the caller's locale.
+export LC_ALL=C
+
 MATLABC="${1:-}"
 if [[ -z "$MATLABC" || ! -x "$MATLABC" ]]; then
   echo "usage: $0 <path-to-matlabc>" >&2
