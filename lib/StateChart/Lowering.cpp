@@ -640,7 +640,8 @@ public:
     std::ostringstream OS;
     emitHeader(OS);
     if (Opts_.Target == LoweringTarget::Software) {
-      emitDemoDriver(OS);
+      if (Opts_.IncludeDemoDriver)
+        emitDemoDriver(OS);
     } else {
       // SV target: emit a small calls-once harness so matlabc still
       // sees a script-with-function (its SV pipeline ignores the
