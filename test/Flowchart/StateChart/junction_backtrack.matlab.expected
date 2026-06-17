@@ -14,36 +14,20 @@ end
 
 function out_dest = router_tick(in_mode, in_val, ev_tick)
   persistent init_done;
-  persistent tick_count;
   persistent r_chart_root;
-  persistent t_far;
-  persistent t_idle;
-  persistent t_ignore;
-  persistent t_near;
   persistent l_dest;
-  persistent l_mode;
-  persistent l_val;
   if isempty(init_done)
     init_done = 0;
-    tick_count = 0;
     r_chart_root = 0;
-    t_far = 0;
-    t_idle = 0;
-    t_ignore = 0;
-    t_near = 0;
-    l_mode = 0;
-    l_val = 0;
     l_dest = 0;
   end
   l_mode = in_mode;
   l_val = in_val;
   if init_done == 0
     r_chart_root = 2;
-    t_idle = tick_count;
     l_dest = 0;
     init_done = 1;
   end
-  tick_count = tick_count + 1;
   fired = true;
   iter = 0;
   while fired
@@ -56,17 +40,14 @@ function out_dest = router_tick(in_mode, in_val, ev_tick)
         if ~fired && ev_tick
           if (l_mode == 1) && (l_val < 10)
             r_chart_root = 4;
-            t_near = tick_count;
             l_dest = 1;
             fired = true;
           elseif (l_mode == 1) && (l_val < 100)
             r_chart_root = 1;
-            t_far = tick_count;
             l_dest = 2;
             fired = true;
           elseif (l_mode == 1)
             r_chart_root = 3;
-            t_ignore = tick_count;
             l_dest = 3;
             fired = true;
           end

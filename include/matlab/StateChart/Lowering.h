@@ -62,6 +62,12 @@ struct LoweringOptions {
   // 16-bit covers up to 65k states; chart symbol locals reuse the
   // same width unless the caller overrides via fi-spec.
   int IntegerWidth = 16;
+  // Software target only: prepend a 5-tick demo driver so the lowered
+  // .m is a runnable script-with-functions. Disabled when the output
+  // is consumed as an importable module (e.g. the cocotb Python
+  // reference) — running the demo at import would dirty the chart's
+  // persistent state before the cosim resets it.
+  bool IncludeDemoDriver = true;
 };
 
 struct LoweringResult {

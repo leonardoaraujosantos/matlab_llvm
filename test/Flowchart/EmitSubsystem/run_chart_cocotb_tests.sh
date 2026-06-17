@@ -82,6 +82,32 @@ PY
     fails+=("$stem (Python harness check failed)")
     return
   fi
+  # Lint the emitted RTL when verilator is available (independent of
+  # cocotb). -Wall catches dead/unused signals; DECLFILENAME is just a
+  # file-vs-module naming convention (the bundle names the file after
+  # the .mflow stem, not the module) so it is silenced.
+  if command -v verilator >/dev/null 2>&1; then
+    if ! verilator --lint-only -Wall -Wno-DECLFILENAME "$out/$stem.sv" \
+         >"$SCRATCH/$stem.lint" 2>&1; then
+      fail=$((fail+1))
+      fails+=("$stem (verilator lint — $(grep -m1 -E 'Warning-|Error' "$SCRATCH/$stem.lint"))")
+      return
+    fi
+  fi
+  # Logic-synthesis check via yosys when available — proves the RTL is
+  # synthesizable, not merely lint-clean. Known yosys SV-frontend gaps
+  # (it rejects some constructs verilator accepts) are skipped, not
+  # failed, mirroring the EmitSV lane.
+  if command -v yosys >/dev/null 2>&1; then
+    if ! yosys -p "read_verilog -sv $out/$stem.sv; synth -top $tick_fn" \
+         >"$SCRATCH/$stem.ysynth" 2>&1; then
+      if ! grep -qE "syntax error|Unknown.*type|Failed to" "$SCRATCH/$stem.ysynth"; then
+        fail=$((fail+1))
+        fails+=("$stem (yosys synth — see $SCRATCH/$stem.ysynth)")
+        return
+      fi
+    fi
+  fi
   # End-to-end SIL when the toolchain is available.
   if command -v cocotb-config >/dev/null 2>&1 \
      && command -v verilator >/dev/null 2>&1; then
@@ -98,6 +124,7 @@ PY
 chart_cocotb_smoke traffic_light_moore   traffic_light_tick
 chart_cocotb_smoke vending_machine_mealy vending_tick
 chart_cocotb_smoke model_air_temperature_controller air_controller_tick
+chart_cocotb_smoke pipelined_mac         pipemac_tick
 
 echo "----"
 echo "passed: $pass    failed: $fail"

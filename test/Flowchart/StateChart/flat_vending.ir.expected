@@ -5,7 +5,7 @@ Chart vending sig=(coin)->(dispense) maxIter=1000
   symbol.event name=insertCoin trigger=rising
   symbol.event name=select trigger=either
   State idle decomp=leaf
-    .entry=credit = 0; dispense = 0
+    .entry=credit = 0
   State have decomp=leaf
     .during=% wait for selection
   Junction d0 kind=default

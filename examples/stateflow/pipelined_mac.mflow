@@ -1,0 +1,78 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.2.0",
+  "entry": "pipemac",
+  "settings": { "kind": "state_chart" },
+  "_comment": [
+    "Harder example: a control FSM driving a 3-stage PIPELINED datapath.",
+    "",
+    "A 2-state controller (Idle / Run) gates a 3-deep arithmetic pipeline",
+    "that computes  y = (sample*3) + 7  with one result per clock and a",
+    "3-cycle latency. The pipeline registers (s1..s3) and the valid-bit",
+    "shift register (v1..v3) are chart locals; the Run state's `during`",
+    "action advances them once per clock (one chart_tick = one posedge).",
+    "",
+    "Because each assignment reads the PREVIOUS (registered) stage value",
+    "before overwriting it, the SV lowering produces a textbook pipeline:",
+    "  s3 <= s2;  s2 <= s1 + 7;  s1 <= sample*3;   (and v3<=v2; v2<=v1...)",
+    "result / valid_out are registered Moore outputs (state-resident), so",
+    "there is no combinational input->output path — production timing-",
+    "friendly RTL.",
+    "",
+    "  matlabc -emit-systemverilog examples/stateflow/pipelined_mac.mflow",
+    "  matlabc -emit-matlab        examples/stateflow/pipelined_mac.mflow",
+    "",
+    "Integer-only data -> synthesizable, verilator --lint-only clean."
+  ],
+  "flows": [
+    {
+      "id": "flow_pipemac",
+      "kind": "program",
+      "name": "pipemac",
+      "signature": { "inputs": ["sample"], "outputs": ["result", "valid_out"] },
+      "symbols": {
+        "data": [
+          { "name": "sample",    "scope": "input",  "type": "int16", "initial": "0" },
+          { "name": "result",    "scope": "output", "type": "int16", "initial": "0" },
+          { "name": "valid_out", "scope": "output", "type": "int16", "initial": "0" },
+          { "name": "s1", "scope": "local", "type": "int16", "initial": "0" },
+          { "name": "s2", "scope": "local", "type": "int16", "initial": "0" },
+          { "name": "s3", "scope": "local", "type": "int16", "initial": "0" },
+          { "name": "v1", "scope": "local", "type": "int16", "initial": "0" },
+          { "name": "v2", "scope": "local", "type": "int16", "initial": "0" },
+          { "name": "v3", "scope": "local", "type": "int16", "initial": "0" }
+        ],
+        "events": [
+          { "name": "start", "trigger": "rising" },
+          { "name": "stop",  "trigger": "rising" }
+        ]
+      },
+      "nodes": [
+        { "id": "Idle", "kind": "state",
+          "data": {
+            "entryAction": "valid_out = 0; v1 = 0; v2 = 0; v3 = 0",
+            "params": { "decomposition": "leaf", "isInitial": "true" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "Run", "kind": "state",
+          "data": {
+            "duringAction": "result = s3; valid_out = v3; s3 = s2; v3 = v2; s2 = s1 + 7; v2 = v1; s1 = sample * 3; v1 = 1",
+            "params": { "decomposition": "leaf" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } }
+      ],
+      "edges": [
+        { "id": "t_idle_run", "kind": "transition",
+          "label": "start",
+          "from": {"node": "Idle", "port": "out"},
+          "to":   {"node": "Run",  "port": "in"},
+          "data": { "params": { "priority": "1" } } },
+        { "id": "t_run_idle", "kind": "transition",
+          "label": "stop",
+          "from": {"node": "Run",  "port": "out"},
+          "to":   {"node": "Idle", "port": "in"},
+          "data": { "params": { "priority": "1" } } }
+      ]
+    }
+  ]
+}

@@ -21,39 +21,17 @@ end
 
 function [out_heater, out_cooler, out_blower] = air_temp_controller_tick(in_temp, in_setpoint, ev_tick)
   persistent init_done;
-  persistent tick_count;
   persistent r_blower_loop;
   persistent r_chart_root;
   persistent r_temp_loop;
-  persistent t_blower_loop;
-  persistent t_blower_off;
-  persistent t_blower_on;
-  persistent t_controller;
-  persistent t_cooling;
-  persistent t_heating;
-  persistent t_idle_temp;
-  persistent t_temp_loop;
   persistent l_blower;
   persistent l_cooler;
   persistent l_heater;
-  persistent l_setpoint;
-  persistent l_temp;
   if isempty(init_done)
     init_done = 0;
-    tick_count = 0;
     r_blower_loop = 0;
     r_chart_root = 0;
     r_temp_loop = 0;
-    t_blower_loop = 0;
-    t_blower_off = 0;
-    t_blower_on = 0;
-    t_controller = 0;
-    t_cooling = 0;
-    t_heating = 0;
-    t_idle_temp = 0;
-    t_temp_loop = 0;
-    l_temp = 0;
-    l_setpoint = 0;
     l_heater = 0;
     l_cooler = 0;
     l_blower = 0;
@@ -62,20 +40,14 @@ function [out_heater, out_cooler, out_blower] = air_temp_controller_tick(in_temp
   l_setpoint = in_setpoint;
   if init_done == 0
     r_chart_root = 4;
-    t_controller = tick_count;
     r_chart_root = 8;
-    t_temp_loop = tick_count;
     r_temp_loop = 7;
-    t_idle_temp = tick_count;
     l_heater = 0; l_cooler = 0;
     r_chart_root = 1;
-    t_blower_loop = tick_count;
     r_blower_loop = 2;
-    t_blower_off = tick_count;
     l_blower = 0;
     init_done = 1;
   end
-  tick_count = tick_count + 1;
   fired = true;
   iter = 0;
   while fired
@@ -88,13 +60,11 @@ function [out_heater, out_cooler, out_blower] = air_temp_controller_tick(in_temp
         if r_temp_loop == 7
           if ~fired && ev_tick && (l_temp <= l_setpoint - 1)
             r_temp_loop = 6;
-            t_heating = tick_count;
             l_heater = 1; l_cooler = 0;
             fired = true;
           end
           if ~fired && ev_tick && (l_temp >= l_setpoint + 1)
             r_temp_loop = 5;
-            t_cooling = tick_count;
             l_heater = 0; l_cooler = 1;
             fired = true;
           end
@@ -102,7 +72,6 @@ function [out_heater, out_cooler, out_blower] = air_temp_controller_tick(in_temp
         if r_temp_loop == 6
           if ~fired && ev_tick && (l_temp >= l_setpoint)
             r_temp_loop = 7;
-            t_idle_temp = tick_count;
             l_heater = 0; l_cooler = 0;
             fired = true;
           end
@@ -110,7 +79,6 @@ function [out_heater, out_cooler, out_blower] = air_temp_controller_tick(in_temp
         if r_temp_loop == 5
           if ~fired && ev_tick && (l_temp <= l_setpoint)
             r_temp_loop = 7;
-            t_idle_temp = tick_count;
             l_heater = 0; l_cooler = 0;
             fired = true;
           end
@@ -118,7 +86,6 @@ function [out_heater, out_cooler, out_blower] = air_temp_controller_tick(in_temp
         if r_blower_loop == 2
           if ~fired && ev_tick && (l_heater == 1 || l_cooler == 1)
             r_blower_loop = 3;
-            t_blower_on = tick_count;
             l_blower = 1;
             fired = true;
           end
@@ -126,7 +93,6 @@ function [out_heater, out_cooler, out_blower] = air_temp_controller_tick(in_temp
         if r_blower_loop == 3
           if ~fired && ev_tick && (l_heater == 0 && l_cooler == 0)
             r_blower_loop = 2;
-            t_blower_off = tick_count;
             l_blower = 0;
             fired = true;
           end

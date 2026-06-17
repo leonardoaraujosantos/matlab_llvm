@@ -9,7 +9,7 @@ Flow id=flow_vending kind=program name=vending sig=(coin)->(dispense)
   Node id=d0 kind=junction_default
     out:out
   Node id=idle kind=state
-    data.entryAction=credit = 0; dispense = 0
+    data.entryAction=credit = 0
     param.decomposition=leaf
     in:in
     out:out

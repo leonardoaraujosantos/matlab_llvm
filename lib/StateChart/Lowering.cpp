@@ -74,6 +74,87 @@ std::string sanitize(const std::string &S) {
   return Out;
 }
 
+// True when `Name` appears as the left-hand side of a top-level
+// assignment (`Name = ...`, but not `Name == ...` or a comparison) in
+// the given action-body source. Quotes / comments / field accesses are
+// skipped. Used to classify Mealy outputs (assigned by a transition
+// action) and to keep the recogniser dependency-free.
+inline bool stmtAssignsVar(const std::string &Src, const std::string &Name) {
+  if (Name.empty()) return false;
+  size_t I = 0;
+  char Quote = 0;
+  bool PrevDot = false;
+  while (I < Src.size()) {
+    char C = Src[I];
+    if (Quote) {
+      if (C == Quote) Quote = 0;
+      ++I; continue;
+    }
+    if (C == '\'' || C == '"') { Quote = C; ++I; PrevDot = false; continue; }
+    if (C == '%') {
+      while (I < Src.size() && Src[I] != '\n') ++I;
+      PrevDot = false; continue;
+    }
+    if (isIdStart(C)) {
+      size_t S = I;
+      while (I < Src.size() && isIdCont(Src[I])) ++I;
+      if (!PrevDot && Src.compare(S, I - S, Name) == 0) {
+        size_t J = I;
+        while (J < Src.size() &&
+               std::isspace(static_cast<unsigned char>(Src[J]))) ++J;
+        if (J < Src.size() && Src[J] == '=' &&
+            (J + 1 >= Src.size() || Src[J + 1] != '='))
+          return true;
+      }
+      PrevDot = false; continue;
+    }
+    if (C == '.' && (I + 1 >= Src.size() || Src[I + 1] != '.')) {
+      PrevDot = true; ++I; continue;
+    }
+    PrevDot = false; ++I;
+  }
+  return false;
+}
+
+// True when the body calls one of the scalar temporal operators
+// (`after` / `before` / `at` / `every`) as `op(...)`. The counter-style
+// operators (`temporalCount` / `duration`) are discovered separately
+// into TempCounts / Durations.
+inline bool bodyUsesTemporalBuiltin(const std::string &Src) {
+  static const std::set<std::string> Ops{"after", "before", "at", "every"};
+  size_t I = 0;
+  char Quote = 0;
+  bool PrevDot = false;
+  while (I < Src.size()) {
+    char C = Src[I];
+    if (Quote) {
+      if (C == Quote) Quote = 0;
+      ++I; continue;
+    }
+    if (C == '\'' || C == '"') { Quote = C; ++I; PrevDot = false; continue; }
+    if (C == '%') {
+      while (I < Src.size() && Src[I] != '\n') ++I;
+      PrevDot = false; continue;
+    }
+    if (isIdStart(C)) {
+      size_t S = I;
+      while (I < Src.size() && isIdCont(Src[I])) ++I;
+      if (!PrevDot && Ops.count(Src.substr(S, I - S))) {
+        size_t J = I;
+        while (J < Src.size() &&
+               std::isspace(static_cast<unsigned char>(Src[J]))) ++J;
+        if (J < Src.size() && Src[J] == '(') return true;
+      }
+      PrevDot = false; continue;
+    }
+    if (C == '.' && (I + 1 >= Src.size() || Src[I + 1] != '.')) {
+      PrevDot = true; ++I; continue;
+    }
+    PrevDot = false; ++I;
+  }
+  return false;
+}
+
 //===----------------------------------------------------------------------===//
 // Identifier maps used by the action rewriter + emit pass.
 //===----------------------------------------------------------------------===//
@@ -147,6 +228,24 @@ struct ChartLayout {
   std::map<std::string, std::vector<TempCountSlot>> TempCounts;
   // state-id → ordered list of duration slots.
   std::map<std::string, std::vector<DurationSlot>> Durations;
+
+  // Outputs written by a transition's condition / transition action.
+  // These are Mealy outputs (they depend on the active state *and* the
+  // incoming event), so they must NOT be lowered as state-resident
+  // registered slots — a Moore-style entry action on the destination
+  // state would otherwise clobber the value within the same tick. They
+  // are emitted as plain (non-persistent) locals that reset to their
+  // default at the top of every tick and are driven combinationally by
+  // the firing transition. On the SV target this lowers to a
+  // combinational output; in software it produces a one-tick pulse.
+  std::set<std::string> MealyOutputs;
+
+  // True when the chart actually uses a temporal operator (`after` /
+  // `before` / `at` / `every` / `temporalCount` / `duration`). When
+  // false, the `tick_count` counter and every per-state entry-time
+  // stamp (`t_<state>`) are dead, so they are pruned entirely — a
+  // plain Moore/Mealy FSM emits no temporal scaffolding.
+  bool UsesTemporal = false;
 
   // Numeric code lookup.
   int codeOf(const std::string &Id) const {
@@ -541,7 +640,8 @@ public:
     std::ostringstream OS;
     emitHeader(OS);
     if (Opts_.Target == LoweringTarget::Software) {
-      emitDemoDriver(OS);
+      if (Opts_.IncludeDemoDriver)
+        emitDemoDriver(OS);
     } else {
       // SV target: emit a small calls-once harness so matlabc still
       // sees a script-with-function (its SV pipeline ignores the
@@ -743,6 +843,45 @@ private:
     }
 
     discoverTemporalCounters();
+    classifyMealyOutputs();
+    detectTemporalUsage();
+  }
+
+  // An output assigned by any transition's condition / transition
+  // action is a Mealy output (see ChartLayout::MealyOutputs).
+  void classifyMealyOutputs() {
+    for (auto &Out : C_.Sig.Outputs) {
+      for (auto &T : C_.Transitions) {
+        if (stmtAssignsVar(T.Label.CondAction, Out) ||
+            stmtAssignsVar(T.Label.TransAction, Out)) {
+          L_.MealyOutputs.insert(Out);
+          break;
+        }
+      }
+    }
+  }
+
+  // Set UsesTemporal when any body uses a temporal operator. The
+  // counter-style operators already populated TempCounts / Durations
+  // during discovery; the scalar ones are scanned here.
+  void detectTemporalUsage() {
+    if (!L_.TempCounts.empty() || !L_.Durations.empty()) {
+      L_.UsesTemporal = true;
+      return;
+    }
+    auto scan = [&](const std::string &Src) {
+      return bodyUsesTemporalBuiltin(Src);
+    };
+    for (auto &P : C_.States) {
+      const ChartState &S = P.second;
+      if (scan(S.Entry.Source) || scan(S.During.Source) ||
+          scan(S.Exit.Source)) { L_.UsesTemporal = true; return; }
+      for (auto &OE : S.OnEvent)
+        if (scan(OE.second.Source)) { L_.UsesTemporal = true; return; }
+    }
+    for (auto &T : C_.Transitions)
+      if (scan(T.Label.Guard) || scan(T.Label.CondAction) ||
+          scan(T.Label.TransAction)) { L_.UsesTemporal = true; return; }
   }
 
   // Walk every action / guard / cond / trans / on-event body in the
@@ -1057,16 +1196,21 @@ private:
     // line emits a display of the last variable as an unsuppressed
     // expression statement. One-var-per-line dodges it.
     OS << "  persistent init_done;\n";
-    OS << "  persistent tick_count;\n";
+    if (L_.UsesTemporal)
+      OS << "  persistent tick_count;\n";
     for (auto &P : L_.RegionVar)
       OS << "  persistent " << P.second << ";\n";
     for (auto &P : C_.States)
       if (P.second.HasHistory)
         OS << "  persistent h_" << sanitize(P.first) << ";\n";
-    for (auto &P : C_.States)
-      OS << "  persistent t_" << sanitize(P.first) << ";\n";
+    if (L_.UsesTemporal)
+      for (auto &P : C_.States)
+        OS << "  persistent t_" << sanitize(P.first) << ";\n";
+    // Mealy outputs are combinational (reset + driven each tick) and
+    // inputs are bound fresh each tick — neither is persistent state.
     for (auto &N : L_.Locals)
-      OS << "  persistent l_" << N << ";\n";
+      if (!L_.MealyOutputs.count(N) && !isInputName(N))
+        OS << "  persistent l_" << N << ";\n";
     // Counter-style temporal slots (temporalCount + duration).
     for (auto &P : L_.TempCounts)
       for (auto &S : P.second)
@@ -1081,13 +1225,15 @@ private:
     // symbol table's `initial`, descend the initial entry chain.
     OS << "  if isempty(init_done)\n";
     OS << "    init_done = 0;\n";
-    OS << "    tick_count = 0;\n";
+    if (L_.UsesTemporal)
+      OS << "    tick_count = 0;\n";
     for (auto &P : L_.RegionVar) OS << "    " << P.second << " = 0;\n";
     for (auto &P : C_.States)
       if (P.second.HasHistory)
         OS << "    h_" << sanitize(P.first) << " = 0;\n";
-    for (auto &P : C_.States)
-      OS << "    t_" << sanitize(P.first) << " = 0;\n";
+    if (L_.UsesTemporal)
+      for (auto &P : C_.States)
+        OS << "    t_" << sanitize(P.first) << " = 0;\n";
     for (auto &P : L_.TempCounts)
       for (auto &S : P.second)
         OS << "    " << S.Slot << " = 0;\n";
@@ -1097,13 +1243,15 @@ private:
         OS << "    " << S.StartSlot << " = 0;\n";
       }
     for (auto &S : C_.Symbols.Data) {
+      if (L_.MealyOutputs.count(S.Name) || isInputName(S.Name)) continue;
       OS << "    l_" << S.Name << " = ";
       OS << (S.Initial.empty() ? "0" : Rewriter_.rewrite(S.Initial)) << ";\n";
     }
-    for (auto &N : C_.Sig.Inputs)
-      if (!hasDataSymbol(N)) OS << "    l_" << N << " = 0;\n";
+    // Inputs are not state — they are bound from in_<N> below, every
+    // tick, so they get no isempty initialiser.
     for (auto &N : C_.Sig.Outputs)
-      if (!hasDataSymbol(N)) OS << "    l_" << N << " = 0;\n";
+      if (!hasDataSymbol(N) && !L_.MealyOutputs.count(N))
+        OS << "    l_" << N << " = 0;\n";
     OS << "  end\n";
 
     // Bind inputs into the chart's local scope so user actions can
@@ -1118,7 +1266,15 @@ private:
     OS << "  end\n";
 
     // Advance tick counter for temporal operators.
-    OS << "  tick_count = tick_count + 1;\n";
+    if (L_.UsesTemporal)
+      OS << "  tick_count = tick_count + 1;\n";
+
+    // Mealy outputs reset to their default at the top of every tick so
+    // a firing transition's condition action produces a one-tick pulse
+    // (and a non-firing tick reads the default). They are not
+    // state-resident, so the destination state's entry action can't
+    // clobber them.
+    emitMealyReset(OS, "  ");
 
     // Counter-style temporal maintenance: once per super-step, while
     // the owner state is active. temporalCount increments on each
@@ -1150,8 +1306,38 @@ private:
     OS << "end\n\n";
   }
 
+  // Reset every Mealy output to its declared default. Emitted once per
+  // tick before transition dispatch (both software + SV targets).
+  void emitMealyReset(std::ostream &OS, const std::string &Pad) {
+    if (L_.MealyOutputs.empty()) return;
+    std::string IntT = "int" + std::to_string(Opts_.IntegerWidth);
+    for (auto &N : C_.Sig.Outputs) {
+      if (!L_.MealyOutputs.count(N)) continue;
+      std::string Init = "0";
+      for (auto &S : C_.Symbols.Data)
+        if (S.Name == N && !S.Initial.empty()) { Init = S.Initial; break; }
+      OS << Pad << "l_" << N << " = ";
+      if (Opts_.Target == LoweringTarget::SystemVerilog)
+        OS << IntT << "(" << Init << ")";
+      else
+        OS << Rewriter_.rewrite(Init);
+      OS << ";\n";
+    }
+  }
+
   bool hasDataSymbol(const std::string &Name) const {
     for (auto &S : C_.Symbols.Data) if (S.Name == Name) return true;
+    return false;
+  }
+
+  // Chart inputs are bound fresh from the tick params every call
+  // (`l_<in> = in_<in>`), so they are NOT state — emitting them as
+  // persistent flip-flops is both wrong (an extra register on a pure
+  // input wire) and breaks matlabc's SV type inference (a persistent
+  // assigned from a parameter doesn't inherit the param's integer
+  // type, collapsing to f64). Lower them as plain locals instead.
+  bool isInputName(const std::string &Name) const {
+    for (auto &N : C_.Sig.Inputs) if (N == Name) return true;
     return false;
   }
 
@@ -1262,20 +1448,26 @@ private:
     };
 
     persIsempty("init_done", IntT + "(0)");
-    persIsempty("tick_count", IntT + "(0)");
+    if (L_.UsesTemporal)
+      persIsempty("tick_count", IntT + "(0)");
     for (auto &P : L_.RegionVar) persIsempty(P.second, IntT + "(0)");
     for (auto &P : C_.States)
       if (P.second.HasHistory)
         persIsempty("h_" + sanitize(P.first), IntT + "(0)");
-    for (auto &P : C_.States)
-      persIsempty("t_" + sanitize(P.first), IntT + "(0)");
+    if (L_.UsesTemporal)
+      for (auto &P : C_.States)
+        persIsempty("t_" + sanitize(P.first), IntT + "(0)");
+    // Mealy outputs are combinational and inputs are bound fresh each
+    // tick — neither is a registered slot (see ChartLayout::MealyOutputs
+    // / isInputName). Inputs as plain locals also keep matlabc's SV type
+    // inference from collapsing a param-fed persistent to f64.
     for (auto &S : C_.Symbols.Data)
-      persIsempty("l_" + S.Name,
-                  IntT + "(" + (S.Initial.empty() ? "0" : S.Initial) + ")");
-    for (auto &N : C_.Sig.Inputs)
-      if (!hasDataSymbol(N)) persIsempty("l_" + N, IntT + "(0)");
+      if (!L_.MealyOutputs.count(S.Name) && !isInputName(S.Name))
+        persIsempty("l_" + S.Name,
+                    IntT + "(" + (S.Initial.empty() ? "0" : S.Initial) + ")");
     for (auto &N : C_.Sig.Outputs)
-      if (!hasDataSymbol(N)) persIsempty("l_" + N, IntT + "(0)");
+      if (!hasDataSymbol(N) && !L_.MealyOutputs.count(N))
+        persIsempty("l_" + N, IntT + "(0)");
 
     // Bind inputs (already typed by caller).
     for (auto &N : C_.Sig.Inputs)
@@ -1289,7 +1481,11 @@ private:
     OS << "    init_done = " << IntT << "(1);\n";
     OS << "  end\n";
 
-    OS << "  tick_count = tick_count + " << IntT << "(1);\n";
+    if (L_.UsesTemporal)
+      OS << "  tick_count = tick_count + " << IntT << "(1);\n";
+
+    // Mealy outputs default-reset each tick (combinational pulse).
+    emitMealyReset(OS, "  ");
 
     // Single-pass transition evaluation — one shot, no while loop.
     // SV pipelines model this as one clock edge per chart_tick call.
@@ -1348,7 +1544,8 @@ private:
     std::string ParentRegion = regionOwner(Sid);
     OS << Pad << L_.RegionVar.at(ParentRegion) << " = "
        << codeText(L_.codeOf(Sid)) << ";\n";
-    OS << Pad << "t_" << sanitize(Sid) << " = tick_count;\n";
+    if (L_.UsesTemporal)
+      OS << Pad << "t_" << sanitize(Sid) << " = tick_count;\n";
     // Reset counter-style temporal slots for this state so a fresh
     // entry observes temporalCount==0 and duration==0.
     auto TcIt = L_.TempCounts.find(Sid);
@@ -1393,11 +1590,18 @@ private:
     if (!S) return;
     OwnerScope Owner(L_, Sid);
     if (S->Decomp == Decomposition::Or && !S->ChildStateIds.empty()) {
-      // Walk via the currently-active code in this region.
+      // Walk via the currently-active code in this region. Only wrap a
+      // child in `if Var == code … end` when that child actually has
+      // exit work to do — otherwise the guard is dead code, and the SV
+      // backend turns the unused `Var == code` predicate into an
+      // unread temp (verilator -Wall UNUSEDSIGNAL).
       std::string Var = L_.RegionVar.at(Sid);
       for (auto &Cid : S->ChildStateIds) {
+        std::ostringstream Body;
+        emitExitChain(Body, Cid, Pad + "  ");
+        if (Body.str().empty()) continue;
         OS << Pad << "if " << Var << " == " << codeText(L_.codeOf(Cid)) << "\n";
-        emitExitChain(OS, Cid, Pad + "  ");
+        OS << Body.str();
         OS << Pad << "end\n";
       }
       if (S->HasHistory)
@@ -1566,8 +1770,9 @@ private:
         std::string Owner = regionOwner(EnterChain[I]);
         OS << Pad << L_.RegionVar.at(Owner) << " = "
            << codeText(L_.codeOf(EnterChain[I])) << ";\n";
-        OS << Pad << "t_" << sanitize(EnterChain[I])
-           << " = tick_count;\n";
+        if (L_.UsesTemporal)
+          OS << Pad << "t_" << sanitize(EnterChain[I])
+             << " = tick_count;\n";
         if (!S->Entry.empty()) {
           OwnerScope OS_(L_, EnterChain[I]);
           OS << Pad << rewrite(S->Entry.Source) << ";\n";

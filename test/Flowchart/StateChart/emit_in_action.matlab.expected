@@ -13,30 +13,20 @@ end
 
 function out_overheat = watchdog_tick(ev_tick, ev_fault, ev_shutdown)
   persistent init_done;
-  persistent tick_count;
   persistent r_chart_root;
-  persistent t_halted;
-  persistent t_normal;
-  persistent t_warned;
   persistent l_overheat;
   persistent l_warnings;
   if isempty(init_done)
     init_done = 0;
-    tick_count = 0;
     r_chart_root = 0;
-    t_halted = 0;
-    t_normal = 0;
-    t_warned = 0;
     l_overheat = 0;
     l_warnings = 0;
   end
   if init_done == 0
     r_chart_root = 2;
-    t_normal = tick_count;
     l_overheat = 0; l_warnings = 0;
     init_done = 1;
   end
-  tick_count = tick_count + 1;
   fired = true;
   iter = 0;
   while fired
@@ -48,7 +38,6 @@ function out_overheat = watchdog_tick(ev_tick, ev_fault, ev_shutdown)
       if r_chart_root == 2
         if ~fired && ev_fault
           r_chart_root = 3;
-          t_warned = tick_count;
           l_warnings = l_warnings + 1; ev_shutdown = true;
           fired = true;
         end
@@ -56,7 +45,6 @@ function out_overheat = watchdog_tick(ev_tick, ev_fault, ev_shutdown)
       if r_chart_root == 3
         if ~fired && ev_shutdown
           r_chart_root = 1;
-          t_halted = tick_count;
           l_overheat = 1;
           fired = true;
         end

@@ -348,6 +348,10 @@ struct Options {
    * port). Default 1 LSB at Q16.16 = 1/65536. */
   double CocotbTolerance = 1.0 / 65536.0;
   bool CocotbToleranceExplicit = false;
+  /* State-chart software lowering: omit the 5-tick demo driver so the
+   * emitted .m/.py is a side-effect-free importable module. Set
+   * internally for the cocotb Python reference (see -emit-cocotb). */
+  bool ChartNoDemo = false;
 };
 
 int usage(const char *Prog) {
@@ -470,6 +474,8 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
         return false;
       }
     }
+    else if (A == "--chart-no-demo" || A == "-chart-no-demo")
+      Opts.ChartNoDemo = true;
     else if (A == "-repl") Opts.Mode = Options::Mode::Repl;
     else if (A == "-format") Opts.Mode = Options::Mode::Format;
     else if (A == "-dap") Opts.Mode = Options::Mode::Dap;
@@ -11365,7 +11371,7 @@ int emitCocotbHarness(const char *Self, const Options &Opts,
   std::string PyPath = OutDir + "/" + Stem + "_ref.py";
   if (runMatlabcEmit(Self, "-emit-systemverilog", Input, SVPath) != 0)
     return 1;
-  if (runMatlabcEmit(Self, "-emit-python", Input, PyPath) != 0)
+  if (runMatlabcEmit(Self, "-emit-python --chart-no-demo", Input, PyPath) != 0)
     return 1;
 
   // Source of truth for port specs: parse the SV port list we just
@@ -12942,6 +12948,11 @@ int main(int Argc, char **Argv) {
           break;
         default: break;
         }
+        // Cocotb Python reference is imported as a module, so it must
+        // not run the demo driver at import (it would dirty persistent
+        // state before the cosim resets it).
+        if (Opts.ChartNoDemo)
+          LowOpts.IncludeDemoDriver = false;
         // Debug hook — `MATLABC_DUMP_SV_LOWER=1` prints the SV-target
         // MATLAB source to stderr so we can see what the SV pipeline
         // sees. Useful while iterating on the lowering.

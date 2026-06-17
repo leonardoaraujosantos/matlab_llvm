@@ -19,36 +19,16 @@ end
 
 function [out_heat, out_fan_cmd] = heater_tick(in_temp, in_setpoint, ev_tick)
   persistent init_done;
-  persistent tick_count;
   persistent r_chart_root;
   persistent r_fan;
   persistent r_thermo;
-  persistent t_ctrl;
-  persistent t_fan;
-  persistent t_idle;
-  persistent t_off;
-  persistent t_on;
-  persistent t_run;
-  persistent t_thermo;
   persistent l_fan_cmd;
   persistent l_heat;
-  persistent l_setpoint;
-  persistent l_temp;
   if isempty(init_done)
     init_done = 0;
-    tick_count = 0;
     r_chart_root = 0;
     r_fan = 0;
     r_thermo = 0;
-    t_ctrl = 0;
-    t_fan = 0;
-    t_idle = 0;
-    t_off = 0;
-    t_on = 0;
-    t_run = 0;
-    t_thermo = 0;
-    l_temp = 0;
-    l_setpoint = 0;
     l_heat = 0;
     l_fan_cmd = 0;
   end
@@ -56,20 +36,14 @@ function [out_heat, out_fan_cmd] = heater_tick(in_temp, in_setpoint, ev_tick)
   l_setpoint = in_setpoint;
   if init_done == 0
     r_chart_root = 1;
-    t_ctrl = tick_count;
     r_chart_root = 7;
-    t_thermo = tick_count;
     r_thermo = 5;
-    t_on = tick_count;
     l_heat = 1;
     r_chart_root = 2;
-    t_fan = tick_count;
     r_fan = 3;
-    t_idle = tick_count;
     l_fan_cmd = 0;
     init_done = 1;
   end
-  tick_count = tick_count + 1;
   fired = true;
   iter = 0;
   while fired
@@ -82,7 +56,6 @@ function [out_heat, out_fan_cmd] = heater_tick(in_temp, in_setpoint, ev_tick)
         if r_thermo == 5
           if ~fired && ev_tick && (l_temp >= l_setpoint + 2)
             r_thermo = 4;
-            t_off = tick_count;
             l_heat = 0;
             fired = true;
           end
@@ -90,7 +63,6 @@ function [out_heat, out_fan_cmd] = heater_tick(in_temp, in_setpoint, ev_tick)
         if r_thermo == 4
           if ~fired && ev_tick && (l_temp <= l_setpoint - 2)
             r_thermo = 5;
-            t_on = tick_count;
             l_heat = 1;
             fired = true;
           end
@@ -98,7 +70,6 @@ function [out_heat, out_fan_cmd] = heater_tick(in_temp, in_setpoint, ev_tick)
         if r_fan == 3
           if ~fired && ev_tick && (l_heat==1)
             r_fan = 6;
-            t_run = tick_count;
             l_fan_cmd = 1;
             fired = true;
           end
@@ -106,7 +77,6 @@ function [out_heat, out_fan_cmd] = heater_tick(in_temp, in_setpoint, ev_tick)
         if r_fan == 6
           if ~fired && ev_tick && (l_heat==0)
             r_fan = 3;
-            t_idle = tick_count;
             l_fan_cmd = 0;
             fired = true;
           end

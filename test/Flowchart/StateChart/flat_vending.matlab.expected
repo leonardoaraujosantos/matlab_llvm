@@ -12,31 +12,20 @@ end
 
 function out_dispense = vending_tick(in_coin, ev_insertCoin, ev_select)
   persistent init_done;
-  persistent tick_count;
   persistent r_chart_root;
-  persistent t_have;
-  persistent t_idle;
-  persistent l_coin;
   persistent l_credit;
-  persistent l_dispense;
   if isempty(init_done)
     init_done = 0;
-    tick_count = 0;
     r_chart_root = 0;
-    t_have = 0;
-    t_idle = 0;
     l_credit = 0;
-    l_dispense = 0;
-    l_coin = 0;
   end
   l_coin = in_coin;
   if init_done == 0
     r_chart_root = 2;
-    t_idle = tick_count;
-    l_credit = 0; l_dispense = 0;
+    l_credit = 0;
     init_done = 1;
   end
-  tick_count = tick_count + 1;
+  l_dispense = 0;
   fired = true;
   iter = 0;
   while fired
@@ -49,7 +38,6 @@ function out_dispense = vending_tick(in_coin, ev_insertCoin, ev_select)
         if ~fired && ev_insertCoin
           l_credit = l_credit + 1;
           r_chart_root = 1;
-          t_have = tick_count;
           fired = true;
         end
       end
@@ -57,8 +45,7 @@ function out_dispense = vending_tick(in_coin, ev_insertCoin, ev_select)
         if ~fired && ev_select && (l_credit>0)
           l_dispense = 1;
           r_chart_root = 2;
-          t_idle = tick_count;
-          l_credit = 0; l_dispense = 0;
+          l_credit = 0;
           fired = true;
         end
         if ~fired
