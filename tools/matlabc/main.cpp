@@ -4310,6 +4310,19 @@ bool compileProgram() {
        * IDs are exposed via DAP `source.path` so a stable ordering
        * keeps log lines comparable. */
       std::sort(Siblings.begin(), Siblings.end());
+      /* #311: dedup by symbol name when merging siblings. The entry TU's
+       * own functions/classes win, then earlier (sorted) siblings win
+       * over later ones. Without this, two sibling files in the program
+       * directory that define the same helper — a stale copy, a backup,
+       * or just an unrelated script that happens to reuse the name —
+       * both get appended and MLIR verification aborts the whole launch
+       * with "redefinition of symbol", so the IDE never sees a `stopped`
+       * event. Skipping the duplicate keeps the entry point debuggable. */
+      std::set<std::string_view> DefinedNames;
+      for (auto *Fn : TU->Functions)
+        if (Fn) DefinedNames.insert(Fn->Name);
+      for (auto *Cls : TU->Classes)
+        if (Cls) DefinedNames.insert(Cls->Name);
       for (const std::string &SP : Siblings) {
         FileID SF = SM.loadFile(SP);
         if (SF == 0) continue;
@@ -4325,8 +4338,16 @@ bool compileProgram() {
                               SibTU->ScriptNode->Body &&
                               !SibTU->ScriptNode->Body->Stmts.empty();
         if (HasScriptBody) continue;
-        for (auto *Fn : SibTU->Functions) TU->Functions.push_back(Fn);
-        for (auto *Cls : SibTU->Classes) TU->Classes.push_back(Cls);
+        for (auto *Fn : SibTU->Functions) {
+          if (!Fn || Fn->Name.empty()) continue;
+          if (!DefinedNames.insert(Fn->Name).second) continue;
+          TU->Functions.push_back(Fn);
+        }
+        for (auto *Cls : SibTU->Classes) {
+          if (!Cls || Cls->Name.empty()) continue;
+          if (!DefinedNames.insert(Cls->Name).second) continue;
+          TU->Classes.push_back(Cls);
+        }
       }
       /* Re-sync the path → file_id table now that SM has more entries.
        * This loop runs again at the bottom of the registration block;
