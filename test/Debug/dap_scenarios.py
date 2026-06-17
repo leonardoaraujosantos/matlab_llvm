@@ -27,6 +27,8 @@ loop-body hook on line 9 fires three times at runtime.
 """
 
 import os
+import shutil
+import tempfile
 
 from dap_client import DapClient, DapError, initialize_and_launch
 
@@ -3496,6 +3498,47 @@ def scn_obj_inplace_mutation_124(matlabc, program):
             "#124 regression: model read the stale blank read-cache slot "
             f"(U0=0.0000): {out!r}")
         c.wait_event("terminated", timeout=10.0)
+
+
+def scn_sibling_redefinition_311(matlabc, program):
+    """#311 regression: a tiny .m debugged under -dap must reach a
+    `stopped` event even when its program directory holds a sibling .m
+    that redefines a helper the entry point also pulls in.
+
+    compileProgram scans sibling .m files in the program's directory and
+    merges their functions into the entry TU so helpers are debuggable.
+    Before the fix it appended duplicate definitions verbatim, so a stale
+    copy / backup of a helper (two files defining `helper`) made MLIR
+    verification abort the whole launch with "redefinition of symbol".
+    The IDE then completed initialize -> launch -> setBreakpoints ->
+    configurationDone but never saw a `stopped` event. Dedup-by-name on
+    the merge keeps the entry point debuggable; here we assert the
+    handshake reaches `stopped` and runs to `terminated`.
+
+    Uses its own isolated temp directory (ignores `program`) so the
+    sibling set is exactly what we control."""
+    work = tempfile.mkdtemp(prefix="dap311_")
+    try:
+        with open(os.path.join(work, "main.m"), "w") as f:
+            f.write("% entry point\n"
+                    "value = helper(3);\n"
+                    "disp(value);\n")
+        with open(os.path.join(work, "helper.m"), "w") as f:
+            f.write("function y = helper(x)\n  y = x + 1;\nend\n")
+        # Stale duplicate that previously tripped "redefinition of symbol".
+        with open(os.path.join(work, "helper_backup.m"), "w") as f:
+            f.write("function y = helper(x)\n  y = x + 999;\nend\n")
+        prog = os.path.join(work, "main.m")
+        with DapClient(matlabc, prog) as c:
+            initialize_and_launch(c, stop_on_entry=True)
+            ev = c.wait_event("stopped", timeout=10.0)
+            body = ev.get("body") or {}
+            assert body.get("threadId") == 1, \
+                f"#311: expected a stopped event on launch, got {body!r}"
+            c.request("continue", {"threadId": 1})
+            c.wait_event("terminated", timeout=10.0)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def all_scenarios():
