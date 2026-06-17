@@ -51,7 +51,7 @@ diagnostic) until its evaluator lands.
 
 | Kind | Tier-C | Params | Notes |
 |---|---|---|---|
-| `signal_integrator`   | ✓ | `initialCondition: 0.0`                                  | One continuous state; loop-breaker |
+| `signal_integrator`   | ✓ | `initialCondition: 0.0`                                  | One continuous state; loop-breaker. Optional `reset` input port: on a rising edge (`prev ≤ 0 && now > 0`) the continuous state is reloaded at the next major step from the `init` input port if connected, else from `initialCondition` — the zero-crossing → state-reset pattern (see `examples/mflowlink/bouncing_ball.mflow`) |
 | `signal_pid`          | ✓ | `Kp: 1.0`, `Ki: 0.0`, `Kd: 0.0`, `N: 100.0`, `initialIntegral: 0.0`, `upperLimit: +inf`, `lowerLimit: -inf` | Parallel form `C(s) = Kp + Ki/s + Kd·N/(s+N)`. Two continuous states (integral + derivative-filter). Direct-feedthrough ⇒ **not** a loop-breaker. Optional output saturation with clamping anti-windup (integrator frozen while pinned to a limit) |
 | `signal_derivative`   |   | *(none)*                                                 | Reserved — needs filtered derivative |
 | `signal_transfer_fcn` | ✓ | `num: "1"`, `den: "1, 1"`                                | Comma-separated coefficients, highest order first. Tier-C: strictly proper only (`degNum < degDen` ⇒ loop-breaker) |
