@@ -699,6 +699,50 @@ bool TensorLowering::rewriteBuiltinCalls() {
       }
     }
 
+    /* `rand/randn/zeros/ones/eye(dims..., 'single')` — a trailing dtype
+     * class-name string selects the element type. The CPU runtime is
+     * double-only (single/double share storage here), so drop the dtype
+     * const_char and let the numeric-dims form dispatch normally (same as
+     * `gpuArray.rand(n, n, 'single')`, whose wrapper also drops it).
+     * Gating on the operand being a const_char — not a numeric literal —
+     * keeps the 3-D `zeros(n, m, d)` size form (third arg is f64) on its
+     * own path; that distinction is why a blanket {F64,F64,PtrTy} dispatch
+     * entry had to be removed (it coerced the numeric 3 into a ptr and
+     * collided). Runs before the 1-arg normalizer so `rand(n, 'single')`
+     * folds to `rand(n)` and then to `rand(n, n)`. */
+    if ((Name == "eye" || Name == "zeros" || Name == "ones" ||
+         Name == "rand" || Name == "randn") &&
+        Call->getNumOperands() >= 2) {
+      Value Last = Call->getOperand(Call->getNumOperands() - 1);
+      Operation *Def = Last.getDefiningOp();
+      if (isMatlabOp(Def, "matlab.const_char")) {
+        auto VA = Def->getAttrOfType<StringAttr>("value");
+        auto isDtypeName = [](StringRef S) {
+          return S == "single" || S == "double" || S == "int8" ||
+                 S == "int16" || S == "int32" || S == "int64" ||
+                 S == "uint8" || S == "uint16" || S == "uint32" ||
+                 S == "uint64" || S == "logical";
+        };
+        if (VA && isDtypeName(VA.getValue())) {
+          B.setInsertionPoint(Call);
+          llvm::SmallVector<Value> Kept;
+          for (unsigned i = 0; i + 1 < Call->getNumOperands(); ++i)
+            Kept.push_back(Call->getOperand(i));
+          mlir::OperationState S(Call->getLoc(), "matlab.call_builtin");
+          S.addOperands(Kept);
+          S.addTypes(Call->getResultTypes());
+          for (auto A : Call->getAttrs())
+            S.addAttribute(A.getName(), A.getValue());
+          Operation *New = B.create(S);
+          for (unsigned i = 0; i < Call->getNumResults(); ++i)
+            Call->getResult(i).replaceAllUsesWith(New->getResult(i));
+          Call->erase();
+          Changed = true;
+          continue;
+        }
+      }
+    }
+
     /* Normalize 1-arg forms of 2-arg shape builtins: `eye(n)` is
      * `eye(n, n)`, same for zeros / ones / rand / randn. The runtime
      * only exposes 2-arg entries (matlab_eye(m, n) etc.), so rewrite

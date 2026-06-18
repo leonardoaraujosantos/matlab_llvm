@@ -23,7 +23,7 @@ rl/pendulum_sac.m                                  # TIMEOUT (heavy 200-ep SAC t
 # `single()`/`double()` dispatch gap) is fixed and gated by
 # test/Run/single_cast_in_builtin_arg.m; what's left here is the orthogonal
 # function-only-needs-main / multi-file-resolution gap.
-gpu/benchmark_gpu_backend.m                        # EMIT  (matrix `for n = sizes` fixed by #23; still blocked by `rand(n, n, 'single')` 3-arg dtype-string dispatch)
+gpu/benchmark_gpu_backend.m                        # LINK  (function-only, no main entry; `rand(n, n, 'single')` dtype-string now lowers — see test/Run/rand_single_dtype.m)
 gpu/mandelbrot_gpu.m                               # LINK  (Metal host-driver, needs Metal SDK objects)
 gpu/run_validation_suite.m                         # EMIT  (multi-file resolution: calls test_gpuarray_*.m by name)
 gpu/test_gpuarray_arrayfun.m                       # LINK  (function-only, no main entry)
