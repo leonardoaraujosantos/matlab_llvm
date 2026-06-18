@@ -488,6 +488,21 @@ check "alg-loop converges to 1/3" \
 AL_IR=$("$MATLABC" -simulate --dry-run "$EX/algebraic_loop_solved.mflow" 2>&1 | grep -c 'algebraic-loops')
 check "alg-loop surfaced in IR" "[[ '$AL_IR' == '1' ]]" ""
 
+#--- #323: --list-supported-kinds catalogue (no model file) ---------------
+LK="$("$MATLABC" -simulate --list-supported-kinds 2>&1)"
+# Well-formed JSON array.
+check "list-kinds is a JSON array" \
+  "[[ '$(printf '%s' "$LK" | head -1)' == '[' ]]" ""
+# A shipped kind is supported.
+check "signal_constant supported" \
+  "printf '%s' \"\$LK\" | grep -q '\"kind\": \"signal_constant\", \"supported\": true'" ""
+# A reserved kind is flagged unsupported.
+check "signal_custom reserved" \
+  "printf '%s' \"\$LK\" | grep -q '\"kind\": \"signal_custom\", \"supported\": false'" ""
+# Exactly the five reserved kinds report supported:false.
+LK_RES=$(printf '%s\n' "$LK" | grep -c '"supported": false')
+check "exactly 5 reserved kinds" "[[ '$LK_RES' == '5' ]]" ""
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 exit $(( fail > 0 ? 1 : 0 ))

@@ -42,6 +42,10 @@ The system SHALL select exactly one output mode from a mode flag, supporting at 
 - **WHEN** the user passes `-simulate` on a `.mflow` program, optionally with `--sim-dap` (live DAP server) or `--dry-run` (lower-only)
 - **THEN** the system SHALL run the signal-flow / state-chart simulator — emitting CSV by default, booting the live DAP transport under `--sim-dap`, or only lowering under `--dry-run` (src: tools/matlabc/main.cpp `Mode::Simulate`, `Opts.SimulateDap`)
 
+#### Scenario: List supported signal-flow kinds
+- **WHEN** the user passes `-simulate --list-supported-kinds` (no model file required)
+- **THEN** the system SHALL print a JSON array of `{kind, supported}` for every recognised `signal_*` block kind and exit 0, so tooling can distinguish shipped evaluators from reserved kinds (src: tools/matlabc/main.cpp `Opts.ListKinds`, lib/Flowchart/SignalFlowLowering.cpp `listSignalKinds`)
+
 #### Scenario: Usage banner advertises the mode set
 - **WHEN** the user invokes `matlabc` with no input file
 - **THEN** the system SHALL print a usage banner that lists the simulation lane (`-simulate [--sim-dap | --dry-run]`) alongside the other modes and exit non-zero (src: tools/matlabc/main.cpp `usage`, test: test/Flowchart/SimulateDap/run_usage.py)

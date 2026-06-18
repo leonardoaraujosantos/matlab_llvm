@@ -167,5 +167,12 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
 // `matlabc -simulate --dry-run` and the Tier-B golden tests.
 void dumpMflowLinkModel(std::ostream &OS, const MflowLinkModel &M);
 
+// Every `signal_*` kind the loader recognises, paired with whether its
+// evaluator is shipped (`true` = Supported, `false` = Reserved/rejected at
+// lowering). Sorted by kind name. Backs `matlabc -simulate
+// --list-supported-kinds` so the IDE can gray out unsupported palette
+// blocks at edit time instead of failing at simulate (#323).
+std::vector<std::pair<std::string, bool>> listSignalKinds();
+
 } // namespace flowchart
 } // namespace matlab

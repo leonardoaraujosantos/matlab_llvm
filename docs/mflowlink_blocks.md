@@ -137,11 +137,17 @@ These live directly under `data` (not nested in `params`) and use
 
 These kinds are accepted by the loader (round-trip clean) but rejected
 at lowering. Each needs a prerequisite that lives outside the lone
-Tier-H "ship more evaluators" axis:
+Tier-H "ship more evaluators" axis.
+
+The authoritative supported/reserved split is the machine-readable
+catalogue printed by `matlabc -simulate --list-supported-kinds` (a JSON
+array of `{kind, supported}`, no model file required); the IDE consumes
+it to gray out unsupported palette blocks at edit time instead of
+failing at simulate (#323). The five rows below are the current
+`supported: false` set:
 
 | Kind | Prerequisite |
 |---|---|
-| `signal_bus_creator`, `signal_bus_selector` | First-class vector / struct signal type in the IR. Today every wire is scalar `double` — a bus needs a composite signal carrier plus per-port type checking. Roadmap §16 punts this until the scalar path is solid. |
 | `signal_from_workspace` | Mechanism to bind a runtime `simout`-style variable into the simulation as a time-indexed source. The matlabc workspace model and the mflowLink runtime currently share no such handle. |
 | `signal_custom` | Plugin layer for user-defined evaluators. The shipped `signal_matlab_fcn` covers the inline-expression case; `signal_custom` would let the IDE register evaluators implemented elsewhere (a `.cpp` the user compiles into the runtime, a remote service, …). Needs a registry + ABI design. |
 | `signal_if_action`, `signal_switch_case_action` | A parent `signal_if_subsystem` / `signal_switch_case_subsystem` container that scopes which case fires. The IDE's `SignalFlowParamSpec` doesn't ship these containers yet — IDE-side prerequisite. |
