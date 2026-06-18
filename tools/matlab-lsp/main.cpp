@@ -427,10 +427,12 @@ Value handleDefinition(const Object &Params) {
   return nullptr;
 }
 
-/* SymbolKind constants from the LSP spec. */
+/* SymbolKind constants from the LSP spec. The full set is kept as a
+ * reference table even though only a few kinds are emitted today;
+ * [[maybe_unused]] silences the unused-constant warning for the rest. */
 namespace SymKind {
-  constexpr int File = 1, Module = 2, Namespace = 3, Package = 4,
-                Class = 5, Method = 6, Property = 7, Field = 8,
+  [[maybe_unused]] constexpr int File = 1, Module = 2, Namespace = 3,
+                Package = 4, Class = 5, Method = 6, Property = 7, Field = 8,
                 Constructor = 9, Enum = 10, Interface = 11, Function = 12,
                 Variable = 13, Constant = 14, String = 15, Number = 16,
                 Boolean = 17, Array = 18, EnumMember = 22;
