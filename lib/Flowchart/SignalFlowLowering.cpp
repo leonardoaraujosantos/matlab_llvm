@@ -43,7 +43,7 @@ struct KindInfo {
   SampleTimeClass Sample = SampleTimeClass::FixedInMinor;
 };
 
-const KindInfo *lookupKind(const std::string &K) {
+const std::map<std::string, KindInfo> &kindTable() {
   static const std::map<std::string, KindInfo> Table = [] {
     std::map<std::string, KindInfo> T;
     auto add = [&](const char *Name, KindInfo I) {
@@ -200,6 +200,11 @@ const KindInfo *lookupKind(const std::string &K) {
     }
     return T;
   }();
+  return Table;
+}
+
+const KindInfo *lookupKind(const std::string &K) {
+  const auto &Table = kindTable();
   auto It = Table.find(K);
   return It == Table.end() ? nullptr : &It->second;
 }
@@ -1530,6 +1535,15 @@ void dumpMflowLinkModel(std::ostream &OS, const MflowLinkModel &M) {
   for (auto &E : M.Edges)
     OS << "    " << E.Id << " " << E.FromBlock << ":" << E.FromPort << " -> "
        << E.ToBlock << ":" << E.ToPort << "\n";
+}
+
+std::vector<std::pair<std::string, bool>> listSignalKinds() {
+  std::vector<std::pair<std::string, bool>> Out;
+  const auto &Table = kindTable();
+  Out.reserve(Table.size());
+  for (const auto &[Name, Info] : Table)
+    Out.emplace_back(Name, Info.Supported);
+  return Out; // std::map iterates in sorted key order.
 }
 
 } // namespace matlab::flowchart

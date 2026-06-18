@@ -195,6 +195,11 @@ struct Options {
    * stepBackMajor / continue / pause / disconnect, plus the snapshot
    * ring (settings.snapshot.depth). */
   bool SimulateDap = false;
+  /* mflowLink: `-simulate --list-supported-kinds` prints the JSON
+   * supported/reserved `signal_*` kind catalogue and exits, no model
+   * file required — the IDE consumes it to gray out unsupported palette
+   * blocks at edit time (#323). */
+  bool ListKinds = false;
   /* `-emit-c` / `-emit-cpp` default to NOT emitting `#line` directives
    * — the cleaner output is what most users want for hand-reading the
    * generated C / C++. Pass `-line` to opt back in when you need
@@ -365,7 +370,8 @@ int usage(const char *Prog) {
                "             -dump-chart | -emit-trace |\n"
                "             -emit-matlab |\n"
                "             -emit-cuda | -emit-metal | -emit-opencl |\n"
-               "             -simulate [--sim-dap | --dry-run] |\n"
+               "             -simulate [--sim-dap | --dry-run |\n"
+               "                        --list-supported-kinds] |\n"
                "             -format | -repl | -dap]\n"
                "            [-no-line | -line] [-doxygen] [-cpp-auto] [-g]\n"
                "            [-o <dir>  (output dir for -emit-{cuda,metal,opencl})]"
@@ -483,6 +489,8 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
     else if (A == "-simulate") Opts.Mode = Options::Mode::Simulate;
     else if (A == "--dry-run" || A == "-dry-run") Opts.DryRun = true;
     else if (A == "--sim-dap" || A == "-sim-dap") Opts.SimulateDap = true;
+    else if (A == "--list-supported-kinds" || A == "-list-supported-kinds")
+      Opts.ListKinds = true;
     else if (A.size() > 12 && A.substr(0, 12) == "--subsystem=")
       Opts.Subsystem = std::string(A.substr(12));
     else if (A == "--subsystem" || A == "-subsystem") {
@@ -628,6 +636,8 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
    * path is optional there too. */
   if (Opts.Mode == Options::Mode::Repl) return true;
   if (Opts.Mode == Options::Mode::Dap) return true;
+  /* `-simulate --list-supported-kinds` is a static query — no file. */
+  if (Opts.Mode == Options::Mode::Simulate && Opts.ListKinds) return true;
   return !Opts.InputPath.empty();
 }
 
@@ -12016,6 +12026,18 @@ int main(int Argc, char **Argv) {
    * the Tier-B smoke lane. The interactive runtime (DAP-server mode,
    * step / step-back) is Tier C/D of docs/mflow_link_roadmap.md. */
   if (Opts.Mode == Options::Mode::Simulate) {
+    /* `--list-supported-kinds` is a static query — print the JSON kind
+     * catalogue and exit before requiring a model file (#323). */
+    if (Opts.ListKinds) {
+      auto Kinds = matlab::flowchart::listSignalKinds();
+      std::cout << "[\n";
+      for (size_t I = 0; I < Kinds.size(); ++I)
+        std::cout << "  {\"kind\": \"" << Kinds[I].first << "\", \"supported\": "
+                  << (Kinds[I].second ? "true" : "false") << "}"
+                  << (I + 1 < Kinds.size() ? "," : "") << "\n";
+      std::cout << "]\n";
+      return 0;
+    }
     SourceManager FlowSM;
     DiagnosticEngine FlowDiag(FlowSM);
     auto Doc = matlab::flowchart::loadMflowFromPath(FlowSM, Opts.InputPath,
