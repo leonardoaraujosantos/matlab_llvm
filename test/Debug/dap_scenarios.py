@@ -3541,6 +3541,48 @@ def scn_sibling_redefinition_311(matlabc, program):
         shutil.rmtree(work, ignore_errors=True)
 
 
+def scn_unreferenced_broken_sibling_320(matlabc, program):
+    """#320 regression: a debuggable .m must still compile when its program
+    directory holds an *unreferenced* sibling .m that would fail to lower.
+
+    compileProgram merges sibling .m files so helpers are debuggable, then
+    lowers the whole TU. Before the fix it merged every sibling
+    unconditionally, so one advanced/broken example in the directory aborted
+    the entire compile — and the IDE could not debug ANY file there (e.g.
+    `mandelbrot_gpu.m` was undebuggable because of sibling examples that use
+    unsupported call shapes). The merge is now reference-gated: a sibling is
+    pulled in only if the entry program (transitively) references it.
+
+    Here the entry references nothing external, while a sibling calls an
+    undefined function (parses fine, but fails to lower if merged). The
+    entry must still launch -> stopped -> terminated. Without the gate the
+    launch fails with `failed to compile program`.
+
+    Uses its own isolated temp directory (ignores `program`)."""
+    work = tempfile.mkdtemp(prefix="dap320_")
+    try:
+        with open(os.path.join(work, "main.m"), "w") as f:
+            f.write("% entry references no sibling\n"
+                    "x = 41;\n"
+                    "disp(x + 1);\n")
+        # Parses cleanly but would fail to lower (undefined call) if merged.
+        with open(os.path.join(work, "broken_helper.m"), "w") as f:
+            f.write("function r = broken_helper()\n"
+                    "  r = totally_undefined_fn_xyz123();\n"
+                    "end\n")
+        prog = os.path.join(work, "main.m")
+        with DapClient(matlabc, prog) as c:
+            initialize_and_launch(c, stop_on_entry=True)
+            ev = c.wait_event("stopped", timeout=10.0)
+            body = ev.get("body") or {}
+            assert body.get("threadId") == 1, \
+                f"#320: expected a stopped event on launch, got {body!r}"
+            c.request("continue", {"threadId": 1})
+            c.wait_event("terminated", timeout=10.0)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def all_scenarios():
     g = globals()
     return [(name, g[name]) for name in sorted(g) if name.startswith("scn_")]

@@ -4311,19 +4311,60 @@ bool compileProgram() {
        * IDs are exposed via DAP `source.path` so a stable ordering
        * keeps log lines comparable. */
       std::sort(Siblings.begin(), Siblings.end());
-      /* #311: dedup by symbol name when merging siblings. The entry TU's
-       * own functions/classes win, then earlier (sorted) siblings win
-       * over later ones. Without this, two sibling files in the program
-       * directory that define the same helper — a stale copy, a backup,
-       * or just an unrelated script that happens to reuse the name —
-       * both get appended and MLIR verification aborts the whole launch
-       * with "redefinition of symbol", so the IDE never sees a `stopped`
-       * event. Skipping the duplicate keeps the entry point debuggable. */
+      /* #311 + #320: merge sibling functions into the entry TU so helpers
+       * are debuggable, under two guards:
+       *   (#311) dedup by symbol name — the entry's own definitions win,
+       *     then earlier (sorted) siblings win over later ones. Without
+       *     this, two sibling files defining the same helper (a stale copy
+       *     or backup) both get appended and MLIR verification aborts the
+       *     launch with "redefinition of symbol".
+       *   (#320) only merge a sibling the entry program actually
+       *     references — transitively. A merged sibling's body is lowered
+       *     too, so one advanced example in the directory (e.g. using an
+       *     unsupported call shape) would otherwise abort the whole compile
+       *     and the IDE could not debug ANY file in that directory. The
+       *     reference test is a comment-stripped whole-word scan, iterated
+       *     to a fixpoint so transitively-called helpers come along. */
       std::set<std::string_view> DefinedNames;
       for (auto *Fn : TU->Functions)
         if (Fn) DefinedNames.insert(Fn->Name);
       for (auto *Cls : TU->Classes)
         if (Cls) DefinedNames.insert(Cls->Name);
+
+      auto stripComments = [](std::string_view Raw) {
+        std::string Out;
+        Out.reserve(Raw.size());
+        bool InComment = false;
+        for (char c : Raw) {
+          if (c == '\n') { InComment = false; Out.push_back(c); continue; }
+          if (c == '%') InComment = true;
+          if (!InComment) Out.push_back(c);
+        }
+        return Out;
+      };
+      auto mentionsWord = [](const std::string &Hay, llvm::StringRef W) {
+        if (W.empty()) return false;
+        size_t P = 0;
+        while ((P = Hay.find(W.data(), P, W.size())) != std::string::npos) {
+          bool L = P > 0 && (std::isalnum((unsigned char)Hay[P - 1]) ||
+                             Hay[P - 1] == '_');
+          size_t E = P + W.size();
+          bool R = E < Hay.size() && (std::isalnum((unsigned char)Hay[E]) ||
+                                      Hay[E] == '_');
+          if (!L && !R) return true;
+          P = E;
+        }
+        return false;
+      };
+
+      struct SibRec {
+        std::string Stem;
+        std::string Text;
+        std::vector<Function *> Fns;
+        std::vector<ClassDef *> Clss;
+        bool Merged = false;
+      };
+      std::vector<SibRec> Recs;
       for (const std::string &SP : Siblings) {
         FileID SF = SM.loadFile(SP);
         if (SF == 0) continue;
@@ -4339,15 +4380,43 @@ bool compileProgram() {
                               SibTU->ScriptNode->Body &&
                               !SibTU->ScriptNode->Body->Stmts.empty();
         if (HasScriptBody) continue;
-        for (auto *Fn : SibTU->Functions) {
-          if (!Fn || Fn->Name.empty()) continue;
-          if (!DefinedNames.insert(Fn->Name).second) continue;
-          TU->Functions.push_back(Fn);
-        }
-        for (auto *Cls : SibTU->Classes) {
-          if (!Cls || Cls->Name.empty()) continue;
-          if (!DefinedNames.insert(Cls->Name).second) continue;
-          TU->Classes.push_back(Cls);
+        SibRec R;
+        R.Stem = fs::path(SP).stem().string();
+        R.Text = stripComments(SM.getBuffer(SF));
+        for (auto *Fn : SibTU->Functions) R.Fns.push_back(Fn);
+        for (auto *Cls : SibTU->Classes) R.Clss.push_back(Cls);
+        Recs.push_back(std::move(R));
+      }
+
+      /* Seed the reference set with the entry program's own source, then
+       * pull in referenced siblings until the set stops growing. */
+      std::string Mentioned = stripComments(SM.getBuffer(F));
+      bool GrewM = true;
+      while (GrewM) {
+        GrewM = false;
+        for (auto &R : Recs) {
+          if (R.Merged) continue;
+          bool Need = mentionsWord(Mentioned, R.Stem);
+          for (auto *Fn : R.Fns) {
+            if (Need) break;
+            if (Fn && !Fn->Name.empty() && mentionsWord(Mentioned, Fn->Name))
+              Need = true;
+          }
+          if (!Need) continue;
+          for (auto *Fn : R.Fns) {
+            if (!Fn || Fn->Name.empty()) continue;
+            if (!DefinedNames.insert(Fn->Name).second) continue;
+            TU->Functions.push_back(Fn);
+          }
+          for (auto *Cls : R.Clss) {
+            if (!Cls || Cls->Name.empty()) continue;
+            if (!DefinedNames.insert(Cls->Name).second) continue;
+            TU->Classes.push_back(Cls);
+          }
+          Mentioned.push_back('\n');
+          Mentioned += R.Text;
+          R.Merged = true;
+          GrewM = true;
         }
       }
       /* Re-sync the path → file_id table now that SM has more entries.
