@@ -819,8 +819,8 @@ extern "C" const char *replWorkspaceClassNameHook(const char *name,
 extern "C" int replWorkspaceHandleSigHook(const char *name, int64_t len);
 
 /* matlabc binary directory — captured once in main() so the REPL
- * prelude-search helpers can find runtime/*.m files relative to the
- * binary location without threading argv[0] through every call site.
+ * prelude-search helpers can find the runtime `*.m` files relative to
+ * the binary location without threading argv[0] through every call site.
  * Empty when matlabc was invoked without a discoverable on-disk path
  * (rare; falls back to no preludes in that case). */
 static std::string g_MatlabcBinDir;
@@ -3240,7 +3240,7 @@ static std::string buildReplPrelude(const std::string &Src, bool ScanCwd) {
     }
   }
   /* Current-folder functions (#284). MATLAB makes every `.m` file in the
-   * working directory callable by name. Enumerate `./*.m` so a mentioned
+   * working directory callable by name. Enumerate the `.m` files there so a mentioned
    * basename can be injected exactly like a stashed user function. Only the
    * file *names* are collected here; contents are read lazily (in bodyOf)
    * so a turn that mentions nothing pays one cheap directory scan and no
@@ -5325,21 +5325,25 @@ DisasmHolder &disasmHolder() {
   /* Lazy init — see runDap() comment. Idempotent. */
   llvm::InitializeNativeTargetDisassembler();
   std::string Triple = llvm::sys::getDefaultTargetTriple();
+  // LLVM 22 deprecated the string-keyed TargetRegistry / MC factory
+  // overloads in favour of ones taking an llvm::Triple; build it once.
+  llvm::Triple TripleObj(Triple);
   std::string LookupErr;
-  const llvm::Target *T = llvm::TargetRegistry::lookupTarget(Triple, LookupErr);
+  const llvm::Target *T =
+      llvm::TargetRegistry::lookupTarget(TripleObj, LookupErr);
   if (!T) {
     H.ErrMsg = "MCTarget lookup failed for " + Triple + ": " + LookupErr;
     return H;
   }
-  H.MRI.reset(T->createMCRegInfo(Triple));
+  H.MRI.reset(T->createMCRegInfo(TripleObj));
   if (!H.MRI) { H.ErrMsg = "createMCRegInfo failed"; return H; }
   llvm::MCTargetOptions MCOpts;
-  H.MAI.reset(T->createMCAsmInfo(*H.MRI, Triple, MCOpts));
+  H.MAI.reset(T->createMCAsmInfo(*H.MRI, TripleObj, MCOpts));
   if (!H.MAI) { H.ErrMsg = "createMCAsmInfo failed"; return H; }
   H.MII.reset(T->createMCInstrInfo());
   if (!H.MII) { H.ErrMsg = "createMCInstrInfo failed"; return H; }
   H.STI.reset(T->createMCSubtargetInfo(
-      Triple, llvm::sys::getHostCPUName(), ""));
+      TripleObj, llvm::sys::getHostCPUName(), ""));
   if (!H.STI) { H.ErrMsg = "createMCSubtargetInfo failed"; return H; }
   H.Ctx.reset(new llvm::MCContext(
       llvm::Triple(Triple), H.MAI.get(), H.MRI.get(), H.STI.get()));
@@ -11658,8 +11662,8 @@ int main(int Argc, char **Argv) {
   if (!parseArgs(Argc, Argv, Opts, Prog)) return usage(Prog);
 
   /* Capture the matlabc binary directory so `buildReplPrelude` (and any
-   * other path-relative helper) can locate `runtime/*.m` without
-   * threading argv[0] through their signatures.  realpath() resolves
+   * other path-relative helper) can locate the runtime `*.m` files
+   * without threading argv[0] through their signatures.  realpath() resolves
    * symlinks so a `/usr/local/bin/matlabc` symlink to the build tree
    * still points back at the source's `runtime/` directory. */
   {
@@ -12105,23 +12109,6 @@ int main(int Argc, char **Argv) {
    * cheap whole-word check against the source — false positives
    * (e.g. a user comment `% tf is short for transfer function`)
    * just pay the parse cost, not a correctness bug. */
-  auto findCstPrelude = [&]() -> std::string {
-    std::string SelfStr(Argv[0]);
-    auto last = SelfStr.find_last_of('/');
-    std::string Bin = (last == std::string::npos) ? "." : SelfStr.substr(0, last);
-    char Real[PATH_MAX];
-    if (realpath(Bin.c_str(), Real)) Bin = Real;
-    std::vector<std::string> Cands = {
-      Bin + "/../runtime/cst_classdefs.m",
-      Bin + "/runtime/cst_classdefs.m",
-      Bin + "/../share/matlabc/runtime/cst_classdefs.m",
-    };
-    for (auto &C : Cands) {
-      std::ifstream Fp(C);
-      if (Fp) return C;
-    }
-    return std::string();
-  };
   /* Per-class detection: scan the user input for whole-word `<name>(`
    * or `<name> =` (single-`=` assignment) patterns. Returns a vector
    * of matched class names. Comments are stripped first so a `% tf
