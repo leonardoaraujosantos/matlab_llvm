@@ -38,6 +38,14 @@ The system SHALL select exactly one output mode from a mode flag, supporting at 
 - **WHEN** the user passes `-repl` or `-dap`
 - **THEN** the system SHALL enter the JIT-backed REPL or the DAP debug server respectively rather than emitting a file (src: tools/matlabc/main.cpp `Mode::Repl` / `Mode::Dap`)
 
+#### Scenario: Simulation mode and modifiers
+- **WHEN** the user passes `-simulate` on a `.mflow` program, optionally with `--sim-dap` (live DAP server) or `--dry-run` (lower-only)
+- **THEN** the system SHALL run the signal-flow / state-chart simulator — emitting CSV by default, booting the live DAP transport under `--sim-dap`, or only lowering under `--dry-run` (src: tools/matlabc/main.cpp `Mode::Simulate`, `Opts.SimulateDap`)
+
+#### Scenario: Usage banner advertises the mode set
+- **WHEN** the user invokes `matlabc` with no input file
+- **THEN** the system SHALL print a usage banner that lists the simulation lane (`-simulate [--sim-dap | --dry-run]`) alongside the other modes and exit non-zero (src: tools/matlabc/main.cpp `usage`, test: test/Flowchart/SimulateDap/run_usage.py)
+
 ### Requirement: Output destination
 The system SHALL write single-stream emit output to stdout and accept `-o <dir>` (alias `--output`) to name the output directory for the multi-file GPU bundle emitters (`-emit-{cuda,metal,opencl}`).
 

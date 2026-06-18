@@ -90,6 +90,25 @@ The system SHALL build an mflowlink signal-flow block model from a `.mflow` docu
 - **WHEN** an mflowlink model is simulated
 - **THEN** the system SHALL step blocks in execution order with continuous-state integration and produce logged signal output (src: lib/Flowchart/MflowLinkSim.cpp, examples/mflowlink/bouncing_ball.mflow, test/Flowchart/Simulate)
 
+#### Scenario: Integrator external reset port
+- **WHEN** a `signal_integrator` block has a connected `reset` input and that signal makes a rising edge (`prev ≤ 0 && now > 0`)
+- **THEN** the system SHALL reload the integrator's continuous state at the next major step from the `init` input port if connected, else from `initialCondition` (the zero-crossing → state-reset pattern) (src: lib/Flowchart/MflowLinkSim.cpp, examples/mflowlink/bouncing_ball.mflow, test/Flowchart/SimulateRun)
+
+### Requirement: Live simulation DAP transport
+The system SHALL expose a live Debug Adapter Protocol server for signal-flow and state-chart `.mflow` simulations via `matlabc -simulate --sim-dap`, so an editor can pause, step, set breakpoints, and observe a running simulation rather than only replaying a completed trace. (src: tools/matlabc/main.cpp `runMflowLinkDap` / `runStateChartDap`, doc: docs/mflow_link_roadmap.md §10, docs/mStateflow_roadmap.md §6.7)
+
+#### Scenario: Step, breakpoint, and solver control
+- **WHEN** a client drives the `--sim-dap` server
+- **THEN** the system SHALL pause at entry and handle `stepMajor` / `stepBlock` / `stepBackMajor` / `stepBackBlock` (over the snapshot ring), `continue` / `pause`, `setSignalBreakpoints` / `setTimeBreakpoints`, `resetSimulation`, and `configureSolver` (src: tools/matlabc/main.cpp `runMflowLinkDap`, test: test/Flowchart/SimulateDap)
+
+#### Scenario: Live simulation event stream
+- **WHEN** the simulation advances a major step
+- **THEN** the system SHALL emit `simulationTime`, `simulationActiveBlock`, `signalSample`, `zeroCrossing`, and `snapshotTaken` events (src: tools/matlabc/main.cpp, test: test/Flowchart/SimulateDap)
+
+#### Scenario: State-chart DAP namespace
+- **WHEN** the `.mflow` is a state-chart (`settings.kind = "state_chart"`)
+- **THEN** the system SHALL additionally serve the `stateChart/*` request set (`stepSuperStep` / `stepTransition`, state / transition / symbol breakpoints, snapshots) over the same transport (src: tools/matlabc/main.cpp `runStateChartDap`, test: test/Flowchart/SimulateDap/StateChart)
+
 ### Requirement: Subsystem-to-MATLAB lowering
 The system SHALL lower signal-flow subsystems into MATLAB function ASTs. (src: lib/Flowchart/SubsystemToMatlab.cpp, src: include/matlab/Flowchart/SubsystemToMatlab.h)
 

@@ -130,8 +130,8 @@ range(1, N+1)`, `A*B` → `A @ B`, `classdef` → a real `class`). See
 
 ## Tools
 
-`matlabc` modes: `-dump-{tokens,ast}`, `-emit-{sema,mir,mlir,llvm,c,cpp,python,typescript,systemverilog,matlab,mflow}`,
-`-check-synthesizable`, `-emit-{hardware,fixed-point}-report`, `-format`, `-repl`, `-dap`.
+`matlabc` modes: `-dump-{tokens,ast,flow,chart}`, `-emit-{sema,mir,mlir,llvm,c,cpp,python,typescript,systemverilog,matlab,mflow}`,
+`-check-synthesizable`, `-emit-{hardware,fixed-point}-report`, `-simulate [--sim-dap | --dry-run]` (signal-flow / state-chart simulation + live DAP transport), `-format`, `-repl`, `-dap`.
 Modifiers: `-O` (optimize), `-g` (debug hooks), `-line` (DWARF/`#line`), `-o <dir>` (GPU bundle output).
 Full reference: [`docs/README.md`](docs/README.md). The repo also builds `matlab-lsp`
 (Language Server; accepts `.m` and `.mflow`).
