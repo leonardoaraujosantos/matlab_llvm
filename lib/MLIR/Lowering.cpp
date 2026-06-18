@@ -3357,6 +3357,35 @@ void Lowerer::lowerStmt(const Stmt &St) {
           }
           return;
         }
+        /* [y, t] = step(model): the auto-grid data-returning form (#322).
+         * No time vector supplied, so synthesise the default grid the
+         * single-output `step_ss` samples on — dt = 0.01, N = 500 — as a
+         * column `t = linspace(0, (N-1)*dt, N)'`, then sample the response
+         * on it via the `_t` variants (ss and tf). y is N×p, t is N×1. */
+        if (Callee->Name == "step" && (Cn0 == "ss" || Cn0 == "tf") &&
+            C->Args.size() == 1) {
+          mlir::Value Obj = loadObjP(C->Args[0]);
+          auto F64 = mlir::Float64Type::get(&MCtx);
+          const double Dt = 0.01, Npts = 500.0;
+          auto konst = [&](double V) {
+            return mlir::arith::ConstantOp::create(
+                       B, Lc, F64, mlir::FloatAttr::get(F64, V)).getResult();
+          };
+          mlir::Value Trow = callRT(
+              "linspace", {konst(0.0), konst((Npts - 1.0) * Dt), konst(Npts)});
+          mlir::Value T = callRT("transpose", {Trow}); /* N×1 column */
+          mlir::Value Y =
+              (Cn0 == "tf")
+                  ? callRT("step_tf_t", {getPropP(Obj, "Numerator"),
+                                         getPropP(Obj, "Denominator"), T})
+                  : callRT("step_ss_t", {getPropP(Obj, "A"), getPropP(Obj, "B"),
+                                         getPropP(Obj, "C"), getPropP(Obj, "D"),
+                                         T});
+          mlir::Value Outs[2] = {Y, T};
+          for (size_t i = 0; i < A.LHS.size() && i < 2; ++i)
+            if (A.LHS[i]) lowerLValueStore(*A.LHS[i], Outs[i]);
+          return;
+        }
         /* [y, tout] = step(model, t): y is the response over the supplied
          * time grid t (ss or tf), tout echoes t. */
         if (Callee->Name == "step" && (Cn0 == "ss" || Cn0 == "tf") &&
