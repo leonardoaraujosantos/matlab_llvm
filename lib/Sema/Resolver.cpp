@@ -1295,13 +1295,14 @@ void Resolver::registerBuiltins() {
     /* `coder.gpuConfig('mex' | 'lib' | 'exe' | 'dll')` returns a
      * config record consumed by the -emit-{cuda,metal,opencl} lanes. */
     "coder_gpuConfig",
-    /* GPU Coder host-side carriers — `gpuArray` is a classdef pulled
-     * in by the prelude (gpu_classdefs.m); the symbols listed below
-     * are the free functions declared alongside it (gather, etc.).
-     * Registering as builtin so Sema accepts the name in source code
-     * before the classdef prelude wires it up.  Note: gpuArray itself
-     * is intentionally NOT in this list — it's a class binding. */
-    "gather", "existsOnGPU", "gpuDevice",
+    /* GPU Coder host-side carriers. On the CPU-debug lane `gpuArray` is
+     * an *identity* builtin (matlab_gpuArray_ctor returns its input), not
+     * a classdef object — a carrier object broke `Ag*Bg` / `gather` because
+     * the runtime matrix ops received the object pointer instead of the
+     * underlying matrix (#333). `gather` is likewise identity. The
+     * `gpuArray.<static>` factories (gpuArray.rand, …) are parser-folded to
+     * the `gpuArray_*` builtins below, independent of this binding. */
+    "gpuArray", "gather", "existsOnGPU", "gpuDevice",
     /* Runtime ABI shims called from gpu_classdefs.m method bodies. */
     "matlab_gpu_upload", "matlab_gpu_download",
     "matlab_gpu_exists_on_gpu", "matlab_gpu_active_target_name",
