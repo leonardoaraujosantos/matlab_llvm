@@ -1,32 +1,35 @@
 #!/usr/bin/env python3
-"""Bare-minimum CPU-lane gate for examples/gpu (no GPU required).
+"""Per-PR CPU-lane gate for examples/ (no GPU required).
 
-GitHub's runners have no GPU, and the examples sweep (run_sweep.sh) is
-AOT-only and baselines every GPU example as a known failure — so the
-JIT / -dap / -repl compile path of examples/gpu had no per-PR coverage.
-That's exactly where three bugs hid:
+The examples sweep (run_sweep.sh) is AOT-only — it never exercises the
+JIT / -dap / -repl compile path, which can reject a program the AOT
+`-emit-llvm` path accepts (different pass pipeline / ReplMode / slot-
+promotion ordering). That path had no per-PR coverage, and three bugs hid
+there in the GPU examples alone:
 
   * rand(n, n, 'single') dtype-string lowering          (#319)
   * sibling .m scan tanking the whole directory's compile (#320)
   * none-typed param feeding gpuArray.* not promoted in  (#326)
     the JIT pipeline
 
-The gpuArray CPU-debug lane is host-BLAS identity, so all three are
-plain CPU compile/lowering checks. This test pins them on the *real*
-example files:
+The gpuArray CPU-debug lane is host-BLAS identity, so these are plain CPU
+checks. This test pins:
 
-  1. `-emit-llvm` must lower the in-scope files cleanly (guards #319 and
-     any future lowering regression in them).
-  2. `-dap` (JIT) must accept `launch` (i.e. compileProgram succeeds) for
-     a representative file *in the real examples/gpu directory* — which
-     contains the advanced stencil/parfor siblings. This guards #320
-     (the sibling scan must not pull them in and abort) and #326 (the
-     param `n` feeding gpuArray.rand must promote). We assert only the
-     compile (launch accepted), not a clean run: a function-file entry
-     can't run to a clean exit (param unbound), and -dap has a known
-     teardown SIGSEGV race orthogonal to what we're guarding.
+  1. `-emit-llvm` lowering of the in-scope GPU example files (guards #319
+     and any future lowering regression in them).
+  2. `-dap` (JIT) `launch` acceptance (compileProgram OK) for files in the
+     real examples/gpu directory — which holds the advanced stencil/parfor
+     siblings — guarding #320 (sibling scan must not abort the compile) and
+     #326 (the param feeding gpuArray.rand must promote).
+  3. `-dap` (JIT) `launch` acceptance for a representative .m from each
+     major toolbox directory, so an AOT-OK-but-JIT-broken regression in any
+     toolbox (the #326 class, but non-GPU) is caught per-PR.
 
-Usage: gpu_cpu_lane.py <path-to-matlabc>
+We assert only the compile (launch accepted), not a clean run: a function-
+file entry can't run to a clean exit (param unbound), and -dap has a known
+teardown SIGSEGV race orthogonal to what we're guarding.
+
+Usage: examples_cpu_lane.py <path-to-matlabc>
 """
 from __future__ import annotations
 
@@ -57,6 +60,26 @@ EXPECT_JIT_COMPILE = [
     "mandelbrot_gpu.m",       # simple file in a dir of advanced siblings (#320)
 ]
 
+# One representative script per major toolbox directory (paths relative to
+# the repo root). Each must JIT-compile under -dap, so an AOT-OK-but-JIT-
+# broken regression in any toolbox is caught — the #326 class generalised
+# beyond GPU. All verified to JIT-compile when added; if one legitimately
+# stops working, fix the JIT path or swap the representative (don't silently
+# drop coverage for that toolbox).
+TOOLBOX_JIT_COMPILE = [
+    "examples/matrix_mult.m",
+    "examples/eigendecomp.m",
+    "examples/solve_linear.m",
+    "examples/ode_solver.m",
+    "examples/control/balreal_demo.m",
+    "examples/signal/bandpass_design.m",
+    "examples/stats_ml/distribution_fitting.m",
+    "examples/optim/blade_pitch_opt.m",
+    "examples/pde/antenna_glb_fem.m",
+    "examples/comm/alamouti_diversity.m",
+    "examples/dsp/adaptive_eq.m",
+]
+
 
 def emit_lowers(matlabc: str, path: str) -> tuple[bool, str]:
     p = subprocess.run([matlabc, "-emit-llvm", path],
@@ -83,20 +106,27 @@ def main(matlabc: str) -> int:
     matlabc = os.path.abspath(matlabc)
     failures: list[str] = []
 
-    print("examples/gpu CPU-lane gate:")
-    print("  -emit-llvm (lowering):")
+    print("examples CPU-lane gate:")
+    print("  gpu -emit-llvm (lowering):")
     for name in EXPECT_LOWER:
         ok, err = emit_lowers(matlabc, os.path.join(GPU_DIR, name))
-        print(f"    {name:30s} {'ok' if ok else 'FAIL: ' + err[:60]}")
+        print(f"    {name:38s} {'ok' if ok else 'FAIL: ' + err[:60]}")
         if not ok:
             failures.append(f"emit-llvm {name}: {err[:80]}")
 
-    print("  -dap (JIT compile):")
+    print("  gpu -dap (JIT compile):")
     for name in EXPECT_JIT_COMPILE:
         ok, err = jit_compiles(matlabc, os.path.join(GPU_DIR, name))
-        print(f"    {name:30s} {'ok' if ok else 'FAIL: ' + err}")
+        print(f"    {name:38s} {'ok' if ok else 'FAIL: ' + err}")
         if not ok:
             failures.append(f"jit-compile {name}: {err}")
+
+    print("  toolbox -dap (JIT compile):")
+    for rel in TOOLBOX_JIT_COMPILE:
+        ok, err = jit_compiles(matlabc, os.path.join(REPO, rel))
+        print(f"    {rel:38s} {'ok' if ok else 'FAIL: ' + err}")
+        if not ok:
+            failures.append(f"jit-compile {rel}: {err}")
 
     print("----")
     if failures:
