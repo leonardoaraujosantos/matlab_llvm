@@ -181,11 +181,17 @@ def main():
 
     failed = []
 
-    def jit_compiles(prog_path, allow_compile_fail=False):
+    def jit_compiles(prog_path, allow_compile_fail=False, compile_only=False):
         """Returns (ok_compile, error_text). ok_compile is True iff
         the DAP server accepted `launch`. error_text is whatever
         showed up on the stderr-output channel (used to fail loudly
-        on regressions)."""
+        on regressions).
+
+        compile_only=True returns as soon as `launch` is accepted, without
+        driving to termination — for entries that compile cleanly but can't
+        be run to a clean exit under -dap (e.g. a function-file entry whose
+        required param is unbound, plus the pre-existing -dap teardown
+        SIGSEGV race). The compile is the signal under test."""
         try:
             with DapClient(matlabc, prog_path) as c:
                 err = []
@@ -204,6 +210,8 @@ def main():
                         except DapError:
                             pass
                     return False, "".join(err) or str(e)
+                if compile_only:
+                    return True, ""
                 # Compile succeeded — drive to termination so the
                 # JIT'd worker exits cleanly. Some programs print
                 # to stdout; we don't assert content, only that the
@@ -248,6 +256,31 @@ def main():
         else:
             print("FAIL")
             failed.append((name, err))
+
+    # Regression: a function-file entry whose `none`-typed param feeds a
+    # gpuArray.* size builtin must compile in the JIT/-dap pipeline. With no
+    # caller, the param stays `none` and only PromoteNoneParams (which reads
+    # each param's alloc slot) can type it — so it must run BEFORE the JIT
+    # pipeline's slot promotion mem2regs those slots away. Before the fix
+    # this failed with "unsupported call shape for gpuArray_rand", so
+    # examples/gpu/test_gpuarray_{gemm,axpy,arrayfun}.m were undebuggable
+    # even though they lower cleanly under AOT -emit-llvm. compile_only: the
+    # entry can't run to a clean exit (param unbound + -dap teardown race),
+    # but the compile is the signal under test.
+    print(f"\ngpuArray param-promotion (JIT compile):")
+    gp_dir = os.path.join(work, "gpuparam")
+    os.makedirs(gp_dir, exist_ok=True)
+    gp = os.path.join(gp_dir, "gpu_param.m")
+    with open(gp, "w") as f:
+        f.write("function y = gpu_param(n)\n  y = gpuArray.rand(n, n);\nend\n")
+    sys.stdout.write(f"  {'gpuarray_param_no_caller':<32} ... ")
+    sys.stdout.flush()
+    ok, err = jit_compiles(gp, compile_only=True)
+    if ok:
+        print("ok")
+    else:
+        print("FAIL")
+        failed.append(("gpuarray_param_no_caller", err))
 
     # examples/mflow/ — every example must JIT + run.
     print(f"\nexamples/mflow/ end-to-end JIT (every .mflow):")
