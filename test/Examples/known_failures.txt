@@ -34,4 +34,3 @@ gpu/test_parfor_gpu_batches.m                      # EMIT  (parfor+GPU, deferred
 gpu/test_parfor_multigpu.m                         # EMIT  (multi-GPU, deferred)
 rl/countdown_grpo.m                                # TIMEOUT (heavy GRPO training, group sampling x epochs; convergence gated by test/Run/rl_grpo.m)
 rl/cartpole_trpo.m                                 # TIMEOUT (heavy TRPO training, CG + line search per iter; convergence gated by test/Run/rl_trpo.m)
-pde/tuningfork_modal.m                             # RUNTIME — #123 solve() string-Geometry SIGSEGV is FIXED; residual: fixtures/TuningFork.stl is not shipped, so solve returns empty and RF.ModeShapes.Magnitude(:,7) hits the empty-mat-as-obj crash (#128). Stays baselined until the asset ships or #128 lands.
