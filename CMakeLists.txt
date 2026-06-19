@@ -1211,6 +1211,24 @@ if(MATLAB_LLVM_WITH_MLIR)
             $<TARGET_FILE:matlabc>
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Debug
   )
+  # Bare-minimum CPU-lane gate for examples/gpu (no GPU needed). The
+  # gpuArray CPU-debug lane is host-BLAS identity, so this is a plain
+  # compile/lowering check on the real example files. The AOT examples
+  # sweep baselines every GPU example as a known failure and never
+  # exercises the JIT/-dap path, so the bugs fixed in #319 (rand dtype
+  # string), #320 (sibling-scan tanking the directory compile) and #326
+  # (none-param feeding gpuArray.* not promoted in the JIT pipeline) had
+  # no per-PR coverage. This gate pins -emit-llvm lowering + -dap
+  # compileProgram on the in-scope files so those classes can't regress.
+  add_test(
+    NAME examples-gpu-cpu-lane-tests
+    COMMAND python3 ${CMAKE_SOURCE_DIR}/test/Examples/gpu_cpu_lane.py
+            $<TARGET_FILE:matlabc>
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Examples
+  )
+  set_tests_properties(examples-gpu-cpu-lane-tests PROPERTIES
+    RUN_SERIAL TRUE
+    ENVIRONMENT "MATLABC_DAP_MIN_TIMEOUT=30")
   # SystemVerilog emission shape test (Phase 1 scope, ASIC target).
   # Diffs the emitted .sv against per-input goldens and — when
   # Verilator is on PATH — runs `verilator --lint-only -Wall` on each
@@ -1299,7 +1317,8 @@ endif()
 foreach(_t flowchart-simulate-dap-tests flowchart-simulate-dap-block-tests
            flowchart-simulate-dap-breakpoint-tests flowchart-simulate-dap-chart-tests
            flowchart-simulate-dap-usage-tests
-           flowchart-dap-tests debug-dap-tests debug-dap-jit-userfn-tests)
+           flowchart-dap-tests debug-dap-tests debug-dap-jit-userfn-tests
+           examples-gpu-cpu-lane-tests)
   if(TEST ${_t})
     set_tests_properties(${_t} PROPERTIES TIMEOUT 300)
   endif()
