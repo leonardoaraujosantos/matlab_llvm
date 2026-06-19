@@ -25,7 +25,7 @@ rl/pendulum_sac.m                                  # TIMEOUT (heavy 200-ep SAC t
 # function-only-needs-main / multi-file-resolution gap.
 gpu/benchmark_gpu_backend.m                        # LINK  (function-only, no main entry; `rand(n, n, 'single')` dtype-string now lowers — see test/Run/rand_single_dtype.m)
 gpu/mandelbrot_gpu.m                               # LINK  (Metal host-driver, needs Metal SDK objects)
-gpu/run_validation_suite.m                         # EMIT  (multi-file resolution: calls test_gpuarray_*.m by name)
+gpu/run_validation_suite.m                         # EMIT  (#332 multi-file resolution fixed — siblings now merge on the AOT path; residual is #330 string-mode call shapes zeros(...,'like'), sum(X,'all'), norm(X,'fro') in the stencil/parfor helpers)
 gpu/test_gpuarray_arrayfun.m                       # LINK  (function-only, no main entry)
 gpu/test_gpuarray_axpy.m                           # LINK  (function-only, no main entry)
 gpu/test_gpuarray_gemm.m                           # LINK  (function-only, no main entry)

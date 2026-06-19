@@ -4145,6 +4145,146 @@ std::string interpolateLogMessage(const std::string &Tmpl) {
  * registry was populated. */
 int64_t encodeBpId(int32_t file_id, int32_t line);
 
+/* Merge referenced sibling `.m` function/classdef files from the entry
+ * program's directory into `TU`, under the #311/#320 guards:
+ *   (#311) dedup by symbol name — the entry's own definitions win, then
+ *     earlier (sorted) siblings win over later ones, so a stale/backup copy
+ *     defining the same helper can't double-define and abort MLIR verify.
+ *   (#320) only merge a sibling the entry program actually references —
+ *     transitively (comment-stripped whole-word scan, iterated to a fixpoint).
+ *     A merged sibling's body is lowered too, so an unrelated advanced example
+ *     in the directory must not be pulled in and abort the whole compile.
+ *
+ * Function-/classdef-only siblings are merged; a sibling with a script body is
+ * skipped (it's its own entry-point candidate). `.mflow` entries must skip
+ * this (the caller gates on that). Shared by the `-dap` launch (compileProgram)
+ * and the AOT `-emit-*` path (#332) so Compile/Run resolves multi-file
+ * programs identically to Debug. New files loaded into `SM` here; the caller
+ * re-syncs any path→file_id table it maintains afterward. */
+static void mergeReferencedSiblingFiles(SourceManager &SM, ASTContext &AstCtx,
+                                        FileID EntryFile,
+                                        const std::string &ProgramPath,
+                                        TranslationUnit *TU) {
+  if (!TU) return;
+  namespace fs = std::filesystem;
+  fs::path EntryPath = fs::path(ProgramPath);
+  std::error_code EC;
+  fs::path Dir = fs::canonical(EntryPath, EC).parent_path();
+  if (EC || !fs::exists(Dir, EC)) return;
+
+  std::vector<std::string> Siblings;
+  for (auto It = fs::directory_iterator(Dir, EC);
+       !EC && It != fs::directory_iterator(); ++It) {
+    if (!It->is_regular_file()) continue;
+    if (It->path().extension() != ".m") continue;
+    std::string SP = It->path().string();
+    /* Skip the entry point itself — it's already loaded. */
+    fs::path Cand = fs::canonical(It->path(), EC);
+    if (EC) continue;
+    fs::path EntryCanon = fs::canonical(EntryPath, EC);
+    if (EC) continue;
+    if (Cand == EntryCanon) continue;
+    Siblings.push_back(SP);
+  }
+  /* Sort for deterministic file_id assignment across runs. */
+  std::sort(Siblings.begin(), Siblings.end());
+
+  std::set<std::string_view> DefinedNames;
+  for (auto *Fn : TU->Functions)
+    if (Fn) DefinedNames.insert(Fn->Name);
+  for (auto *Cls : TU->Classes)
+    if (Cls) DefinedNames.insert(Cls->Name);
+
+  auto stripComments = [](std::string_view Raw) {
+    std::string Out;
+    Out.reserve(Raw.size());
+    bool InComment = false;
+    for (char c : Raw) {
+      if (c == '\n') { InComment = false; Out.push_back(c); continue; }
+      if (c == '%') InComment = true;
+      if (!InComment) Out.push_back(c);
+    }
+    return Out;
+  };
+  auto mentionsWord = [](const std::string &Hay, llvm::StringRef W) {
+    if (W.empty()) return false;
+    size_t P = 0;
+    while ((P = Hay.find(W.data(), P, W.size())) != std::string::npos) {
+      bool L = P > 0 && (std::isalnum((unsigned char)Hay[P - 1]) ||
+                         Hay[P - 1] == '_');
+      size_t E = P + W.size();
+      bool R = E < Hay.size() && (std::isalnum((unsigned char)Hay[E]) ||
+                                  Hay[E] == '_');
+      if (!L && !R) return true;
+      P = E;
+    }
+    return false;
+  };
+
+  struct SibRec {
+    std::string Stem;
+    std::string Text;
+    std::vector<Function *> Fns;
+    std::vector<ClassDef *> Clss;
+    bool Merged = false;
+  };
+  std::vector<SibRec> Recs;
+  for (const std::string &SP : Siblings) {
+    FileID SF = SM.loadFile(SP);
+    if (SF == 0) continue;
+    DiagnosticEngine SibDiag(SM);
+    Lexer SibLx(SM, SF, SibDiag);
+    auto SibToks = SibLx.tokenize();
+    Parser SibP(std::move(SibToks), AstCtx, SibDiag);
+    TranslationUnit *SibTU = SibP.parseFile();
+    if (!SibTU || SibDiag.hasErrors()) continue;
+    /* Skip siblings that have a script body — they're scripts in their
+     * own right, not function-file helpers. */
+    bool HasScriptBody = SibTU->ScriptNode &&
+                          SibTU->ScriptNode->Body &&
+                          !SibTU->ScriptNode->Body->Stmts.empty();
+    if (HasScriptBody) continue;
+    SibRec R;
+    R.Stem = fs::path(SP).stem().string();
+    R.Text = stripComments(SM.getBuffer(SF));
+    for (auto *Fn : SibTU->Functions) R.Fns.push_back(Fn);
+    for (auto *Cls : SibTU->Classes) R.Clss.push_back(Cls);
+    Recs.push_back(std::move(R));
+  }
+
+  /* Seed the reference set with the entry program's own source, then pull
+   * in referenced siblings until the set stops growing. */
+  std::string Mentioned = stripComments(SM.getBuffer(EntryFile));
+  bool GrewM = true;
+  while (GrewM) {
+    GrewM = false;
+    for (auto &R : Recs) {
+      if (R.Merged) continue;
+      bool Need = mentionsWord(Mentioned, R.Stem);
+      for (auto *Fn : R.Fns) {
+        if (Need) break;
+        if (Fn && !Fn->Name.empty() && mentionsWord(Mentioned, Fn->Name))
+          Need = true;
+      }
+      if (!Need) continue;
+      for (auto *Fn : R.Fns) {
+        if (!Fn || Fn->Name.empty()) continue;
+        if (!DefinedNames.insert(Fn->Name).second) continue;
+        TU->Functions.push_back(Fn);
+      }
+      for (auto *Cls : R.Clss) {
+        if (!Cls || Cls->Name.empty()) continue;
+        if (!DefinedNames.insert(Cls->Name).second) continue;
+        TU->Classes.push_back(Cls);
+      }
+      Mentioned.push_back('\n');
+      Mentioned += R.Text;
+      R.Merged = true;
+      GrewM = true;
+    }
+  }
+}
+
 /* Build + JIT the program, store into G.Engine, register its file
  * with the runtime. Returns true on success. */
 bool compileProgram() {
@@ -4308,145 +4448,13 @@ bool compileProgram() {
    * (with their own search-path resolution), not through ad-hoc
    * sibling `.m` files in the same directory. */
   if (!IsFlow) {
-    namespace fs = std::filesystem;
-    fs::path EntryPath = fs::path(G.ProgramPath);
-    std::error_code EC;
-    fs::path Dir = fs::canonical(EntryPath, EC).parent_path();
-    if (!EC && fs::exists(Dir, EC)) {
-      std::vector<std::string> Siblings;
-      for (auto It = fs::directory_iterator(Dir, EC);
-           !EC && It != fs::directory_iterator(); ++It) {
-        if (!It->is_regular_file()) continue;
-        if (It->path().extension() != ".m") continue;
-        std::string SP = It->path().string();
-        /* Skip the entry point itself — it's already loaded. */
-        fs::path Cand = fs::canonical(It->path(), EC);
-        if (EC) continue;
-        fs::path EntryCanon = fs::canonical(EntryPath, EC);
-        if (EC) continue;
-        if (Cand == EntryCanon) continue;
-        Siblings.push_back(SP);
-      }
-      /* Sort for deterministic file_id assignment across runs — the
-       * IDs are exposed via DAP `source.path` so a stable ordering
-       * keeps log lines comparable. */
-      std::sort(Siblings.begin(), Siblings.end());
-      /* #311 + #320: merge sibling functions into the entry TU so helpers
-       * are debuggable, under two guards:
-       *   (#311) dedup by symbol name — the entry's own definitions win,
-       *     then earlier (sorted) siblings win over later ones. Without
-       *     this, two sibling files defining the same helper (a stale copy
-       *     or backup) both get appended and MLIR verification aborts the
-       *     launch with "redefinition of symbol".
-       *   (#320) only merge a sibling the entry program actually
-       *     references — transitively. A merged sibling's body is lowered
-       *     too, so one advanced example in the directory (e.g. using an
-       *     unsupported call shape) would otherwise abort the whole compile
-       *     and the IDE could not debug ANY file in that directory. The
-       *     reference test is a comment-stripped whole-word scan, iterated
-       *     to a fixpoint so transitively-called helpers come along. */
-      std::set<std::string_view> DefinedNames;
-      for (auto *Fn : TU->Functions)
-        if (Fn) DefinedNames.insert(Fn->Name);
-      for (auto *Cls : TU->Classes)
-        if (Cls) DefinedNames.insert(Cls->Name);
-
-      auto stripComments = [](std::string_view Raw) {
-        std::string Out;
-        Out.reserve(Raw.size());
-        bool InComment = false;
-        for (char c : Raw) {
-          if (c == '\n') { InComment = false; Out.push_back(c); continue; }
-          if (c == '%') InComment = true;
-          if (!InComment) Out.push_back(c);
-        }
-        return Out;
-      };
-      auto mentionsWord = [](const std::string &Hay, llvm::StringRef W) {
-        if (W.empty()) return false;
-        size_t P = 0;
-        while ((P = Hay.find(W.data(), P, W.size())) != std::string::npos) {
-          bool L = P > 0 && (std::isalnum((unsigned char)Hay[P - 1]) ||
-                             Hay[P - 1] == '_');
-          size_t E = P + W.size();
-          bool R = E < Hay.size() && (std::isalnum((unsigned char)Hay[E]) ||
-                                      Hay[E] == '_');
-          if (!L && !R) return true;
-          P = E;
-        }
-        return false;
-      };
-
-      struct SibRec {
-        std::string Stem;
-        std::string Text;
-        std::vector<Function *> Fns;
-        std::vector<ClassDef *> Clss;
-        bool Merged = false;
-      };
-      std::vector<SibRec> Recs;
-      for (const std::string &SP : Siblings) {
-        FileID SF = SM.loadFile(SP);
-        if (SF == 0) continue;
-        DiagnosticEngine SibDiag(SM);
-        Lexer SibLx(SM, SF, SibDiag);
-        auto SibToks = SibLx.tokenize();
-        Parser SibP(std::move(SibToks), AstCtx, SibDiag);
-        TranslationUnit *SibTU = SibP.parseFile();
-        if (!SibTU || SibDiag.hasErrors()) continue;
-        /* Skip siblings that have a script body — they're scripts in
-         * their own right, not function-file helpers. */
-        bool HasScriptBody = SibTU->ScriptNode &&
-                              SibTU->ScriptNode->Body &&
-                              !SibTU->ScriptNode->Body->Stmts.empty();
-        if (HasScriptBody) continue;
-        SibRec R;
-        R.Stem = fs::path(SP).stem().string();
-        R.Text = stripComments(SM.getBuffer(SF));
-        for (auto *Fn : SibTU->Functions) R.Fns.push_back(Fn);
-        for (auto *Cls : SibTU->Classes) R.Clss.push_back(Cls);
-        Recs.push_back(std::move(R));
-      }
-
-      /* Seed the reference set with the entry program's own source, then
-       * pull in referenced siblings until the set stops growing. */
-      std::string Mentioned = stripComments(SM.getBuffer(F));
-      bool GrewM = true;
-      while (GrewM) {
-        GrewM = false;
-        for (auto &R : Recs) {
-          if (R.Merged) continue;
-          bool Need = mentionsWord(Mentioned, R.Stem);
-          for (auto *Fn : R.Fns) {
-            if (Need) break;
-            if (Fn && !Fn->Name.empty() && mentionsWord(Mentioned, Fn->Name))
-              Need = true;
-          }
-          if (!Need) continue;
-          for (auto *Fn : R.Fns) {
-            if (!Fn || Fn->Name.empty()) continue;
-            if (!DefinedNames.insert(Fn->Name).second) continue;
-            TU->Functions.push_back(Fn);
-          }
-          for (auto *Cls : R.Clss) {
-            if (!Cls || Cls->Name.empty()) continue;
-            if (!DefinedNames.insert(Cls->Name).second) continue;
-            TU->Classes.push_back(Cls);
-          }
-          Mentioned.push_back('\n');
-          Mentioned += R.Text;
-          R.Merged = true;
-          GrewM = true;
-        }
-      }
-      /* Re-sync the path → file_id table now that SM has more entries.
-       * This loop runs again at the bottom of the registration block;
-       * doing it here keeps both sides consistent if the resolver
-       * needs to see the auxiliary files (it shouldn't, but defensive
-       * cheap). */
-      for (size_t i = 1; i <= SM.numFiles(); ++i)
-        registerSMFile((FileID)i, SM.getName((FileID)i));
-    }
+    mergeReferencedSiblingFiles(SM, AstCtx, F, G.ProgramPath, TU);
+    /* Re-sync the path → file_id table now that SM has more entries.
+     * This loop runs again at the bottom of the registration block;
+     * doing it here keeps both sides consistent if the resolver needs
+     * to see the auxiliary files (it shouldn't, but defensive cheap). */
+    for (size_t i = 1; i <= SM.numFiles(); ++i)
+      registerSMFile((FileID)i, SM.getName((FileID)i));
   }
 
   /* Walk the parsed TU to populate G.BpLocations and G.FunctionTable
@@ -13216,6 +13224,25 @@ int main(int Argc, char **Argv) {
 
     Parser P(std::move(Toks), Ctx, Diag);
     TU = P.parseFile();
+
+    /* #332: merge referenced sibling .m function/classdef files into the
+     * entry TU on the AOT `-emit-*` path, the same reference-gated merge the
+     * `-dap` launch (compileProgram) already does. Without this, a script
+     * that calls helpers defined in separate sibling files fails Compile/Run
+     * with "undefined name" while Debug resolves them — the inconsistency in
+     * #332. Gated to the Sema-consuming codegen/check modes (link/run is what
+     * needs cross-file resolution); dump/format/single-pass inspection modes
+     * keep their single-file view. Skipped for synthetic multi-file inputs
+     * (ExtraInputs / CST prelude already concatenated above) and .mflow. */
+    bool WantSiblingMerge =
+        Opts.Mode == Options::Mode::EmitLLVM ||
+        Opts.Mode == Options::Mode::EmitC ||
+        Opts.Mode == Options::Mode::EmitCpp ||
+        Opts.Mode == Options::Mode::EmitPython ||
+        Opts.Mode == Options::Mode::EmitTypeScript;
+    if (WantSiblingMerge && TU && !Diag.hasErrors() &&
+        Opts.ExtraInputs.empty() && PreludePaths.empty())
+      dap::mergeReferencedSiblingFiles(SM, Ctx, F, Opts.InputPath, TU);
   }
   // mStateflow Tier 4 — landing pad for the state-chart lowering
   // path. After it injects the lowered .m into SM and produces a TU,

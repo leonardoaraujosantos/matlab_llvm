@@ -23,6 +23,13 @@ The system SHALL select the flowchart frontend for inputs whose path ends in `.m
 - **WHEN** the program path ends in `.mflow`
 - **THEN** the system SHALL set `IsFlow=true` and route through the flowchart frontend instead of the MATLAB lexer/parser, feeding the resulting TU into the same downstream pipeline (src: tools/matlabc/main.cpp `endsWith(G.ProgramPath, ".mflow")`)
 
+### Requirement: Multi-file sibling resolution
+For a `.m` entry point, the system SHALL merge referenced sibling `.m` function/classdef files from the entry program's directory into the entry translation unit before Sema, so a script that calls helpers defined in separate sibling files resolves them. The merge is reference-gated (only siblings the program references, transitively) and deduped by symbol name (the entry's own definitions win). This SHALL hold uniformly for the `-dap` Debug launch and the code-generating `-emit-{llvm,c,cpp,python,typescript}` modes, so Compile/Run resolves multi-file programs the same way Debug does.
+
+#### Scenario: AOT emit resolves a sibling helper
+- **WHEN** the user runs `matlabc -emit-llvm prog.m` where `prog.m` calls `helper(...)` defined in a sibling `helper.m`
+- **THEN** the system SHALL merge `helper.m` into the TU and resolve the call rather than failing with `undefined name 'helper'` (src: tools/matlabc/main.cpp `mergeReferencedSiblingFiles`; test: test/Run/sib332_multifile.m)
+
 ### Requirement: Emit / mode flags
 The system SHALL select exactly one output mode from a mode flag, supporting at least the following: `-dump-tokens`, `-dump-ast`, `-emit-sema`, `-dump-call-sites`, `-emit-mir`, `-emit-mlir`, `-emit-llvm`, `-emit-c`, `-emit-cpp`, `-emit-python`, `-emit-typescript` (alias `-emit-ts`), `-emit-cuda`, `-emit-metal`, `-emit-opencl`, `-emit-systemverilog` (alias `-emit-sv`), `-check-synthesizable`, `-emit-hardware-report` (alias `-emit-hw-report`), `-emit-fixed-point-report` (alias `-emit-fi-report`), `-emit-cocotb`, `-emit-trace`, `-emit-matlab` (alias `-emit-m`), `-emit-mflow` (alias `-emit-flow`), `-emit-mflowlink-cpp` (alias `-emit-signal-flow-cpp`), `-dump-flow`, `-dump-chart`, `-format`, `-repl`, `-dap`, and `-simulate`.
 
