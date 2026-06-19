@@ -7618,6 +7618,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"bode_tf_mag",  "matlab_bode_tf_mag",  1, "ppp"},
       {"bode_tf_phase","matlab_bode_tf_phase",1, "ppp"},
       {"lsim_ss",    "matlab_lsim_ss",    1, "pppppf"},
+      /* #322: lsim(sys, u, t) time-vector form — derives dt from t. */
+      {"lsim_ss_t",  "matlab_lsim_ss_t",  1, "pppppp"},
       /* §3.4 follow-ons — raw complex freqresp + nyquist (re/im
        * columns) + allmargin (1×4 row). freqresp / nyquist accept
        * either matrix-arg (ss / tf) or model-object call sites; the

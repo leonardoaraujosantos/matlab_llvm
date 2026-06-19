@@ -3429,6 +3429,122 @@ void Lowerer::lowerStmt(const Stmt &St) {
             if (A.LHS[i]) lowerLValueStore(*A.LHS[i], Outs[i]);
           return;
         }
+        /* [mag, phase, wout] = bode(model): auto-grid form (#322). No w
+         * supplied, so synthesise a default log-spaced frequency grid
+         * (1e-2 .. 1e3 rad/s, 200 points) — the frequency-domain analogue of
+         * step's fixed default time grid — and sample magnitude + phase on it.
+         * wout echoes the grid. Also serves the 2-output [mag, phase] form. */
+        if (Callee->Name == "bode" && (Cn0 == "ss" || Cn0 == "tf") &&
+            C->Args.size() == 1) {
+          mlir::Value Obj = loadObjP(C->Args[0]);
+          auto F64 = mlir::Float64Type::get(&MCtx);
+          auto konst = [&](double V) {
+            return mlir::arith::ConstantOp::create(
+                       B, Lc, F64, mlir::FloatAttr::get(F64, V)).getResult();
+          };
+          mlir::Value Wrow =
+              callRT("logspace", {konst(-2.0), konst(3.0), konst(200.0)});
+          mlir::Value W = callRT("transpose", {Wrow});  /* column */
+          mlir::Value Mag, Phase;
+          if (Cn0 == "tf") {
+            mlir::Value Num = getPropP(Obj, "Numerator");
+            mlir::Value Den = getPropP(Obj, "Denominator");
+            Mag   = callRT("bode_tf_mag",   {Num, Den, W});
+            Phase = callRT("bode_tf_phase", {Num, Den, W});
+          } else {
+            mlir::Value Av = getPropP(Obj, "A"), Bv = getPropP(Obj, "B"),
+                        Cv = getPropP(Obj, "C"), Dv = getPropP(Obj, "D");
+            Mag   = callRT("bode_ss_mag",   {Av, Bv, Cv, Dv, W});
+            Phase = callRT("bode_ss_phase", {Av, Bv, Cv, Dv, W});
+          }
+          mlir::Value Outs[3] = {Mag, Phase, W};
+          for (size_t i = 0; i < A.LHS.size() && i < 3; ++i)
+            if (A.LHS[i]) lowerLValueStore(*A.LHS[i], Outs[i]);
+          return;
+        }
+        /* [re, im, wout] = nyquist(model[, w]) (#322). Sample the complex
+         * frequency response and split into real / imaginary columns via
+         * real()/imag(). With no w, reuse bode's default log grid. */
+        if (Callee->Name == "nyquist" && (Cn0 == "ss" || Cn0 == "tf") &&
+            (C->Args.size() == 1 ||
+             (C->Args.size() == 2 && C->Args[1]))) {
+          mlir::Value Obj = loadObjP(C->Args[0]);
+          auto F64 = mlir::Float64Type::get(&MCtx);
+          auto konst = [&](double V) {
+            return mlir::arith::ConstantOp::create(
+                       B, Lc, F64, mlir::FloatAttr::get(F64, V)).getResult();
+          };
+          mlir::Value W;
+          if (C->Args.size() == 2) {
+            W = lowerExpr(*C->Args[1]);
+            if (W.getType() != PtrTy) W.setType(PtrTy);
+          } else {
+            mlir::Value Wrow =
+                callRT("logspace", {konst(-2.0), konst(3.0), konst(200.0)});
+            W = callRT("transpose", {Wrow});
+          }
+          mlir::Value H =
+              (Cn0 == "tf")
+                  ? callRT("freqresp_tf", {getPropP(Obj, "Numerator"),
+                                           getPropP(Obj, "Denominator"), W})
+                  : callRT("freqresp_ss", {getPropP(Obj, "A"), getPropP(Obj, "B"),
+                                           getPropP(Obj, "C"), getPropP(Obj, "D"),
+                                           W});
+          mlir::Value Re = callRT("real", {H});
+          mlir::Value Im = callRT("imag", {H});
+          mlir::Value Outs[3] = {Re, Im, W};
+          for (size_t i = 0; i < A.LHS.size() && i < 3; ++i)
+            if (A.LHS[i]) lowerLValueStore(*A.LHS[i], Outs[i]);
+          return;
+        }
+        /* [y, t] = impulse(model) (#322), state-space form. impulse_ss
+         * samples the impulse response on a fixed dt/N grid; t echoes
+         * linspace(0, (N-1)*dt, N)' to match. */
+        if (Callee->Name == "impulse" && Cn0 == "ss" &&
+            C->Args.size() == 1) {
+          mlir::Value Obj = loadObjP(C->Args[0]);
+          auto F64 = mlir::Float64Type::get(&MCtx);
+          const double Dt = 0.01, Npts = 500.0;
+          auto konst = [&](double V) {
+            return mlir::arith::ConstantOp::create(
+                       B, Lc, F64, mlir::FloatAttr::get(F64, V)).getResult();
+          };
+          mlir::Value Y = callRT(
+              "impulse_ss", {getPropP(Obj, "A"), getPropP(Obj, "B"),
+                             getPropP(Obj, "C"), getPropP(Obj, "D"),
+                             konst(Dt), konst(Npts)});
+          mlir::Value Trow = callRT(
+              "linspace", {konst(0.0), konst((Npts - 1.0) * Dt), konst(Npts)});
+          mlir::Value T = callRT("transpose", {Trow});
+          mlir::Value Outs[2] = {Y, T};
+          for (size_t i = 0; i < A.LHS.size() && i < 2; ++i)
+            if (A.LHS[i]) lowerLValueStore(*A.LHS[i], Outs[i]);
+          return;
+        }
+        /* [y, t] = initial(model, x0) (#322), state-space form. Free response
+         * from the initial state x0 over the fixed dt/N grid. */
+        if (Callee->Name == "initial" && Cn0 == "ss" &&
+            C->Args.size() == 2 && C->Args[1]) {
+          mlir::Value Obj = loadObjP(C->Args[0]);
+          mlir::Value X0 = boxP(lowerExpr(*C->Args[1]));
+          auto F64 = mlir::Float64Type::get(&MCtx);
+          const double Dt = 0.01, Npts = 500.0;
+          auto konst = [&](double V) {
+            return mlir::arith::ConstantOp::create(
+                       B, Lc, F64, mlir::FloatAttr::get(F64, V)).getResult();
+          };
+          mlir::Value Y = callRT(
+              "initial_ss", {getPropP(Obj, "A"), getPropP(Obj, "B"),
+                             getPropP(Obj, "C"), getPropP(Obj, "D"), X0,
+                             konst(Dt), konst(Npts)});
+          mlir::Value Trow = callRT(
+              "linspace", {konst(0.0), konst((Npts - 1.0) * Dt), konst(Npts)});
+          mlir::Value T = callRT("transpose", {Trow});
+          mlir::Value Outs[2] = {Y, T};
+          for (size_t i = 0; i < A.LHS.size() && i < 2; ++i)
+            if (A.LHS[i]) lowerLValueStore(*A.LHS[i], Outs[i]);
+          return;
+        }
       }
       if (IsBuiltin) {
         llvm::SmallVector<mlir::Value, 4> Args;
@@ -10588,16 +10704,27 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           }
         }
 
-        /* lsim(sys, u, dt): for ss → lsim_ss(A, B, C, D, u, dt). */
+        /* lsim(sys, u, dt|t): for ss → lsim_ss(A,B,C,D,u,dt). The 3rd arg is
+         * either a scalar sample period dt or, in MATLAB's `lsim(sys,u,t)`
+         * form (#322), a uniform time vector — routed to lsim_ss_t which
+         * derives dt from the grid spacing. */
         if (Nm == "lsim" && Cls0 && Cn0 == "ss" && C.Args.size() == 3) {
           mlir::Value Obj = loadObj(C.Args[0]);
           mlir::Value U  = lowerExpr(*C.Args[1]);
-          mlir::Value Dt = lowerExpr(*C.Args[2]);
+          mlir::Value Arg3 = lowerExpr(*C.Args[2]);
           if (U.getType() != PtrTy) U.setType(PtrTy);
-          return rebuildCall("lsim_ss",
+          bool IsScalarDt = mlir::isa<mlir::Float64Type>(Arg3.getType());
+          if (IsScalarDt)
+            return rebuildCall("lsim_ss",
+                               {getProp(Obj, "A"), getProp(Obj, "B"),
+                                getProp(Obj, "C"), getProp(Obj, "D"),
+                                U, Arg3},
+                               PtrTy);
+          if (Arg3.getType() != PtrTy) Arg3.setType(PtrTy);
+          return rebuildCall("lsim_ss_t",
                              {getProp(Obj, "A"), getProp(Obj, "B"),
                               getProp(Obj, "C"), getProp(Obj, "D"),
-                              U, Dt},
+                              U, Arg3},
                              PtrTy);
         }
 

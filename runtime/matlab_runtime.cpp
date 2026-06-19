@@ -4972,6 +4972,18 @@ matlab_mat *matlab_lsim_ss(matlab_mat *A, matlab_mat *B,
     return y;
 }
 
+/* lsim(sys, u, t): the MATLAB form taking a uniform time *vector* t (#322).
+ * Derive the sample period from the grid spacing and delegate to
+ * matlab_lsim_ss; the data-returning call site uses t as the tout echo. */
+matlab_mat *matlab_lsim_ss_t(matlab_mat *A, matlab_mat *B,
+                             matlab_mat *C, matlab_mat *D,
+                             matlab_mat *u, matlab_mat *t) {
+    if (!t) return mat_alloc(0, 0);
+    int64_t nt = t->rows * t->cols;
+    double dt = (nt >= 2) ? (t->data[1] - t->data[0]) : 0.0;
+    return matlab_lsim_ss(A, B, C, D, u, dt);
+}
+
 /* Forward declarations - matlab_bode_ss_mag/phase are defined below. */
 matlab_mat *matlab_bode_ss_mag  (matlab_mat *A, matlab_mat *B,
                                  matlab_mat *C, matlab_mat *D, matlab_mat *w);

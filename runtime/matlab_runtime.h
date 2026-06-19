@@ -442,6 +442,10 @@ matlab_mat *matlab_bode_ss_phase(matlab_mat *A, matlab_mat *B,
 matlab_mat *matlab_lsim_ss(matlab_mat *A, matlab_mat *B,
                            matlab_mat *C, matlab_mat *D,
                            matlab_mat *u, double dt);
+/* lsim(sys, u, t) — time-vector form; derives dt from t's spacing (#322). */
+matlab_mat *matlab_lsim_ss_t(matlab_mat *A, matlab_mat *B,
+                             matlab_mat *C, matlab_mat *D,
+                             matlab_mat *u, matlab_mat *t);
 
 /* SISO peak gain max |H(jw)| over a 1e-3..1e6 log-spaced grid (200
  * points). First approximation of the H∞ norm. */

@@ -1,0 +1,14 @@
+bode_n = 200
+bode_nw = 200
+bode_mag1 = 1.0000
+nyq_n = 200
+nyq_re1 = 0.9999
+nyq_im1 = -0.0100
+imp_n = 500
+imp_y0 = 1.0000
+imp_tend = 4.99
+ini_n = 500
+ini_y0 = 2.0000
+ini_yend = 0.0136
+lsim_n = 101
+lsim_yend = 0.6321
