@@ -480,6 +480,11 @@ private:
 
   //--- top-level
   void lowerScript(const Script &S, mlir::ModuleOp M);
+  /* #329: synthesize a `script` entry that calls a zero-parameter primary
+   * function, so a function-only `.m` file gets a linkable `main()` (the
+   * LowerIO pass renames `script` -> `main () -> i32`), mirroring how
+   * MATLAB runs a function file by calling the function. */
+  void synthesizeFunctionFileEntry(const Function &F, mlir::ModuleOp M);
   void lowerFunction(const Function &F, mlir::ModuleOp M,
                      const ClassDef *Owner = nullptr,
                      bool IsStatic = false);
@@ -1874,6 +1879,19 @@ mlir::ModuleOp Lowerer::lower(const TranslationUnit &TU) {
   if (TU.ScriptNode) lowerScript(*TU.ScriptNode, M);
   for (const Function *F : TU.Functions) if (F) lowerFunction(*F, M);
   for (const ClassDef *C : TU.Classes) if (C) lowerClass(*C, M);
+
+  /* #329: a `.m` file with no script body whose primary (first) top-level
+   * function takes zero parameters runs like a script in MATLAB — by
+   * calling the function. Synthesize a `script` entry that does exactly
+   * that so the AOT lanes get a linkable `main()` instead of a no-entry
+   * LINK failure. Gated strictly on zero parameters: arg-taking function
+   * files stay no-main by design (MATLAB also errors "Not enough input
+   * arguments" when you run those standalone). */
+  if (!TU.ScriptNode && !TU.Functions.empty()) {
+    const Function *F0 = TU.Functions.front();
+    if (F0 && !F0->Name.empty() && F0->ParamRefs.empty())
+      synthesizeFunctionFileEntry(*F0, M);
+  }
   CurTU = nullptr;
 
   return M;
@@ -1936,6 +1954,39 @@ void Lowerer::lowerScript(const Script &S, mlir::ModuleOp M) {
   InScriptBody = SavedInScript;
 
   mlir::func::ReturnOp::create(B, loc(S.Range));
+}
+
+void Lowerer::synthesizeFunctionFileEntry(const Function &F, mlir::ModuleOp M) {
+  mlir::OpBuilder::InsertionGuard G(B);
+  B.setInsertionPointToEnd(M.getBody());
+
+  auto FnTy = mlir::FunctionType::get(&MCtx, {}, {});
+  auto Fn = mlir::func::FuncOp::create(loc(F.Range), "script", FnTy);
+  B.insert(Fn);
+
+  auto *Entry = Fn.addEntryBlock();
+  B.setInsertionPointToEnd(Entry);
+  Slots.clear();
+  CurFnName = "script";
+
+  /* Call the primary function for its side effects, nargout = 0 — the same
+   * void-call shape a bare `name();` statement lowers to (one NoneType
+   * result the downstream pass drops). The emitted symbol mangles dots to
+   * underscores, matching lowerFunction's FnName. Any return value the
+   * function declares is computed and discarded, as when a function call is
+   * used as a statement. */
+  std::string Callee(F.Name);
+  for (char &ch : Callee) if (ch == '.') ch = '_';
+  mlir::NamedAttribute Cal(
+      mlir::StringAttr::get(&MCtx, "callee"),
+      mlir::StringAttr::get(&MCtx, Callee));
+  mlir::NamedAttribute NO(
+      mlir::StringAttr::get(&MCtx, "nargout"),
+      mlir::IntegerAttr::get(mlir::IntegerType::get(&MCtx, 64), (int64_t)0));
+  emitUnregOp("matlab.call", {}, {mlir::NoneType::get(&MCtx)}, loc(F.Range),
+              {Cal, NO});
+
+  mlir::func::ReturnOp::create(B, loc(F.Range));
 }
 
 void Lowerer::lowerFunction(const Function &F, mlir::ModuleOp M,

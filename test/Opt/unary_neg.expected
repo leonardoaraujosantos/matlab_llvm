@@ -3,4 +3,8 @@ module {
     %cst = arith.constant -3.140000e+00 : f64
     return %cst : f64
   }
+  func.func @script() {
+    %0 = "matlab.call"() {callee = "demo", nargout = 0 : i64} : () -> none
+    return
+  }
 }
