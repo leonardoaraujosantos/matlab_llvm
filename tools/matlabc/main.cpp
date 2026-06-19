@@ -926,6 +926,16 @@ static void dropUncalledClassMethods(mlir::ModuleOp M) {
 
 static void runJitSoftwareLowering(mlir::ModuleOp M) {
   using namespace mlirgen;
+  // Promote `none` function params (e.g. `n` feeding `gpuArray.rand(n, n)`)
+  // BEFORE slot promotion runs. PromoteNoneParams decides what to promote
+  // from each param's alloc slot (findParamSlots + slotHasNumericUse); once
+  // runSlotPromotion below mem2regs those slots away, the param has no slot
+  // to inspect and promotion silently skips it. The AOT `-emit-llvm`
+  // pipeline promotes while the slots still exist, so a GPU-PCT function
+  // file like `examples/gpu/test_gpuarray_gemm.m` lowered under AOT but
+  // failed to compile under the JIT/-dap/-repl path with "unsupported call
+  // shape for gpuArray_rand". Running it first here closes that gap.
+  runPromoteNoneParams(M);
   runSlotPromotion(M);
   // fi ops must lower before the generic scalar-to-arith pass (else the
   // matlab.add/matmul carrying fi attrs fold to plain arith and lose the
