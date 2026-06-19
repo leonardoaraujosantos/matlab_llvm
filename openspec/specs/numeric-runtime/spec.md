@@ -41,6 +41,17 @@ The system SHALL provide reductions (sum, prod, mean, min, max) and cumulative r
 - **WHEN** a program calls `sum(A)`, `mean(A)`, `max(A)`, etc., with or without a trailing dimension argument
 - **THEN** the system SHALL reduce along columns by default (M×N → 1×N) and along the requested dimension when a `_dim` variant is invoked (src: runtime/matlab_runtime.cpp MULTIDIM_REDUCE sum/prod/mean/min/max, matlab_sum_dim, matlab_cumsum)
 
+### Requirement: String-mode builtin call shapes
+The system SHALL accept the standard string-flagged forms of construction/reduction builtins, lowering them to dedicated runtime entries where the semantics differ from the no-flag form: `sum(X, 'all')` (whole-array sum → scalar, distinct from the column-wise `sum(X)`), `norm(X, 'fro')` (Frobenius norm over all elements), and `zeros(sz, 'like', A)` / `ones`/`rand`/… (drop the `'like', A` prototype pair on the double-only CPU lane, keeping the numeric dims). These SHALL hold across the LLVM, C, C++, Python, and TypeScript lanes.
+
+#### Scenario: Whole-array sum and Frobenius norm
+- **WHEN** a program calls `sum(X, 'all')` or `norm(X, 'fro')`
+- **THEN** the system SHALL return the scalar whole-array sum / Frobenius norm (src: runtime/matlab_runtime.cpp matlab_sum_all/matlab_norm_fro; lowering: lib/MLIR/Passes/LowerTensorOps.cpp string-mode intercept; test: test/Run/string_mode_builtins.m)
+
+#### Scenario: Prototype-typed construction
+- **WHEN** a program calls `zeros(sz, 'like', A)` (or `ones`/`rand`/`eye`/`randn` with `'like'`)
+- **THEN** the system SHALL drop the `'like', A` pair and construct the array from the numeric dims (double-typed on the CPU lane)
+
 ### Requirement: Decompositions and FFT
 The system SHALL provide eigen, singular-value, QR, LU, Cholesky, Schur, and Hessenberg decompositions plus FFT/IFFT (1-D and 2-D) with shift helpers.
 

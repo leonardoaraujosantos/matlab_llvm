@@ -743,6 +743,67 @@ bool TensorLowering::rewriteBuiltinCalls() {
       }
     }
 
+    /* #330: string-mode builtin call shapes. Each rewrites the call to a
+     * plain numeric/whole-array form by stripping the trailing string flag
+     * (and, for 'like', its prototype operand), redirecting to a dedicated
+     * callee where the semantics differ from the no-flag form. Same family
+     * as the dtype-string strip above. Helper: is operand `V` a const_char
+     * whose text equals `Want`? */
+    auto constCharIs = [&](Value V, StringRef Want) -> bool {
+      Operation *Def = V.getDefiningOp();
+      if (!isMatlabOp(Def, "matlab.const_char")) return false;
+      auto VA = Def->getAttrOfType<StringAttr>("value");
+      return VA && VA.getValue() == Want;
+    };
+    /* Rebuild `Call` as a call_builtin to `NewCallee` keeping operands
+     * [0, Keep) and all attrs except `callee` (which becomes NewCallee). */
+    auto rewriteCalleeKeep = [&](StringRef NewCallee, unsigned Keep) {
+      B.setInsertionPoint(Call);
+      llvm::SmallVector<Value> Kept;
+      for (unsigned i = 0; i < Keep && i < Call->getNumOperands(); ++i)
+        Kept.push_back(Call->getOperand(i));
+      mlir::OperationState St(Call->getLoc(), "matlab.call_builtin");
+      St.addOperands(Kept);
+      St.addTypes(Call->getResultTypes());
+      for (auto A : Call->getAttrs()) {
+        if (A.getName() == "callee") continue;
+        St.addAttribute(A.getName(), A.getValue());
+      }
+      St.addAttribute("callee", B.getStringAttr(NewCallee));
+      Operation *New = B.create(St);
+      for (unsigned i = 0; i < Call->getNumResults(); ++i)
+        Call->getResult(i).replaceAllUsesWith(New->getResult(i));
+      Call->erase();
+      Changed = true;
+    };
+
+    /* sum(X, 'all') -> sum_all(X): whole-array sum (a scalar), distinct from
+     * sum(X) which is the column-wise reduction. */
+    if (Name == "sum" && Call->getNumOperands() == 2 &&
+        constCharIs(Call->getOperand(1), "all")) {
+      rewriteCalleeKeep("sum_all", 1);
+      continue;
+    }
+    /* norm(X, 'fro') -> norm_fro(X): Frobenius norm, distinct from the
+     * (induced/2-) norm(X). */
+    if (Name == "norm" && Call->getNumOperands() == 2 &&
+        constCharIs(Call->getOperand(1), "fro")) {
+      rewriteCalleeKeep("norm_fro", 1);
+      continue;
+    }
+    /* zeros/ones/eye/rand/randn(dims..., 'like', A) -> drop the ('like', A)
+     * pair and keep the numeric dims. The CPU lane is double-only, so the
+     * prototype A's element type is ignored (same rationale as the trailing
+     * dtype-string strip). Gated on the second-to-last operand being the
+     * const_char 'like'. */
+    if ((Name == "eye" || Name == "zeros" || Name == "ones" ||
+         Name == "rand" || Name == "randn") &&
+        Call->getNumOperands() >= 3 &&
+        constCharIs(Call->getOperand(Call->getNumOperands() - 2), "like")) {
+      rewriteCalleeKeep(Name, Call->getNumOperands() - 2);
+      continue;
+    }
+
     /* Normalize 1-arg forms of 2-arg shape builtins: `eye(n)` is
      * `eye(n, n)`, same for zeros / ones / rand / randn. The runtime
      * only exposes 2-arg entries (matlab_eye(m, n) etc.), so rewrite
@@ -7404,6 +7465,10 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"sum",        "matlab_sum",        1, "p"},
       {"sum",        "matlab_sum_dim",    1, "pf"},
       {"sum",        "matlab_sum_dims",   1, "pp"},
+      /* #330: sum(X,'all') — the 'all' const_char is stripped and the callee
+       * rewritten to `sum_all` by the string-mode intercept below; here it
+       * dispatches to the whole-array reduction (1×1 matrix result). */
+      {"sum_all",    "matlab_sum_all",    1, "p"},
       {"prod",       "matlab_prod",       1, "p"},
       {"prod",       "matlab_prod_dim",   1, "pf"},
       {"prod",       "matlab_prod_dims",  1, "pp"},
@@ -7445,6 +7510,9 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"ind2sub",    "matlab_ind2sub",    1, "pf"},
       {"norm",       "matlab_norm",       0, "p"},
       {"norm",       "matlab_norm_p",     0, "pf"},  /* norm(x, p) order */
+      /* #330: norm(X,'fro') — the 'fro' const_char is stripped and the callee
+       * rewritten to `norm_fro` by the string-mode intercept below. */
+      {"norm_fro",   "matlab_norm_fro",   0, "p"},
       {"trace",      "matlab_trace",      0, "p"},
       {"kron",       "matlab_kron",       1, "pp"},
       {"chol",       "matlab_chol",       1, "p"},
