@@ -1,1 +1,3 @@
 gemm err = 0
+gemm size = 4 4
+gemm C34 = 12

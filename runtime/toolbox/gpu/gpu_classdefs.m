@@ -1,30 +1,7 @@
 % gpu_classdefs.m — GPU Coder host-side carriers.
 %
-% Auto-prepended by matlabc when the user source mentions any of:
-%   gpuArray, gather, existsOnGPU, gpuDevice
-%
-% (coder.gpuConfig lives in a separate file — gpu_config_classdefs.m
-% — because the parser AOT path only consistently accepts a single
-% classdef per prelude file when prepended to a function-defining
-% user input; splitting umbrellas keeps the test suite green.)
-%
-% T1 design: gpuArray is a host-only handle carrier — it stores the
-% Underlying matrix value and metadata (Device target, dtype).  The
-% CPU-debug lane satisfies every read by returning Underlying directly.
-
-classdef gpuArray < handle
-    properties
-        Underlying
-        Device
-        Dtype
-        DevicePtr
-    end
-    methods
-        function obj = gpuArray(x)
-            obj.Underlying = x;
-            obj.Device = 0;
-            obj.Dtype = 0;
-            obj.DevicePtr = 0;
-        end
-    end
-end
+% On the CPU-debug lane `gpuArray` is an identity builtin
+% (matlab_gpuArray_ctor returns its input) rather than a carrier object,
+% so host matrix ops (mtimes / gather / size / …) operate directly on the
+% wrapped matrix. See #333 and docs/gpu_coder_roadmap.md §1. This file is
+% kept as the prelude target for the gpu names but defines no classdef.
