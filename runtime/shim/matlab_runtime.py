@@ -591,6 +591,9 @@ def qr_R(A): return np.linalg.qr(_m(A))[1]
 def pinv(A): return np.linalg.pinv(_m(A))
 def trace(A): return float(np.trace(_m(A)))
 def norm(A): return float(np.linalg.norm(_m(A)))
+def norm_fro(A):
+    # norm(A, 'fro') — Frobenius norm over every element (#330).
+    a = _m(A); return float(np.sqrt(np.sum(a * a)))
 
 def _c2d_aug_expm_(A, B, Ts):
     """Internal helper for c2d - returns the (n+m)x(n+m) augmented expm."""
@@ -1997,6 +2000,11 @@ def sum(A):
     if a.size == 0: return 0.0          # MATLAB: sum([]) == 0 (#185)
     if a.ndim < 2 or a.shape[0] == 1: return float(a.sum())
     return _to_row(a.sum(axis=0))
+
+def sum_all(A):
+    # sum(A, 'all') — sum of every element regardless of shape, as a scalar
+    # (a 1x1), distinct from the column-wise sum (#330).
+    return float(np.sum(_m(A)))
 
 
 def _reduce_shape(v, d):

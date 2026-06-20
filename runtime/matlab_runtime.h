@@ -1080,6 +1080,9 @@ matlab_mat *matlab_abs_m(matlab_mat *A);
 
 // Column-wise / scalar reductions.
 matlab_mat *matlab_sum(matlab_mat *A);
+/* sum(A, 'all') — full-element sum as a 1×1; norm(A, 'fro') — Frobenius norm. */
+matlab_mat *matlab_sum_all(matlab_mat *A);
+double matlab_norm_fro(matlab_mat *A);
 matlab_mat *matlab_prod(matlab_mat *A);
 matlab_mat *matlab_mean(matlab_mat *A);
 matlab_mat *matlab_min(matlab_mat *A);

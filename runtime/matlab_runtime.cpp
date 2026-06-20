@@ -1900,6 +1900,51 @@ COLWISE_REDUCE(max, -INFINITY,  (x > acc ? x : acc),        acc,                
 
 #undef COLWISE_REDUCE
 
+/* Flatten any matrix layout (matN / mat3 / 2-D) to its contiguous element
+ * buffer + total element count, for whole-array ('all') reductions. */
+static const double *mat_flat_all(matlab_mat *A, int64_t *total_out) {
+    if (mat_is_nd(A)) {
+        matlab_matN *Mn = (matlab_matN *)A;
+        int64_t t = 1;
+        for (uint32_t k = 0; k < Mn->ndims; ++k) t *= Mn->dims[k];
+        *total_out = t;
+        return Mn->data;
+    }
+    if (mat_is_3d(A)) {
+        matlab_mat3 *M3 = (matlab_mat3 *)A;
+        *total_out = M3->rows * M3->cols * M3->depth;
+        return M3->data;
+    }
+    *total_out = A->rows * A->cols;
+    return A->data;
+}
+
+/* sum(A, 'all'): sum of every element regardless of shape, returned as a 1×1.
+ * Distinct from matlab_sum, which is the column-wise reduction (a 1×N row for
+ * a 2-D matrix). */
+matlab_mat *matlab_sum_all(matlab_mat *A) {
+    matlab_mat *R = mat_alloc(1, 1);
+    if (!A) { R->data[0] = 0.0; return R; }
+    int64_t total = 0;
+    const double *Ad = mat_flat_all(A, &total);
+    double acc = 0.0;
+    for (int64_t k = 0; k < total; ++k) acc += Ad[k];
+    R->data[0] = acc;
+    return R;
+}
+
+/* norm(A, 'fro'): Frobenius norm = sqrt(sum of squares of every element). A
+ * dedicated entry so 'fro' stays correct independent of matlab_norm (which
+ * today returns the same value, but conceptually is the matrix 2-norm). */
+double matlab_norm_fro(matlab_mat *A) {
+    if (!A) return 0.0;
+    int64_t total = 0;
+    const double *Ad = mat_flat_all(A, &total);
+    double acc = 0.0;
+    for (int64_t k = 0; k < total; ++k) acc += Ad[k] * Ad[k];
+    return sqrt(acc);
+}
+
 /* Dimension-aware reductions: sum(A, dim) etc.
  * dim==1 collapses rows (result has 1 row, A->cols cols);
  * dim==2 collapses cols (result has A->rows rows, 1 col).

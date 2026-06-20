@@ -30,9 +30,9 @@ gpu/run_validation_suite.m                         # EMIT  (#332 multi-file reso
 gpu/test_gpuarray_arrayfun.m                       # LINK  (function-only, no main entry)
 gpu/test_gpuarray_axpy.m                           # LINK  (function-only, no main entry)
 gpu/test_gpuarray_gemm.m                           # LINK  (function-only, no main entry)
-gpu/test_gpuarray_stencil2d.m                      # EMIT  (stencil patterns, deferred T2.B-D)
-gpu/test_parfor_gpu_batches.m                      # EMIT  (parfor+GPU, deferred — issue #20)
-gpu/test_parfor_multigpu.m                         # EMIT  (multi-GPU, deferred)
+gpu/test_gpuarray_stencil2d.m                      # EMIT  (#330 cleared zeros(...,'like',A); residual is zeros(size(A)) size-vector form + stencil __subscript_store, deferred T2.B-D)
+gpu/test_parfor_gpu_batches.m                      # LINK  (#330 cleared sum(X,'all') so it now EMITs; arg-taking function file -> no main by design, so it LINK-fails standalone — issue #20)
+gpu/test_parfor_multigpu.m                         # LINK  (#330 cleared norm(X,'fro') so it now EMITs; arg-taking function file -> no main by design, so it LINK-fails standalone)
 rl/countdown_grpo.m                                # TIMEOUT (heavy GRPO training, group sampling x epochs; convergence gated by test/Run/rl_grpo.m)
 rl/cartpole_trpo.m                                 # TIMEOUT (heavy TRPO training, CG + line search per iter; convergence gated by test/Run/rl_trpo.m)
 pde/tuningfork_modal.m                             # RUNTIME — #123 solve() string-Geometry SIGSEGV is FIXED; residual: fixtures/TuningFork.stl is not shipped, so solve returns empty and RF.ModeShapes.Magnitude(:,7) hits the empty-mat-as-obj crash (#128). Stays baselined until the asset ships or #128 lands.

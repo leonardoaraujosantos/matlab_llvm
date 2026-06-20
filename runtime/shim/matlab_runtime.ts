@@ -393,6 +393,13 @@ export function mrdivide_mm(A: any, B: any): NDArray {
 export function det(A: any): number { return np.linalg.det(A); }
 export function trace(A: any): number { return np.trace(A); }
 export function norm(A: any): number { return np.linalg.norm(A); }
+// norm(A, 'fro') — Frobenius norm over every element (#330).
+export function norm_fro(A: any): number {
+  const a = asArray(A);
+  let s = 0;
+  for (let i = 0; i < a.size; i++) s += a.data[i] * a.data[i];
+  return Math.sqrt(s);
+}
 // norm(x, p) — order delegated to numpy_ts.norm (mirrors runtime matlab_norm_p).
 export function norm_p(A: any, p: number): number { return np.linalg.norm(A, p); }
 
@@ -2023,6 +2030,14 @@ export function sum(A: any): NDArray | number {
   for (let i = 0; i < a.rows; i++)
     for (let j = 0; j < a.cols; j++) out[j] += a.data[i * a.cols + j];
   return toRow(out);
+}
+
+// sum(A, 'all') — sum of every element regardless of shape, as a scalar (#330).
+export function sum_all(A: any): number {
+  const a = asArray(A);
+  let s = 0;
+  for (let i = 0; i < a.size; i++) s += a.data[i];
+  return s;
 }
 
 function reduceShape(arr: number[], d: number): NDArray {
