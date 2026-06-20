@@ -26,6 +26,10 @@ The system SHALL provide time-response and frequency-response analysis functions
 - **WHEN** a program calls `step`, `impulse`, `lsim`, `initial`, `stepinfo`, `bode`, `freqresp`, `nyquist`, `margin`/`allmargin`, `dcgain`, `bandwidth`, or `damp`
 - **THEN** the system SHALL return the response trajectory, magnitude/phase, gain/phase margins, or scalar metric computed by the matching runtime entry (e.g. `matlab_step_ss`, `matlab_bode_ss_mag`/`matlab_bode_ss_phase`, `matlab_gain_margin`/`matlab_phase_margin`, `matlab_dcgain_ss`)
 
+#### Scenario: Data-returning multi-output response forms
+- **WHEN** a program assigns the response data to multiple outputs — `[y,t] = step(sys)`, `[y,t] = impulse(sys)`, `[y,t] = initial(sys,x0)`, `[mag,phase,w] = bode(sys)` (auto frequency grid) or `bode(sys,w)`, `[re,im,w] = nyquist(sys)` or `nyquist(sys,w)`
+- **THEN** the system SHALL return the response/grid data instead of plotting, splitting the model object's matrices to the per-output runtime entries; auto-grid forms synthesise a default grid (time: dt=0.01, N=500; frequency: logspace(-2,3,200)) (src: lib/MLIR/Lowering.cpp model-object multi-return splitters; test: test/Run/ctrl_step_data.m, test/Run/ctrl_response_data.m)
+
 ### Requirement: Pole analysis and model interconnections
 The system SHALL provide pole/stability analysis and SISO model interconnection operators. (doc: docs/control_toolbox_roadmap.md) (src: runtime/matlab_runtime.cpp)
 
