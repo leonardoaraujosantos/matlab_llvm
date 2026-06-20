@@ -109,11 +109,14 @@ if [[ -f "$BUNDLE/scale_kernel.cu" ]]; then
     fail_n=$((fail_n+1))
   elif make -C "$BUNDLE" CUDA_INC="$INC_FLAGS" \
             CUDA_LIBS="$LIB_FLAGS $RPATH_FLAGS" >/dev/null 2>"$TMP/make.err"; then
-    # scale with demo x=2.0, n=8 → out[i] = 2*(i+1) = 2 4 6 8 10 12 14 16
-    # The driver reads scale_kernel.cu by relative path, so run it from
-    # inside the bundle directory (matches the bundle README).
+    # The bundle driver runs the NVRTC-JIT'd kernel on the GPU and prints a
+    # checksum of the result: for n=8 it computes y(i) = x*i with x=n=8, so
+    # the checksum is sum_{i=1..8} 8*i = 8 * 36 = 288.0000.  (The driver was
+    # changed from dumping the element list to a single checksum line; this
+    # check follows that.)  Run from inside the bundle dir — the driver reads
+    # scale_kernel.cu by relative path (matches the bundle README).
     got="$(cd "$BUNDLE" && ./scale_cuda 8 | tr '\n' ' ' | sed 's/ *$//')"
-    want="2 4 6 8 10 12 14 16"
+    want="scale: checksum = 288.0000"
     if [[ "$got" == "$want" ]]; then
       echo "  bundle output OK: $got"
       pass=$((pass+1))
@@ -127,6 +130,33 @@ if [[ -f "$BUNDLE/scale_kernel.cu" ]]; then
   fi
 else
   echo "FAIL: bundle missing scale_kernel.cu"; fail_n=$((fail_n+1))
+fi
+
+# ---- 5. In-process gpuArray dispatch (#335 Tier C) ------------------------
+# A plain `Ag = gpuArray(A); Cg = Ag*Bg; gather(Cg)` program, run through the
+# JIT/-repl lane with MATLAB_GPU_TARGET=auto, must (a) escalate to the CUDA
+# device (MATLAB_GPU_TRACE shows the dispatch) and (b) be numerically correct.
+echo "== in-process gpuArray dispatch (Tier C) =="
+cat > "$TMP/gpurun.m" << 'EOF'
+A = ones(256, 256);
+B = ones(256, 256);
+Cg = gpuArray(A) * gpuArray(B);
+C = gather(Cg);
+fprintf('gpuarray_gemm checksum = %.1f\n', C(1, 1));
+EOF
+GP_OUT="$(MATLAB_GPU_TARGET=auto MATLAB_GPU_TRACE=1 MATLAB_GPU_GEMM_MIN=1 \
+          "$MATLABC" -repl < "$TMP/gpurun.m" 2>"$TMP/gp.err")"
+if ! echo "$GP_OUT" | grep -q "gpuarray_gemm checksum = 256.0"; then
+  echo "FAIL: in-process gpuArray gemm wrong/missing result"
+  echo "  stdout: $(echo "$GP_OUT" | tr '\n' '|')"
+  fail_n=$((fail_n+1))
+elif ! grep -q "gemm dispatched to cuda" "$TMP/gp.err"; then
+  echo "FAIL: gpuArray gemm did NOT dispatch to the CUDA device (ran on CPU?)"
+  sed 's/^/  /' "$TMP/gp.err" | grep -i "matlab_gpu" | head
+  fail_n=$((fail_n+1))
+else
+  echo "  gpuArray Ag*Bg ran on the CUDA device, checksum 256.0 OK"
+  pass=$((pass+1))
 fi
 
 echo "cuda validation: passed $pass, failed $fail_n"
