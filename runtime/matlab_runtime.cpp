@@ -282,6 +282,7 @@ matlab_mat *matlab_mat_scalar(double v) {
  * — such an operand is always a 1x1 box, so element [0] is its value.
  * Returns 0.0 for a null/empty matrix. */
 double matlab_mat_to_scalar(matlab_mat *m) {
+    m = mat_gpu_host(m);  /* #335: a gpuArray scalar reads its host data */
     if (!m || !m->data || m->rows * m->cols < 1) return 0.0;
     return m->data[0];
 }
@@ -587,7 +588,27 @@ double matlab_randn_scalar(void) { return rng_normal();  }
 matlab_mat *matlab_transpose(matlab_mat *A);
 
 /* C = A * B. Returns a 0x0 matrix if dimensions don't match. */
+/* Wrap a host descriptor as a device-resident gpuArray (#335 Tier A). Defined
+ * here (not in the gpu toolbox TU) because every link line includes this TU,
+ * so the gpu-aware ops below resolve it on all lanes. `host` holds the real
+ * data and `device_ptr` is null in Tier A (no host->device upload yet).
+ * Leaked like the rest of this demo runtime (short-lived programs). */
+matlab_gpu *matlab_gpu_wrap(matlab_mat *host) {
+    matlab_gpu *g = static_cast<matlab_gpu *>(std::malloc(sizeof(matlab_gpu)));
+    g->magic = MATLAB_GPU_MAGIC;
+    g->reserved = 0;
+    g->host = host;
+    g->device_ptr = nullptr;
+    return g;
+}
+
 matlab_mat *matlab_matmul_mm(matlab_mat *A, matlab_mat *B) {
+    /* #335 Tier A: a device-resident operand makes the result device-resident.
+     * Unwrap to host, run the CPU-fallback matmul, re-wrap (Tier C swaps the
+     * host call for a device GEMM behind the same tag). */
+    if (mat_is_gpu(A) || mat_is_gpu(B))
+        return (matlab_mat *)matlab_gpu_wrap(
+            matlab_matmul_mm(mat_gpu_host(A), mat_gpu_host(B)));
     /* #216: either operand may actually be a complex matlab_mat_c (the ptr ABI
      * is shared). Reading a mat_c as a real matrix drops the imaginary part, so
      * dispatch to the complex-aware path, which also handles 1x1 scalar
@@ -1827,6 +1848,8 @@ matlab_mat3 *matlab_repmat3(matlab_mat *A, double m, double n, double p) {
 #define COLWISE_REDUCE(NAME, INIT_EXPR, UPDATE_EXPR, FINALIZE_EXPR, EMPTY_VAL, \
                        EMPTY_RET_EMPTYMAT)                                \
     matlab_mat *matlab_##NAME(matlab_mat *A) {                            \
+        if (mat_is_gpu(A)) /* #335: reduce on host, result stays gpuArray */ \
+            return (matlab_mat *)matlab_gpu_wrap(matlab_##NAME(mat_gpu_host(A))); \
         /* matN / mat3 fast path: reduce the flat buffer to a scalar.     \
          * Matches MATLAB on rank>=3 where vector-shape behaviour applies \
          * uniformly (sum(zeros(2,3,4)) returns the column sum but the    \
@@ -1923,6 +1946,8 @@ static const double *mat_flat_all(matlab_mat *A, int64_t *total_out) {
  * Distinct from matlab_sum, which is the column-wise reduction (a 1×N row for
  * a 2-D matrix). */
 matlab_mat *matlab_sum_all(matlab_mat *A) {
+    if (mat_is_gpu(A)) /* #335: whole-array sum on host, result stays gpuArray */
+        return (matlab_mat *)matlab_gpu_wrap(matlab_sum_all(mat_gpu_host(A)));
     matlab_mat *R = mat_alloc(1, 1);
     if (!A) { R->data[0] = 0.0; return R; }
     int64_t total = 0;
@@ -2710,6 +2735,7 @@ static inline void mat_any_shape(const void *A,
 }
 
 matlab_mat *matlab_size(matlab_mat *A) {
+    A = mat_gpu_host(A);  /* #335: size/numel/length see through a gpuArray */
     int64_t r, c; mat_any_shape(A, &r, &c);
     matlab_mat *R = mat_alloc(1, 2);
     R->data[0] = (double)r;
@@ -2741,6 +2767,7 @@ double matlab_size_dim(matlab_mat *A, double dim) {
 }
 
 double matlab_length(matlab_mat *A) {
+    A = mat_gpu_host(A);  /* #335 */
     if (mat_is_nd(A)) {
         matlab_matN *n = (matlab_matN *)A;
         int64_t mx = 0;
@@ -2754,6 +2781,7 @@ double matlab_length(matlab_mat *A) {
 }
 
 double matlab_numel(matlab_mat *A)  {
+    A = mat_gpu_host(A);  /* #335 */
     if (mat_is_nd(A)) {
         matlab_matN *n = (matlab_matN *)A;
         int64_t t = 1; for (uint32_t k = 0; k < n->ndims; ++k) t *= n->dims[k];
@@ -7384,6 +7412,9 @@ static matlab_mat_c *to_mat_c(void *p) {
  * fine. */
 #define BINARY_MM(name, op) \
     matlab_mat *matlab_##name##_mm(void *Ap, void *Bp) { \
+        if (mat_is_gpu(Ap) || mat_is_gpu(Bp)) \
+            return (matlab_mat *)matlab_gpu_wrap( \
+                matlab_##name##_mm(mat_gpu_host(Ap), mat_gpu_host(Bp))); \
         if (mat_is_complex(Ap) || mat_is_complex(Bp)) \
             return (matlab_mat *)matlab_##name##_cc(to_mat_c(Ap), to_mat_c(Bp)); \
         if (mat_is_nd(Ap) && mat_is_nd(Bp)) { \
@@ -7431,6 +7462,9 @@ static matlab_mat_c *to_mat_c(void *p) {
  * aliased as a tot×1 matlab_mat so the same `op` expression applies. */
 #define BINARY_MS(name, op) \
     matlab_mat *matlab_##name##_ms(void *Ap, double s) { \
+        if (mat_is_gpu(Ap)) \
+            return (matlab_mat *)matlab_gpu_wrap( \
+                matlab_##name##_ms(mat_gpu_host(Ap), s)); \
         if (mat_is_complex(Ap)) \
             return (matlab_mat *)matlab_##name##_cc( \
                 (matlab_mat_c *)Ap, matlab_complex_scalar(s, 0)); \
@@ -7470,6 +7504,9 @@ static matlab_mat_c *to_mat_c(void *p) {
 
 #define BINARY_SM(name, op) \
     matlab_mat *matlab_##name##_sm(double s, void *Ap) { \
+        if (mat_is_gpu(Ap)) \
+            return (matlab_mat *)matlab_gpu_wrap( \
+                matlab_##name##_sm(s, mat_gpu_host(Ap))); \
         if (mat_is_complex(Ap)) \
             return (matlab_mat *)matlab_##name##_cc( \
                 matlab_complex_scalar(s, 0), (matlab_mat_c *)Ap); \
@@ -18366,6 +18403,7 @@ void matlab_disp_obj(matlab_obj *o) {
  * the cast-and-deref-as-matrix below doesn't read garbage and SEGV. */
 void matlab_disp_mat(void *Aptr) {
     if (!Aptr) return;
+    Aptr = mat_gpu_host(Aptr);  /* #335: disp a gpuArray as its host data */
     if (matlab_obj_is_known(Aptr)) {
         matlab_disp_obj((matlab_obj *)Aptr);
         return;

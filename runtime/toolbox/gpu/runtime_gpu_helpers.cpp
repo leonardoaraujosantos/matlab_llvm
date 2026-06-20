@@ -200,22 +200,28 @@ matlab_mat *matlab_gpuArray_linspace2(double a, double b) {
   return matlab_gpuArray_linspace(a, b, 100.0);
 }
 
-/* gpuArray(X) — wrap a host matrix.  On CPU lane, transparent
- * passthrough; the runtime returns the same matlab_mat*.  When a real
- * device backend is active, the call routes through
- * matlab_gpu_upload (defined in runtime_gpu.cpp). */
+/* matlab_gpu_wrap is defined in runtime/matlab_runtime.cpp — the one TU every
+ * link line (REPL, examples, all emit lanes) includes — so the gpu-aware ops
+ * there resolve it without each lane needing to link this toolbox TU. */
+
+/* gpuArray(X) — make X device-resident.  Tier A: wrap the host matrix in the
+ * tagged carrier (no host->device upload yet); a real backend uploads in
+ * Tier C.  Idempotent: gpuArray(gpuArray(X)) stays a single wrapper. */
 matlab_mat *matlab_gpuArray_ctor(matlab_mat *X) {
-  return X;
+  if (mat_is_gpu(X)) return X;
+  return reinterpret_cast<matlab_mat *>(matlab_gpu_wrap(X));
 }
 
-/* gather(g) — bring a device matrix back to host.  On CPU lane,
- * identity.  On Metal/CUDA/OpenCL, becomes a real d2h. */
+/* gather(g) — bring a device value back to host.  Tier A: unwrap the carrier
+ * to its host descriptor (identity for a plain matrix).  Becomes a real d2h
+ * copy on Metal/CUDA/OpenCL in Tier C. */
 matlab_mat *matlab_gather(matlab_mat *X) {
-  return X;
+  return mat_gpu_host(X);
 }
 
 /* gpuDeviceCount() — number of GPU devices.  On CPU-debug lane, 1.
- * Backends override at runtime. */
+ * Backends override at runtime.  (Honest device detection — reporting 0 when
+ * no backend is linked — is deferred to Tier C with the real device path.) */
 double matlab_gpuDeviceCount(void) {
   return 1.0;
 }
