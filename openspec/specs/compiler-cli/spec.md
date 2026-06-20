@@ -57,6 +57,17 @@ The system SHALL select exactly one output mode from a mode flag, supporting at 
 - **WHEN** the user invokes `matlabc` with no input file
 - **THEN** the system SHALL print a usage banner that lists the simulation lane (`-simulate [--sim-dap | --dry-run]`) alongside the other modes and exit non-zero (src: tools/matlabc/main.cpp `usage`, test: test/Flowchart/SimulateDap/run_usage.py)
 
+### Requirement: Entry-point synthesis for zero-arg function files
+For a `.m` file with no top-level script body whose primary (first) function takes zero parameters, the system SHALL synthesize a program entry point that calls that function — mirroring how MATLAB runs a function file by calling the function — so the code-generating lanes produce a linkable `main()` instead of a no-entry LINK failure. The synthesis SHALL be gated strictly on zero parameters: a function file whose primary function takes one or more parameters stays no-main (MATLAB likewise errors "Not enough input arguments" when such a file is run standalone).
+
+#### Scenario: Zero-arg function file gets a main
+- **WHEN** the user runs `matlabc -emit-c foo.m` where `foo.m` defines only `function foo()`
+- **THEN** the system SHALL emit a `main()` that calls `foo()` (src: lib/MLIR/Lowering.cpp `Lowerer::synthesizeFunctionFileEntry`; test: test/Run/zero_arg_function_file.m)
+
+#### Scenario: Arg-taking function file stays no-main
+- **WHEN** the user runs `matlabc -emit-c foo.m` where `foo.m` defines only `function foo(n)`
+- **THEN** the system SHALL NOT synthesize a `main()`, leaving the function as a standalone definition
+
 ### Requirement: Output destination
 The system SHALL write single-stream emit output to stdout and accept `-o <dir>` (alias `--output`) to name the output directory for the multi-file GPU bundle emitters (`-emit-{cuda,metal,opencl}`).
 

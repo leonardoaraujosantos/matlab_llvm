@@ -16,15 +16,16 @@ rl/pendulum_sac.m                                  # TIMEOUT (heavy 200-ep SAC t
 # patterns (stencil, parfor+GPU, multi-GPU, full benchmark) that are deferred
 # per docs/gpu_coder_roadmap.md.  The simpler GPU examples (mandelbrot.m,
 # test_gpu_*.m) work; the entries below are the documented carve-outs.
-# mandelbrot_gpu.m LINKs against the Metal-host variant which needs Metal SDK
-# objects not in the AOT runtime set.  The three `test_gpuarray_*` fixtures
-# are function-only files (no top-level statements -> matlabc doesn't
-# synthesize a `main()`), so they LINK-fail standalone.  Issue #22 (the
-# `single()`/`double()` dispatch gap) is fixed and gated by
-# test/Run/single_cast_in_builtin_arg.m; what's left here is the orthogonal
-# function-only-needs-main / multi-file-resolution gap.
-gpu/benchmark_gpu_backend.m                        # LINK  (function-only, no main entry; `rand(n, n, 'single')` dtype-string now lowers — see test/Run/rand_single_dtype.m)
-gpu/mandelbrot_gpu.m                               # LINK  (Metal host-driver, needs Metal SDK objects)
+# The three `test_gpuarray_*` fixtures are *arg-taking* function files
+# (`test_gpuarray_gemm(n)` etc.) — MATLAB errors "Not enough input arguments"
+# when you run those standalone, so by design matlabc synthesizes no `main()`
+# and they LINK-fail standalone (#329 only synthesizes a main for zero-arg
+# function files).  Issue #22 (the `single()`/`double()` dispatch gap) is fixed
+# and gated by test/Run/single_cast_in_builtin_arg.m.
+# (#329: mandelbrot_gpu.m and benchmark_gpu_backend.m are zero-arg function
+# files — they now get a synthesized main and link; mandelbrot runs to
+# completion and left this list, benchmark stays only as a TIMEOUT below.)
+gpu/benchmark_gpu_backend.m                        # TIMEOUT (#329 now links + runs; CPU GEMM sweep up to N=4096 exceeds the sweep's per-example budget — gated for correctness by test/Run/zero_arg_function_file.m)
 gpu/run_validation_suite.m                         # EMIT  (#332 multi-file resolution fixed — siblings now merge on the AOT path; residual is #330 string-mode call shapes zeros(...,'like'), sum(X,'all'), norm(X,'fro') in the stencil/parfor helpers)
 gpu/test_gpuarray_arrayfun.m                       # LINK  (function-only, no main entry)
 gpu/test_gpuarray_axpy.m                           # LINK  (function-only, no main entry)
