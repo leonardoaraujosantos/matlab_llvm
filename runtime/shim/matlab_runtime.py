@@ -2007,6 +2007,15 @@ def sum_all(A):
     return float(np.sum(_m(A)))
 
 
+# --- gpuArray (#335 Tier A) ------------------------------------------------
+# The TypeScript/Python shims are host-only references with no device backend,
+# so gpuArray/gather are host-identity: results stay numerically correct (the
+# Tier-A CPU-fallback contract). The C runtime carries the device tag.
+def gpuArray_ctor(X): return X
+def gather(X):        return X
+def gpuDeviceCount(): return 1.0
+
+
 def _reduce_shape(v, d):
     """Shape reduction output: dim=1 -> row, dim=2 -> column."""
     arr = np.asarray(v).reshape(-1)

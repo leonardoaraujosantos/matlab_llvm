@@ -2040,6 +2040,12 @@ export function sum_all(A: any): number {
   return s;
 }
 
+// gpuArray (#335 Tier A) — host-only shim: gpuArray/gather are host-identity
+// (no device backend here), keeping results numerically correct.
+export function gpuArray_ctor(X: any): any { return X; }
+export function gather(X: any): any { return X; }
+export function gpuDeviceCount(): number { return 1.0; }
+
 function reduceShape(arr: number[], d: number): NDArray {
   const dn = d | 0;
   if (dn === 1) return new NDArray(Float64Array.from(arr), [1, arr.length]);

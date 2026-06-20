@@ -44,6 +44,8 @@ extern "C" {
 #define MATLAB_MAT_C_MAGIC 0xC0FFEE01u
 #define MATLAB_MAT3_MAGIC  0xC0FFEE03u
 #define MATLAB_MATN_MAGIC  0xC0FFEE04u
+/* 0xC0FFEE05 is MATLAB_SPARSE_MAGIC (runtime_sparse.cpp). */
+#define MATLAB_GPU_MAGIC   0xC0FFEE06u
 
 /*--- Real matrix descriptor ----------------------------------------------*/
 struct matlab_mat {
@@ -95,9 +97,37 @@ struct matlab_matN {
 };
 typedef struct matlab_matN matlab_matN;
 
+/*--- gpuArray device-resident carrier (#335 Tier A) ----------------------- *
+ * A routable wrapper around a host matrix: lowering/runtime sniff the magic
+ * to dispatch an op to the device backend (Tier C) or the host CPU fallback
+ * (Tier A — `host` carries the real data, `device_ptr` is null). The tag
+ * lives in the descriptor (not an MLIR type), so it round-trips through the
+ * REPL workspace as a plain ptr and is recognised per-op. Supersedes the
+ * #333 identity builtin while preserving host correctness. */
+struct matlab_gpu {
+    uint32_t magic;       /* MATLAB_GPU_MAGIC */
+    uint32_t reserved;    /* future: element-type / backend id */
+    matlab_mat *host;     /* underlying host descriptor (real data in Tier A) */
+    void *device_ptr;     /* opaque device handle; null until Tier C */
+};
+typedef struct matlab_gpu matlab_gpu;
+/* Wrap a host descriptor as device-resident (defined in runtime_gpu_helpers). */
+matlab_gpu *matlab_gpu_wrap(matlab_mat *host);
+
 /*--- Magic-tag predicates -------------------------------------------------
  * Inline so they don't impose a TU boundary cost. Both accept a raw
  * void* — callers pass either descriptor kind interchangeably. */
+static inline int mat_is_gpu(const void *p) {
+    if (!p) return 0;
+    return *reinterpret_cast<const uint32_t *>(p) == MATLAB_GPU_MAGIC;
+}
+/* Unwrap a (possibly) device-resident value to its host descriptor; passes a
+ * plain matrix through unchanged. The single chokepoint every gpu-aware op
+ * uses to reach the host data for the CPU-fallback path. */
+static inline matlab_mat *mat_gpu_host(void *p) {
+    return mat_is_gpu(p) ? reinterpret_cast<matlab_gpu *>(p)->host
+                         : reinterpret_cast<matlab_mat *>(p);
+}
 static inline int mat_is_complex(const void *p) {
     if (!p) return 0;
     return *reinterpret_cast<const uint32_t *>(p) == MATLAB_MAT_C_MAGIC;
