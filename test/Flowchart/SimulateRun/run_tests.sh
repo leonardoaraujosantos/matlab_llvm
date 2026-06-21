@@ -533,6 +533,19 @@ check "matlab_fcn multi header" "[[ '$MM_HEAD' == 't,sa,sb' ]]" ""
 check "matlab_fcn out1 (a)=105"  "awk 'BEGIN{exit !(($MM_A-105)^2<1e-6)}'" ""
 check "matlab_fcn out2 (b)=-95"  "awk 'BEGIN{exit !(($MM_B+95)^2<1e-6)}'" "out2 must carry the 2nd output, not out1"
 
+#--- #343: signal_awgn — Communications AWGN channel ----------------------
+# Constant input 1.0 through AWGN at snr=10 dB, signalPower=1 → additive
+# N(0, σ²) with σ² = 1/10^(10/10) = 0.1. Over the run (seed-fixed,
+# reproducible) the output mean tracks the input (~1.0) and the variance
+# tracks σ² (~0.1). First toolbox library block via the authoring recipe.
+AW="$("$MATLABC" -simulate "$EX/awgn_channel.mflow")"
+AW_HEAD=$(printf '%s\n' "$AW" | head -1)
+AW_MEAN=$(printf '%s\n' "$AW" | awk -F, 'NR>1{n++; s+=$2} END{print s/n}')
+AW_VAR=$(printf '%s\n'  "$AW" | awk -F, 'NR>1{n++; d=$2-1; ss+=d*d} END{print ss/n}')
+check "awgn header"      "[[ '$AW_HEAD' == 't,sc' ]]" ""
+check "awgn mean ~ input" "awk 'BEGIN{exit !($AW_MEAN>0.95 && $AW_MEAN<1.05)}'" "noise should average out to the 1.0 input"
+check "awgn var ~ 0.1"    "awk 'BEGIN{exit !($AW_VAR>0.07 && $AW_VAR<0.13)}'" "variance must track sigma^2 = 1/10^(snr/10)"
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 exit $(( fail > 0 ? 1 : 0 ))

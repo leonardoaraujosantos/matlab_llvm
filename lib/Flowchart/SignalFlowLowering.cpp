@@ -109,6 +109,10 @@ const std::map<std::string, KindInfo> &kindTable() {
     add("signal_math_fcn",   {true, true, false, false, false, FIM});
     add("signal_trig_fcn",   {true, true, false, false, false, FIM});
     add("signal_dead_zone",  {true, true, false, false, false, FIM});
+    // Communications (#343) — first toolbox-domain library block via the
+    // mflow-toolbox-library-blocks recipe. AWGN channel: direct-feedthrough
+    // additive noise, stateless aside from the per-block RNG seed.
+    add("signal_awgn",       {true, true, false, false, false, FIM});
     add("signal_relop",      {true, true, false, false, false, FIM});
     add("signal_logical",    {true, true, false, false, false, FIM});
     add("signal_compare_to_zero",

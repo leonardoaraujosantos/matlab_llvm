@@ -1,4 +1,5 @@
 signal_abs
+signal_awgn
 signal_bus_creator
 signal_bus_selector
 signal_chirp

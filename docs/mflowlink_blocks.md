@@ -35,6 +35,7 @@ diagnostic) until its evaluator lands.
 | `signal_clock`        | ✓ | *(none)*                                                                  | Tier-H — outputs the current simulation time `t` |
 | `signal_chirp`        | ✓ | `amplitude: 1.0`, `f0: 0.1`, `f1: 1.0`, `t1: 10.0`                        | Tier-H — linear frequency sweep `f0 → f1` over `[0, t1]` |
 | `signal_noise`        | ✓ | `amplitude: 1.0`, `seed: 1.0`, `kind: "uniform"`                          | Tier-H — uniform `[-amp, +amp]` or `kind: "gaussian"` (σ = amp) via xorshift64 + Box-Muller. Seed is per-block for reproducibility |
+| `signal_awgn`         | ✓ | `snr: 10.0`, `signalPower: 1.0`, `seed: 1.0`                              | Communications (#343) — AWGN channel `y = x + N(0, σ²)`, `σ² = signalPower / 10^(snr/10)` (Simulink "SNR + input signal power" mode). Reuses the xorshift64 + Box-Muller Gaussian generator. First toolbox-domain library block via the [authoring recipe](#adding-a-toolbox-library-block-343) |
 | `signal_from_workspace` |  | reserved                                                                | Needs workspace var binding (no equivalent in our runtime today) |
 | `signal_function_call_generator` | ✓ | `period: 1.0`, `phaseDelay: 0.0`                               | Tier-F carve-out — emits `1` over a 1.5×step window at every `period` boundary, `0` otherwise. Designed to drive `signal_triggered_subsystem` via a rising edge. |
 
