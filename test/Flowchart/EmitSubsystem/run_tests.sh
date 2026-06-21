@@ -356,6 +356,31 @@ sv_fir_smoke() {
 }
 sv_fir_smoke
 
+# #343 HDL — signal_dff → SystemVerilog. A D flip-flop must emit a single
+# state register clocked on posedge: `s_ff_next = D` (combinational), `q = s_ff`,
+# and `always_ff @(posedge clk ...) s_ff <= s_ff_next`. The block's `clk` input
+# maps to the implicit module clock (single-clock design).
+sv_dff_smoke() {
+  local sv="$SCRATCH/dff_register.sv"
+  "$MATLABC" -emit-sv "$EX/dff_register.mflow" --subsystem dff_reg \
+       > "$sv" 2> "$SCRATCH/emit.err"
+  if ! grep -q "module dff_reg" "$sv"; then
+    fail=$((fail+1)); fails+=("dff_register (missing module)")
+    sed 's/^/  /' "$SCRATCH/emit.err" >&2; return
+  fi
+  if ! grep -q "logic signed \[31:0\] s_ff" "$sv"; then
+    fail=$((fail+1)); fails+=("dff_register (no state register)"); return
+  fi
+  if ! grep -q "always_ff @(posedge clk" "$sv"; then
+    fail=$((fail+1)); fails+=("dff_register (no always_ff)"); return
+  fi
+  if ! grep -q "s_ff <= s_ff_next" "$sv"; then
+    fail=$((fail+1)); fails+=("dff_register (register not clocked)"); return
+  fi
+  pass=$((pass+1))
+}
+sv_dff_smoke
+
 # Tier-5d — saturation → SV. The pure-arith form (used for
 # software targets) routes through bool-by-fi multiplication
 # that the SV synthcheck rejects. HDL mode now emits an explicit

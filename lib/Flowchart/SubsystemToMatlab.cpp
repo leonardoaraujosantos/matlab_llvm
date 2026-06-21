@@ -106,6 +106,11 @@ const std::set<std::string> &tier1Kinds() {
       // Ts*B*u[k]; y = C*x. Contributes N state slots (N = A's row
       // count).
       "signal_state_space",
+      // #343 HDL — D flip-flop. One persistent register; the `clk` input
+      // maps to the module clock (single-clock design), so it emits as
+      // `always_ff @(posedge clk) Q <= D`. (signal_tff / signal_counter
+      // simulate but are not yet SV-lowered.)
+      "signal_dff",
       // Tier 5 — inline user MATLAB. The block's `params.function_body`
       // becomes a sibling local function in the same TU; the call
       // site emits as `<out> = <fn_name>(<inputs...>)`. SV emit
@@ -163,7 +168,12 @@ bool isStatefulKind(const std::string &K) {
          K == "signal_transport_delay" ||
          // Tier-5h: continuous state-space (A, B, C) with D=0.
          // Contributes N state slots (N = A's row count).
-         K == "signal_state_space";
+         K == "signal_state_space" ||
+         // #343 HDL: clocked registers. The block's `clk` input maps to the
+         // module clock (single-clock design), so a D flip-flop emits as a
+         // one-element persistent register updated every clock — exactly the
+         // unit_delay shape (`always_ff @(posedge clk) Q <= D`).
+         K == "signal_dff";
 }
 
 // Tier-5i — does this block's output equation overwrite the
@@ -1878,6 +1888,21 @@ matlab::Function *lowerSubsystemImpl(
         NextExpr = Opts.StateAsPersistent
                        ? U
                        : B.bin(BinOp::Add, U, B.number(0.0));
+      } else if (N->Kind == "signal_dff") {
+        // #343 D flip-flop: Q_next = D. Pick the data port explicitly (the
+        // `clk` input is the module clock, not data); fall back to the first
+        // input if no named data port. Same +0.0 software-anchor as
+        // unit_delay so a pure-passthrough register isn't DCE'd.
+        Expr *D = nullptr;
+        for (size_t pi = 0; pi < Ports.size() && pi < Ins.size(); ++pi)
+          if (Ports[pi] == "d" || Ports[pi] == "in" || Ports[pi] == "in1") {
+            D = Ins[pi];
+            break;
+          }
+        if (!D) D = Ins.empty() ? B.number(0.0) : Ins.front();
+        NextExpr = Opts.StateAsPersistent
+                       ? D
+                       : B.bin(BinOp::Add, D, B.number(0.0));
       } else if (N->Kind == "signal_discrete_integrator" ||
                  N->Kind == "signal_integrator") {
         // signal_integrator (continuous) gets auto-discretised here
@@ -3903,6 +3928,15 @@ matlab::TranslationUnit *buildDiagramTU(
       Expr *NextExpr = nullptr;
       if (N->Kind == "signal_unit_delay" || N->Kind == "signal_zoh") {
         NextExpr = Ins.empty() ? B.number(0.0) : Ins.front();
+      } else if (N->Kind == "signal_dff") {
+        // #343 D flip-flop — Q_next = D (data port; `clk` is the module clock).
+        Expr *D = nullptr;
+        for (size_t pi = 0; pi < Ports.size() && pi < Ins.size(); ++pi)
+          if (Ports[pi] == "d" || Ports[pi] == "in" || Ports[pi] == "in1") {
+            D = Ins[pi];
+            break;
+          }
+        NextExpr = D ? D : (Ins.empty() ? B.number(0.0) : Ins.front());
       } else if (N->Kind == "signal_discrete_integrator" ||
                  N->Kind == "signal_integrator") {
         Expr *U = Ins.empty() ? B.number(0.0) : Ins.front();

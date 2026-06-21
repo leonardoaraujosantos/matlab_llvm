@@ -77,8 +77,16 @@ fixed sample rate. They update once per major step (a single clock edge → a
 single update); the held value is the output, and they are loop-breakers like
 `unit_delay`. An optional active-high `reset`/`rst` input asynchronously
 reloads `initialValue`. Mux/Demux and logic gates already ship as
-`signal_mux`/`signal_demux`/`signal_logical`/`signal_multiport_switch`. These map
-to the `-emit-{systemverilog,verilog,cocotb}` lane (emit lowering is a follow-up).
+`signal_mux`/`signal_demux`/`signal_logical`/`signal_multiport_switch`.
+
+**`signal_dff` synthesises to RTL.** `matlabc -emit-sv <model.mflow> --subsystem
+<name>` lowers a D flip-flop to a clocked register — `always_ff @(posedge clk or
+negedge rst_n) s_ff <= s_ff_next` with `s_ff_next = D` and the output `= s_ff`.
+The block's `clk` input maps to the module's implicit clock (single-clock
+design), so for synthesis leave `clk` unwired (the module `clk` is the clock);
+`reset` maps to the module reset. See `examples/mflowlink/coder/dff_register.mflow`.
+`signal_tff` / `signal_counter` simulate today but aren't SV-lowered yet (their
+toggle / increment next-state is the follow-up).
 
 | Kind | Tier-C | Params | Ports | Notes |
 |---|---|---|---|---|

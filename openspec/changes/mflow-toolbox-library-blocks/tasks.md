@@ -37,11 +37,13 @@ Sequential elements for synchronous digital modeling → the `-emit-{systemveril
 verilog,cocotb}` lane. Mux/Demux + logic gates already ship (`signal_mux`/`demux`/
 `logical`/`multiport_switch`).
 
-- [x] 4b.1 `signal_dff` (D flip-flop), `signal_tff` (T flip-flop), `signal_counter` (up counter) — clocked posedge registers — DONE (this PR)
+- [x] 4b.1 `signal_dff` (D flip-flop), `signal_tff` (T flip-flop), `signal_counter` (up counter) — clocked posedge registers (simulator) — DONE
+- [x] 4b.5a `signal_dff` → SystemVerilog: lowers to `always_ff @(posedge clk) s_ff <= D` via the SubsystemToMatlab persistent-register path; synthesizable (`-check-synthesizable` clean). DONE
+- [x] 4b.x example circuits: `hdl_half_adder`, `hdl_full_adder` (combinational), `hdl_shift_register`, `hdl_freq_divider` (sequential) — DONE
 - [ ] 4b.2 `signal_jkff` / `signal_srff` — JK / SR flip-flops
-- [ ] 4b.3 `signal_shift_register` — N-bit serial/parallel shift register
+- [ ] 4b.3 `signal_shift_register` — N-bit serial/parallel shift register block (the example wires DFFs by hand today)
 - [ ] 4b.4 `signal_ram` / `signal_rom` — addressable memory (addr/data/we ports; vector state)
-- [ ] 4b.5 emit-SystemVerilog lowering for the sequential blocks (`always @(posedge clk)`)
+- [ ] 4b.5b emit-SystemVerilog for `signal_tff` (toggle) and `signal_counter` (increment+wrap) — the conditional next-state forms
 
 ## 5. Computer Vision / Image Processing catalog (follow-on PRs)
 
