@@ -3,6 +3,7 @@
 #include "matlab/Flowchart/MflowLinkModel.h"
 
 #include <iosfwd>
+#include <map>
 #include <memory>
 #include <string>
 #include <utility>
@@ -234,13 +235,21 @@ public:
 private:
   const MflowLinkModel &M_;
   // Per-block input wiring: Inputs_[i] is the list of (sourceBlock,
-  // sourcePortIgnored, destPort) tuples feeding block i. Outputs are
-  // assumed scalar in Tier C — every block emits one `double`.
+  // sourcePort, destPort) tuples feeding block i. Most blocks emit a
+  // single scalar in Out_[i]; multi-output blocks (state_space with a
+  // multi-row C, a MATLAB Function with [y1,y2,...]) additionally publish
+  // their named output ports in PortOut_[i] so a consumer wired from
+  // `out2` reads the right value (#344 / #345).
   struct InputEdge {
     size_t SrcBlock;     // index into M_.Blocks
+    std::string SrcPort; // the output port on the source block (may be empty)
     std::string DstPort; // the port on *this* block the value lands on
   };
   std::vector<std::vector<InputEdge>> Inputs_;
+  // Named secondary outputs per block (port id -> value). Empty for the
+  // single-output common case; a consumer falls back to Out_[srcBlock]
+  // when the source port isn't present here.
+  std::vector<std::map<std::string, double>> PortOut_;
 
   // Each block with continuous state owns a contiguous slice of Y_.
   // StateOffset_[i] is the start of block i's slice; ContStateCount
