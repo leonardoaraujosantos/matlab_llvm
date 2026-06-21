@@ -94,6 +94,10 @@ The system SHALL build an mflowlink signal-flow block model from a `.mflow` docu
 - **WHEN** a `signal_integrator` block has a connected `reset` input and that signal makes a rising edge (`prev ≤ 0 && now > 0`)
 - **THEN** the system SHALL reload the integrator's continuous state at the next major step from the `init` input port if connected, else from `initialCondition` (the zero-crossing → state-reset pattern) (src: lib/Flowchart/MflowLinkSim.cpp, examples/mflowlink/bouncing_ball.mflow, test/Flowchart/SimulateRun)
 
+#### Scenario: Per-output-port routing for multi-output blocks
+- **WHEN** a block exposes multiple output ports (e.g. a `signal_state_space` with a multi-row `C`, or a MATLAB Function block returning `[y1, y2, …]`) and a consumer is wired from a specific source port (`out2`, …)
+- **THEN** the system SHALL route the value published for that source port (each output port `outK` carries its own value), not the block's primary scalar output; a `signal_state_space` with per-state `x0` initial conditions SHALL seed each state independently, and `outK = (C·x)_k` (src: lib/Flowchart/MflowLinkSim.cpp `PortOut_`, test/Flowchart/SimulateRun, examples/mflowlink/state_space_vector_ic.mflow)
+
 ### Requirement: Live simulation DAP transport
 The system SHALL expose a live Debug Adapter Protocol server for signal-flow and state-chart `.mflow` simulations via `matlabc -simulate --sim-dap`, so an editor can pause, step, set breakpoints, and observe a running simulation rather than only replaying a completed trace. (src: tools/matlabc/main.cpp `runMflowLinkDap` / `runStateChartDap`, doc: docs/mflow_link_roadmap.md §10, docs/mStateflow_roadmap.md §6.7)
 

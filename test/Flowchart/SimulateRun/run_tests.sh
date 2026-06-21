@@ -503,6 +503,24 @@ check "signal_custom reserved" \
 LK_RES=$(printf '%s\n' "$LK" | grep -c '"supported": false')
 check "exactly 5 reserved kinds" "[[ '$LK_RES' == '5' ]]" ""
 
+#--- #345: state_space vector x0 + per-output C --------------------------
+# Undamped oscillator A=[0 1;-1 0], x0=[2;0], C=[1 0;0 1]: analytic solution
+# pos(t)=2cos t, vel(t)=-2sin t. Verifies (1) the vector IC sets vel=0 (so pos
+# FALLS from 2, not rises), and (2) out2 emits the 2nd state (vel), distinct
+# from out1 (pos) — before the fix both ports returned pos and vel started at 2.
+SS="$("$MATLABC" -simulate "$EX/state_space_vector_ic.mflow")"
+SS_HEAD=$(printf '%s\n' "$SS" | head -1)
+SS_POS0=$(printf '%s\n' "$SS" | awk -F, 'NR==2{print $2}')
+SS_VEL0=$(printf '%s\n' "$SS" | awk -F, 'NR==2{print $3}')
+SS_POSH=$(printf '%s\n' "$SS" | awk -F, '$1+0>=0.5{print $2; exit}')
+SS_VELH=$(printf '%s\n' "$SS" | awk -F, '$1+0>=0.5{print $3; exit}')
+check "ss header"        "[[ '$SS_HEAD' == 't,pos,vel' ]]" ""
+check "ss pos(0)=2"      "awk 'BEGIN{exit !($SS_POS0>1.999 && $SS_POS0<2.001)}'" ""
+check "ss vel(0)=0"      "awk 'BEGIN{exit !($SS_VEL0>-0.001 && $SS_VEL0<0.001)}'" "vel IC must be 0, not 2"
+check "ss pos falls"     "awk 'BEGIN{exit !($SS_POSH<$SS_POS0)}'" "pos must fall (2cos t), not rise"
+check "ss pos(.5)≈2cos"  "awk 'BEGIN{exit !($SS_POSH>1.74 && $SS_POSH<1.77)}'" ""
+check "ss vel(.5)≈-2sin" "awk 'BEGIN{exit !($SS_VELH>-0.97 && $SS_VELH<-0.95)}'" "out2 must be the velocity state"
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 exit $(( fail > 0 ? 1 : 0 ))

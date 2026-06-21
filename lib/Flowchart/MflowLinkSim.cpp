@@ -370,6 +370,35 @@ double evalMatlabFcn(const Node *N,
 // expression evaluator) but the constructor and evaluator branch
 // above use them.
 namespace {
+// Parse a MATLAB matrix literal like "1 0; -1 0" / "[2; 0]" into a flat
+// row-major value list + row/col counts. Whitespace OR commas separate
+// columns; `;` separates rows. Shared by the state_space evaluator and the
+// vector-x0 initial condition (#345).
+void parseSimMatrix(const std::string &S, std::vector<double> &Vals,
+                    int &Rows, int &Cols) {
+  Vals.clear();
+  Rows = 0;
+  Cols = 0;
+  std::string T = S;
+  auto F = T.find('[');
+  if (F != std::string::npos) T.erase(0, F + 1);
+  auto L = T.rfind(']');
+  if (L != std::string::npos) T.erase(L);
+  for (char &c : T) if (c == ',') c = ' ';
+  std::stringstream RS(T);
+  std::string Row;
+  while (std::getline(RS, Row, ';')) {
+    int C = 0;
+    std::stringstream CS(Row);
+    std::string Tok;
+    while (CS >> Tok) {
+      try { Vals.push_back(std::stod(Tok)); } catch (...) {}
+      ++C;
+    }
+    if (C > 0) { ++Rows; Cols = C; }
+  }
+}
+
 std::pair<std::unique_ptr<MflowLinkSim::MatlabFunctionState>, std::string>
 parseMatlabFunctionBody(const std::string &Source);
 double runMatlabFunction(const MflowLinkSim::MatlabFunctionState &S,
@@ -405,6 +434,7 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
   OutRows_.resize(N, 1);
   OutCols_.resize(N, 1);
   VecOut_.assign(N, {});
+  PortOut_.assign(N, {});
   for (size_t I = 0; I < N; ++I) {
     int W = M_.Blocks[I].OutWidth;
     if (W < 1) W = 1;
@@ -477,7 +507,7 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
     auto FI = IdxOf.find(E.FromBlock);
     auto TI = IdxOf.find(E.ToBlock);
     if (FI == IdxOf.end() || TI == IdxOf.end()) continue;
-    Inputs_[TI->second].push_back({FI->second, E.ToPort});
+    Inputs_[TI->second].push_back({FI->second, E.FromPort, E.ToPort});
   }
 
   // Cache transfer-function coefficients. For `signal_zero_pole`,
@@ -757,11 +787,21 @@ void MflowLinkSim::reset() {
       Y_[Off + 0] = paramD(B, "initialIntegral", 0.0);
       Y_[Off + 1] = 0.0; // derivative filter starts at rest
     } else if (B.Kind == "signal_state_space") {
-      // x0 may be a vector literal — Tier C reads scalar only; vector
-      // ICs are picked up when state_space gets its full evaluator.
-      double X0 = paramD(B, "x0", 0.0);
-      for (int J = 0; J < B.ContStateCount; ++J)
-        Y_[StateOffset_[I] + J] = X0;
+      // #345: x0 may be a per-state vector literal ("2; 0" → state 1 = 2,
+      // state 2 = 0). Parse it as a matrix and assign element-wise; a single
+      // scalar broadcasts to every state (the old behaviour). A short vector
+      // zero-fills the remaining states.
+      std::vector<double> X0v;
+      int X0r = 0, X0c = 0;
+      if (const std::string *X0S = paramS(B, "x0"))
+        parseSimMatrix(*X0S, X0v, X0r, X0c);
+      for (int J = 0; J < B.ContStateCount; ++J) {
+        double V;
+        if (X0v.empty())          V = 0.0;
+        else if (X0v.size() == 1) V = X0v[0];                 // scalar broadcast
+        else V = (J < static_cast<int>(X0v.size())) ? X0v[J] : 0.0;
+        Y_[StateOffset_[I] + J] = V;
+      }
     } else if (B.Kind == "signal_relay") {
       // Initial relay state: `initialState` (bool/0|1) wins, else
       // start in the "off" branch. The on/off VALUES (not the
@@ -847,9 +887,20 @@ void MflowLinkSim::reset() {
 void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
   if (Deriv) std::memset(Deriv, 0, sizeof(double) * Y_.size());
 
+  // Read the value flowing along an edge: a multi-output source publishes
+  // its named ports in PortOut_, so a wire from `out2` reads that; every
+  // other case falls back to the source block's scalar Out_ (#344 / #345).
+  auto edgeValue = [&](const InputEdge &P) -> double {
+    if (!P.SrcPort.empty()) {
+      const auto &PM = PortOut_[P.SrcBlock];
+      auto It = PM.find(P.SrcPort);
+      if (It != PM.end()) return It->second;
+    }
+    return Out_[P.SrcBlock];
+  };
   auto inputOf = [&](size_t I, const char *PortId) -> double {
     for (auto &P : Inputs_[I])
-      if (P.DstPort == PortId) return Out_[P.SrcBlock];
+      if (P.DstPort == PortId) return edgeValue(P);
     return 0.0;
   };
   auto sumInput = [&](size_t I, const std::string &Port) -> double {
@@ -858,7 +909,7 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
     // joins, and harmless for the single-edge common case).
     double V = 0.0;
     for (auto &P : Inputs_[I])
-      if (P.DstPort == Port) V += Out_[P.SrcBlock];
+      if (P.DstPort == Port) V += edgeValue(P);
     return V;
   };
 
@@ -1051,7 +1102,7 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
           }
         } else {
           // No `signs` declared — sum every connected input port.
-          for (auto &P : Inputs_[I]) Sum += Out_[P.SrcBlock];
+          for (auto &P : Inputs_[I]) Sum += edgeValue(P);
         }
         Out_[I] = Sum;
       }
@@ -1147,46 +1198,18 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
         Out_[I] = Y;
       }
     } else if (K == "signal_state_space") {
-      // Tier-C: only the scalar SISO case (n = ContStateCount, single
-      // input/output) with D = 0 (the lowering already marked D ≠ 0
-      // as a non-loop-breaker, which we don't support yet).
-      auto parseMatrix = [](const std::string &S, std::vector<double> &Vals,
-                            int &Rows, int &Cols) {
-        Vals.clear();
-        Rows = 0;
-        Cols = 0;
-        std::string T = S;
-        auto F = T.find('[');
-        if (F != std::string::npos) T.erase(0, F + 1);
-        auto L = T.rfind(']');
-        if (L != std::string::npos) T.erase(L);
-        std::stringstream RS(T);
-        std::string Row;
-        while (std::getline(RS, Row, ';')) {
-          int C = 0;
-          std::stringstream CS(Row);
-          std::string Tok;
-          while (CS >> Tok) {
-            try {
-              Vals.push_back(std::stod(Tok));
-            } catch (...) {
-            }
-            ++C;
-          }
-          if (C > 0) {
-            ++Rows;
-            Cols = C;
-          }
-        }
-      };
+      // Continuous LTI: dx = A·x + B·u, y = C·x (D = 0; the lowering
+      // already marked D ≠ 0 as a non-loop-breaker we don't model yet).
+      // SISO input; #345 added per-state x0 and a multi-row C → distinct
+      // output ports out1..outP = (C·x)_1..(C·x)_P.
       const std::string *AS = paramS(B, "A");
       const std::string *BS = paramS(B, "B");
       const std::string *CS = paramS(B, "C");
       std::vector<double> A, Bm, Cm;
       int Ar = 0, Ac = 0, Br = 0, Bc = 0, Cr = 0, Cc = 0;
-      if (AS) parseMatrix(*AS, A, Ar, Ac);
-      if (BS) parseMatrix(*BS, Bm, Br, Bc);
-      if (CS) parseMatrix(*CS, Cm, Cr, Cc);
+      if (AS) parseSimMatrix(*AS, A, Ar, Ac);
+      if (BS) parseSimMatrix(*BS, Bm, Br, Bc);
+      if (CS) parseSimMatrix(*CS, Cm, Cr, Cc);
       int n = B.ContStateCount;
       size_t Off = StateOffset_[I];
       double U = inputOf(I, "in");
@@ -1199,10 +1222,17 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
           Deriv[Off + Ri] = D;
         }
       }
-      double Y = 0.0;
-      if (static_cast<int>(Cm.size()) >= n)
-        for (int Ki = 0; Ki < n; ++Ki) Y += Cm[Ki] * State[Off + Ki];
-      Out_[I] = Y;
+      // y_r = (row r of C)·x. Each row drives output port out{r+1}; out1
+      // also mirrors into the scalar Out_ for `out`-wired / scalar consumers.
+      int Outs = Cr > 0 ? Cr : 1;
+      for (int R = 0; R < Outs; ++R) {
+        double Yr = 0.0;
+        if (Cc > 0 && static_cast<int>(Cm.size()) >= (R + 1) * Cc)
+          for (int Ki = 0; Ki < n && Ki < Cc; ++Ki)
+            Yr += Cm[R * Cc + Ki] * State[Off + Ki];
+        if (R == 0) Out_[I] = Yr;
+        PortOut_[I]["out" + std::to_string(R + 1)] = Yr;
+      }
     } else if (K == "signal_mpc_move") {
       /* MPC Toolbox Tier-3 §4.5 — MpcMove block.  Simulator carries
        * a static-gain MPC approximation: `u = gain · (r - ym)`.  The
@@ -1282,12 +1312,12 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
         }
         Out_[I] = VecOut_[I].front();
       } else {
-        Out_[I] = Inputs_[I].empty() ? 0.0 : Out_[Inputs_[I].front().SrcBlock];
+        Out_[I] = Inputs_[I].empty() ? 0.0 : edgeValue(Inputs_[I].front());
       }
     } else if (K == "signal_demux" || K == "signal_switch") {
       // Algebra-only Tier-C stub: passthrough first input. Tier-E adds
       // the proper switch / demux semantics + zero-crossing.
-      Out_[I] = Inputs_[I].empty() ? 0.0 : Out_[Inputs_[I].front().SrcBlock];
+      Out_[I] = Inputs_[I].empty() ? 0.0 : edgeValue(Inputs_[I].front());
     } else if (K == "signal_reshape") {
       // §17.5 #9 — copy the upstream flat buffer through; shape
       // change is purely a metadata switch (OutRows / OutCols
@@ -1715,7 +1745,7 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       // anything reaching here is an evaluator gap — treat as
       // passthrough so simulation doesn't crash and the user sees
       // the wrong-but-finite result instead of a segfault.
-      Out_[I] = Inputs_[I].empty() ? 0.0 : Out_[Inputs_[I].front().SrcBlock];
+      Out_[I] = Inputs_[I].empty() ? 0.0 : edgeValue(Inputs_[I].front());
     }
   }
 }
