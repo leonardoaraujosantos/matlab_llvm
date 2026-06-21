@@ -42,6 +42,11 @@
 extern "C" matlab_mat *matlab_obj_get_mat(matlab_obj *o, const char *name,
                                           int64_t len);
 
+/* CUDA device-name probe — weak stub below (nullptr), strong in
+ * runtime_gpu_cuda.cpp.  Forward-declared so the `auto` target resolution
+ * in activeTarget() can detect a present device (#335 Tier C). */
+extern "C" const char *matlab_gpu_cuda_device_name(void);
+
 namespace {
 
 enum class GpuTarget : int {
@@ -64,8 +69,14 @@ GpuTarget activeTarget() {
 #if defined(__APPLE__)
       return GpuTarget::Metal;
 #else
-      /* Linux: try CUDA → OpenCL → CPU at runtime; for now default
-       * to CPU and let the backend init code escalate. */
+      /* Linux: escalate to CUDA when a real CUDA backend is linked and a
+       * device is present.  matlab_gpu_cuda_device_name() is the weak stub
+       * (nullptr) until runtime_gpu_cuda.cpp is in the link line, where its
+       * strong def returns the device name after a successful cuInit — so a
+       * non-null name means "a usable CUDA device is here".  Otherwise stay
+       * on the host CPU fallback (#335 Tier C).  OpenCL escalation is TODO. */
+      const char *cudaDev = matlab_gpu_cuda_device_name();
+      if (cudaDev && *cudaDev) return GpuTarget::Cuda;
       return GpuTarget::Cpu;
 #endif
     }
@@ -360,6 +371,17 @@ double matlab_gpu_exists_on_gpu(void *obj) {
  * var for benchmark sweeps. */
 extern "C" matlab_mat *matlab_matmul_mm(matlab_mat *A, matlab_mat *B);
 
+/* Opt-in dispatch trace (MATLAB_GPU_TRACE=1) — emits one stderr line per
+ * device GEMM so users (and the HW-gated test) can confirm a gpuArray op
+ * actually ran on the device vs the CPU fallback (#335 Tier C). */
+static void gpuTrace(const char *backend) {
+  static const bool on = []() {
+    const char *e = std::getenv("MATLAB_GPU_TRACE");
+    return e && *e;
+  }();
+  if (on) std::fprintf(stderr, "matlab_gpu: gemm dispatched to %s\n", backend);
+}
+
 matlab_mat *matlab_gpu_gemm(matlab_mat *A, matlab_mat *B) {
   if (!A || !B) return nullptr;
   static int threshold = -1;
@@ -372,17 +394,17 @@ matlab_mat *matlab_gpu_gemm(matlab_mat *A, matlab_mat *B) {
   GpuTarget T = activeTarget();
   if (T == GpuTarget::Metal && big_enough) {
     matlab_mat *C = matlab_gpu_metal_gemm_double(A, B);
-    if (C) return C;
+    if (C) { gpuTrace("metal"); return C; }
     /* Backend hook unavailable / failed — fall through to CPU. */
   }
   if (T == GpuTarget::Cuda && big_enough) {
     matlab_mat *C = matlab_gpu_cuda_gemm_double(A, B);
-    if (C) return C;
+    if (C) { gpuTrace("cuda"); return C; }
     /* Backend hook unavailable / failed — fall through to CPU. */
   }
   if (T == GpuTarget::OpenCl && big_enough) {
     matlab_mat *C = matlab_gpu_opencl_gemm_double(A, B);
-    if (C) return C;
+    if (C) { gpuTrace("opencl"); return C; }
     /* Backend hook unavailable / failed — fall through to CPU. */
   }
   return matlab_matmul_mm(A, B);

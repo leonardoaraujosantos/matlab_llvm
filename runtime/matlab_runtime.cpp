@@ -588,6 +588,16 @@ double matlab_randn_scalar(void) { return rng_normal();  }
 matlab_mat *matlab_transpose(matlab_mat *A);
 
 /* C = A * B. Returns a 0x0 matrix if dimensions don't match. */
+/* GPU GEMM dispatcher (runtime/gpu/runtime_gpu.cpp) — device (cuBLAS/Metal)
+ * when a backend is linked + selected, host fallback otherwise. Used by the
+ * gpuArray mtimes path below (#335 Tier C). Declared *weak* so this TU never
+ * forces runtime_gpu.cpp into the link line: some lanes (e.g. the Symbolic
+ * run-tests harness) compile a reduced runtime source list that omits it.
+ * When absent the symbol resolves to null and the call site falls back to the
+ * host matmul. */
+extern "C" __attribute__((weak)) matlab_mat *matlab_gpu_gemm(matlab_mat *A,
+                                                             matlab_mat *B);
+
 /* Wrap a host descriptor as a device-resident gpuArray (#335 Tier A). Defined
  * here (not in the gpu toolbox TU) because every link line includes this TU,
  * so the gpu-aware ops below resolve it on all lanes. `host` holds the real
@@ -603,12 +613,21 @@ matlab_gpu *matlab_gpu_wrap(matlab_mat *host) {
 }
 
 matlab_mat *matlab_matmul_mm(matlab_mat *A, matlab_mat *B) {
-    /* #335 Tier A: a device-resident operand makes the result device-resident.
-     * Unwrap to host, run the CPU-fallback matmul, re-wrap (Tier C swaps the
-     * host call for a device GEMM behind the same tag). */
-    if (mat_is_gpu(A) || mat_is_gpu(B))
-        return (matlab_mat *)matlab_gpu_wrap(
-            matlab_matmul_mm(mat_gpu_host(A), mat_gpu_host(B)));
+    /* #335 Tier C: a device-resident operand makes the result device-resident
+     * AND routes the GEMM through matlab_gpu_gemm — which escalates to the
+     * device (cuBLAS Dgemm under MATLAB_GPU_TARGET=cuda|auto, N >= threshold)
+     * when a backend is linked + a device is present, else falls back to the
+     * host matmul.  The host operands are untagged, so matlab_gpu_gemm's CPU
+     * fallback re-enters matlab_matmul_mm without recursion. */
+    if (mat_is_gpu(A) || mat_is_gpu(B)) {
+        matlab_mat *hA = mat_gpu_host(A), *hB = mat_gpu_host(B);
+        /* matlab_gpu_gemm is weak — when runtime_gpu.cpp isn't linked it's
+         * null, so fall back to the host matmul (the hosts are untagged, so
+         * no recursion either way). */
+        matlab_mat *C = matlab_gpu_gemm ? matlab_gpu_gemm(hA, hB)
+                                        : matlab_matmul_mm(hA, hB);
+        return (matlab_mat *)matlab_gpu_wrap(C);
+    }
     /* #216: either operand may actually be a complex matlab_mat_c (the ptr ABI
      * is shared). Reading a mat_c as a real matrix drops the imaginary part, so
      * dispatch to the complex-aware path, which also handles 1x1 scalar

@@ -34,14 +34,16 @@ Tier A (groups 1–4) is implemented by the first slice.
 - [ ] 5.1 Extend dispatch to `+ - ./ .^`, relational/logical, `max`/`min`, and the remaining reductions, uniform across AOT + JIT
 - [ ] 5.2 Coverage report: `log()`/document any gpuArray op not yet routed
 
-## 6. Tier C — real device init + transfer (future PR)
+## 6. Tier C — real device init + transfer (in progress — mtimes landed)
 
-- [ ] 6.1 Link `runtime/gpu/{cuda,metal,opencl}` into the REPL/examples/test build behind the tag
-- [ ] 6.2 `gpuArray(X)` h2d upload, ops stay on device, `gather` d2h; `MATLAB_GPU_TARGET=auto` device escalation with CPU fallback
+- [x] 6.1 CUDA backend links into the JIT/REPL lane (`matlabc`) behind `-DMATLAB_LLVM_GPU_CUDA=ON`; the dispatcher TU is in every build with weak stubs → CPU fallback when OFF. (Linking into `libMatlabRuntime` so AOT-emitted programs also escalate is a follow-up.)
+- [x] 6.2 `MATLAB_GPU_TARGET=auto` now escalates to CUDA when a device is present (`matlab_gpu_cuda_device_name` probe); gpuArray `mtimes` routes through `matlab_gpu_gemm` → cuBLAS Dgemm on the device (per-op h2d/d2h), host fallback otherwise. `MATLAB_GPU_TRACE=1` makes the dispatch observable. **Verified on the RTX 5060** (in-process `Ag*Bg`, 76% GPU util, machine-precision correct) — gated by `test/Run/run_gpu_cuda_validation.sh` (Tier C section).
+- [ ] 6.3 Extend device dispatch beyond `mtimes` to the element-wise / reduction surface (needs NVRTC kernels — currently those gpuArray ops still take the host fallback even with a device).
+- [ ] 6.4 Keep data resident on the device across chained ops (today each op round-trips h2d/d2h); add `gpuArray(X)` h2d upload + `gather` d2h proper.
 
 ## 7. Tier D — real-GPU CI/dev lane (future PR)
 
-- [ ] 7.1 RTX 5060 lane asserting numeric parity vs CPU and speedup ≥ 1× at N ≥ 1024
+- [ ] 7.1 RTX 5060 lane asserting numeric parity vs CPU and speedup ≥ 1× at N ≥ 1024 — `test/Run/run_gpu_cuda_validation.sh` now exercises the device end-to-end (HW-gated, self-skips without a GPU); wiring it into CI behind a self-hosted runner label remains.
 
 ## 8. Tier E — wire the examples (future PR)
 
