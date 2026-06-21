@@ -521,6 +521,18 @@ check "ss pos falls"     "awk 'BEGIN{exit !($SS_POSH<$SS_POS0)}'" "pos must fall
 check "ss pos(.5)≈2cos"  "awk 'BEGIN{exit !($SS_POSH>1.74 && $SS_POSH<1.77)}'" ""
 check "ss vel(.5)≈-2sin" "awk 'BEGIN{exit !($SS_VELH>-0.97 && $SS_VELH<-0.95)}'" "out2 must be the velocity state"
 
+#--- #344: signal_matlab_fcn multiple outputs ----------------------------
+# function [a,b] = split(u1): a = u1+100, b = u1-100, with u1 = const 5.
+# out1 (a) -> scope sa = 105; out2 (b) -> scope sb = -95. Before the fix the
+# block rejected any function with >1 output; out2 could not be expressed.
+MM="$("$MATLABC" -simulate "$EX/matlab_fcn_multi_output.mflow")"
+MM_HEAD=$(printf '%s\n' "$MM" | head -1)
+MM_A=$(printf '%s\n' "$MM" | awk -F, 'NR==2{print $2}')
+MM_B=$(printf '%s\n' "$MM" | awk -F, 'NR==2{print $3}')
+check "matlab_fcn multi header" "[[ '$MM_HEAD' == 't,sa,sb' ]]" ""
+check "matlab_fcn out1 (a)=105"  "awk 'BEGIN{exit !(($MM_A-105)^2<1e-6)}'" ""
+check "matlab_fcn out2 (b)=-95"  "awk 'BEGIN{exit !(($MM_B+95)^2<1e-6)}'" "out2 must carry the 2nd output, not out1"
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 exit $(( fail > 0 ? 1 : 0 ))
