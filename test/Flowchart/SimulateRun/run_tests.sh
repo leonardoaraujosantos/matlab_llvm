@@ -546,6 +546,23 @@ check "awgn header"      "[[ '$AW_HEAD' == 't,sc' ]]" ""
 check "awgn mean ~ input" "awk 'BEGIN{exit !($AW_MEAN>0.95 && $AW_MEAN<1.05)}'" "noise should average out to the 1.0 input"
 check "awgn var ~ 0.1"    "awk 'BEGIN{exit !($AW_VAR>0.07 && $AW_VAR<0.13)}'" "variance must track sigma^2 = 1/10^(snr/10)"
 
+#--- #343: HDL sequential blocks — D flip-flop / T flip-flop / counter -----
+# A 1 Hz pulse clock drives a D-FF (D=1), a free-running T-FF, and an up
+# counter over 5 s. Each updates once per clock posedge (once per major step,
+# not per RK4 substep). Columns: t,sff,stg,scn.
+HD="$("$MATLABC" -simulate "$EX/hdl_registers.mflow")"
+HD_HEAD=$(printf '%s\n' "$HD" | head -1)
+HD_DFF_END=$(printf '%s\n' "$HD" | tail -1 | awk -F, '{print $2}')
+HD_TFF_MEAN=$(printf '%s\n' "$HD" | awk -F, 'NR>1{n++; s+=$3} END{print s/n}')
+HD_CNT_END=$(printf '%s\n' "$HD" | tail -1 | awk -F, '{print $4}')
+# counter must be monotonically non-decreasing (no double-count / no reset).
+HD_MONO=$(printf '%s\n' "$HD" | awk -F, 'NR>1{if($4+0 < prev-1e-9){bad=1} prev=$4} END{print bad+0}')
+check "hdl header"        "[[ '$HD_HEAD' == 't,sff,stg,scn' ]]" ""
+check "dff holds D=1"     "awk 'BEGIN{exit !(($HD_DFF_END-1)^2<1e-9)}'" "D flip-flop must latch and hold D"
+check "tff toggles ~50%"  "awk 'BEGIN{exit !($HD_TFF_MEAN>0.30 && $HD_TFF_MEAN<0.55)}'" "T flip-flop must toggle, not stick"
+check "counter ~1/clk"    "awk 'BEGIN{exit !($HD_CNT_END>=4 && $HD_CNT_END<=6)}'" "one increment per clock period (5 periods)"
+check "counter monotonic" "[[ '$HD_MONO' == '0' ]]" "a clock edge must increment exactly once (not per RK4 substep)"
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 exit $(( fail > 0 ? 1 : 0 ))

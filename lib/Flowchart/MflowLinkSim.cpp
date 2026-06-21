@@ -520,6 +520,7 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
   Lookup1DCache_.assign(N, {});
   Lookup2DCache_.assign(N, {});
   NoiseSeed_.assign(N, 0);
+  DigitalLatch_.assign(N, 0.0);
   MatlabFcnCache_.resize(N);
   MatlabFnCache_.resize(N);
   // §17.5 #8 — snapshot the currently installed JIT factory once.
@@ -858,6 +859,10 @@ void MflowLinkSim::reset() {
           static_cast<uint64_t>(paramD(B, "seed", 1.0));
       if (Seed == 0) Seed = 0xC0FFEE12345678ABULL;
       NoiseSeed_[I] = Seed;
+    } else if (B.Kind == "signal_dff" || B.Kind == "signal_tff" ||
+               B.Kind == "signal_counter") {
+      // Clocked HDL registers start at their initial/reset value (#343).
+      DigitalLatch_[I] = paramD(B, "initialValue", 0.0);
     }
   }
 
@@ -1434,6 +1439,13 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       if (U1 < 1e-12) U1 = 1e-12;
       double G = std::sqrt(-2.0 * std::log(U1)) * std::cos(2.0 * M_PI * U2);
       Out_[I] = X + Sigma * G;
+    } else if (K == "signal_dff" || K == "signal_tff" ||
+               K == "signal_counter") {
+      // #343 — clocked HDL registers. The output is the held value; the
+      // edge-triggered state update happens once per major step in
+      // commitDigitalRegisters() (NOT here — evalAll runs multiple times
+      // per RK4 step, which would multiply-count a single clock edge).
+      Out_[I] = DigitalLatch_[I];
     } else if (K == "signal_math_fcn") {
       const std::string *F = paramS(B, "function");
       double U  = inputOf(I, "in");
@@ -2239,6 +2251,48 @@ double MflowLinkSim::stepMajor() {
             ? Out_[InitSrc]
             : paramD(M_.Blocks[I], "initialCondition", 0.0);
     Y_[StateOffset_[I]] = NewIC;
+  }
+  // #343 — clocked HDL registers (signal_dff / signal_tff / signal_counter).
+  // Done once per major step (here, not in evalAll) so a single clock edge
+  // updates the register exactly once. Active-high `reset`/`rst` reloads the
+  // initial value; otherwise a `clk` rising edge (PrevOut_ ≤ 0 && Out_ > 0)
+  // samples/toggles/increments. The refresh evalAll below makes the new value
+  // visible in this step's logged output (a posedge-triggered register).
+  for (size_t I = 0; I < M_.Blocks.size(); ++I) {
+    const std::string &K = M_.Blocks[I].Kind;
+    if (K != "signal_dff" && K != "signal_tff" && K != "signal_counter")
+      continue;
+    auto srcOf = [&](const char *Port) -> int {
+      for (auto &P : Inputs_[I])
+        if (P.DstPort == Port) return static_cast<int>(P.SrcBlock);
+      return -1;
+    };
+    int ClkSrc = srcOf("clk");
+    int RstSrc = srcOf("reset");
+    if (RstSrc < 0) RstSrc = srcOf("rst");
+    double &Q = DigitalLatch_[I];
+    if (RstSrc >= 0 && Out_[RstSrc] > 0.5) {
+      Q = paramD(M_.Blocks[I], "initialValue", 0.0);
+      continue;
+    }
+    bool Posedge =
+        ClkSrc >= 0 && PrevOut_[ClkSrc] <= 0.0 && Out_[ClkSrc] > 0.0;
+    if (!Posedge) continue;
+    if (K == "signal_dff") {
+      int DSrc = srcOf("d");
+      if (DSrc < 0) DSrc = srcOf("in");
+      if (DSrc < 0) DSrc = srcOf("in1");
+      Q = (DSrc >= 0) ? Out_[DSrc] : 0.0;
+    } else if (K == "signal_tff") {
+      int TSrc = srcOf("t");
+      if (TSrc < 0) TSrc = srcOf("in");
+      bool Toggle = TSrc < 0 || Out_[TSrc] > 0.5;
+      if (Toggle) Q = (Q > 0.5) ? 0.0 : 1.0;
+    } else { // signal_counter
+      Q += paramD(M_.Blocks[I], "step", 1.0);
+      double Mod = paramD(M_.Blocks[I], "modulus", 0.0);
+      if (Mod > 0.0 && Q >= Mod) Q -= Mod;
+    }
   }
   // Refresh outputs once more so the reset-into-state propagates
   // visibly into the post-step Out_ slot (the integrator's output

@@ -6,32 +6,42 @@ each block (or small same-domain set) is its own follow-on PR. Each block PR: re
 fixture + checks, `docs/mflowlink_blocks.md` row, update the parity snapshot, and file the
 editor `NodeKind` (IDE repo).
 
-## 1. First slice — recipe + parity guard
+## 1. First slice — recipe + parity guard (DONE, PR #350)
 
-- [ ] 1.1 Write the block-authoring recipe into `docs/mflowlink_blocks.md` (the §"Adding a toolbox library block" checklist: kind registration, classification, evaluator, runtime delegation, docs, test, editor parity)
-- [ ] 1.2 Add the editor↔simulator parity guard: a `test/Flowchart/` test that enumerates the registered `signal_*` kinds and diffs against a committed `registered_block_kinds.txt` snapshot (fails on drift)
-- [ ] 1.3 Wire the guard into ctest; seed the snapshot with today's ~63 kinds
+- [x] 1.1 Block-authoring recipe in `docs/mflowlink_blocks.md` (§"Adding a toolbox library block")
+- [x] 1.2 Editor↔simulator parity guard: `test/Flowchart/BlockKindParity/run_tests.sh` diffs the registered kinds vs a committed `registered_block_kinds.txt` snapshot (fails on drift)
+- [x] 1.3 Wired into ctest (`flowchart-block-kind-parity`); snapshot seeded (62 kinds → grows as blocks land)
 
-## 2. First slice — first DSP block (worked example)
+## 2. First worked-example block (DONE, PR #351)
 
-- [ ] 2.1 Implement `signal_fft` (or `signal_fir`): register kind + sample-time/loop-breaker class in `SignalFlowLowering.cpp`
-- [ ] 2.2 Simulator evaluator in `MflowLinkSim.cpp` delegating to the DSP runtime (`matlab_fft_c` / FIR), using the `VecOut_` frame path for vector output
-- [ ] 2.3 `examples/mflowlink/` fixture + `SimulateRun` checks asserting a known transform/filter result; `docs/mflowlink_blocks.md` row; update parity snapshot
+- [x] 2.1–2.3 `signal_awgn` (Comms AWGN channel) shipped end-to-end through the recipe — the worked example follow-on blocks copy. (A DSP transform block, §3, is still open; the linear-filter space is already covered by discrete_filter/transfer_fcn/state_space so the first block was a Comms channel instead.)
 
 ## 3. DSP / Signal Processing catalog (follow-on PRs)
 
-- [ ] 3.1 `signal_fft` / `signal_ifft` — frame DFT/IDFT (`matlab_fft_c`/`matlab_ifft_c`)
-- [ ] 3.2 `signal_fir` — FIR filter (taps param; frame or sample)
-- [ ] 3.3 `signal_biquad` / `signal_iir` — IIR/Biquad sections
-- [ ] 3.4 `signal_window` — windowing (Hann/Hamming/Blackman)
-- [ ] 3.5 `signal_spectrum` — power-spectrum / spectrum-analyzer sink
+- [ ] 3.1 `signal_fft` / `signal_ifft` — frame DFT/IDFT (`matlab_fft_c`/`matlab_ifft_c`, `VecOut_` frame path)
+- [ ] 3.2 `signal_window` — windowing (Hann/Hamming/Blackman)
+- [ ] 3.3 `signal_spectrum` — power-spectrum / spectrum-analyzer sink
+- [ ] 3.4 `signal_biquad` — Biquad/SOS section (delegates to the DSP runtime; complements the existing `signal_discrete_filter` IIR)
+- [ ] 3.5 `signal_dcblock` / `signal_lowpass` / `signal_highpass` — streaming filters (DSP `*_step` runtimes; need the obj-step delegation pattern)
 
 ## 4. Communications catalog (follow-on PRs)
 
+- [x] 4.3 `signal_awgn` — AWGN channel (SNR + signal power) — DONE (PR #351)
 - [ ] 4.1 `signal_psk_mod` / `signal_psk_demod` — PSK modulator/demodulator (comm runtime)
 - [ ] 4.2 `signal_qam_mod` / `signal_qam_demod` — QAM modulator/demodulator
-- [ ] 4.3 `signal_awgn` — AWGN channel (SNR/EbNo param)
 - [ ] 4.4 `signal_error_rate` — error-rate calculation sink
+
+## 4b. HDL / digital catalog (follow-on PRs)
+
+Sequential elements for synchronous digital modeling → the `-emit-{systemverilog,
+verilog,cocotb}` lane. Mux/Demux + logic gates already ship (`signal_mux`/`demux`/
+`logical`/`multiport_switch`).
+
+- [x] 4b.1 `signal_dff` (D flip-flop), `signal_tff` (T flip-flop), `signal_counter` (up counter) — clocked posedge registers — DONE (this PR)
+- [ ] 4b.2 `signal_jkff` / `signal_srff` — JK / SR flip-flops
+- [ ] 4b.3 `signal_shift_register` — N-bit serial/parallel shift register
+- [ ] 4b.4 `signal_ram` / `signal_rom` — addressable memory (addr/data/we ports; vector state)
+- [ ] 4b.5 emit-SystemVerilog lowering for the sequential blocks (`always @(posedge clk)`)
 
 ## 5. Computer Vision / Image Processing catalog (follow-on PRs)
 

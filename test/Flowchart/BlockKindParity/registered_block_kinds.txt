@@ -7,10 +7,12 @@ signal_clock
 signal_compare_to_constant
 signal_compare_to_zero
 signal_constant
+signal_counter
 signal_custom
 signal_dead_zone
 signal_demux
 signal_derivative
+signal_dff
 signal_discrete_filter
 signal_discrete_integrator
 signal_display
@@ -53,6 +55,7 @@ signal_sum
 signal_switch
 signal_switch_case_action
 signal_terminator
+signal_tff
 signal_to_workspace
 signal_transfer_fcn
 signal_transport_delay
