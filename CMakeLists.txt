@@ -878,6 +878,15 @@ add_test(
           $<TARGET_FILE:matlabc>
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/SimulateRun
 )
+# Editor <-> simulator block-kind parity guard (#343 §1) — the set of
+# registered signal_* kinds must match the committed snapshot, so adding a
+# kind is a visible diff and a reminder to mirror it in the IDE editor.
+add_test(
+  NAME flowchart-block-kind-parity
+  COMMAND ${CMAKE_SOURCE_DIR}/test/Flowchart/BlockKindParity/run_tests.sh
+          $<TARGET_FILE:matlabc>
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/BlockKindParity
+)
 # mflowLink Tier-D smoke lane — drive `matlabc -simulate --sim-dap`
 # over stdio with a scripted DAP conversation and check that the
 # simulator pauses at entry, steps forward / backward, and resumes
