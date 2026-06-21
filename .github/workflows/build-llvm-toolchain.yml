@@ -73,10 +73,14 @@ jobs:
           set -euxo pipefail
           tag="toolchain-${{ inputs.llvm-tag }}"
           asset="llvm-${{ inputs.llvm-tag }}-linux-x64.tar.zst"
-          if ! gh release view "$tag" >/dev/null 2>&1; then
-            gh release create "$tag" \
+          # This job has no repo checkout, so gh can't infer the repo from git
+          # context; pass it explicitly or `gh release` aborts with
+          # "fatal: not a git repository".
+          repo="${{ github.repository }}"
+          if ! gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
+            gh release create "$tag" --repo "$repo" \
               --title "LLVM toolchain ${{ inputs.llvm-tag }}" \
               --notes "Prebuilt LLVM + MLIR (Release, dylib, RTTI) for CI. Consumed by .github/actions/setup-llvm. Not a project release." \
               --latest=false
           fi
-          gh release upload "$tag" "$asset" --clobber
+          gh release upload "$tag" "$asset" --repo "$repo" --clobber
