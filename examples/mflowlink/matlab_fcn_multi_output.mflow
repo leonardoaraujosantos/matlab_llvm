@@ -1,0 +1,26 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "mf_multi",
+  "settings": { "kind": "signal_flow",
+    "solver": { "type": "fixed_step", "algorithm": "ode4", "startTime": 0.0, "stopTime": 0.2, "maxStep": "0.1" } },
+  "flows": [{
+    "id": "flow_mf", "kind": "function", "name": "mf_multi",
+    "signature": { "inputs": [], "outputs": [] },
+    "nodes": [
+      { "id": "src", "kind": "signal_constant",
+        "data": { "params": { "value": 5.0 } },
+        "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "f", "kind": "signal_matlab_fcn",
+        "data": { "params": { "function_body": "function [a, b] = split(u1)\n  a = u1 + 100;\n  b = u1 - 100;\nend" } },
+        "ports": { "in": [{"id": "u1"}], "out": [{"id": "out1"}, {"id": "out2"}] } },
+      { "id": "sa", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } },
+      { "id": "sb", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } }
+    ],
+    "edges": [
+      { "id": "e0", "kind": "data", "from": {"node": "src", "port": "out"}, "to": {"node": "f", "port": "u1"} },
+      { "id": "e1", "kind": "data", "from": {"node": "f", "port": "out1"}, "to": {"node": "sa", "port": "in"} },
+      { "id": "e2", "kind": "data", "from": {"node": "f", "port": "out2"}, "to": {"node": "sb", "port": "in"} }
+    ]
+  }]
+}

@@ -401,14 +401,16 @@ void parseSimMatrix(const std::string &S, std::vector<double> &Vals,
 
 std::pair<std::unique_ptr<MflowLinkSim::MatlabFunctionState>, std::string>
 parseMatlabFunctionBody(const std::string &Source);
-double runMatlabFunction(const MflowLinkSim::MatlabFunctionState &S,
-                         const std::vector<double> &Inputs, double T);
+std::vector<double> runMatlabFunction(const MflowLinkSim::MatlabFunctionState &S,
+                                      const std::vector<double> &Inputs, double T);
 // §17.5 #8 — accessor for the parsed-function input count. The
 // constructor needs this to decide how many `u1..uN` slots the JIT
 // wrapper should declare, but `MatlabFunctionState` is defined
 // further down (after AST/Lexer/Parser have established their full
 // types). Defined alongside the struct definition itself.
 unsigned matlabFunctionInputCount(
+    const MflowLinkSim::MatlabFunctionState &S);
+unsigned matlabFunctionOutputCount(
     const MflowLinkSim::MatlabFunctionState &S);
 } // namespace
 
@@ -632,8 +634,12 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
             unsigned NumInputs = matlabFunctionInputCount(*Pair.first);
             // Cap at 8 to match the wrapper's pre-generated signature
             // pad — bodies with more inputs fall back to the AST
-            // interpreter rather than failing the sim.
-            if (NumInputs <= 8) {
+            // interpreter rather than failing the sim. #344: the JIT
+            // wrapper returns a single scalar, so multi-output bodies
+            // also fall back to the AST interpreter (which fills every
+            // out1..outM port).
+            if (NumInputs <= 8 &&
+                matlabFunctionOutputCount(*Pair.first) == 1) {
               std::string JitErr;
               if (auto *H = MatlabFcnJitOps_.Compile(*FB, NumInputs,
                                                      JitErr)) {
@@ -1736,7 +1742,12 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
         for (unsigned K = 0; K < Arity && K < U.size(); ++K) Pad[K] = U[K];
         Out_[I] = MatlabFcnJitOps_.Call(MatlabFnJit_[I], Pad, Arity);
       } else if (MatlabFnCache_[I]) {
-        Out_[I] = runMatlabFunction(*MatlabFnCache_[I], U, T);
+        // #344: the AST interpreter returns every declared output; out1
+        // mirrors into the scalar Out_, out2..outM publish on PortOut_.
+        std::vector<double> Ys = runMatlabFunction(*MatlabFnCache_[I], U, T);
+        Out_[I] = Ys.empty() ? 0.0 : Ys[0];
+        for (size_t K = 0; K < Ys.size(); ++K)
+          PortOut_[I]["out" + std::to_string(K + 1)] = Ys[K];
       } else {
         Out_[I] = evalMatlabFcn(MatlabFcnCache_[I].get(), U, T);
       }
@@ -2659,13 +2670,19 @@ struct MflowLinkSim::MatlabFunctionState {
   std::unique_ptr<matlab::ASTContext> AST;
   matlab::Function *Fn = nullptr;
   std::vector<std::string> InNames;
-  std::string OutName;
+  // #344: a MATLAB Function block may declare several outputs
+  // (`function [a, b] = f(...)`), bound positionally to ports out1..outM.
+  std::vector<std::string> OutNames;
 };
 
 namespace {
 unsigned matlabFunctionInputCount(
     const MflowLinkSim::MatlabFunctionState &S) {
   return static_cast<unsigned>(S.InNames.size());
+}
+unsigned matlabFunctionOutputCount(
+    const MflowLinkSim::MatlabFunctionState &S) {
+  return static_cast<unsigned>(S.OutNames.size());
 }
 } // namespace
 
@@ -2711,11 +2728,15 @@ parseMatlabFunctionBody(const std::string &Source) {
   // builtins). Loader keeps the same first-function-is-entry rule
   // either way.
   S->Fn = TU->Functions.front();
-  if (S->Fn->Outputs.size() != 1)
+  if (S->Fn->Outputs.empty())
     return {nullptr,
-            "function_body's entry function must declare exactly one "
+            "function_body's entry function must declare at least one "
             "output variable"};
-  S->OutName = std::string(S->Fn->Outputs[0]);
+  // #344: bind every declared output positionally to ports out1..outM
+  // (mirroring the u1..uN input convention); a single output is the
+  // common case and drives the scalar `out`.
+  S->OutNames.reserve(S->Fn->Outputs.size());
+  for (auto &Out : S->Fn->Outputs) S->OutNames.emplace_back(Out);
   S->InNames.reserve(S->Fn->Inputs.size());
   for (auto &In : S->Fn->Inputs) S->InNames.emplace_back(In);
   return {std::move(S), std::string{}};
@@ -2941,9 +2962,11 @@ void interpStmt(const matlab::Stmt *S, InterpEnv &Env) {
   }
 }
 
-double runMatlabFunction(const MflowLinkSim::MatlabFunctionState &S,
-                         const std::vector<double> &Inputs,
-                         double T) {
+// #344: returns one value per declared output (out1..outM), in order. An
+// output variable never assigned by the body reads back as 0.
+std::vector<double> runMatlabFunction(const MflowLinkSim::MatlabFunctionState &S,
+                                      const std::vector<double> &Inputs,
+                                      double T) {
   InterpEnv Env;
   Env.Vars["t"] = T;
   for (size_t I = 0; I < S.InNames.size(); ++I)
@@ -2956,8 +2979,13 @@ double runMatlabFunction(const MflowLinkSim::MatlabFunctionState &S,
   } catch (const ReturnSignal &) {
     // Normal `return` exit.
   }
-  auto It = Env.Vars.find(S.OutName);
-  return It == Env.Vars.end() ? 0.0 : It->second;
+  std::vector<double> Outs;
+  Outs.reserve(S.OutNames.size());
+  for (const auto &Name : S.OutNames) {
+    auto It = Env.Vars.find(Name);
+    Outs.push_back(It == Env.Vars.end() ? 0.0 : It->second);
+  }
+  return Outs;
 }
 
 } // namespace
