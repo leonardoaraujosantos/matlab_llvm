@@ -97,6 +97,15 @@ const std::map<std::string, KindInfo> &kindTable() {
                              {true, true, false, true, false, DISC});
     add("signal_rate_transition",
                              {true, true, false, true, false, DISC});
+    // HDL / digital sequential elements (#343) — clocked registers driven
+    // by an external `clk` rising edge (not a fixed sample rate), so they're
+    // FixedInMinor + always loop-breakers (output comes from held state).
+    // Maps to the synchronous emit-{systemverilog,verilog,cocotb} lane;
+    // emit lowering is a follow-up. Mux/Demux + logic gates already ship as
+    // signal_mux/demux/logical/multiport_switch.
+    add("signal_dff",        {true, true, false, true, false, FIM});
+    add("signal_tff",        {true, true, false, true, false, FIM});
+    add("signal_counter",    {true, true, false, true, false, FIM});
     // Lookup tables (Tier H — table-driven scalar evaluation).
     add("signal_lookup_1d",  {true, true, false, false, false, FIM});
     add("signal_lookup_2d",  {true, true, false, false, false, FIM});

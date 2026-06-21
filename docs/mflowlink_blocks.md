@@ -70,6 +70,22 @@ diagnostic) until its evaluator lands.
 | `signal_discrete_filter` | ✓ | `num: "1"`, `den: "1, -0.9"`, `sampleTime: 1.0`       | Tier-H — z-domain IIR. Implements the pole half (feedback taps) of direct-form-II; pure-FIR / mixed designs need the `u`-history buffer (follow-up) |
 | `signal_rate_transition` | ✓ | `sampleTime: 1.0`                                    | Tier-H — bridges between different sample rates; behaviourally a ZOH at the requested rate |
 
+## HDL / digital sequential (#343)
+
+Clocked registers driven by an external `clk` **rising edge** (posedge), not a
+fixed sample rate. They update once per major step (a single clock edge → a
+single update); the held value is the output, and they are loop-breakers like
+`unit_delay`. An optional active-high `reset`/`rst` input asynchronously
+reloads `initialValue`. Mux/Demux and logic gates already ship as
+`signal_mux`/`signal_demux`/`signal_logical`/`signal_multiport_switch`. These map
+to the `-emit-{systemverilog,verilog,cocotb}` lane (emit lowering is a follow-up).
+
+| Kind | Tier-C | Params | Ports | Notes |
+|---|---|---|---|---|
+| `signal_dff`     | ✓ | `initialValue: 0.0`            | `d`/`in`, `clk`, opt `reset` | D flip-flop — on `clk` posedge `Q ← D`; holds otherwise. `always @(posedge clk) Q <= D` |
+| `signal_tff`     | ✓ | `initialValue: 0.0`            | opt `t`/`in`, `clk`, opt `reset` | T flip-flop — toggles `Q` on `clk` posedge when `t` is high (free-toggles when `t` unconnected) |
+| `signal_counter` | ✓ | `step: 1.0`, `modulus: 0.0`   | `clk`, opt `reset` | Up counter — `+step` per `clk` posedge; wraps at `modulus` (> 0) |
+
 ## Math
 
 | Kind | Tier-C | Params | Notes |

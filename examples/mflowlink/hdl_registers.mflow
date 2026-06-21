@@ -1,0 +1,32 @@
+{
+  "schema": "matforge.flowchart", "version": "0.1.0", "entry": "hdl_test",
+  "settings": { "kind": "signal_flow",
+    "solver": { "type": "fixed_step", "algorithm": "ode4", "startTime": 0.0, "stopTime": 5.0, "maxStep": "0.05" } },
+  "flows": [{
+    "id": "flow_hdl", "kind": "function", "name": "hdl_test",
+    "signature": { "inputs": [], "outputs": [] },
+    "nodes": [
+      { "id": "clk", "kind": "signal_pulse", "data": { "params": { "amplitude": 1.0, "period": 1.0, "pulseWidth": 50.0, "phaseDelay": 0.0 } },
+        "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "d1", "kind": "signal_constant", "data": { "params": { "value": 1.0 } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "ff", "kind": "signal_dff", "data": { "params": { "initialValue": 0.0 } },
+        "ports": { "in": [{"id": "d"}, {"id": "clk"}], "out": [{"id": "out"}] } },
+      { "id": "tg", "kind": "signal_tff", "data": { "params": { "initialValue": 0.0 } },
+        "ports": { "in": [{"id": "clk"}], "out": [{"id": "out"}] } },
+      { "id": "cnt", "kind": "signal_counter", "data": { "params": { "modulus": 0.0 } },
+        "ports": { "in": [{"id": "clk"}], "out": [{"id": "out"}] } },
+      { "id": "sff", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } },
+      { "id": "stg", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } },
+      { "id": "scn", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } }
+    ],
+    "edges": [
+      { "id": "e1", "kind": "data", "from": {"node": "d1",  "port": "out"}, "to": {"node": "ff",  "port": "d"} },
+      { "id": "e2", "kind": "data", "from": {"node": "clk", "port": "out"}, "to": {"node": "ff",  "port": "clk"} },
+      { "id": "e3", "kind": "data", "from": {"node": "clk", "port": "out"}, "to": {"node": "tg",  "port": "clk"} },
+      { "id": "e4", "kind": "data", "from": {"node": "clk", "port": "out"}, "to": {"node": "cnt", "port": "clk"} },
+      { "id": "e5", "kind": "data", "from": {"node": "ff",  "port": "out"}, "to": {"node": "sff", "port": "in"} },
+      { "id": "e6", "kind": "data", "from": {"node": "tg",  "port": "out"}, "to": {"node": "stg", "port": "in"} },
+      { "id": "e7", "kind": "data", "from": {"node": "cnt", "port": "out"}, "to": {"node": "scn", "port": "in"} }
+    ]
+  }]
+}

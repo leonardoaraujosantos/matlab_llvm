@@ -312,6 +312,12 @@ private:
   // - `NoiseSeed_` is the per-block RNG state (xorshift64). Reseeded
   //   on `reset()` from `params.seed`.
   std::vector<uint64_t> NoiseSeed_;
+  // - `DigitalLatch_` holds the registered/held output of the clocked
+  //   HDL blocks (signal_dff / signal_tff / signal_counter). They sample
+  //   on a `clk` rising edge (PrevOut_ vs Out_) and otherwise hold, so the
+  //   value lives outside the continuous/discrete state vectors. Seeded on
+  //   `reset()` from `params.initialValue` (#343).
+  std::vector<double> DigitalLatch_;
   // - `MatlabFcnCache_[I]` holds the parsed expression tree for a
   //   `signal_matlab_fcn` block with `params.expression`. Empty
   //   `unique_ptr` means "not a matlab_fcn block" or "the block
