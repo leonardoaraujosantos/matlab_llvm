@@ -1,0 +1,36 @@
+{
+  "schema": "matforge.flowchart", "version": "0.1.0", "entry": "hdl_full_adder",
+  "settings": { "kind": "signal_flow",
+    "solver": { "type": "fixed_step", "algorithm": "ode4", "startTime": 0.0, "stopTime": 8.0, "maxStep": "0.05" } },
+  "flows": [{
+    "id": "flow_fa", "kind": "function", "name": "hdl_full_adder",
+    "signature": { "inputs": [], "outputs": [] },
+    "comment": "Full adder from logic gates: SUM = A XOR B XOR Cin, COUT = (A AND B) OR (Cin AND (A XOR B)). A,B,Cin are square waves of periods 4,2,1 so all 8 input combinations are swept.",
+    "nodes": [
+      { "id": "A",   "kind": "signal_pulse", "data": { "params": { "amplitude": 1.0, "period": 4.0, "pulseWidth": 50.0, "phaseDelay": 0.0 } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "B",   "kind": "signal_pulse", "data": { "params": { "amplitude": 1.0, "period": 2.0, "pulseWidth": 50.0, "phaseDelay": 0.0 } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "Cin", "kind": "signal_pulse", "data": { "params": { "amplitude": 1.0, "period": 1.0, "pulseWidth": 50.0, "phaseDelay": 0.0 } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "axb",  "kind": "signal_logical", "data": { "params": { "op": "XOR" } }, "ports": { "in": [{"id": "in1"}, {"id": "in2"}], "out": [{"id": "out"}] } },
+      { "id": "sum",  "kind": "signal_logical", "data": { "params": { "op": "XOR" } }, "ports": { "in": [{"id": "in1"}, {"id": "in2"}], "out": [{"id": "out"}] } },
+      { "id": "ab",   "kind": "signal_logical", "data": { "params": { "op": "AND" } }, "ports": { "in": [{"id": "in1"}, {"id": "in2"}], "out": [{"id": "out"}] } },
+      { "id": "cab",  "kind": "signal_logical", "data": { "params": { "op": "AND" } }, "ports": { "in": [{"id": "in1"}, {"id": "in2"}], "out": [{"id": "out"}] } },
+      { "id": "cout", "kind": "signal_logical", "data": { "params": { "op": "OR"  } }, "ports": { "in": [{"id": "in1"}, {"id": "in2"}], "out": [{"id": "out"}] } },
+      { "id": "s_sum",  "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } },
+      { "id": "s_cout", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } }
+    ],
+    "edges": [
+      { "id": "x1", "kind": "data", "from": {"node": "A",   "port": "out"}, "to": {"node": "axb", "port": "in1"} },
+      { "id": "x2", "kind": "data", "from": {"node": "B",   "port": "out"}, "to": {"node": "axb", "port": "in2"} },
+      { "id": "x3", "kind": "data", "from": {"node": "axb", "port": "out"}, "to": {"node": "sum", "port": "in1"} },
+      { "id": "x4", "kind": "data", "from": {"node": "Cin", "port": "out"}, "to": {"node": "sum", "port": "in2"} },
+      { "id": "x5", "kind": "data", "from": {"node": "A",   "port": "out"}, "to": {"node": "ab",  "port": "in1"} },
+      { "id": "x6", "kind": "data", "from": {"node": "B",   "port": "out"}, "to": {"node": "ab",  "port": "in2"} },
+      { "id": "x7", "kind": "data", "from": {"node": "Cin", "port": "out"}, "to": {"node": "cab", "port": "in1"} },
+      { "id": "x8", "kind": "data", "from": {"node": "axb", "port": "out"}, "to": {"node": "cab", "port": "in2"} },
+      { "id": "x9", "kind": "data", "from": {"node": "ab",  "port": "out"}, "to": {"node": "cout","port": "in1"} },
+      { "id": "x10","kind": "data", "from": {"node": "cab", "port": "out"}, "to": {"node": "cout","port": "in2"} },
+      { "id": "x11","kind": "data", "from": {"node": "sum", "port": "out"}, "to": {"node": "s_sum","port": "in"} },
+      { "id": "x12","kind": "data", "from": {"node": "cout","port": "out"}, "to": {"node": "s_cout","port": "in"} }
+    ]
+  }]
+}
