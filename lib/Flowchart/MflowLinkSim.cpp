@@ -850,10 +850,10 @@ void MflowLinkSim::reset() {
       // read.
       TransportBuf_[I].Samples.push_back(
           {M_.Solver.StartTime, TransportBuf_[I].InitialOutput});
-    } else if (B.Kind == "signal_noise") {
+    } else if (B.Kind == "signal_noise" || B.Kind == "signal_awgn") {
       // Per-block xorshift seed. The default seed makes the same
       // model reproducible across runs; users can override via
-      // `params.seed`.
+      // `params.seed`. signal_awgn (#343) shares the same RNG state.
       uint64_t Seed =
           static_cast<uint64_t>(paramD(B, "seed", 1.0));
       if (Seed == 0) Seed = 0xC0FFEE12345678ABULL;
@@ -1413,6 +1413,27 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       } else {
         Out_[I] = A * (2.0 * U1 - 1.0);
       }
+    } else if (K == "signal_awgn") {
+      // #343 — Communications AWGN channel. y[n] = x[n] + n[n], with
+      // n ~ N(0, σ²), σ² = signalPower / 10^(snr/10) (the Simulink AWGN
+      // Channel "SNR + input signal power" mode). Reuses the per-block
+      // xorshift64 + Box-Muller Gaussian generator (same seed state as
+      // signal_noise). First dedicated toolbox-domain library block added
+      // through the mflow-toolbox-library-blocks authoring recipe.
+      double X = inputOf(I, "in");
+      double Snr = paramD(B, "snr", 10.0);
+      double Sp = paramD(B, "signalPower", 1.0);
+      if (Sp < 0.0) Sp = 0.0;
+      double Sigma = std::sqrt(Sp / std::pow(10.0, Snr / 10.0));
+      uint64_t &S = NoiseSeed_[I];
+      S ^= S << 13; S ^= S >> 7; S ^= S << 17;
+      double U1 = (S >> 11) / 9007199254740992.0;
+      uint64_t S2 = S ^ 0xDEADBEEFCAFEBABEULL;
+      S2 ^= S2 << 13; S2 ^= S2 >> 7; S2 ^= S2 << 17;
+      double U2 = (S2 >> 11) / 9007199254740992.0;
+      if (U1 < 1e-12) U1 = 1e-12;
+      double G = std::sqrt(-2.0 * std::log(U1)) * std::cos(2.0 * M_PI * U2);
+      Out_[I] = X + Sigma * G;
     } else if (K == "signal_math_fcn") {
       const std::string *F = paramS(B, "function");
       double U  = inputOf(I, "in");
