@@ -1,0 +1,32 @@
+{
+  "schema": "matforge.flowchart", "version": "0.1.0", "entry": "hdl_freq_divider",
+  "settings": { "kind": "signal_flow",
+    "solver": { "type": "fixed_step", "algorithm": "ode4", "startTime": 0.0, "stopTime": 16.0, "maxStep": "0.05" } },
+  "flows": [{
+    "id": "flow_fd", "kind": "function", "name": "hdl_freq_divider",
+    "signature": { "inputs": [], "outputs": [] },
+    "comment": "Synchronous 3-bit binary counter / frequency divider. All T flip-flops share clk; the toggle-enable chain (T1 free, T2.t=Q1, T3.t=Q1 AND Q2) makes Q1=clk/2, Q2=clk/4, Q3=clk/8. Synchronous (not ripple) so it works with the per-major-step register update.",
+    "nodes": [
+      { "id": "clk", "kind": "signal_pulse", "data": { "params": { "amplitude": 1.0, "period": 1.0, "pulseWidth": 50.0, "phaseDelay": 0.0 } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "t1", "kind": "signal_tff", "data": { "params": { "initialValue": 0.0 } }, "ports": { "in": [{"id": "clk"}], "out": [{"id": "out"}] } },
+      { "id": "t2", "kind": "signal_tff", "data": { "params": { "initialValue": 0.0 } }, "ports": { "in": [{"id": "t"}, {"id": "clk"}], "out": [{"id": "out"}] } },
+      { "id": "en3", "kind": "signal_logical", "data": { "params": { "op": "AND" } }, "ports": { "in": [{"id": "in1"}, {"id": "in2"}], "out": [{"id": "out"}] } },
+      { "id": "t3", "kind": "signal_tff", "data": { "params": { "initialValue": 0.0 } }, "ports": { "in": [{"id": "t"}, {"id": "clk"}], "out": [{"id": "out"}] } },
+      { "id": "d2", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } },
+      { "id": "d4", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } },
+      { "id": "d8", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } }
+    ],
+    "edges": [
+      { "id": "ck1", "kind": "data", "from": {"node": "clk", "port": "out"}, "to": {"node": "t1", "port": "clk"} },
+      { "id": "ck2", "kind": "data", "from": {"node": "clk", "port": "out"}, "to": {"node": "t2", "port": "clk"} },
+      { "id": "ck3", "kind": "data", "from": {"node": "clk", "port": "out"}, "to": {"node": "t3", "port": "clk"} },
+      { "id": "te2", "kind": "data", "from": {"node": "t1", "port": "out"}, "to": {"node": "t2", "port": "t"} },
+      { "id": "a1",  "kind": "data", "from": {"node": "t1", "port": "out"}, "to": {"node": "en3", "port": "in1"} },
+      { "id": "a2",  "kind": "data", "from": {"node": "t2", "port": "out"}, "to": {"node": "en3", "port": "in2"} },
+      { "id": "te3", "kind": "data", "from": {"node": "en3", "port": "out"}, "to": {"node": "t3", "port": "t"} },
+      { "id": "o1", "kind": "data", "from": {"node": "t1", "port": "out"}, "to": {"node": "d2", "port": "in"} },
+      { "id": "o2", "kind": "data", "from": {"node": "t2", "port": "out"}, "to": {"node": "d4", "port": "in"} },
+      { "id": "o3", "kind": "data", "from": {"node": "t3", "port": "out"}, "to": {"node": "d8", "port": "in"} }
+    ]
+  }]
+}

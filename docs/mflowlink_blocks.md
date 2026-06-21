@@ -86,6 +86,22 @@ to the `-emit-{systemverilog,verilog,cocotb}` lane (emit lowering is a follow-up
 | `signal_tff`     | ✓ | `initialValue: 0.0`            | opt `t`/`in`, `clk`, opt `reset` | T flip-flop — toggles `Q` on `clk` posedge when `t` is high (free-toggles when `t` unconnected) |
 | `signal_counter` | ✓ | `step: 1.0`, `modulus: 0.0`   | `clk`, opt `reset` | Up counter — `+step` per `clk` posedge; wraps at `modulus` (> 0) |
 
+**Example circuits** (`examples/mflowlink/`, regression-checked in
+`test/Flowchart/SimulateRun`):
+
+| Model | Kind | Demonstrates |
+|---|---|---|
+| `hdl_half_adder.mflow`     | combinational | `SUM = A⊕B`, `CARRY = A·B` from XOR/AND gates |
+| `hdl_full_adder.mflow`     | combinational | `SUM = A⊕B⊕Cin`, `COUT = AB + Cin(A⊕B)` (all 8 inputs swept) |
+| `hdl_shift_register.mflow` | sequential    | 3× `signal_dff` — a serial bit marches one stage per clock |
+| `hdl_freq_divider.mflow`   | sequential    | synchronous 3-bit counter — `signal_tff` + AND enable → clk/2, /4, /8 |
+
+> **Cascade note:** chain registers *synchronously* (all flip-flops on the same
+> `clk`, with combinational toggle-enable logic — as in `hdl_freq_divider`), not
+> as a ripple (one flip-flop's output clocking the next). The register state is
+> committed once per major step, so a downstream flip-flop clocked by an
+> upstream flip-flop's output won't see that output's edge within the same step.
+
 ## Math
 
 | Kind | Tier-C | Params | Notes |

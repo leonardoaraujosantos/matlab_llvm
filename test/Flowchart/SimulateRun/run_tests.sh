@@ -563,6 +563,29 @@ check "tff toggles ~50%"  "awk 'BEGIN{exit !($HD_TFF_MEAN>0.30 && $HD_TFF_MEAN<0
 check "counter ~1/clk"    "awk 'BEGIN{exit !($HD_CNT_END>=4 && $HD_CNT_END<=6)}'" "one increment per clock period (5 periods)"
 check "counter monotonic" "[[ '$HD_MONO' == '0' ]]" "a clock edge must increment exactly once (not per RK4 substep)"
 
+#--- #343: HDL example circuits (combinational + sequential) --------------
+# Combinational — half adder: SUM=A XOR B, CARRY=A AND B. A=clk/2, B=clk/1.
+HA="$("$MATLABC" -simulate "$EX/hdl_half_adder.mflow")"
+HA_S=$(printf '%s\n' "$HA" | awk -F, '$1+0==0.75{print $2; exit}')  # A1 B0 -> sum1
+HA_C=$(printf '%s\n' "$HA" | awk -F, '$1+0==0.25{print $3; exit}')  # A1 B1 -> carry1
+check "half_adder header" "[[ '$(printf '%s\n' "$HA" | head -1)' == 't,s_sum,s_carry' ]]" ""
+check "half_adder SUM=A^B"   "awk 'BEGIN{exit !(($HA_S-1)^2<1e-9)}'" "A=1,B=0 ⇒ sum=1"
+check "half_adder CARRY=A&B"  "awk 'BEGIN{exit !(($HA_C-1)^2<1e-9)}'" "A=1,B=1 ⇒ carry=1"
+# Combinational — full adder: at t=0.25 A=B=Cin=1 ⇒ sum=1, cout=1.
+FA="$("$MATLABC" -simulate "$EX/hdl_full_adder.mflow")"
+FA_S=$(printf '%s\n' "$FA" | awk -F, '$1+0==0.25{print $2; exit}')
+FA_C=$(printf '%s\n' "$FA" | awk -F, '$1+0==0.25{print $3; exit}')
+check "full_adder sum(1,1,1)=1"  "awk 'BEGIN{exit !(($FA_S-1)^2<1e-9)}'" ""
+check "full_adder cout(1,1,1)=1" "awk 'BEGIN{exit !(($FA_C-1)^2<1e-9)}'" ""
+# Sequential — shift register: the input bit reaches all 3 stages (max=1 each).
+SR="$("$MATLABC" -simulate "$EX/hdl_shift_register.mflow")"
+SR_M=$(printf '%s\n' "$SR" | awk -F, 'NR>1{if($2>m1)m1=$2; if($3>m2)m2=$3; if($4>m3)m3=$4} END{print (m1>0.5&&m2>0.5&&m3>0.5)?1:0}')
+check "shift_register bit marches q1→q2→q3" "[[ '$SR_M' == '1' ]]" "every stage must latch the shifted bit"
+# Sequential — synchronous freq divider: q1:q2:q3 transition counts ≈ 2:1 each (÷2,÷4,÷8).
+FD="$("$MATLABC" -simulate "$EX/hdl_freq_divider.mflow")"
+FD_R=$(printf '%s\n' "$FD" | awk -F, 'NR>1{for(i=2;i<=4;i++){v=($i>0.5); if(seen[i]&&v!=p[i])tr[i]++; p[i]=v; seen[i]=1}} END{print (tr[2]>tr[3] && tr[3]>tr[4] && tr[4]>=3)?1:0}')
+check "freq_divider /2 > /4 > /8" "[[ '$FD_R' == '1' ]]" "each T-FF stage halves the toggle rate"
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 exit $(( fail > 0 ? 1 : 0 ))

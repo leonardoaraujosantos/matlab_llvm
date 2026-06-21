@@ -1,0 +1,26 @@
+{
+  "schema": "matforge.flowchart", "version": "0.1.0", "entry": "hdl_half_adder",
+  "settings": { "kind": "signal_flow",
+    "solver": { "type": "fixed_step", "algorithm": "ode4", "startTime": 0.0, "stopTime": 4.0, "maxStep": "0.05" } },
+  "flows": [{
+    "id": "flow_ha", "kind": "function", "name": "hdl_half_adder",
+    "signature": { "inputs": [], "outputs": [] },
+    "comment": "Half adder: SUM = A XOR B, CARRY = A AND B. A and B are square waves of different periods so the (A,B) truth table is swept over time.",
+    "nodes": [
+      { "id": "A", "kind": "signal_pulse", "data": { "params": { "amplitude": 1.0, "period": 2.0, "pulseWidth": 50.0, "phaseDelay": 0.0 } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "B", "kind": "signal_pulse", "data": { "params": { "amplitude": 1.0, "period": 1.0, "pulseWidth": 50.0, "phaseDelay": 0.0 } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "sum",   "kind": "signal_logical", "data": { "params": { "op": "XOR" } }, "ports": { "in": [{"id": "in1"}, {"id": "in2"}], "out": [{"id": "out"}] } },
+      { "id": "carry", "kind": "signal_logical", "data": { "params": { "op": "AND" } }, "ports": { "in": [{"id": "in1"}, {"id": "in2"}], "out": [{"id": "out"}] } },
+      { "id": "s_sum",   "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } },
+      { "id": "s_carry", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } }
+    ],
+    "edges": [
+      { "id": "e1", "kind": "data", "from": {"node": "A", "port": "out"}, "to": {"node": "sum",   "port": "in1"} },
+      { "id": "e2", "kind": "data", "from": {"node": "B", "port": "out"}, "to": {"node": "sum",   "port": "in2"} },
+      { "id": "e3", "kind": "data", "from": {"node": "A", "port": "out"}, "to": {"node": "carry", "port": "in1"} },
+      { "id": "e4", "kind": "data", "from": {"node": "B", "port": "out"}, "to": {"node": "carry", "port": "in2"} },
+      { "id": "e5", "kind": "data", "from": {"node": "sum",   "port": "out"}, "to": {"node": "s_sum",   "port": "in"} },
+      { "id": "e6", "kind": "data", "from": {"node": "carry", "port": "out"}, "to": {"node": "s_carry", "port": "in"} }
+    ]
+  }]
+}
