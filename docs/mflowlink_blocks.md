@@ -168,3 +168,40 @@ diff against the IDE side:
 3. Defaults match the IDE's `SignalFlowParamSpec`. If the runtime
    needs a different default for some reason (e.g. a numerical
    stability guard), the IDE must change too.
+
+## Adding a toolbox library block (#343)
+
+The mflowLink library is mostly Simulink-core blocks plus a few toolbox
+blocks (`signal_mpc_move`, `signal_pid`, `signal_state_space`,
+`signal_transfer_fcn`). To expose more toolbox capability as drag-and-drop
+blocks, follow this recipe — each block is a small, mechanical change. The
+catalog of which blocks to add per domain lives in the OpenSpec change
+`openspec/changes/mflow-toolbox-library-blocks/tasks.md`.
+
+**Function-first rule:** add a `signal_*` block only where drag-and-drop
+time-domain modeling beats wiring a generic MATLAB Function block
+(`signal_matlab_fcn`). The toolbox *math* already exists at the function
+level; a block is a thin adapter, not a re-implementation.
+
+Per-block checklist:
+
+1. **Register the kind + classification** in `lib/Flowchart/SignalFlowLowering.cpp`
+   (`add("signal_xyz", {directFeedthrough, …})`): sample-time class (continuous /
+   discrete-with-period / constant) and whether it's a loop-breaker.
+2. **Simulator evaluator** in `lib/Flowchart/MflowLinkSim.cpp`: read params +
+   input ports, compute the output(s), and **delegate to the existing toolbox
+   runtime** (`runtime/toolbox/<domain>/runtime_*.cpp`, e.g. `matlab_fft_c`)
+   rather than re-coding the algorithm. Scalar output → `Out_[I]`; a
+   vector/frame output → the `VecOut_[I]` width path; several output ports →
+   `PortOut_[I]["outK"]` (the per-output-port routing from #344/#345).
+3. **Params row** in this file (camelCase keys, defaults) — in lockstep with
+   the IDE's `SignalFlowParamSpec`.
+4. **`SimulateRun` regression** — an `examples/mflowlink/*.mflow` fixture and
+   `check`s in `test/Flowchart/SimulateRun/run_tests.sh` asserting an
+   analytically-known value.
+5. **Optional `-emit-c`/`-emit-cpp` lowering** when codegen of the block is
+   wanted.
+6. **Editor parity** — add the matching `NodeKind` in the IDE repo, and update
+   the snapshot in `test/Flowchart/BlockKindParity/registered_block_kinds.txt`.
+   The `flowchart-block-kind-parity` ctest fails until the snapshot matches the
+   registered kinds, so a new block can't silently skip the editor.
