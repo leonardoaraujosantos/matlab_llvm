@@ -80,7 +80,7 @@ shape machinery — no new wire type).
 - [x] 5.1 2-D-signal-on-a-wire question — RESOLVED (flattened vector + shape; see `mflow-2d-image-signals/design.md`)
 - [x] 5.2 `signal_image_source` — constant grayscale image source (rows/cols/data)
 - [x] 5.3 `signal_image_filter` — 2-D convolution (box/gaussian3/sobelx/sobely or kernel literal, zero-padded)
-- [ ] 5.4 `signal_color_space` — color-space conversion (color follow-on; `channels > 1` path, `mflow-2d-image-signals` group 6)
+- [x] 5.4 `signal_color_space` — color-space conversion — DONE (PR #379): RGB↔grayscale (Rec.601 luma / replicate) over interleaved triples; the rank-3 color-image path is the `mflow-nd-signals` model (image_source `channels`).
 - [x] 5.5 `signal_threshold` — per-pixel binarize
 
 ## 6. RF catalog (follow-on PRs)
