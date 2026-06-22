@@ -92,6 +92,10 @@ const std::map<std::string, KindInfo> &kindTable() {
     // Deep Learning (#343) — feedforward MLP inference in a loop. One hidden
     // layer: y = W2·act(W1·x + b1) + b2. Stateless, direct-feedthrough.
     add("signal_dnn_predict",  {true, true, false, false, false, FIM});
+    // Reinforcement Learning (#343) — trained deterministic policy in the loop.
+    // An MLP maps state → action; discrete picks argmax (action index),
+    // continuous emits actionScale·tanh(raw). Stateless, direct-feedthrough.
+    add("signal_rl_agent",     {true, true, false, false, false, FIM});
     add("signal_transport_delay",
                                {true, true, false, true,  false, CONT});
     // Discrete.
@@ -972,6 +976,15 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
       // Deep Learning (#343) — output dim = rows of the output-layer weight W2.
       int Mr = matrixRows(N.getParam("W2") ? *N.getParam("W2") : "");
       B.OutWidth = Mr > 0 ? Mr : 1;
+      B.OutRows = B.OutWidth;
+      B.OutCols = 1;
+    } else if (N.Kind == "signal_rl_agent") {
+      // RL (#343) — a discrete policy emits a scalar action index (argmax); a
+      // continuous policy emits one bounded action per output (rows of W2).
+      const std::string *AT = N.getParam("actionType");
+      bool Discrete = !AT || *AT == "discrete";
+      int Mr = matrixRows(N.getParam("W2") ? *N.getParam("W2") : "");
+      B.OutWidth = Discrete ? 1 : (Mr > 0 ? Mr : 1);
       B.OutRows = B.OutWidth;
       B.OutCols = 1;
     } else if (N.Kind == "signal_psk_demod" || N.Kind == "signal_qam_demod") {

@@ -61,6 +61,7 @@ signal_rate_transition
 signal_relay
 signal_relop
 signal_reshape
+signal_rl_agent
 signal_rom
 signal_running_stats
 signal_saturation

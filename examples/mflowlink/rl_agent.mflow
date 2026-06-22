@@ -1,0 +1,24 @@
+{
+  "schema": "matforge.flowchart", "version": "0.1.0", "entry": "rl_test",
+  "settings": { "kind": "signal_flow",
+    "solver": { "type": "fixed_step", "algorithm": "ode4", "startTime": 0.0, "stopTime": 0.2, "maxStep": "0.1" } },
+  "flows": [{
+    "id": "flow_rl", "kind": "function", "name": "rl_test",
+    "signature": { "inputs": [], "outputs": [] },
+    "nodes": [
+      { "id": "sd", "kind": "signal_constant", "data": { "params": { "value": 1.0 } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "ad", "kind": "signal_rl_agent", "data": { "params": { "W1": "1", "b1": "0", "W2": "2; 5; 1", "b2": "0 0 0", "activation": "linear", "actionType": "discrete" } }, "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "sda", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } },
+
+      { "id": "sc", "kind": "signal_constant", "data": { "params": { "value": 1.0 } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "ac", "kind": "signal_rl_agent", "data": { "params": { "W1": "1", "b1": "0", "W2": "10", "b2": "0", "activation": "linear", "actionType": "continuous", "actionScale": 2.0 } }, "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "sca", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } }
+    ],
+    "edges": [
+      { "id": "e0", "kind": "data", "from": {"node": "sd", "port": "out"}, "to": {"node": "ad", "port": "in"} },
+      { "id": "e1", "kind": "data", "from": {"node": "ad", "port": "out"}, "to": {"node": "sda", "port": "in"} },
+      { "id": "e2", "kind": "data", "from": {"node": "sc", "port": "out"}, "to": {"node": "ac", "port": "in"} },
+      { "id": "e3", "kind": "data", "from": {"node": "ac", "port": "out"}, "to": {"node": "sca", "port": "in"} }
+    ]
+  }]
+}
