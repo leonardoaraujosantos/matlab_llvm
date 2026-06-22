@@ -102,6 +102,13 @@ const std::map<std::string, KindInfo> &kindTable() {
     // through the same discrete-filter difference-engine, with named SOS
     // coefficients (b0..b2 / a0..a2) instead of num/den polynomials.
     add("signal_biquad",     {true, true, false, true, false, DISC});
+    // DSP (#343) — streaming first-order filters, also discrete_filter presets:
+    //   signal_lowpass   one-pole EMA   H(z) = α / (1 - (1-α)z⁻¹)
+    //   signal_highpass  one-pole HP    H(z) = α(1 - z⁻¹) / (1 - α z⁻¹)
+    //   signal_dcblock   DC blocker     H(z) = (1 - z⁻¹) / (1 - r z⁻¹)
+    add("signal_lowpass",    {true, true, false, true, false, DISC});
+    add("signal_highpass",   {true, true, false, true, false, DISC});
+    add("signal_dcblock",    {true, true, false, true, false, DISC});
     add("signal_rate_transition",
                              {true, true, false, true, false, DISC});
     // HDL / digital sequential elements (#343) — clocked registers driven
@@ -1089,6 +1096,8 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
                N.Kind == "signal_discrete_integrator" ||
                N.Kind == "signal_discrete_filter" ||
                N.Kind == "signal_biquad" ||
+               N.Kind == "signal_lowpass" || N.Kind == "signal_highpass" ||
+               N.Kind == "signal_dcblock" ||
                N.Kind == "signal_rate_transition") {
       // Discrete period: `params.sampleTime`, else numeric
       // `data.sample_time`, else 1 s. Every discrete block keys

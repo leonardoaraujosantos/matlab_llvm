@@ -47,7 +47,7 @@ econ, finance, curvefit, optim, gads, PDE, symbolic, GPU, ident (batch/frequency
 - [x] 3.2 `signal_window` — windowing — DONE. Hann (default) / Hamming / Blackman / rect taper over an `n`-point frame; `windowCoef` helper. `window_taper.mflow` + checks (Hann N=4 → [0, 0.75, 0.75, 0]).
 - [x] 3.3 `signal_spectrum` — power-spectrum sink — DONE. Real n-frame → `|X[k]|²` (width n) via the same direct DFT as `signal_fft`. `spectrum.mflow` + SimulateRun (DC frame → all power at bin 0; alternating frame → all power at the Nyquist bin).
 - [x] 3.4 `signal_biquad` — Biquad/SOS section — DONE. 2nd-order section routed through the existing discrete-filter difference engine (TFCache_/Z_/FirHistory_/fireDiscreteTicks), differing only in building num/den from SOS coefficients (`b`/`a` vectors or `b0..b2`/`a0..a2` scalars; parseSimMatrix so space- and comma-separated both work). `biquad_lowpass.mflow` + SimulateRun checks (unity DC gain on a noisy constant, ~5× variance reduction, genuine 2nd-order transient).
-- [ ] 3.5 `signal_dcblock` / `signal_lowpass` / `signal_highpass` — streaming filters (DSP `*_step` runtimes; need the obj-step delegation pattern)
+- [x] 3.5 `signal_dcblock` / `signal_lowpass` / `signal_highpass` — streaming filters — DONE. Implemented as 1st-order `discrete_filter` presets (build num/den from `alpha`/`r` and route through the shared difference engine — no separate `*_step` runtime needed). `streaming_filters.mflow` + SimulateRun (lowpass passes DC with transient; highpass & dcblock reject DC → 0). Added an `isDiscreteIirKind()` helper covering discrete_filter/biquad/lowpass/highpass/dcblock.
 
 ## 4. Communications catalog (follow-on PRs)
 
