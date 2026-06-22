@@ -106,11 +106,14 @@ const std::set<std::string> &tier1Kinds() {
       // Ts*B*u[k]; y = C*x. Contributes N state slots (N = A's row
       // count).
       "signal_state_space",
-      // #343 HDL — D flip-flop. One persistent register; the `clk` input
-      // maps to the module clock (single-clock design), so it emits as
-      // `always_ff @(posedge clk) Q <= D`. (signal_tff / signal_counter
-      // simulate but are not yet SV-lowered.)
-      "signal_dff",
+      // #343 HDL — clocked registers. One persistent slot each; the `clk`
+      // input maps to the module clock (single-clock design):
+      //   signal_dff     → `always_ff @(posedge clk) Q <= D`
+      //   signal_tff     → toggle: Q_next = Q + T*(1 - 2*Q)
+      //   signal_counter → up-count: Q_next = Q + step (mod wrap if set)
+      // The toggle/counter next-state forms are pure arithmetic (no branch)
+      // so they stay synthesizable through HWLegalize.
+      "signal_dff", "signal_tff", "signal_counter",
       // Tier 5 — inline user MATLAB. The block's `params.function_body`
       // becomes a sibling local function in the same TU; the call
       // site emits as `<out> = <fn_name>(<inputs...>)`. SV emit
@@ -172,8 +175,10 @@ bool isStatefulKind(const std::string &K) {
          // #343 HDL: clocked registers. The block's `clk` input maps to the
          // module clock (single-clock design), so a D flip-flop emits as a
          // one-element persistent register updated every clock — exactly the
-         // unit_delay shape (`always_ff @(posedge clk) Q <= D`).
-         K == "signal_dff";
+         // unit_delay shape (`always_ff @(posedge clk) Q <= D`). signal_tff
+         // (toggle) and signal_counter (increment+wrap) carry the same single
+         // slot with a conditional/arithmetic next-state form.
+         K == "signal_dff" || K == "signal_tff" || K == "signal_counter";
 }
 
 // Tier-5i — does this block's output equation overwrite the
@@ -1903,6 +1908,48 @@ matlab::Function *lowerSubsystemImpl(
         NextExpr = Opts.StateAsPersistent
                        ? D
                        : B.bin(BinOp::Add, D, B.number(0.0));
+      } else if (N->Kind == "signal_tff") {
+        // #343 toggle FF: Q_next = Q + T*(1 - 2*Q) — arithmetic (no branch),
+        // so it stays synthesizable. With T=1 this is 1-Q (toggle); T=0 holds
+        // Q. If no `t` data port is wired, toggle every clock (T≡1 → 1-Q).
+        std::string LocalRead = B.WrapFi ? VarOfNode[N->Id] : CurS;
+        Expr *T = nullptr;
+        for (size_t pi = 0; pi < Ports.size() && pi < Ins.size(); ++pi)
+          if (Ports[pi] == "t" || Ports[pi] == "in" || Ports[pi] == "in1") {
+            T = Ins[pi];
+            break;
+          }
+        Expr *One = B.WrapFi ? B.lit(1.0) : B.number(1.0);
+        if (T) {
+          Expr *Two = B.WrapFi ? B.lit(2.0) : B.number(2.0);
+          Expr *OneMinus2Q = B.bin(BinOp::Sub, One,
+                                   B.bin(BinOp::Mul, Two, B.name(LocalRead)));
+          NextExpr = B.bin(BinOp::Add, B.name(LocalRead),
+                           B.bin(BinOp::Mul, T, OneMinus2Q));
+        } else {
+          NextExpr = B.bin(BinOp::Sub, One, B.name(LocalRead));
+        }
+      } else if (N->Kind == "signal_counter") {
+        // #343 up-counter: Q_next = Q + step, wrapping to [0, mod) when a
+        // modulus is set. The wrap is `inc - mod*(inc >= mod)` — pure
+        // arithmetic+comparison matching the simulator's single subtract.
+        std::string LocalRead = B.WrapFi ? VarOfNode[N->Id] : CurS;
+        double Step = paramD(*N, "step", 1.0);
+        double Mod = paramD(*N, "modulus", 0.0);
+        // Fresh sub-tree per use — AST nodes aren't shared between parents.
+        auto inc = [&]() {
+          return B.bin(BinOp::Add, B.name(LocalRead),
+                       B.WrapFi ? B.lit(Step) : B.number(Step));
+        };
+        if (Mod > 0.0) {
+          Expr *ModGe = B.WrapFi ? B.lit(Mod) : B.number(Mod);
+          Expr *ModSub = B.WrapFi ? B.lit(Mod) : B.number(Mod);
+          Expr *Ge = B.bin(BinOp::Ge, inc(), ModGe);
+          Expr *Wrap = B.bin(BinOp::Mul, ModSub, Ge);
+          NextExpr = B.bin(BinOp::Sub, inc(), Wrap);
+        } else {
+          NextExpr = inc();
+        }
       } else if (N->Kind == "signal_discrete_integrator" ||
                  N->Kind == "signal_integrator") {
         // signal_integrator (continuous) gets auto-discretised here
@@ -3937,6 +3984,37 @@ matlab::TranslationUnit *buildDiagramTU(
             break;
           }
         NextExpr = D ? D : (Ins.empty() ? B.number(0.0) : Ins.front());
+      } else if (N->Kind == "signal_tff") {
+        // #343 toggle FF: Q_next = Q + T*(1 - 2*Q); 1-Q if no `t` port.
+        Expr *T = nullptr;
+        for (size_t pi = 0; pi < Ports.size() && pi < Ins.size(); ++pi)
+          if (Ports[pi] == "t" || Ports[pi] == "in" || Ports[pi] == "in1") {
+            T = Ins[pi];
+            break;
+          }
+        if (T) {
+          Expr *OneMinus2Q =
+              B.bin(BinOp::Sub, B.number(1.0),
+                    B.bin(BinOp::ElemMul, B.number(2.0), B.name(Slot->Var)));
+          NextExpr = B.bin(BinOp::Add, B.name(Slot->Var),
+                           B.bin(BinOp::ElemMul, T, OneMinus2Q));
+        } else {
+          NextExpr = B.bin(BinOp::Sub, B.number(1.0), B.name(Slot->Var));
+        }
+      } else if (N->Kind == "signal_counter") {
+        // #343 up-counter: Q_next = Q + step, wrap to [0,mod) if mod set.
+        double Step = paramD(*N, "step", 1.0);
+        double Mod = paramD(*N, "modulus", 0.0);
+        auto inc = [&]() {
+          return B.bin(BinOp::Add, B.name(Slot->Var), B.number(Step));
+        };
+        if (Mod > 0.0) {
+          Expr *Ge = B.bin(BinOp::Ge, inc(), B.number(Mod));
+          NextExpr = B.bin(BinOp::Sub, inc(),
+                           B.bin(BinOp::ElemMul, B.number(Mod), Ge));
+        } else {
+          NextExpr = inc();
+        }
       } else if (N->Kind == "signal_discrete_integrator" ||
                  N->Kind == "signal_integrator") {
         Expr *U = Ins.empty() ? B.number(0.0) : Ins.front();

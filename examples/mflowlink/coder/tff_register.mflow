@@ -1,0 +1,17 @@
+{
+  "schema": "matforge.flowchart", "version": "0.1.0", "entry": "tff_reg",
+  "settings": { "kind": "signal_flow" },
+  "flows": [{
+    "id": "flow_tff", "kind": "function", "name": "tff_reg",
+    "signature": { "inputs": ["t"], "outputs": ["q"] },
+    "nodes": [
+      { "id": "tin", "kind": "signal_inport", "data": { "params": {} }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "ff",  "kind": "signal_tff", "data": { "params": { "initialValue": 0.0 } }, "ports": { "in": [{"id": "t"}], "out": [{"id": "out"}] } },
+      { "id": "qout", "kind": "signal_outport", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } }
+    ],
+    "edges": [
+      { "id": "e1", "kind": "data", "from": {"node": "tin", "port": "out"}, "to": {"node": "ff", "port": "t"} },
+      { "id": "e2", "kind": "data", "from": {"node": "ff", "port": "out"}, "to": {"node": "qout", "port": "in"} }
+    ]
+  }]
+}

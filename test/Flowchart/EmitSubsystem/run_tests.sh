@@ -381,6 +381,57 @@ sv_dff_smoke() {
 }
 sv_dff_smoke
 
+# #343 HDL — signal_tff → SystemVerilog. A toggle flip-flop carries the same
+# single posedge register as the DFF; its next-state is the arithmetic toggle
+# `Q + T*(1 - 2*Q)`, so the always_ff/register structure must be present and
+# the design must pass -check-synthesizable.
+sv_tff_smoke() {
+  local sv="$SCRATCH/tff_register.sv"
+  "$MATLABC" -emit-sv "$EX/tff_register.mflow" --subsystem tff_reg \
+       > "$sv" 2> "$SCRATCH/emit.err"
+  if ! "$MATLABC" -emit-sv "$EX/tff_register.mflow" --subsystem tff_reg \
+       -check-synthesizable > /dev/null 2> "$SCRATCH/chk.err"; then
+    fail=$((fail+1)); fails+=("tff_register (-check-synthesizable failed)")
+    sed 's/^/  /' "$SCRATCH/chk.err" >&2; return
+  fi
+  if ! grep -q "module tff_reg" "$sv"; then
+    fail=$((fail+1)); fails+=("tff_register (missing module)"); return
+  fi
+  if ! grep -q "always_ff @(posedge clk" "$sv"; then
+    fail=$((fail+1)); fails+=("tff_register (no always_ff)"); return
+  fi
+  if ! grep -q "s_ff <= s_ff_next" "$sv"; then
+    fail=$((fail+1)); fails+=("tff_register (register not clocked)"); return
+  fi
+  pass=$((pass+1))
+}
+sv_tff_smoke
+
+# #343 HDL — signal_counter → SystemVerilog. An up-counter is a posedge
+# register whose next-state is `Q + step` (with a modulus wrap). Verify the
+# register structure and that the design is synthesizable.
+sv_counter_smoke() {
+  local sv="$SCRATCH/counter_register.sv"
+  "$MATLABC" -emit-sv "$EX/counter_register.mflow" --subsystem counter_reg \
+       > "$sv" 2> "$SCRATCH/emit.err"
+  if ! "$MATLABC" -emit-sv "$EX/counter_register.mflow" --subsystem counter_reg \
+       -check-synthesizable > /dev/null 2> "$SCRATCH/chk.err"; then
+    fail=$((fail+1)); fails+=("counter_register (-check-synthesizable failed)")
+    sed 's/^/  /' "$SCRATCH/chk.err" >&2; return
+  fi
+  if ! grep -q "module counter_reg" "$sv"; then
+    fail=$((fail+1)); fails+=("counter_register (missing module)"); return
+  fi
+  if ! grep -q "always_ff @(posedge clk" "$sv"; then
+    fail=$((fail+1)); fails+=("counter_register (no always_ff)"); return
+  fi
+  if ! grep -q "s_cnt <= s_cnt_next" "$sv"; then
+    fail=$((fail+1)); fails+=("counter_register (register not clocked)"); return
+  fi
+  pass=$((pass+1))
+}
+sv_counter_smoke
+
 # Tier-5d — saturation → SV. The pure-arith form (used for
 # software targets) routes through bool-by-fi multiplication
 # that the SV synthcheck rejects. HDL mode now emits an explicit

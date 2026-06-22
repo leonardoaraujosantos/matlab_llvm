@@ -68,7 +68,7 @@ verilog,cocotb}` lane. Mux/Demux + logic gates already ship (`signal_mux`/`demux
 - [ ] 4b.2 `signal_jkff` / `signal_srff` — JK / SR flip-flops
 - [ ] 4b.3 `signal_shift_register` — N-bit serial/parallel shift register block (the example wires DFFs by hand today)
 - [ ] 4b.4 `signal_ram` / `signal_rom` — addressable memory (addr/data/we ports; vector state)
-- [ ] 4b.5b emit-SystemVerilog for `signal_tff` (toggle) and `signal_counter` (increment+wrap) — the conditional next-state forms
+- [x] 4b.5b emit-SystemVerilog for `signal_tff` (toggle) and `signal_counter` (increment+wrap) — DONE. Arithmetic next-state (`Q + T*(1-2Q)`, `inc - mod*(inc>=mod)`) keeps both branch-free and synthesizable; `sv_tff_smoke`/`sv_counter_smoke` in EmitSubsystem assert the always_ff register + `-check-synthesizable` clean
 
 ## 5. Computer Vision / Image Processing catalog (follow-on PRs)
 
