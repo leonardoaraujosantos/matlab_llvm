@@ -1,0 +1,24 @@
+{
+  "schema": "matforge.flowchart", "version": "0.1.0", "entry": "dnn_test",
+  "settings": { "kind": "signal_flow",
+    "solver": { "type": "fixed_step", "algorithm": "ode4", "startTime": 0.0, "stopTime": 0.2, "maxStep": "0.1" } },
+  "flows": [{
+    "id": "flow_dnn", "kind": "function", "name": "dnn_test",
+    "signature": { "inputs": [], "outputs": [] },
+    "nodes": [
+      { "id": "xa", "kind": "signal_constant", "data": { "params": { "value": "[3 -2]" } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "nna", "kind": "signal_dnn_predict", "data": { "params": { "W1": "1 0; 0 1", "b1": "0 0", "W2": "1 1", "b2": "0", "activation": "relu" } }, "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "sa", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } },
+
+      { "id": "xb", "kind": "signal_constant", "data": { "params": { "value": 1.0 } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "nnb", "kind": "signal_dnn_predict", "data": { "params": { "W1": "2; -3", "b1": "1 1", "W2": "1 0; 0 1", "b2": "0 0", "activation": "relu" } }, "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "sb", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } }
+    ],
+    "edges": [
+      { "id": "e0", "kind": "data", "from": {"node": "xa", "port": "out"}, "to": {"node": "nna", "port": "in"} },
+      { "id": "e1", "kind": "data", "from": {"node": "nna", "port": "out"}, "to": {"node": "sa", "port": "in"} },
+      { "id": "e2", "kind": "data", "from": {"node": "xb", "port": "out"}, "to": {"node": "nnb", "port": "in"} },
+      { "id": "e3", "kind": "data", "from": {"node": "nnb", "port": "out"}, "to": {"node": "sb", "port": "in"} }
+    ]
+  }]
+}

@@ -18,6 +18,7 @@ signal_dff
 signal_discrete_filter
 signal_discrete_integrator
 signal_display
+signal_dnn_predict
 signal_enabled_subsystem
 signal_error_rate
 signal_fft
