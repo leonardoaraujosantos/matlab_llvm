@@ -1,0 +1,30 @@
+{
+  "schema": "matforge.flowchart", "version": "0.1.0", "entry": "img_test",
+  "settings": { "kind": "signal_flow",
+    "solver": { "type": "fixed_step", "algorithm": "ode4", "startTime": 0.0, "stopTime": 0.2, "maxStep": "0.1" } },
+  "flows": [{
+    "id": "flow_img", "kind": "function", "name": "img_test",
+    "signature": { "inputs": [], "outputs": [] },
+    "nodes": [
+      { "id": "imgC", "kind": "signal_image_source", "data": { "params": { "rows": 3, "cols": 3, "data": "5 5 5 5 5 5 5 5 5" } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "boxF", "kind": "signal_image_filter", "data": { "params": { "type": "box" } }, "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "sBox", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } },
+
+      { "id": "imgE", "kind": "signal_image_source", "data": { "params": { "rows": 3, "cols": 3, "data": "0 0 1 0 0 1 0 0 1" } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "sobF", "kind": "signal_image_filter", "data": { "params": { "type": "sobelx" } }, "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "sSob", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } },
+
+      { "id": "imgR", "kind": "signal_image_source", "data": { "params": { "rows": 2, "cols": 2, "data": "0.2 0.8 0.4 0.6" } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "thr", "kind": "signal_threshold", "data": { "params": { "level": 0.5 } }, "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "sThr", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } }
+    ],
+    "edges": [
+      { "id": "e0", "kind": "data", "from": {"node": "imgC", "port": "out"}, "to": {"node": "boxF", "port": "in"} },
+      { "id": "e1", "kind": "data", "from": {"node": "boxF", "port": "out"}, "to": {"node": "sBox", "port": "in"} },
+      { "id": "e2", "kind": "data", "from": {"node": "imgE", "port": "out"}, "to": {"node": "sobF", "port": "in"} },
+      { "id": "e3", "kind": "data", "from": {"node": "sobF", "port": "out"}, "to": {"node": "sSob", "port": "in"} },
+      { "id": "e4", "kind": "data", "from": {"node": "imgR", "port": "out"}, "to": {"node": "thr", "port": "in"} },
+      { "id": "e5", "kind": "data", "from": {"node": "thr", "port": "out"}, "to": {"node": "sThr", "port": "in"} }
+    ]
+  }]
+}

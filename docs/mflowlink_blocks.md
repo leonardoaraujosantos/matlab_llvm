@@ -199,6 +199,30 @@ channel → demodulate → BER` link on the canvas.
 symbol picks up noise on both axes — the `mod → awgn → demod → error_rate` chain
 measures real BER-vs-SNR on the canvas.
 
+## 2-D image signals (#343)
+
+A grayscale image flows on a wire as a **flattened row-major vector** of width
+`rows·cols`, carrying its 2-D shape in the signal's `(rows, cols)` metadata — the
+same machinery vector `signal_constant` / `signal_reshape` already use. Element
+`(r, c)` lives at flat index `r·cols + c`. Because the element count is unchanged,
+1-D blocks and width inference are unaffected — an image is "a vector with a shape",
+and a scope on it renders `[row,col]`-indexed columns (`sBox[2,2]`, …).
+
+| Block | Params | Notes |
+|---|---|---|
+| `signal_image_source` | `rows`, `cols`, `data` | Constant grayscale image source. `data` is the row-major pixel list (any layout; flattened). Lowering rejects a `data` whose pixel count ≠ `rows·cols` |
+| `signal_image_filter` | `kernel` or `type` | 2-D correlation, zero-padded borders, output shape = input. `type`: `box` / `gaussian3` / `sobelx` / `sobely`, or an explicit `kernel` matrix literal |
+| `signal_threshold` | `level: 0.5` | Per-pixel binarize: `1` where pixel `> level`, else `0`; shape preserved |
+
+**Worked example** (`image_blocks.mflow`): a 3×3 constant-5 image through a
+normalized **box** filter keeps its interior (`center = 5`, unity DC) and loses the
+zero-padded border; a vertical-edge image through **Sobel-x** gives a strong center
+response (`4`); a 2×2 ramp **thresholds** at 0.5 to `[0 1; 0 1]`.
+
+Color (`channels > 1`) and a `signal_color_space` block are scoped as a follow-on
+(OpenSpec `mflow-2d-image-signals` group 6) — the grayscale path validates the
+representation first.
+
 ## Math
 
 | Kind | Tier-C | Params | Notes |

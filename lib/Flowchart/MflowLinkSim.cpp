@@ -416,6 +416,26 @@ static bool isDiscreteIirKind(const std::string &K) {
          K == "signal_dcblock";
 }
 
+// #343 Vision — named 3×3 image-filter kernels (row-major). Returns false for
+// an unknown name so the caller can fall back to an explicit `kernel` literal.
+static bool namedKernel(const std::string &Name, std::vector<double> &K,
+                        int &Kr, int &Kc) {
+  Kr = 3; Kc = 3;
+  if (Name == "box") {
+    K.assign(9, 1.0 / 9.0);
+  } else if (Name == "gaussian3") {
+    K = {1, 2, 1, 2, 4, 2, 1, 2, 1};
+    for (auto &v : K) v /= 16.0;
+  } else if (Name == "sobelx") {
+    K = {-1, 0, 1, -2, 0, 2, -1, 0, 1};
+  } else if (Name == "sobely") {
+    K = {-1, -2, -1, 0, 0, 0, 1, 2, 1};
+  } else {
+    return false;
+  }
+  return true;
+}
+
 // DSP window taper coefficient at index k of an N-point window (#343).
 // Supported: rectangular ("rect"/"none"), Hamming, Blackman; default Hann.
 static double windowCoef(const std::string *Type, int k, int N) {
@@ -1626,6 +1646,66 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
         }
       }
       Out_[I] = VecOut_[I].empty() ? 0.0 : VecOut_[I].front();
+    } else if (K == "signal_image_source" || K == "signal_image_filter" ||
+               K == "signal_threshold") {
+      // #343 Vision — grayscale image blocks over the flattened row-major 2-D
+      // signal (width = rows·cols, shape in OutRows_/OutCols_). All stateless.
+      if (K == "signal_image_source") {
+        // Emit the constant image from `data` (any layout; flattened
+        // row-major). Shape/width were stamped at lowering.
+        int W = OutWidth_[I];
+        VecOut_[I].assign(W, 0.0);
+        if (const std::string *D = paramS(B, "data")) {
+          std::vector<double> Vals; int r = 0, c = 0;
+          parseSimMatrix(*D, Vals, r, c);
+          for (int e = 0; e < W && e < (int)Vals.size(); ++e)
+            VecOut_[I][e] = Vals[e];
+        }
+        Out_[I] = VecOut_[I].empty() ? 0.0 : VecOut_[I].front();
+      } else {
+        // filter / threshold: read the input image + its (rows, cols) shape.
+        int Rows = 1, Cols = 1;
+        std::vector<double> Img;
+        if (!Inputs_[I].empty()) {
+          size_t Src = Inputs_[I].front().SrcBlock;
+          Rows = OutRows_[Src] > 0 ? OutRows_[Src] : 1;
+          Cols = OutCols_[Src] > 0 ? OutCols_[Src] : OutWidth_[Src];
+          Img.assign(OutWidth_[Src], 0.0);
+          if (OutWidth_[Src] > 1)
+            for (int e = 0; e < OutWidth_[Src] && e < (int)VecOut_[Src].size(); ++e)
+              Img[e] = VecOut_[Src][e];
+          else if (!Img.empty())
+            Img[0] = Out_[Src];
+        }
+        int W = Rows * Cols;
+        VecOut_[I].assign(W, 0.0);
+        if (K == "signal_threshold") {
+          double L = paramD(B, "level", 0.5);
+          for (int e = 0; e < W && e < (int)Img.size(); ++e)
+            VecOut_[I][e] = (Img[e] > L) ? 1.0 : 0.0;
+        } else { // signal_image_filter — 2-D correlation, zero-padded borders
+          std::vector<double> Ker; int Kr = 0, Kc = 0;
+          if (const std::string *KS = paramS(B, "kernel"))
+            parseSimMatrix(*KS, Ker, Kr, Kc);
+          if (Ker.empty()) {
+            const std::string *T = paramS(B, "type");
+            namedKernel(T ? *T : "box", Ker, Kr, Kc);
+          }
+          int ar = Kr / 2, ac = Kc / 2; // kernel anchor (center)
+          for (int r = 0; r < Rows; ++r)
+            for (int c = 0; c < Cols; ++c) {
+              double acc = 0.0;
+              for (int i = 0; i < Kr; ++i)
+                for (int j = 0; j < Kc; ++j) {
+                  int rr = r + i - ar, cc = c + j - ac;
+                  if (rr < 0 || rr >= Rows || cc < 0 || cc >= Cols) continue;
+                  acc += Img[rr * Cols + cc] * Ker[i * Kc + j];
+                }
+              VecOut_[I][r * Cols + c] = acc;
+            }
+        }
+        Out_[I] = VecOut_[I].empty() ? 0.0 : VecOut_[I].front();
+      }
     } else if (K == "signal_reshape") {
       // §17.5 #9 — copy the upstream flat buffer through; shape
       // change is purely a metadata switch (OutRows / OutCols

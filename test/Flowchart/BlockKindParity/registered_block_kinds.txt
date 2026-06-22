@@ -30,6 +30,8 @@ signal_goto
 signal_highpass
 signal_if_action
 signal_ifft
+signal_image_filter
+signal_image_source
 signal_inport
 signal_integrator
 signal_jkff
@@ -78,6 +80,7 @@ signal_switch
 signal_switch_case_action
 signal_terminator
 signal_tff
+signal_threshold
 signal_to_workspace
 signal_transfer_fcn
 signal_transport_delay
