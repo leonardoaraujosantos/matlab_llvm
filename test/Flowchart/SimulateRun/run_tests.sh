@@ -718,6 +718,19 @@ check "spectrum header"      "[[ '$SP_HEAD' == 't,sd[1],sd[2],sd[3],sd[4],sn[1],
 check "spectrum DC bin = 16" "awk 'BEGIN{exit !(($SP_DC0-16)^2<1e-6 && $SP_DC1<1e-6)}'" "DC frame puts all power in bin 0"
 check "spectrum Nyquist bin = 16" "awk 'BEGIN{exit !(($SP_NYQ-16)^2<1e-6 && $SP_NY0<1e-6)}'" "alternating frame puts all power at the Nyquist bin"
 
+#--- #343: Control — signal_lqr (state-feedback gain u = -K·x) ------------
+# Scalar gain K=[3 4] on x=[2 1] gives u = -(3·2+4·1) = -10. A 2×2 gain
+# K=[1 0; 0 2] on x=[5 3] gives the vector u = -[5; 6]. Columns: t, su (scalar
+# u), sv[1],sv[2] (vector u).
+LQ="$("$MATLABC" -simulate "$EX/lqr_feedback.mflow")"
+LQ_HEAD=$(printf '%s\n' "$LQ" | head -1)
+LQ_U=$(printf '%s\n'  "$LQ" | tail -1 | awk -F, '{print $2}')
+LQ_V1=$(printf '%s\n' "$LQ" | tail -1 | awk -F, '{print $3}')
+LQ_V2=$(printf '%s\n' "$LQ" | tail -1 | awk -F, '{print $4}')
+check "lqr header"           "[[ '$LQ_HEAD' == 't,su,sv[1],sv[2]' ]]" ""
+check "lqr scalar gain"      "awk 'BEGIN{exit !(($LQ_U+10)^2<1e-9)}'" "u = -K·x with K=[3 4], x=[2 1] is -10"
+check "lqr MIMO gain"        "awk 'BEGIN{exit !(($LQ_V1+5)^2<1e-9 && ($LQ_V2+6)^2<1e-9)}'" "2×2 gain produces the vector u = -[5; 6]"
+
 #--- #343: HDL sequential blocks — D flip-flop / T flip-flop / counter -----
 # A 1 Hz pulse clock drives a D-FF (D=1), a free-running T-FF, and an up
 # counter over 5 s. Each updates once per clock posedge (once per major step,

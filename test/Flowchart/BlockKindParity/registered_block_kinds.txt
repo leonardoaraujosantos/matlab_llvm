@@ -35,6 +35,7 @@ signal_logical
 signal_lookup_1d
 signal_lookup_2d
 signal_lookup_nd
+signal_lqr
 signal_math_fcn
 signal_matlab_fcn
 signal_merge

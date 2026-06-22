@@ -1821,6 +1821,32 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       } else {
         Out_[I] = KS.X.empty() ? 0.0 : KS.X.front();
       }
+    } else if (K == "signal_lqr") {
+      // #343 Control — static state-feedback gain u = -K·x (LQR / pole
+      // placement). K is an M×N matrix literal; the state x is the (vector)
+      // input. Stateless, direct-feedthrough. A `sign` param of +1 emits +K·x.
+      std::vector<double> Kmat;
+      int Kr = 0, Kc = 0;
+      if (const std::string *S = paramS(B, "K")) parseSimMatrix(*S, Kmat, Kr, Kc);
+      double Sgn = paramD(B, "sign", -1.0) >= 0.0 ? 1.0 : -1.0;
+      // Gather the N-element state input (vector source or scalar).
+      std::vector<double> x(Kc > 0 ? Kc : 1, 0.0);
+      if (!Inputs_[I].empty()) {
+        size_t Src = Inputs_[I].front().SrcBlock;
+        if (OutWidth_[Src] > 1)
+          for (int e = 0; e < (int)x.size() && e < (int)VecOut_[Src].size(); ++e)
+            x[e] = VecOut_[Src][e];
+        else
+          x[0] = Out_[Src];
+      }
+      if (Kr > 0 && Kc > 0) {
+        std::vector<double> u = matMul(Kmat, Kr, Kc, x, Kc, 1);
+        VecOut_[I].assign(Kr, 0.0);
+        for (int r = 0; r < Kr; ++r) VecOut_[I][r] = Sgn * u[r];
+        Out_[I] = VecOut_[I].front();
+      } else {
+        Out_[I] = 0.0;
+      }
     } else if (K == "signal_dff" || K == "signal_tff" ||
                K == "signal_counter" || K == "signal_jkff" ||
                K == "signal_srff") {

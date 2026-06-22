@@ -86,6 +86,9 @@ const std::map<std::string, KindInfo> &kindTable() {
     // Parallel PID with derivative filter. Direct-feedthrough
     // (C(∞) = Kp + Kd·N is finite), so it is NOT a loop breaker.
     add("signal_pid",          {true, true, false, false, false, CONT});
+    // Control (#343) — static state-feedback gain: u = -K·x (LQR / pole
+    // placement). Direct-feedthrough matrix-vector product, not a loop breaker.
+    add("signal_lqr",          {true, true, false, false, false, FIM});
     add("signal_transport_delay",
                                {true, true, false, true,  false, CONT});
     // Discrete.
@@ -948,6 +951,13 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
       B.OutWidth = 2;
       B.OutRows = 1;
       B.OutCols = 2;
+    } else if (N.Kind == "signal_lqr") {
+      // Control (#343) — output u = -K·x has one element per row of the gain
+      // matrix K (scalar for a 1×N state-feedback row).
+      int Kr = matrixRows(N.getParam("K") ? *N.getParam("K") : "");
+      B.OutWidth = Kr > 0 ? Kr : 1;
+      B.OutRows = B.OutWidth;
+      B.OutCols = 1;
     } else if (N.Kind == "signal_psk_demod" || N.Kind == "signal_qam_demod") {
       // A demodulator's output is always a scalar symbol index, regardless of
       // its width-2 I/Q input — stamp it explicitly so the width-inference
