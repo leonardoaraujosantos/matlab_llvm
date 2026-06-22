@@ -71,13 +71,29 @@ run_one() {
   pass=$((pass+1))
 }
 
+# The compiled C++ codegen must reproduce the in-process interpreter
+# byte-for-byte. Every fixture below has been verified to round-trip
+# (emit → compile → run → diff). Excluded: `matlab_fcn_jit` — a
+# JIT-path-specific fixture; the C++ codegen lowers a MATLAB Function
+# block's body through the AST interpreter (not the JIT), so it does not
+# reproduce a JIT-only reference (same family as the JIT/AST divergence
+# tracked in #77).
 for name in lowpass pid_tracking multirate saturation_zc enabled_subsystem \
             thermostat tier_h_showcase tier_h_logic \
             goto_from matlab_fcn vector_signals sample_time_inherit \
             algebraic_loop_solved masked_library matlab_function_block \
             discrete_pid discrete_integrator_methods bus_signals \
             bouncing_ball stiff_bdf fir_filter per_flow_solver \
-            matlab_fcn_loops matrix_signals; do
+            matlab_fcn_loops matrix_signals \
+            freefall_floor pid_block tier_h_discrete triggered_counter \
+            state_space_vector_ic matlab_fcn_multi_output \
+            awgn_channel error_rate psk_qpsk qam16 qpsk_awgn_link \
+            biquad_lowpass streaming_filters fft_roundtrip window_taper \
+            spectrum dwt_haar kalman_constant kalman_tracker lqr_feedback \
+            running_stats dnn_predict rl_agent rf_2port pose_transform \
+            color_space image_blocks nd_reshape nd_color_image \
+            hdl_registers hdl_jk_sr hdl_memory hdl_half_adder \
+            hdl_full_adder hdl_shift_register hdl_freq_divider; do
   run_one "$name"
 done
 
