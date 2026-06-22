@@ -586,7 +586,9 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
   // Pre-size FIR history per discrete_filter block to max(NumLen,
   // DenLen) so every reference index is in-range.
   for (size_t I = 0; I < N; ++I) {
-    if (M_.Blocks[I].Kind != "signal_discrete_filter") continue;
+    if (M_.Blocks[I].Kind != "signal_discrete_filter" &&
+        M_.Blocks[I].Kind != "signal_biquad")
+      continue;
     const auto &TF = TFCache_[I];
     size_t Sz = std::max(TF.Num.size(), TF.Den.size());
     if (Sz == 0) Sz = 1;
@@ -647,6 +649,32 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
       TFCache_[I].Num = parsePoly(NumS ? *NumS : "1");
       TFCache_[I].Den = parsePoly(DenS ? *DenS : "1");
       TFCache_[I].Valid = !TFCache_[I].Den.empty();
+    } else if (B.Kind == "signal_biquad") {
+      // #343 DSP — second-order section:
+      //   H(z) = (b0 + b1 z⁻¹ + b2 z⁻²) / (a0 + a1 z⁻¹ + a2 z⁻²)
+      // Coefficients via `b`/`a` vector strings ("b0 b1 b2") or the
+      // individual b0..b2 / a0..a2 scalars (Simulink Biquad style). The
+      // generic discrete_filter evaluator then runs the difference equation.
+      // parseSimMatrix tolerates space- OR comma-separated coefficients
+      // (parsePoly is comma-only), so "0.07 0.13 0.07" and "0.07,0.13,0.07"
+      // both work.
+      std::vector<double> Num, Den;
+      int pr = 0, pc = 0;
+      if (auto *BS = paramS(B, "b")) parseSimMatrix(*BS, Num, pr, pc);
+      else Num = {MflowLinkSim::paramD(B, "b0", 1.0),
+                  MflowLinkSim::paramD(B, "b1", 0.0),
+                  MflowLinkSim::paramD(B, "b2", 0.0)};
+      if (auto *AS = paramS(B, "a")) parseSimMatrix(*AS, Den, pr, pc);
+      else Den = {MflowLinkSim::paramD(B, "a0", 1.0),
+                  MflowLinkSim::paramD(B, "a1", 0.0),
+                  MflowLinkSim::paramD(B, "a2", 0.0)};
+      // A 2nd-order section always carries 2 state slots — pad to length 3.
+      Num.resize(3, 0.0);
+      Den.resize(3, 0.0);
+      if (Den[0] == 0.0) Den[0] = 1.0; // normalise a0
+      TFCache_[I].Num = std::move(Num);
+      TFCache_[I].Den = std::move(Den);
+      TFCache_[I].Valid = true;
     } else if (B.Kind == "signal_zero_pole") {
       // Param shape: `zeros` and `poles` are comma-separated real
       // roots; `gain` is a scalar leading coefficient. Complex root
@@ -971,7 +999,8 @@ void MflowLinkSim::reset() {
       NextFire_[I] = M_.Solver.StartTime;
     } else if (B.Kind == "signal_discrete_integrator" ||
                B.Kind == "signal_rate_transition" ||
-               B.Kind == "signal_discrete_filter") {
+               B.Kind == "signal_discrete_filter" ||
+               B.Kind == "signal_biquad") {
       // Initial discrete state: `initialCondition` (or 0). For
       // signal_discrete_filter the IIR taps all start at 0; the
       // first sample at NextFire_ then writes the new state.
@@ -1977,10 +2006,11 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       }
     } else if (K == "signal_discrete_integrator" ||
                K == "signal_discrete_filter" ||
+               K == "signal_biquad" ||
                K == "signal_rate_transition") {
-      // All three read the same single-scalar latch as Unit Delay /
-      // ZOH. The fireDiscreteTicks scheduler is what advances the
-      // state on each sample tick.
+      // All read the same single-scalar latch as Unit Delay / ZOH (for the
+      // filters it's the most-recent output y[n]). The fireDiscreteTicks
+      // scheduler is what advances the state on each sample tick.
       Out_[I] = Z_[DiscStateOffset_[I]];
     } else if (K == "signal_matlab_fcn") {
       // Pack every connected input port (`u1`, `u2`, …) into a
@@ -2769,7 +2799,8 @@ void MflowLinkSim::fireDiscreteTicks() {
       Z_[Off]     = Y;
       Znext_[Off] = Y;
       DiscPrevU_[I] = U;
-    } else if (B.Kind == "signal_discrete_filter") {
+    } else if (B.Kind == "signal_discrete_filter" ||
+               B.Kind == "signal_biquad") {
       // §17.5 #5 — full direct-form-II IIR with u-history (FIR
       // numerator path). User provides num and den as polynomials
       // in z, highest order first. We rewrite as z^-1:

@@ -628,6 +628,22 @@ check "window header"        "[[ '$WW_HEAD' == 't,sw[1],sw[2],sw[3],sw[4]' ]]" "
 check "window endpoint = 0"  "awk 'BEGIN{exit !($WW_E1^2<1e-9)}'" "Hann window is 0 at the first sample"
 check "window peak = 0.75"   "awk 'BEGIN{exit !(($WW_E2-0.75)^2<1e-6)}'" "Hann(N=4) interior coefficient is 0.75"
 
+#--- #343: signal_biquad — 2nd-order section (lowpass) --------------------
+# A 2nd-order Butterworth lowpass (unity DC gain) filters a noisy constant
+# (2.0 + AWGN, var ~0.1). The steady-state (t>10) output mean tracks the DC
+# input (DC gain ≈ 1) and its variance is well below the input's (lowpass
+# smoothing — validates the b/a difference equation, not a pass-through).
+# Columns: t,sy (filtered), sm (noisy input).
+BQ="$("$MATLABC" -simulate "$EX/biquad_lowpass.mflow")"
+BQ_HEAD=$(printf '%s\n' "$BQ" | head -1)
+BQ_MEAN=$(printf '%s\n' "$BQ" | awk -F, 'NR>1 && $1>10{n++; s+=$2} END{print s/n}')
+BQ_RATIO=$(printf '%s\n' "$BQ" | awk -F, 'NR>1 && $1>10{n++; sy+=$2; sy2+=$2*$2; sm+=$3; sm2+=$3*$3} END{yv=sy2/n-(sy/n)^2; mv=sm2/n-(sm/n)^2; print (mv>0)?yv/mv:1}')
+BQ_FIRST=$(printf '%s\n' "$BQ" | awk -F, 'NR==3{print ($2<0)?-$2:$2}')
+check "biquad header"        "[[ '$BQ_HEAD' == 't,sy,sm' ]]" ""
+check "biquad DC gain ~ 1"   "awk 'BEGIN{exit !($BQ_MEAN>1.8 && $BQ_MEAN<2.2)}'" "unity-DC-gain lowpass must pass the constant 2.0 through"
+check "biquad smooths"       "awk 'BEGIN{exit !($BQ_RATIO<0.5)}'" "filtered variance must be well below the noisy input's"
+check "biquad has transient" "awk 'BEGIN{exit !($BQ_FIRST<0.5)}'" "2nd-order step response rises from ~0, not a pass-through"
+
 #--- #343: HDL sequential blocks — D flip-flop / T flip-flop / counter -----
 # A 1 Hz pulse clock drives a D-FF (D=1), a free-running T-FF, and an up
 # counter over 5 s. Each updates once per clock posedge (once per major step,

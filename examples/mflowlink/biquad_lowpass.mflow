@@ -1,0 +1,26 @@
+{
+  "schema": "matforge.flowchart", "version": "0.1.0", "entry": "biquad_test",
+  "settings": { "kind": "signal_flow",
+    "solver": { "type": "fixed_step", "algorithm": "ode4", "startTime": 0.0, "stopTime": 20.0, "maxStep": "0.05" } },
+  "flows": [{
+    "id": "flow_bq", "kind": "function", "name": "biquad_test",
+    "signature": { "inputs": [], "outputs": [] },
+    "nodes": [
+      { "id": "dc", "kind": "signal_constant", "data": { "params": { "value": 2.0 } },
+        "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "noisy", "kind": "signal_awgn", "data": { "params": { "snr": 10.0, "signalPower": 1.0, "seed": 23.0 } },
+        "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "bq", "kind": "signal_biquad",
+        "data": { "params": { "b": "0.0675 0.1349 0.0675", "a": "1 -1.1430 0.4128", "sampleTime": 0.05 } },
+        "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "sy", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } },
+      { "id": "sm", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } }
+    ],
+    "edges": [
+      { "id": "e0", "kind": "data", "from": {"node": "dc",    "port": "out"}, "to": {"node": "noisy", "port": "in"} },
+      { "id": "e1", "kind": "data", "from": {"node": "noisy", "port": "out"}, "to": {"node": "bq",    "port": "in"} },
+      { "id": "e2", "kind": "data", "from": {"node": "bq",    "port": "out"}, "to": {"node": "sy",    "port": "in"} },
+      { "id": "e3", "kind": "data", "from": {"node": "noisy", "port": "out"}, "to": {"node": "sm",    "port": "in"} }
+    ]
+  }]
+}

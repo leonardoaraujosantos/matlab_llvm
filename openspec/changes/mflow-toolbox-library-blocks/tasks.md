@@ -46,7 +46,7 @@ econ, finance, curvefit, optim, gads, PDE, symbolic, GPU, ident (batch/frequency
 - [x] 3.1 `signal_fft` / `signal_ifft` — frame DFT/IDFT — DONE. Operate on a width-`n` vector signal (frame); complex spectrum carried as `[Re;Im]` width `2n` so `fft→ifft` is a closed identity loop. Direct O(n²) DFT inline (no FFTW/runtime link); `n` param stamps the output width. `fft_roundtrip.mflow` + SimulateRun checks (DC bin = Σx, round-trip recovers the frame exactly).
 - [x] 3.2 `signal_window` — windowing — DONE. Hann (default) / Hamming / Blackman / rect taper over an `n`-point frame; `windowCoef` helper. `window_taper.mflow` + checks (Hann N=4 → [0, 0.75, 0.75, 0]).
 - [ ] 3.3 `signal_spectrum` — power-spectrum / spectrum-analyzer sink
-- [ ] 3.4 `signal_biquad` — Biquad/SOS section (delegates to the DSP runtime; complements the existing `signal_discrete_filter` IIR)
+- [x] 3.4 `signal_biquad` — Biquad/SOS section — DONE. 2nd-order section routed through the existing discrete-filter difference engine (TFCache_/Z_/FirHistory_/fireDiscreteTicks), differing only in building num/den from SOS coefficients (`b`/`a` vectors or `b0..b2`/`a0..a2` scalars; parseSimMatrix so space- and comma-separated both work). `biquad_lowpass.mflow` + SimulateRun checks (unity DC gain on a noisy constant, ~5× variance reduction, genuine 2nd-order transient).
 - [ ] 3.5 `signal_dcblock` / `signal_lowpass` / `signal_highpass` — streaming filters (DSP `*_step` runtimes; need the obj-step delegation pattern)
 
 ## 4. Communications catalog (follow-on PRs)
