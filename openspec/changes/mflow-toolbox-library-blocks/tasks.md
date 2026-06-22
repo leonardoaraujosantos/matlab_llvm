@@ -65,7 +65,7 @@ verilog,cocotb}` lane. Mux/Demux + logic gates already ship (`signal_mux`/`demux
 - [x] 4b.1 `signal_dff` (D flip-flop), `signal_tff` (T flip-flop), `signal_counter` (up counter) — clocked posedge registers (simulator) — DONE
 - [x] 4b.5a `signal_dff` → SystemVerilog: lowers to `always_ff @(posedge clk) s_ff <= D` via the SubsystemToMatlab persistent-register path; synthesizable (`-check-synthesizable` clean). DONE
 - [x] 4b.x example circuits: `hdl_half_adder`, `hdl_full_adder` (combinational), `hdl_shift_register`, `hdl_freq_divider` (sequential) — DONE
-- [ ] 4b.2 `signal_jkff` / `signal_srff` — JK / SR flip-flops
+- [x] 4b.2 `signal_jkff` / `signal_srff` — JK / SR flip-flops — DONE. Same clocked single-latch family as D/T (DigitalLatch_, once-per-major-step edge update). JK: 00 hold / 01 reset / 10 set / 11 toggle; SR: 10 set / 01 reset / 00,11 hold. `hdl_jk_sr.mflow` + SimulateRun checks (JK toggles as /2 divider, SR latches set/reset). SV emit is a follow-up like tff/counter were.
 - [ ] 4b.3 `signal_shift_register` — N-bit serial/parallel shift register block (the example wires DFFs by hand today)
 - [ ] 4b.4 `signal_ram` / `signal_rom` — addressable memory (addr/data/we ports; vector state)
 - [x] 4b.5b emit-SystemVerilog for `signal_tff` (toggle) and `signal_counter` (increment+wrap) — DONE. Arithmetic next-state (`Q + T*(1-2Q)`, `inc - mod*(inc>=mod)`) keeps both branch-free and synthesizable; `sv_tff_smoke`/`sv_counter_smoke` in EmitSubsystem assert the always_ff register + `-check-synthesizable` clean

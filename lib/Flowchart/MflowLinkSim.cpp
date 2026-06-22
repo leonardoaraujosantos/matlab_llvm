@@ -862,7 +862,8 @@ void MflowLinkSim::reset() {
       if (Seed == 0) Seed = 0xC0FFEE12345678ABULL;
       NoiseSeed_[I] = Seed;
     } else if (B.Kind == "signal_dff" || B.Kind == "signal_tff" ||
-               B.Kind == "signal_counter") {
+               B.Kind == "signal_counter" || B.Kind == "signal_jkff" ||
+               B.Kind == "signal_srff") {
       // Clocked HDL registers start at their initial/reset value (#343).
       DigitalLatch_[I] = paramD(B, "initialValue", 0.0);
     }
@@ -1449,7 +1450,8 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       // we only surface the accumulated ratio so it logs and feeds downstream.
       Out_[I] = (TotAccum_[I] > 0.0) ? (ErrAccum_[I] / TotAccum_[I]) : 0.0;
     } else if (K == "signal_dff" || K == "signal_tff" ||
-               K == "signal_counter") {
+               K == "signal_counter" || K == "signal_jkff" ||
+               K == "signal_srff") {
       // #343 — clocked HDL registers. The output is the held value; the
       // edge-triggered state update happens once per major step in
       // commitDigitalRegisters() (NOT here — evalAll runs multiple times
@@ -2269,7 +2271,8 @@ double MflowLinkSim::stepMajor() {
   // visible in this step's logged output (a posedge-triggered register).
   for (size_t I = 0; I < M_.Blocks.size(); ++I) {
     const std::string &K = M_.Blocks[I].Kind;
-    if (K != "signal_dff" && K != "signal_tff" && K != "signal_counter")
+    if (K != "signal_dff" && K != "signal_tff" && K != "signal_counter" &&
+        K != "signal_jkff" && K != "signal_srff")
       continue;
     auto srcOf = [&](const char *Port) -> int {
       for (auto &P : Inputs_[I])
@@ -2297,10 +2300,34 @@ double MflowLinkSim::stepMajor() {
       if (TSrc < 0) TSrc = srcOf("in");
       bool Toggle = TSrc < 0 || Out_[TSrc] > 0.5;
       if (Toggle) Q = (Q > 0.5) ? 0.0 : 1.0;
-    } else { // signal_counter
+    } else if (K == "signal_counter") {
       Q += paramD(M_.Blocks[I], "step", 1.0);
       double Mod = paramD(M_.Blocks[I], "modulus", 0.0);
       if (Mod > 0.0 && Q >= Mod) Q -= Mod;
+    } else if (K == "signal_jkff") {
+      // JK flip-flop: (J,K) → 00 hold, 01 reset, 10 set, 11 toggle.
+      int JSrc = srcOf("j");
+      if (JSrc < 0) JSrc = srcOf("in1");
+      int KSrc = srcOf("k");
+      if (KSrc < 0) KSrc = srcOf("in2");
+      bool J = JSrc >= 0 && Out_[JSrc] > 0.5;
+      bool Kk = KSrc >= 0 && Out_[KSrc] > 0.5;
+      bool Qh = Q > 0.5;
+      if (J && Kk)       Q = Qh ? 0.0 : 1.0; // toggle
+      else if (J)        Q = 1.0;            // set
+      else if (Kk)       Q = 0.0;            // reset
+      // else hold
+    } else { // signal_srff
+      // SR flip-flop: (S,R) → 10 set, 01 reset, 00 hold, 11 hold (invalid).
+      int SSrc = srcOf("s");
+      if (SSrc < 0) SSrc = srcOf("in1");
+      int RSrc2 = srcOf("r");
+      if (RSrc2 < 0) RSrc2 = srcOf("in2");
+      bool S = SSrc >= 0 && Out_[SSrc] > 0.5;
+      bool R = RSrc2 >= 0 && Out_[RSrc2] > 0.5;
+      if (S && !R)      Q = 1.0;
+      else if (R && !S) Q = 0.0;
+      // S==R: hold (the 1,1 case is undefined in HW; we hold)
     }
   }
   // #343 — Communications error-rate (BER) sink. Once per major step, compare

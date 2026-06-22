@@ -106,6 +106,10 @@ const std::map<std::string, KindInfo> &kindTable() {
     add("signal_dff",        {true, true, false, true, false, FIM});
     add("signal_tff",        {true, true, false, true, false, FIM});
     add("signal_counter",    {true, true, false, true, false, FIM});
+    // JK / SR flip-flops — same clocked single-latch family as D/T: edge-
+    // triggered, loop-breaking, held in DigitalLatch_ outside the state vectors.
+    add("signal_jkff",       {true, true, false, true, false, FIM});
+    add("signal_srff",       {true, true, false, true, false, FIM});
     // Lookup tables (Tier H — table-driven scalar evaluation).
     add("signal_lookup_1d",  {true, true, false, false, false, FIM});
     add("signal_lookup_2d",  {true, true, false, false, false, FIM});
