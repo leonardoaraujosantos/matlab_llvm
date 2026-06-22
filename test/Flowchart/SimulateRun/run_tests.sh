@@ -836,6 +836,20 @@ check "pose header"          "[[ '$PT_HEAD' == 't,sr[1],sr[2],st[1],st[2]' ]]" "
 check "pose rotate+translate" "awk 'BEGIN{exit !(($PT_R1-2)^2<1e-9 && ($PT_R2-4)^2<1e-9)}'" "R(90°)·[1 0] + (2,3) = [2 4]"
 check "pose pure translate"  "awk 'BEGIN{exit !(($PT_T1-6)^2<1e-9 && ($PT_T2-6)^2<1e-9)}'" "θ=0 translation of [1 1] by (5,5) = [6 6]"
 
+#--- #343: Vision — signal_color_space (RGB↔grayscale) -------------------
+# rgb2gray collapses interleaved RGB triples 3→1 with luma weights 0.299/0.587/
+# 0.114: red [1 0 0]→0.299, green [0 1 0]→0.587. gray2rgb expands 1→3,
+# replicating: 0.5→[0.5 0.5 0.5]. Cols: t, sg[1],sg[2] (gray), sr[1..3] (rgb).
+CS="$("$MATLABC" -simulate "$EX/color_space.mflow")"
+CS_HEAD=$(printf '%s\n' "$CS" | head -1)
+CS_R=$(printf '%s\n' "$CS" | tail -1 | awk -F, '{print $2}')   # red → 0.299
+CS_G=$(printf '%s\n' "$CS" | tail -1 | awk -F, '{print $3}')   # green → 0.587
+CS_X1=$(printf '%s\n' "$CS" | tail -1 | awk -F, '{print $4}')  # 0.5
+CS_X3=$(printf '%s\n' "$CS" | tail -1 | awk -F, '{print $6}')  # 0.5
+check "color_space header"   "[[ '$CS_HEAD' == 't,sg[1],sg[2],sr[1],sr[2],sr[3]' ]]" "rgb2gray collapses 3→1, gray2rgb expands 1→3 (widths via inference)"
+check "rgb2gray luma"        "awk 'BEGIN{exit !(($CS_R-0.299)^2<1e-9 && ($CS_G-0.587)^2<1e-9)}'" "red→0.299, green→0.587 (Rec.601 luma weights)"
+check "gray2rgb replicate"   "awk 'BEGIN{exit !(($CS_X1-0.5)^2<1e-9 && ($CS_X3-0.5)^2<1e-9)}'" "gray2rgb replicates the gray value across R,G,B"
+
 #--- #343: HDL sequential blocks — D flip-flop / T flip-flop / counter -----
 # A 1 Hz pulse clock drives a D-FF (D=1), a free-running T-FF, and an up
 # counter over 5 s. Each updates once per clock posedge (once per major step,

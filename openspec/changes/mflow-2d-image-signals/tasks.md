@@ -34,11 +34,11 @@ editor `NodeKind` (IDE repo).
 ## 5. Recipe + docs
 
 - [x] 5.1 `docs/mflowlink_blocks.md` "2-D image signals" section (representation, row-major contract, `[row,col]` scope columns) + per-block rows + worked example.
-- [ ] 5.2 Extend the block-authoring recipe prose with the 2-D variant (shape stamping, flat-index formula) — follow-up doc polish.
+- [x] 5.2 Block-authoring recipe extended with the 2-D variant (shape stamping for defining/preserving/element-count-changing blocks, the row-major flat-index formula, the small-image regression-check step) in `docs/mflowlink_blocks.md`.
 - [x] 5.3 Marked `mflow-toolbox-library-blocks` §5 done; cross-referenced this capability.
 
 ## 6. Color follow-on (scoped, after grayscale proves out)
 
-- [ ] 6.1 Resolve the channel-layout open question (interleaved vs planar) and record it in the spec
-- [ ] 6.2 Implement the `channels > 1` stride path and `signal_color_space` (e.g. RGB↔grayscale)
-- [ ] 6.3 `signal_image_source` / `signal_image_filter` color coverage + checks
+- [x] 6.1 Channel layout RESOLVED: **interleaved** RGB triples (matches typical image buffers; `(r·cols+c)·channels+ch`).
+- [x] 6.2 `signal_color_space` — RGB↔grayscale conversion over interleaved triples (rgb2gray 3→1 Rec.601 luma; gray2rgb 1→3). Width handled by a rule in the width-inference fixpoint. `color_space.mflow` + SimulateRun (red→0.299, green→0.587; gray2rgb→[v v v]).
+- [ ] 6.3 Color **image** integration — a `channels` param on `signal_image_source` and per-channel `signal_image_filter` so a 2-D color image carries its channel count in the shape. (Residual: `color_space` already converts; this threads channels through the 2-D image shape end-to-end.)
