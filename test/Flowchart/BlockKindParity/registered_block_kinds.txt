@@ -1,5 +1,6 @@
 signal_abs
 signal_awgn
+signal_biquad
 signal_bus_creator
 signal_bus_selector
 signal_chirp

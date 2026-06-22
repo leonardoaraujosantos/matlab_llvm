@@ -95,6 +95,10 @@ const std::map<std::string, KindInfo> &kindTable() {
                              {true, true, false, true, false, DISC});
     add("signal_discrete_filter",
                              {true, true, false, true, false, DISC});
+    // DSP (#343) — biquad / second-order section. A 2nd-order IIR routed
+    // through the same discrete-filter difference-engine, with named SOS
+    // coefficients (b0..b2 / a0..a2) instead of num/den polynomials.
+    add("signal_biquad",     {true, true, false, true, false, DISC});
     add("signal_rate_transition",
                              {true, true, false, true, false, DISC});
     // HDL / digital sequential elements (#343) — clocked registers driven
@@ -1046,6 +1050,7 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
     } else if (N.Kind == "signal_unit_delay" || N.Kind == "signal_zoh" ||
                N.Kind == "signal_discrete_integrator" ||
                N.Kind == "signal_discrete_filter" ||
+               N.Kind == "signal_biquad" ||
                N.Kind == "signal_rate_transition") {
       // Discrete period: `params.sampleTime`, else numeric
       // `data.sample_time`, else 1 s. Every discrete block keys
@@ -1058,6 +1063,9 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
       if (N.Kind == "signal_discrete_filter") {
         int DenDeg = polyDegree(N.getParam("den") ? *N.getParam("den") : "1");
         B.DiscStateCount = std::max(1, DenDeg);
+      } else if (N.Kind == "signal_biquad") {
+        // A second-order section always carries 2 y-history state slots.
+        B.DiscStateCount = 2;
       }
       double Period = parseDoubleOr(N.getParam("sampleTime"), -1.0);
       if (Period < 0.0) {
