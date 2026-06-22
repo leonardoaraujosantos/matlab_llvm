@@ -260,6 +260,32 @@ plus three shape steps:
    (2×2 / 3×3) image with known pixel values, asserting both the shape (header
    columns) and the per-pixel result.
 
+## N-D signals (up to 6-D) — `mflow-nd-signals`
+
+A wire carries a shape of **rank 1 to 6** over the same flat row-major buffer; the
+element count is `prod(shape)`. Element `(i1,…,iN)` lives at the row-major flat
+index `((…(i1·d2 + i2)·d3 + i3)…)·dN + iN`. 1-D and 2-D are special cases and stay
+**byte-identical** (a vector renders `<id>[k]`, a matrix `<id>[r,c]`); a rank-≥3
+signal renders `<id>[i1,…,iN]`. A reshape to rank > 6 is a sourced error.
+
+This is purely a mflowLink generalization — the rest of the stack was already N-D:
+the runtime rank-N descriptor (`matlab_matN`, ≤ 16-D), the MLIR `RankedTensorType`
+(unbounded), and the DAP debugger (8-D display) all exceed 6 without changes.
+
+- **`signal_reshape`** accepts a `shape = "d1,d2,…"` (1–6 dims, comma/`x`/space
+  separated); a mismatched element count or rank > 6 is a sourced error. The 2-D
+  `rows`/`cols` form still works.
+- **N-D propagation.** The shape-inference pass carries the full N-D shape through
+  shape-preserving blocks, so a scope downstream of a rank-N block sees its shape.
+- **Color image = rank-3.** `signal_image_source` with `channels` emits a
+  `[rows, cols, channels]` signal (interleaved); grayscale is the `channels = 1`
+  (rank-2) case. This subsumes the color-image-channels residual.
+
+**Worked example** (`nd_reshape.mflow`): a width-24 frame → `reshape "2,3,4"` flows
+as a rank-3 signal (`s[1,1,1] … s[2,3,4]`), the 24 values passing through unchanged.
+`nd_color_image.mflow`: an `image_source rows=2 cols=2 channels=3` is a width-12
+`[2,2,3]` color signal.
+
 ## Math
 
 | Kind | Tier-C | Params | Notes |

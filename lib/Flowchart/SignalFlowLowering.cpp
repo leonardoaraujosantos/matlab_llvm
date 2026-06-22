@@ -1010,15 +1010,26 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
       B.OutRows = 2;
       B.OutCols = 1;
     } else if (N.Kind == "signal_image_source") {
-      // Vision (#343) — a 2-D grayscale image source. Shape comes from `rows`
-      // and `cols`; the output is the flattened row-major width rows·cols.
-      // Conformance: if `data` is given, its element count must equal rows·cols.
+      // Vision (#343 / mflow-nd-signals) — an image source. Shape is
+      // `rows × cols × channels` (channels default 1 = grayscale, rank-2);
+      // `channels > 1` makes it a rank-3 color signal (interleaved). Output is
+      // the flattened row-major width rows·cols·channels. Conformance: a `data`
+      // pixel count must equal that product.
       int R = N.getParam("rows") ? std::atoi(N.getParam("rows")->c_str()) : 0;
       int C = N.getParam("cols") ? std::atoi(N.getParam("cols")->c_str()) : 0;
+      int Ch = N.getParam("channels")
+                   ? std::atoi(N.getParam("channels")->c_str()) : 1;
+      if (Ch < 1) Ch = 1;
       if (R > 0 && C > 0) {
-        B.OutRows = R;
-        B.OutCols = C;
-        B.OutWidth = R * C;
+        B.OutWidth = R * C * Ch;
+        if (Ch > 1) {
+          B.OutShape = {R, C, Ch};
+          B.OutRows = R;
+          B.OutCols = C * Ch; // 2-D projection
+        } else {
+          B.OutRows = R;
+          B.OutCols = C;
+        }
         if (auto *D = N.getParam("data")) {
           // Count numeric tokens (any run of non-separator chars is one pixel).
           int n = 0;
@@ -1029,12 +1040,13 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
             if (!sep && !inTok) ++n;
             inTok = !sep;
           }
-          if (n > 0 && n != R * C) {
+          if (n > 0 && n != R * C * Ch) {
             Diag.error(B.Loc, "signal_image_source \"" + B.Id +
                                   "\": data has " + std::to_string(n) +
-                                  " pixels but shape is " + std::to_string(R) +
-                                  "×" + std::to_string(C) + " (" +
-                                  std::to_string(R * C) + ")");
+                                  " values but shape is " + std::to_string(R) +
+                                  "×" + std::to_string(C) + "×" +
+                                  std::to_string(Ch) + " (" +
+                                  std::to_string(R * C * Ch) + ")");
             return std::nullopt;
           }
         }
@@ -1075,22 +1087,50 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
       int Nf = N.getParam("n") ? std::atoi(N.getParam("n")->c_str()) : 0;
       B.OutWidth = Nf > 0 ? Nf : 0;
     } else if (N.Kind == "signal_reshape") {
-      // §17.5 #9 — reshape (rows, cols). Total element count must
-      // match the input; width inference picks the input's element
-      // count up at the resolution pass below, the per-kind
-      // dispatch here just stamps the shape so downstream blocks
-      // see (rows × cols).
-      int R = 0, C = 0;
+      // mflow-nd-signals — reshape to an N-D shape (rank 1–6). `shape` is a
+      // comma-separated dim list ("d1,d2,…"); the element count must match the
+      // input (checked in the shape-inference pass). Two dims keep the legacy
+      // (rows, cols) behaviour. `rows`/`cols` remain accepted for 2-D.
+      std::vector<int> Dims;
       if (auto *Sh = N.getParam("shape")) {
-        std::sscanf(Sh->c_str(), "%d,%d", &R, &C);
+        // Split on , / x / ; / space; each non-empty token is a dimension.
+        std::string tok;
+        std::string s = *Sh;
+        s.push_back(' ');
+        for (char ch : s) {
+          if (ch == ',' || ch == 'x' || ch == ';' || ch == ' ' ||
+              ch == '\t' || ch == '[' || ch == ']') {
+            if (!tok.empty()) {
+              int d = std::atoi(tok.c_str());
+              if (d > 0) Dims.push_back(d);
+              tok.clear();
+            }
+          } else {
+            tok.push_back(ch);
+          }
+        }
       } else {
+        int R = 0, C = 0;
         if (auto *RP = N.getParam("rows")) R = std::atoi(RP->c_str());
         if (auto *CP = N.getParam("cols")) C = std::atoi(CP->c_str());
+        if (R > 0) Dims.push_back(R);
+        if (C > 0) Dims.push_back(C);
       }
-      if (R > 0 && C > 0) {
-        B.OutRows = R;
-        B.OutCols = C;
-        B.OutWidth = R * C;
+      if (Dims.size() > 6) {
+        Diag.error(B.Loc, "signal_reshape \"" + B.Id +
+                              "\": shape rank " + std::to_string(Dims.size()) +
+                              " exceeds the 6-D ceiling");
+        return std::nullopt;
+      }
+      if (!Dims.empty()) {
+        int prod = 1;
+        for (int d : Dims) prod *= d;
+        B.OutShape = Dims;
+        B.OutWidth = prod;
+        B.OutRows = Dims[0];
+        int rest = 1;
+        for (size_t d = 1; d < Dims.size(); ++d) rest *= Dims[d];
+        B.OutCols = Dims.size() > 1 ? rest : prod;
       } else {
         B.OutWidth = 0; // inherit element count; shape stays (1,W)
       }
@@ -1279,6 +1319,19 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
       }
       return Sh;
     };
+    // mflow-nd-signals — the full N-D OutShape of the first non-scalar input,
+    // so a shape-preserving block (and a scope) inherits the *whole* shape, not
+    // just the 2-D projection. Empty ⇒ no N-D anchor among the inputs.
+    auto dominantInputShape = [&](size_t I) -> std::vector<int> {
+      for (auto &E : M.Edges) {
+        if (E.ToBlock != M.Blocks[I].Id) continue;
+        auto It = IdxOf.find(E.FromBlock);
+        if (It == IdxOf.end()) continue;
+        const auto &P = M.Blocks[It->second];
+        if (!P.OutShape.empty() && P.OutWidth > 1) return P.OutShape;
+      }
+      return {};
+    };
     bool Changed = true;
     int Guard = 0;
     while (Changed && Guard++ < 64) {
@@ -1417,6 +1470,14 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
           if (Rd * Cd > 1 && Rd * Cd == B.OutWidth) {
             B.OutRows = Rd;
             B.OutCols = Cd;
+            // mflow-nd-signals — inherit the input's full N-D shape (not just
+            // the 2-D projection) when it matches this block's element count.
+            if (B.OutShape.empty()) {
+              std::vector<int> Full = dominantInputShape(I);
+              int prod = 1;
+              for (int d : Full) prod *= d;
+              if (!Full.empty() && prod == B.OutWidth) B.OutShape = Full;
+            }
             Done[I] = true; ShapeChanged = true;
           } else {
             // No 2-D anchor found yet — leave Done false so a

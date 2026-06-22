@@ -555,22 +555,37 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
   OutWidth_.resize(N, 1);
   OutRows_.resize(N, 1);
   OutCols_.resize(N, 1);
+  OutShape_.assign(N, {});
   VecOut_.assign(N, {});
   PortOut_.assign(N, {});
   for (size_t I = 0; I < N; ++I) {
     int W = M_.Blocks[I].OutWidth;
     if (W < 1) W = 1;
     OutWidth_[I] = W;
-    // §17.5 #9 — mirror the lowering's shape. Fall back to
-    // (1 × W) for blocks the lowering didn't stamp (older models
-    // round-trip cleanly without an explicit shape annotation).
-    int R = M_.Blocks[I].OutRows;
-    int C = M_.Blocks[I].OutCols;
-    if (R <= 0 || C <= 0 || R * C != W) {
-      R = 1; C = W;
+    // mflow-nd-signals — the canonical shape is `OutShape` (rank 1–6) when the
+    // lowering stamped one and its product matches the width; otherwise derive
+    // a 2-D shape from OutRows/OutCols (§17.5 #9), else fall back to (1 × W).
+    std::vector<int> Sh = M_.Blocks[I].OutShape;
+    int prod = 1;
+    for (int d : Sh) prod *= (d > 0 ? d : 0);
+    if (Sh.empty() || prod != W) {
+      int R = M_.Blocks[I].OutRows;
+      int C = M_.Blocks[I].OutCols;
+      if (R <= 0 || C <= 0 || R * C != W) { R = 1; C = W; }
+      Sh = (R > 1) ? std::vector<int>{R, C} : std::vector<int>{W};
     }
-    OutRows_[I] = R;
-    OutCols_[I] = C;
+    OutShape_[I] = Sh;
+    // OutRows/OutCols stay the 2-D projection so every legacy 1-D/2-D site
+    // reads identical values: rank-1 → (1 × W); rank-≥2 → (dim0, prod(rest)).
+    if (Sh.size() <= 1) {
+      OutRows_[I] = 1;
+      OutCols_[I] = W;
+    } else {
+      OutRows_[I] = Sh[0];
+      int rest = 1;
+      for (size_t d = 1; d < Sh.size(); ++d) rest *= Sh[d];
+      OutCols_[I] = rest;
+    }
     if (W > 1) VecOut_[I].assign(W, 0.0);
   }
   Inputs_.assign(N, {});
@@ -920,21 +935,35 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
       // Item-1 — one CSV column per element. Naming follows MATLAB
       // indexing (1-based on disk) to match what users see in the
       // IDE's scope.
-      // §17.5 #9 — when the block has a 2-D shape, emit
-      // `<id>[r,c]` for each (row, col) in row-major order; 1-D
-      // vectors keep the legacy `<id>[k]` form so existing IDE
-      // consumers and tests stay byte-identical.
-      int R = OutRows_[I];
-      int C = OutCols_[I];
-      bool TwoD = (R > 1 && C > 1 && R * C == W);
+      // mflow-nd-signals — one CSV column per element. For a rank-N signal
+      // (N ≥ 2) emit `<id>[i1,…,iN]` (1-based, row-major); a 1-D vector keeps
+      // the legacy `<id>[k]` form so existing IDE consumers and tests stay
+      // byte-identical. The 2-D case renders exactly `<id>[r,c]` as before.
+      const std::vector<int> &Sh = OutShape_[I];
+      // Render multi-axis indices only when ≥2 dimensions exceed 1 — a vector
+      // (row/column, only one non-singleton axis) keeps the legacy `[k]` form,
+      // matching the pre-N-D 2-D rule (`R > 1 && C > 1`).
+      int nonUnit = 0;
+      for (int d : Sh) if (d > 1) ++nonUnit;
+      bool MultiD = (nonUnit >= 2 && W > 1);
       for (int E = 0; E < W; ++E) {
         LogBlocks_.push_back(I);
         LogElements_.push_back(E);
-        if (TwoD) {
-          int Ri = (E / C) + 1;
-          int Ci = (E % C) + 1;
-          LogNames_.push_back(Name + "[" + std::to_string(Ri) + "," +
-                              std::to_string(Ci) + "]");
+        if (MultiD) {
+          // Row-major de-linearization: rightmost dim varies fastest.
+          std::string Idx;
+          int rem = E;
+          std::vector<int> sub(Sh.size());
+          for (int d = (int)Sh.size() - 1; d >= 0; --d) {
+            int dim = Sh[d] > 0 ? Sh[d] : 1;
+            sub[d] = rem % dim;
+            rem /= dim;
+          }
+          for (size_t d = 0; d < sub.size(); ++d) {
+            if (d) Idx += ",";
+            Idx += std::to_string(sub[d] + 1);
+          }
+          LogNames_.push_back(Name + "[" + Idx + "]");
         } else {
           LogNames_.push_back(Name + "[" + std::to_string(E + 1) + "]");
         }

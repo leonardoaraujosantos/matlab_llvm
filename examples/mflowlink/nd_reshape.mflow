@@ -1,0 +1,9 @@
+{ "schema": "matforge.flowchart", "version": "0.1.0", "entry": "nd_reshape",
+  "settings": { "kind": "signal_flow", "solver": { "type": "fixed_step", "algorithm": "ode4", "startTime": 0.0, "stopTime": 0.1, "maxStep": "0.1" } },
+  "flows": [{ "id": "f", "kind": "function", "name": "nd_reshape", "signature": { "inputs": [], "outputs": [] },
+    "nodes": [
+      { "id": "c", "kind": "signal_constant", "data": { "params": { "value": "[1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24]" } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "r", "kind": "signal_reshape", "data": { "params": { "shape": "2,3,4" } }, "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "s", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } } ],
+    "edges": [ { "id": "e0", "kind": "data", "from": {"node": "c", "port": "out"}, "to": {"node": "r", "port": "in"} },
+               { "id": "e1", "kind": "data", "from": {"node": "r", "port": "out"}, "to": {"node": "s", "port": "in"} } ] }] }
