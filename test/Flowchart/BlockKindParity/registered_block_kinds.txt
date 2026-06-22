@@ -47,6 +47,7 @@ signal_rate_transition
 signal_relay
 signal_relop
 signal_reshape
+signal_running_stats
 signal_saturation
 signal_scope
 signal_sine

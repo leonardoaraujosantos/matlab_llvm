@@ -130,6 +130,11 @@ const std::map<std::string, KindInfo> &kindTable() {
     // mismatch ratio between two inputs; the accumulation is stateful (carried
     // across steps), so it breaks algebraic loops like the clocked registers.
     add("signal_error_rate", {true, true, false, true,  false, FIM});
+    // Statistics (#343) — streaming mean/variance/std over the input via an
+    // online Welford accumulator. Stateful (carries across steps), so it
+    // breaks algebraic loops; beats a MATLAB Function block, which can't hold
+    // persistent state in the flow today.
+    add("signal_running_stats", {true, true, false, true, false, FIM});
     add("signal_relop",      {true, true, false, false, false, FIM});
     add("signal_logical",    {true, true, false, false, false, FIM});
     add("signal_compare_to_zero",

@@ -325,6 +325,13 @@ private:
   //   the running ratio `ErrAccum_/TotAccum_`. Reset to 0 on `reset()`.
   std::vector<double> ErrAccum_;
   std::vector<double> TotAccum_;
+  // - `RunCount_` / `RunMean_` / `RunM2_` hold the Welford streaming-statistics
+  //   state for each `signal_running_stats` block (#343). Updated once per
+  //   major step (in commitDigitalRegisters); the output is the running mean,
+  //   variance, or std per `params.stat`. Reset to 0 on `reset()`.
+  std::vector<double> RunCount_;
+  std::vector<double> RunMean_;
+  std::vector<double> RunM2_;
   // - `MatlabFcnCache_[I]` holds the parsed expression tree for a
   //   `signal_matlab_fcn` block with `params.expression`. Empty
   //   `unique_ptr` means "not a matlab_fcn block" or "the block
