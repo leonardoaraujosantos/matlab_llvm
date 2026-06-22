@@ -163,6 +163,8 @@ const std::map<std::string, KindInfo> &kindTable() {
     add("signal_fft",        {true, true, false, false, false, FIM});
     add("signal_ifft",       {true, true, false, false, false, FIM});
     add("signal_window",     {true, true, false, false, false, FIM});
+    // signal_spectrum maps a real N-frame → its power spectrum |X[k]|² (width N).
+    add("signal_spectrum",   {true, true, false, false, false, FIM});
     add("signal_relop",      {true, true, false, false, false, FIM});
     add("signal_logical",    {true, true, false, false, false, FIM});
     add("signal_compare_to_zero",
@@ -953,9 +955,9 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
       B.OutWidth = 1;
       B.OutRows = 1;
       B.OutCols = 1;
-    } else if (N.Kind == "signal_window") {
-      // DSP (#343) — windowing. Output width = frame size `n`; if `n` is
-      // absent the width inherits the input element count (sentinel 0).
+    } else if (N.Kind == "signal_window" || N.Kind == "signal_spectrum") {
+      // DSP (#343) — windowing / power spectrum. Output width = frame size `n`;
+      // if `n` is absent the width inherits the input element count (sentinel 0).
       int Nf = N.getParam("n") ? std::atoi(N.getParam("n")->c_str()) : 0;
       B.OutWidth = Nf > 0 ? Nf : 0;
     } else if (N.Kind == "signal_fft") {

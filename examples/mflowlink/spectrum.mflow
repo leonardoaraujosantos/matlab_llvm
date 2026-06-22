@@ -1,0 +1,24 @@
+{
+  "schema": "matforge.flowchart", "version": "0.1.0", "entry": "spec_test",
+  "settings": { "kind": "signal_flow",
+    "solver": { "type": "fixed_step", "algorithm": "ode4", "startTime": 0.0, "stopTime": 0.2, "maxStep": "0.1" } },
+  "flows": [{
+    "id": "flow_spec", "kind": "function", "name": "spec_test",
+    "signature": { "inputs": [], "outputs": [] },
+    "nodes": [
+      { "id": "dc", "kind": "signal_constant", "data": { "params": { "value": "[1 1 1 1]" } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "spdc", "kind": "signal_spectrum", "data": { "params": { "n": 4 } }, "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "sd", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } },
+
+      { "id": "nyq", "kind": "signal_constant", "data": { "params": { "value": "[1 -1 1 -1]" } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "spnq", "kind": "signal_spectrum", "data": { "params": { "n": 4 } }, "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "sn", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } }
+    ],
+    "edges": [
+      { "id": "e0", "kind": "data", "from": {"node": "dc", "port": "out"}, "to": {"node": "spdc", "port": "in"} },
+      { "id": "e1", "kind": "data", "from": {"node": "spdc", "port": "out"}, "to": {"node": "sd", "port": "in"} },
+      { "id": "e2", "kind": "data", "from": {"node": "nyq", "port": "out"}, "to": {"node": "spnq", "port": "in"} },
+      { "id": "e3", "kind": "data", "from": {"node": "spnq", "port": "out"}, "to": {"node": "sn", "port": "in"} }
+    ]
+  }]
+}
