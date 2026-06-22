@@ -45,7 +45,11 @@ signal_noise
 signal_outport
 signal_pid
 signal_product
+signal_psk_demod
+signal_psk_mod
 signal_pulse
+signal_qam_demod
+signal_qam_mod
 signal_ramp
 signal_rate_transition
 signal_relay
