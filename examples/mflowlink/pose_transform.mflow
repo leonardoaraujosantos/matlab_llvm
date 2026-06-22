@@ -1,0 +1,24 @@
+{
+  "schema": "matforge.flowchart", "version": "0.1.0", "entry": "pose_test",
+  "settings": { "kind": "signal_flow",
+    "solver": { "type": "fixed_step", "algorithm": "ode4", "startTime": 0.0, "stopTime": 0.2, "maxStep": "0.1" } },
+  "flows": [{
+    "id": "flow_pose", "kind": "function", "name": "pose_test",
+    "signature": { "inputs": [], "outputs": [] },
+    "nodes": [
+      { "id": "p1", "kind": "signal_constant", "data": { "params": { "value": "[1 0]" } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "rot", "kind": "signal_pose_transform", "data": { "params": { "theta": 1.5707963268, "x": 2.0, "y": 3.0 } }, "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "sr", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } },
+
+      { "id": "p2", "kind": "signal_constant", "data": { "params": { "value": "[1 1]" } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "trn", "kind": "signal_pose_transform", "data": { "params": { "theta": 0.0, "x": 5.0, "y": 5.0 } }, "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "st", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } }
+    ],
+    "edges": [
+      { "id": "e0", "kind": "data", "from": {"node": "p1", "port": "out"}, "to": {"node": "rot", "port": "in"} },
+      { "id": "e1", "kind": "data", "from": {"node": "rot", "port": "out"}, "to": {"node": "sr", "port": "in"} },
+      { "id": "e2", "kind": "data", "from": {"node": "p2", "port": "out"}, "to": {"node": "trn", "port": "in"} },
+      { "id": "e3", "kind": "data", "from": {"node": "trn", "port": "out"}, "to": {"node": "st", "port": "in"} }
+    ]
+  }]
+}
