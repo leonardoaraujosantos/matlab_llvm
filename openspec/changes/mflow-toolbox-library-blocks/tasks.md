@@ -73,11 +73,15 @@ verilog,cocotb}` lane. Mux/Demux + logic gates already ship (`signal_mux`/`demux
 
 ## 5. Computer Vision / Image Processing catalog (follow-on PRs)
 
-- [ ] 5.1 Resolve the 2-D-signal-on-a-wire question (design Open Question) — bus/vector vs a small 2-D extension
-- [ ] 5.2 `signal_image_source` — image/From-File source
-- [ ] 5.3 `signal_image_filter` — 2-D convolution / filter (`runtime/toolbox/images`/`vision`)
-- [ ] 5.4 `signal_color_space` — color-space conversion
-- [ ] 5.5 `signal_threshold` — image threshold / binarize
+Resolved + implemented under the dedicated change **`mflow-2d-image-signals`** (a
+2-D image = flattened row-major vector + `(rows, cols)` shape, reusing the existing
+shape machinery — no new wire type).
+
+- [x] 5.1 2-D-signal-on-a-wire question — RESOLVED (flattened vector + shape; see `mflow-2d-image-signals/design.md`)
+- [x] 5.2 `signal_image_source` — constant grayscale image source (rows/cols/data)
+- [x] 5.3 `signal_image_filter` — 2-D convolution (box/gaussian3/sobelx/sobely or kernel literal, zero-padded)
+- [ ] 5.4 `signal_color_space` — color-space conversion (color follow-on; `channels > 1` path, `mflow-2d-image-signals` group 6)
+- [x] 5.5 `signal_threshold` — per-pixel binarize
 
 ## 6. RF catalog (follow-on PRs)
 

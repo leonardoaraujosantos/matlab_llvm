@@ -773,6 +773,26 @@ check "rl_agent header"      "[[ '$RL_HEAD' == 't,sda,sca' ]]" ""
 check "rl discrete argmax"   "awk 'BEGIN{exit !(($RL_D-1)^2<1e-9)}'" "discrete policy must select the argmax action (index 1 of [2 5 1])"
 check "rl continuous bound"  "awk 'BEGIN{exit !($RL_C>1.99 && $RL_C<=2.0)}'" "continuous policy must bound the action to ±actionScale via tanh"
 
+#--- #343: Vision — 2-D image signals (source / filter / threshold) -------
+# Grayscale images flow as flattened row-major vectors carrying their shape, so
+# a scope renders 2-D [row,col] indices. A 3×3 constant-5 image through a
+# normalized box filter keeps its interior (center=5, unity DC) and loses the
+# zero-padded border. A vertical-edge image through Sobel-x gives a strong
+# center response (4). A 2×2 ramp thresholds at 0.5 to [0 1; 0 1].
+# Cols: t, sBox[1,1..3,3] ($2-$10), sSob[1,1..3,3] ($11-$19), sThr[1,1..2,2] ($20-$23).
+IM="$("$MATLABC" -simulate "$EX/image_blocks.mflow")"
+IM_HEAD=$(printf '%s\n' "$IM" | head -1)
+IM_BOXCTR=$(printf '%s\n' "$IM" | tail -1 | awk -F, '{print $6}')   # box center = 5
+IM_BOXCNR=$(printf '%s\n' "$IM" | tail -1 | awk -F, '{print $2}')   # box corner < 5
+IM_SOBCTR=$(printf '%s\n' "$IM" | tail -1 | awk -F, '{print $15}')  # sobel center = 4
+IM_T1=$(printf '%s\n' "$IM" | tail -1 | awk -F, '{print $20}')      # 0
+IM_T2=$(printf '%s\n' "$IM" | tail -1 | awk -F, '{print $21}')      # 1
+IM_T4=$(printf '%s\n' "$IM" | tail -1 | awk -F, '{print $23}')      # 1
+check "image 2-D shape naming" "grep -q 'sBox\[2,2\]' <<< '$IM_HEAD' && grep -q 'sThr\[2,2\]' <<< '$IM_HEAD'" "a 2-D image signal must render [row,col] scope columns"
+check "box filter unity DC"  "awk 'BEGIN{exit !(($IM_BOXCTR-5)^2<1e-9 && $IM_BOXCNR<5)}'" "normalized box filter preserves the interior (5) and reduces zero-padded borders"
+check "sobel edge response"  "awk 'BEGIN{exit !(($IM_SOBCTR-4)^2<1e-9)}'" "Sobel-x must respond strongly at the vertical edge"
+check "threshold binarize"   "awk 'BEGIN{exit !($IM_T1<1e-9 && ($IM_T2-1)^2<1e-9 && ($IM_T4-1)^2<1e-9)}'" "per-pixel threshold at 0.5 → [0 1; 0 1]"
+
 #--- #343: HDL sequential blocks — D flip-flop / T flip-flop / counter -----
 # A 1 Hz pulse clock drives a D-FF (D=1), a free-running T-FF, and an up
 # counter over 5 s. Each updates once per clock posedge (once per major step,

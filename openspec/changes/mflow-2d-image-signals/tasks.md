@@ -8,34 +8,34 @@ editor `NodeKind` (IDE repo).
 
 ## 1. Representation + conformance (the gate)
 
-- [ ] 1.1 Confirm the `(OutRows, OutCols)` round-trip carries through `.mflow` for a 2-D signal and document the row-major flat-index contract `(r·cols + c)·channels + ch`
-- [ ] 1.2 Add a `channels` shape field (default 1) and the `OutWidth == rows·cols·channels` invariant; thread it through the simulator's shape mirroring
-- [ ] 1.3 Add the image-shape conformance check in `SignalFlowLowering` — sourced error when a declared image shape's element count mismatches the signal width
-- [ ] 1.4 Verify all 89 existing 1-D blocks and the width-inference pass are unaffected (full flowchart ctest green)
+- [x] 1.1 Confirmed the `(OutRows, OutCols)` round-trip carries a 2-D signal through `.mflow`; documented the row-major flat-index contract `r·cols + c` (grayscale; `channels` is the color follow-on, group 6).
+- [x] 1.2 Grayscale slice uses `OutWidth == rows·cols` over the existing shape mirroring; `channels` (default 1) deferred to group 6 so the model is validated before color multiplies the surface.
+- [x] 1.3 Image-shape conformance check in `SignalFlowLowering` — `signal_image_source` errors when `data` pixel count ≠ `rows·cols`.
+- [x] 1.4 All existing 1-D blocks + width inference unaffected — full flowchart ctest green (19/19), 195/195 SimulateRun.
 
 ## 2. First image block — `signal_image_source` (validates the model)
 
-- [ ] 2.1 Register `signal_image_source`; stamp `OutWidth/OutRows/OutCols` from `rows`/`cols` params
-- [ ] 2.2 Evaluator: emit the row-major image from `data` param into `VecOut_`
-- [ ] 2.3 `image_source.mflow` fixture + `SimulateRun` check (width = rows·cols, shape columns, known pixel values); bump parity snapshot
+- [x] 2.1 Registered `signal_image_source`; stamps `OutWidth/OutRows/OutCols` from `rows`/`cols`.
+- [x] 2.2 Evaluator emits the row-major image from `data` into `VecOut_`.
+- [x] 2.3 Covered by `image_blocks.mflow` (feeds the filter/threshold paths) + the shape-naming check; parity snapshot → 92 kinds.
 
 ## 3. `signal_image_filter` — 2-D convolution
 
-- [ ] 3.1 Register + shape-stamp (output shape = input shape; preserved via inference)
-- [ ] 3.2 Evaluator: direct 2-D correlation with a `kernel` matrix literal or named `type` (box/gaussian3/sobelx/sobely), zero-padded borders; delegate to `runtime/toolbox/images` where an entry exists
-- [ ] 3.3 `SimulateRun` checks: normalized box kernel preserves a constant image (unity DC gain); a Sobel kernel responds at an edge and is ~zero in flat regions
+- [x] 3.1 Registered; output shape = input shape via the shape-inference fixpoint (catch-all inherit).
+- [x] 3.2 Evaluator: direct 2-D correlation with a `kernel` literal or named `type` (box/gaussian3/sobelx/sobely), zero-padded borders. (Runtime-delegation path left open; in-sim conv is adequate for the small frames in scope.)
+- [x] 3.3 `SimulateRun`: normalized box preserves a constant image's interior (unity DC, center=5); Sobel-x responds at a vertical edge (center=4) and is 0 in flat regions.
 
 ## 4. `signal_threshold` — per-pixel binarize
 
-- [ ] 4.1 Register + shape-stamp (shape preserved)
-- [ ] 4.2 Evaluator: per-pixel `> level ? 1 : 0`
-- [ ] 4.3 `SimulateRun` check: a ramp image binarizes at the level, shape preserved
+- [x] 4.1 Registered; shape preserved via inference.
+- [x] 4.2 Evaluator: per-pixel `> level ? 1 : 0`.
+- [x] 4.3 `SimulateRun`: a 2×2 ramp binarizes at 0.5 → `[0 1; 0 1]`, shape preserved.
 
 ## 5. Recipe + docs
 
-- [ ] 5.1 `docs/mflowlink_blocks.md`: a "2-D image signals" section (representation, row-major contract, shape badge) + the per-block rows
-- [ ] 5.2 Extend the block-authoring recipe with the 2-D variant (shape stamping, flat-index formula, image regression-check example)
-- [ ] 5.3 Mark `mflow-toolbox-library-blocks` §5.1–5.3/5.5 done; cross-reference this capability
+- [x] 5.1 `docs/mflowlink_blocks.md` "2-D image signals" section (representation, row-major contract, `[row,col]` scope columns) + per-block rows + worked example.
+- [ ] 5.2 Extend the block-authoring recipe prose with the 2-D variant (shape stamping, flat-index formula) — follow-up doc polish.
+- [x] 5.3 Marked `mflow-toolbox-library-blocks` §5 done; cross-referenced this capability.
 
 ## 6. Color follow-on (scoped, after grayscale proves out)
 

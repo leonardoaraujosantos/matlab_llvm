@@ -164,6 +164,13 @@ const std::map<std::string, KindInfo> &kindTable() {
     add("signal_psk_demod",  {true, true, false, false, false, FIM});
     add("signal_qam_mod",    {true, true, false, false, false, FIM});
     add("signal_qam_demod",  {true, true, false, false, false, FIM});
+    // Computer Vision / Image Processing (#343, mflow-2d-image-signals) —
+    // grayscale image blocks over the flattened row-major 2-D signal. All
+    // stateless, direct-feedthrough. image_source defines its shape from
+    // rows/cols; image_filter and threshold preserve the input image shape.
+    add("signal_image_source", {true, true, false, false, false, FIM});
+    add("signal_image_filter", {true, true, false, false, false, FIM});
+    add("signal_threshold",    {true, true, false, false, false, FIM});
     // Statistics (#343) — streaming mean/variance/std over the input via an
     // online Welford accumulator. Stateful (carries across steps), so it
     // breaks algebraic loops; beats a MATLAB Function block, which can't hold
@@ -978,6 +985,38 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
       B.OutWidth = Mr > 0 ? Mr : 1;
       B.OutRows = B.OutWidth;
       B.OutCols = 1;
+    } else if (N.Kind == "signal_image_source") {
+      // Vision (#343) — a 2-D grayscale image source. Shape comes from `rows`
+      // and `cols`; the output is the flattened row-major width rows·cols.
+      // Conformance: if `data` is given, its element count must equal rows·cols.
+      int R = N.getParam("rows") ? std::atoi(N.getParam("rows")->c_str()) : 0;
+      int C = N.getParam("cols") ? std::atoi(N.getParam("cols")->c_str()) : 0;
+      if (R > 0 && C > 0) {
+        B.OutRows = R;
+        B.OutCols = C;
+        B.OutWidth = R * C;
+        if (auto *D = N.getParam("data")) {
+          // Count numeric tokens (any run of non-separator chars is one pixel).
+          int n = 0;
+          bool inTok = false;
+          for (char ch : *D) {
+            bool sep = (ch == ',' || ch == ';' || ch == ' ' || ch == '\t' ||
+                        ch == '[' || ch == ']');
+            if (!sep && !inTok) ++n;
+            inTok = !sep;
+          }
+          if (n > 0 && n != R * C) {
+            Diag.error(B.Loc, "signal_image_source \"" + B.Id +
+                                  "\": data has " + std::to_string(n) +
+                                  " pixels but shape is " + std::to_string(R) +
+                                  "×" + std::to_string(C) + " (" +
+                                  std::to_string(R * C) + ")");
+            return std::nullopt;
+          }
+        }
+      } else {
+        B.OutWidth = 1; // unshaped → scalar fallback
+      }
     } else if (N.Kind == "signal_rl_agent") {
       // RL (#343) — a discrete policy emits a scalar action index (argmax); a
       // continuous policy emits one bounded action per output (rows of W2).
