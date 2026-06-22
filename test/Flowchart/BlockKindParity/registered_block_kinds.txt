@@ -17,6 +17,7 @@ signal_discrete_filter
 signal_discrete_integrator
 signal_display
 signal_enabled_subsystem
+signal_error_rate
 signal_from
 signal_from_workspace
 signal_function_call_generator

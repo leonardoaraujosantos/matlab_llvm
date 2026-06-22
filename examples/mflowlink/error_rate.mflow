@@ -1,0 +1,23 @@
+{
+  "schema": "matforge.flowchart", "version": "0.1.0", "entry": "ber_test",
+  "settings": { "kind": "signal_flow",
+    "solver": { "type": "fixed_step", "algorithm": "ode4", "startTime": 0.0, "stopTime": 10.0, "maxStep": "0.01" } },
+  "flows": [{
+    "id": "flow_ber", "kind": "function", "name": "ber_test",
+    "signature": { "inputs": [], "outputs": [] },
+    "nodes": [
+      { "id": "tx", "kind": "signal_constant", "data": { "params": { "value": 1.0 } },
+        "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "rx", "kind": "signal_pulse", "data": { "params": { "amplitude": 1.0, "period": 2.0, "pulseWidth": 50.0, "phaseDelay": 0.0 } },
+        "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "ber", "kind": "signal_error_rate", "data": { "params": { "tolerance": 0.5 } },
+        "ports": { "in": [{"id": "tx"}, {"id": "rx"}], "out": [{"id": "out"}] } },
+      { "id": "sc", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } }
+    ],
+    "edges": [
+      { "id": "e0", "kind": "data", "from": {"node": "tx", "port": "out"}, "to": {"node": "ber", "port": "tx"} },
+      { "id": "e1", "kind": "data", "from": {"node": "rx", "port": "out"}, "to": {"node": "ber", "port": "rx"} },
+      { "id": "e2", "kind": "data", "from": {"node": "ber", "port": "out"}, "to": {"node": "sc", "port": "in"} }
+    ]
+  }]
+}
