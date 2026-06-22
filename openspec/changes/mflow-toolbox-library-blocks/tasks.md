@@ -6,6 +6,31 @@ each block (or small same-domain set) is its own follow-on PR. Each block PR: re
 fixture + checks, `docs/mflowlink_blocks.md` row, update the parity snapshot, and file the
 editor `NodeKind` (IDE repo).
 
+## 0. Prioritization (gap analysis: 66 blocks vs 29 function-level toolboxes)
+
+Blocks earn a dedicated kind only where time-domain drag-and-drop beats the generic
+`signal_matlab_fcn` (function-first philosophy). Effort: S = evaluator delegates to existing
+runtime; M = new state/port shape or codegen; L = needs a design decision or new plumbing.
+Value: H = streaming/stateful/synthesizable, no ergonomic function equivalent.
+
+**Tier 1 (high value, low effort — do next):**
+- 4b.5b `signal_tff`/`signal_counter` → SystemVerilog (S/H) — finishes the HDL synthesize path
+- 3.1 `signal_fft`/`signal_ifft` (S–M/H) + 3.2 `signal_window` (S/H) — DSP frame trio
+- 3.4 `signal_biquad` SOS streaming IIR (S/H)
+- 8.1 `signal_kalman` (M/H) — highest-value *new* block; no good function equivalent
+- 4.1 PSK + 4.2 QAM mod/demod (M/H) + 4.4 `signal_error_rate` (S/H) — completes the Comms chain `awgn` started
+
+**Tier 2 (high value, medium effort):**
+- 8.2 `signal_dnn_predict` (M–L/H) — NN inference in a loop
+- 4b.2/4b.3/4b.4 `signal_jkff`/`srff`/`shift_register`/`ram`/`rom` (S–M/H) — round out synthesizable HDL
+- 3.3 `signal_spectrum` (M/M–H), 3.5 streaming `dcblock`/`lowpass`/`highpass` (M/M)
+- 7.1 `signal_lqr`/`signal_observer` (S/M), 8.3 `signal_rl_agent` (M–L/M)
+
+**Tier 3 (blocked on a design decision):** §5 Vision/Image (2-D-signal-on-a-wire), §6 RF (time- vs freq-domain triage), wavelet DWT, nav/robotics pose blocks.
+
+**Tier 4 (leave as functions — low block value):** antenna, propagation, bluetooth, bioinfo,
+econ, finance, curvefit, optim, gads, PDE, symbolic, GPU, ident (batch/frequency/symbolic).
+
 ## 1. First slice — recipe + parity guard (DONE, PR #350)
 
 - [x] 1.1 Block-authoring recipe in `docs/mflowlink_blocks.md` (§"Adding a toolbox library block")
@@ -62,3 +87,9 @@ verilog,cocotb}` lane. Mux/Demux + logic gates already ship (`signal_mux`/`demux
 
 - [ ] 7.1 Control: a few more dedicated blocks beyond `signal_pid` / `signal_state_space` / `signal_transfer_fcn` where useful (e.g. discrete LQR/observer gain block)
 - [ ] 7.2 Stats: a block where streaming/time-domain makes sense (e.g. running mean/variance) — only if it beats a MATLAB Function block
+
+## 8. Estimation / ML in-the-loop catalog (follow-on PRs)
+
+- [ ] 8.1 `signal_kalman` — Kalman filter (predict/update; A/B/C/Q/R params; vector state) delegating to `runtime/toolbox/fusion`. Classic Simulink block, no ergonomic function equivalent.
+- [ ] 8.2 `signal_dnn_predict` — neural-net inference block in a control/sim loop (`runtime/toolbox/dlnet`); serialized network param
+- [ ] 8.3 `signal_rl_agent` — trained policy-in-the-loop block (`runtime/toolbox/rl`)
