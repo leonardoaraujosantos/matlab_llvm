@@ -86,7 +86,7 @@ verilog,cocotb}` lane. Mux/Demux + logic gates already ship (`signal_mux`/`demux
 ## 7. Control / Stats round-outs (follow-on PRs)
 
 - [ ] 7.1 Control: a few more dedicated blocks beyond `signal_pid` / `signal_state_space` / `signal_transfer_fcn` where useful (e.g. discrete LQR/observer gain block)
-- [ ] 7.2 Stats: a block where streaming/time-domain makes sense (e.g. running mean/variance) — only if it beats a MATLAB Function block
+- [x] 7.2 Stats: `signal_running_stats` — streaming mean/var/std via an online Welford accumulator — DONE. Beats a MATLAB Function block (which can't hold persistent state in the flow). `running_stats.mflow` + SimulateRun checks (mean→bias, var→A²/2 on a sine over whole periods).
 
 ## 8. Estimation / ML in-the-loop catalog (follow-on PRs)
 

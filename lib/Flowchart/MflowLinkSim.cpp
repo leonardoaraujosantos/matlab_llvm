@@ -523,6 +523,9 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
   DigitalLatch_.assign(N, 0.0);
   ErrAccum_.assign(N, 0.0);
   TotAccum_.assign(N, 0.0);
+  RunCount_.assign(N, 0.0);
+  RunMean_.assign(N, 0.0);
+  RunM2_.assign(N, 0.0);
   MatlabFcnCache_.resize(N);
   MatlabFnCache_.resize(N);
   // §17.5 #8 — snapshot the currently installed JIT factory once.
@@ -1449,6 +1452,20 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       // (evalAll runs multiple times per RK4 step and would over-count); here
       // we only surface the accumulated ratio so it logs and feeds downstream.
       Out_[I] = (TotAccum_[I] > 0.0) ? (ErrAccum_[I] / TotAccum_[I]) : 0.0;
+    } else if (K == "signal_running_stats") {
+      // #343 — streaming statistics over the input. The Welford state is
+      // updated once per major step in commitDigitalRegisters(); here we only
+      // surface the requested statistic (params.stat: "mean" | "var" | "std",
+      // default "mean"). Sample variance uses (n-1); n<2 ⇒ 0.
+      const std::string *Stat = paramS(B, "stat");
+      double Var = (RunCount_[I] > 1.0) ? (RunM2_[I] / (RunCount_[I] - 1.0))
+                                        : 0.0;
+      if (Stat && *Stat == "var")
+        Out_[I] = Var;
+      else if (Stat && *Stat == "std")
+        Out_[I] = std::sqrt(Var);
+      else
+        Out_[I] = RunMean_[I];
     } else if (K == "signal_dff" || K == "signal_tff" ||
                K == "signal_counter" || K == "signal_jkff" ||
                K == "signal_srff") {
@@ -2353,6 +2370,26 @@ double MflowLinkSim::stepMajor() {
     TotAccum_[I] += 1.0;
     if (std::fabs(Out_[TxSrc] - Out_[RxSrc]) > Tol)
       ErrAccum_[I] += 1.0;
+  }
+  // #343 — streaming statistics. Once per major step, fold the current input
+  // into each running_stats block's Welford accumulator (numerically stable
+  // online mean/variance).
+  for (size_t I = 0; I < M_.Blocks.size(); ++I) {
+    if (M_.Blocks[I].Kind != "signal_running_stats")
+      continue;
+    int Src = -1;
+    for (auto &P : Inputs_[I])
+      if (P.DstPort == "in" || P.DstPort == "in1") {
+        Src = static_cast<int>(P.SrcBlock);
+        break;
+      }
+    if (Src < 0)
+      continue;
+    double X = Out_[Src];
+    RunCount_[I] += 1.0;
+    double Delta = X - RunMean_[I];
+    RunMean_[I] += Delta / RunCount_[I];
+    RunM2_[I] += Delta * (X - RunMean_[I]);
   }
   // Refresh outputs once more so the reset-into-state propagates
   // visibly into the post-step Out_ slot (the integrator's output

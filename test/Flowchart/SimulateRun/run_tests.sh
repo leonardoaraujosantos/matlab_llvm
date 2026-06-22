@@ -559,6 +559,18 @@ check "error_rate header"   "[[ '$ER_HEAD' == 't,sc' ]]" ""
 check "error_rate ~ 0.5"    "awk 'BEGIN{exit !($ER_FINAL>0.45 && $ER_FINAL<0.55)}'" "50%-duty mismatch must converge to BER 0.5"
 check "error_rate bounded"  "[[ '$ER_OOR' == '0' ]]" "a probability ratio must stay within [0, 1]"
 
+#--- #343: signal_running_stats — streaming mean / variance ----------------
+# A sine (amplitude 2, bias 3, 1 Hz) over exactly 10 periods. The Welford
+# running mean converges to the bias (3.0); the sample variance converges to
+# A²/2 = 2.0. Columns: t,sm,sv.
+ST="$("$MATLABC" -simulate "$EX/running_stats.mflow")"
+ST_HEAD=$(printf '%s\n' "$ST" | head -1)
+ST_MEAN=$(printf '%s\n' "$ST" | tail -1 | awk -F, '{print $2}')
+ST_VAR=$(printf '%s\n'  "$ST" | tail -1 | awk -F, '{print $3}')
+check "running_stats header" "[[ '$ST_HEAD' == 't,sm,sv' ]]" ""
+check "running mean ~ bias"  "awk 'BEGIN{exit !($ST_MEAN>2.95 && $ST_MEAN<3.05)}'" "mean of A*sin+bias over whole periods is the bias (3)"
+check "running var ~ A^2/2"  "awk 'BEGIN{exit !($ST_VAR>1.90 && $ST_VAR<2.10)}'" "variance of a 2.0-amplitude sine is A^2/2 = 2"
+
 #--- #343: HDL sequential blocks — D flip-flop / T flip-flop / counter -----
 # A 1 Hz pulse clock drives a D-FF (D=1), a free-running T-FF, and an up
 # counter over 5 s. Each updates once per clock posedge (once per major step,
