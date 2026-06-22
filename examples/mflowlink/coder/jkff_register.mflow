@@ -1,0 +1,19 @@
+{
+  "schema": "matforge.flowchart", "version": "0.1.0", "entry": "jkff_reg",
+  "settings": { "kind": "signal_flow" },
+  "flows": [{
+    "id": "flow_jkff", "kind": "function", "name": "jkff_reg",
+    "signature": { "inputs": ["j", "k"], "outputs": ["q"] },
+    "nodes": [
+      { "id": "jin", "kind": "signal_inport", "data": { "params": {} }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "kin", "kind": "signal_inport", "data": { "params": {} }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "ff",  "kind": "signal_jkff", "data": { "params": { "initialValue": 0.0 } }, "ports": { "in": [{"id": "j"}, {"id": "k"}], "out": [{"id": "out"}] } },
+      { "id": "qout", "kind": "signal_outport", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } }
+    ],
+    "edges": [
+      { "id": "e1", "kind": "data", "from": {"node": "jin", "port": "out"}, "to": {"node": "ff", "port": "j"} },
+      { "id": "e2", "kind": "data", "from": {"node": "kin", "port": "out"}, "to": {"node": "ff", "port": "k"} },
+      { "id": "e3", "kind": "data", "from": {"node": "ff", "port": "out"}, "to": {"node": "qout", "port": "in"} }
+    ]
+  }]
+}
