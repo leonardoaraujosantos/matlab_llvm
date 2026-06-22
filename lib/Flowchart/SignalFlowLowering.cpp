@@ -187,6 +187,10 @@ const std::map<std::string, KindInfo> &kindTable() {
     add("signal_fft",        {true, true, false, false, false, FIM});
     add("signal_ifft",       {true, true, false, false, false, FIM});
     add("signal_window",     {true, true, false, false, false, FIM});
+    // Wavelet (#343) — 1-level Haar DWT/IDWT over a frame; output is
+    // [approx; detail] (width n). signal_dwt → signal_idwt is the identity.
+    add("signal_dwt",        {true, true, false, false, false, FIM});
+    add("signal_idwt",       {true, true, false, false, false, FIM});
     // signal_spectrum maps a real N-frame → its power spectrum |X[k]|² (width N).
     add("signal_spectrum",   {true, true, false, false, false, FIM});
     add("signal_relop",      {true, true, false, false, false, FIM});
@@ -1033,9 +1037,10 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
       B.OutWidth = 1;
       B.OutRows = 1;
       B.OutCols = 1;
-    } else if (N.Kind == "signal_window" || N.Kind == "signal_spectrum") {
-      // DSP (#343) — windowing / power spectrum. Output width = frame size `n`;
-      // if `n` is absent the width inherits the input element count (sentinel 0).
+    } else if (N.Kind == "signal_window" || N.Kind == "signal_spectrum" ||
+               N.Kind == "signal_dwt" || N.Kind == "signal_idwt") {
+      // DSP/Wavelet (#343) — windowing / power spectrum / Haar DWT-IDWT. Output
+      // width = frame size `n`; absent `n` inherits the input element count.
       int Nf = N.getParam("n") ? std::atoi(N.getParam("n")->c_str()) : 0;
       B.OutWidth = Nf > 0 ? Nf : 0;
     } else if (N.Kind == "signal_fft") {

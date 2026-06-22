@@ -793,6 +793,21 @@ check "box filter unity DC"  "awk 'BEGIN{exit !(($IM_BOXCTR-5)^2<1e-9 && $IM_BOX
 check "sobel edge response"  "awk 'BEGIN{exit !(($IM_SOBCTR-4)^2<1e-9)}'" "Sobel-x must respond strongly at the vertical edge"
 check "threshold binarize"   "awk 'BEGIN{exit !($IM_T1<1e-9 && ($IM_T2-1)^2<1e-9 && ($IM_T4-1)^2<1e-9)}'" "per-pixel threshold at 0.5 → [0 1; 0 1]"
 
+#--- #343: Wavelet — signal_dwt / signal_idwt (1-level Haar) --------------
+# DWT of [1 2 3 4]: approx = [(1+2)/√2, (3+4)/√2] = [2.121, 4.950], detail =
+# [(1-2)/√2, (3-4)/√2] = [-0.707, -0.707], packed [approx; detail]. The inverse
+# recovers [1 2 3 4]. Columns: t, sd[1..4] (DWT), si[1..4] (reconstruction).
+DW="$("$MATLABC" -simulate "$EX/dwt_haar.mflow")"
+DW_HEAD=$(printf '%s\n' "$DW" | head -1)
+DW_A0=$(printf '%s\n' "$DW" | tail -1 | awk -F, '{print $2}')   # approx[0] = 3/√2
+DW_D0=$(printf '%s\n' "$DW" | tail -1 | awk -F, '{print $4}')   # detail[0] = -1/√2
+DW_R1=$(printf '%s\n' "$DW" | tail -1 | awk -F, '{print $6}')   # idwt[0] = 1
+DW_R4=$(printf '%s\n' "$DW" | tail -1 | awk -F, '{print $9}')   # idwt[3] = 4
+check "dwt header"           "[[ '$DW_HEAD' == 't,sd[1],sd[2],sd[3],sd[4],si[1],si[2],si[3],si[4]' ]]" ""
+check "dwt Haar approx"      "awk 'BEGIN{exit !(($DW_A0-2.1213203)^2<1e-6)}'" "Haar approx[0] of [1 2] is (1+2)/√2 = 2.1213"
+check "dwt Haar detail"      "awk 'BEGIN{exit !(($DW_D0+0.7071068)^2<1e-6)}'" "Haar detail[0] of [1 2] is (1-2)/√2 = -0.7071"
+check "dwt→idwt identity"    "awk 'BEGIN{exit !(($DW_R1-1)^2<1e-9 && ($DW_R4-4)^2<1e-9)}'" "dwt → idwt round-trip recovers the frame"
+
 #--- #343: HDL sequential blocks — D flip-flop / T flip-flop / counter -----
 # A 1 Hz pulse clock drives a D-FF (D=1), a free-running T-FF, and an up
 # counter over 5 s. Each updates once per clock posedge (once per major step,

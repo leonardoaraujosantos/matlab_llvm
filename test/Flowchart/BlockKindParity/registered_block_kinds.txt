@@ -19,6 +19,7 @@ signal_discrete_filter
 signal_discrete_integrator
 signal_display
 signal_dnn_predict
+signal_dwt
 signal_enabled_subsystem
 signal_error_rate
 signal_fft
@@ -28,6 +29,7 @@ signal_function_call_generator
 signal_gain
 signal_goto
 signal_highpass
+signal_idwt
 signal_if_action
 signal_ifft
 signal_image_filter

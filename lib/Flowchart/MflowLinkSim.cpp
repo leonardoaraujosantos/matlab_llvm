@@ -1575,7 +1575,8 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       // the proper switch / demux semantics + zero-crossing.
       Out_[I] = Inputs_[I].empty() ? 0.0 : edgeValue(Inputs_[I].front());
     } else if (K == "signal_window" || K == "signal_fft" ||
-               K == "signal_ifft" || K == "signal_spectrum") {
+               K == "signal_ifft" || K == "signal_spectrum" ||
+               K == "signal_dwt" || K == "signal_idwt") {
       // #343 DSP frame transforms over a vector signal. Read `Want` elements
       // from the single input (a width-W source fills from VecOut_, a scalar
       // source broadcasts its value into element 0). Stateless: the whole
@@ -1630,7 +1631,7 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
           }
           VecOut_[I][n] = Nf > 0 ? re / Nf : 0.0;
         }
-      } else { // signal_spectrum
+      } else if (K == "signal_spectrum") {
         // Power spectrum of a real N-frame: |X[k]|² = Re[k]² + Im[k]² (width N).
         int Nf = OutWidth_[I];
         std::vector<double> x = frame(Nf);
@@ -1643,6 +1644,30 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
             im += x[n] * std::sin(ang);
           }
           VecOut_[I][kk] = re * re + im * im;
+        }
+      } else if (K == "signal_dwt") {
+        // 1-level Haar DWT: approx[k] = (x[2k]+x[2k+1])/√2, detail[k] =
+        // (x[2k]−x[2k+1])/√2. Output packs [approx (N/2); detail (N/2)].
+        int Nf = OutWidth_[I];
+        int H = Nf / 2;
+        std::vector<double> x = frame(Nf);
+        VecOut_[I].assign(Nf, 0.0);
+        const double s = std::sqrt(2.0);
+        for (int k = 0; k < H; ++k) {
+          VecOut_[I][k] = (x[2 * k] + x[2 * k + 1]) / s;
+          VecOut_[I][H + k] = (x[2 * k] - x[2 * k + 1]) / s;
+        }
+      } else { // signal_idwt
+        // Inverse Haar: x[2k] = (a[k]+d[k])/√2, x[2k+1] = (a[k]−d[k])/√2,
+        // from the [approx; detail] frame. signal_dwt → signal_idwt = identity.
+        int Nf = OutWidth_[I];
+        int H = Nf / 2;
+        std::vector<double> X = frame(Nf);
+        VecOut_[I].assign(Nf, 0.0);
+        const double s = std::sqrt(2.0);
+        for (int k = 0; k < H; ++k) {
+          VecOut_[I][2 * k] = (X[k] + X[H + k]) / s;
+          VecOut_[I][2 * k + 1] = (X[k] - X[H + k]) / s;
         }
       }
       Out_[I] = VecOut_[I].empty() ? 0.0 : VecOut_[I].front();
