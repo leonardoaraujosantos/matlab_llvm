@@ -95,11 +95,21 @@ def main(matlabc):
         wait_stop()           # the boot/entry stop
         send("continue", {})
         stop = wait_stop()    # the post-continue stop
+        # Inspect the body's locals at the stop (the "Locals" scope).
+        send("scopes", {"frameId": 1})
+        sc = wait_response("scopes")
+        scope_names = [s.get("name") for s in sc.get("body", {}).get("scopes", [])] if sc else []
+        send("variables", {"variablesReference": 2})
+        vr = wait_response("variables")
+        locals_ = {x["name"]: x["value"]
+                   for x in (vr.get("body", {}).get("variables", []) if vr else [])}
         proc.kill()
-        return bp_resp, stop
+        return bp_resp, stop, scope_names, locals_
 
-    # Case 1 — breakpoint on line 3 ("b = a * 2;") pauses the run.
-    bp_resp, stop = session(3)
+    # Case 1 — breakpoint on line 3 ("b = a * 2;") pauses the run; the Locals
+    # scope shows the body's variables *before* that line runs (a = u1+1 = 4,
+    # u1 = 3), and `b` is not yet assigned.
+    bp_resp, stop, scopes, locals_ = session(3)
     verified = False
     if bp_resp:
         bps = bp_resp.get("body", {}).get("breakpoints", [])
@@ -111,10 +121,18 @@ def main(matlabc):
     elif stop.get("description") != "fn:3":
         failures.append(
             f"stopped description should be 'fn:3', got {stop.get('description')}")
+    if "Locals" not in scopes:
+        failures.append(f"no Locals scope at the breakpoint (scopes: {scopes})")
+    if abs(float(locals_.get("a", "nan")) - 4.0) > 1e-9:
+        failures.append(f"local 'a' should be 4 at fn:3, got {locals_.get('a')}")
+    if abs(float(locals_.get("u1", "nan")) - 3.0) > 1e-9:
+        failures.append(f"local 'u1' should be 3 at fn:3, got {locals_.get('u1')}")
+    if "b" in locals_:
+        failures.append("local 'b' must not exist yet at fn:3 (line not run)")
 
     # Case 2 — a breakpoint on a non-existent body line (99) never fires; the
     # run reaches stopTime (reason != breakpoint).
-    _, stop2 = session(99)
+    _, stop2, _, _ = session(99)
     if stop2 and stop2.get("reason") == "breakpoint":
         failures.append("a breakpoint on an unreached line must not stop the run")
 
@@ -123,7 +141,8 @@ def main(matlabc):
         for f in failures:
             print(f"  - {f}")
         return 1
-    print("PASS: source-line breakpoint stops at fn:3; unreached line does not")
+    print("PASS: breakpoint stops at fn:3 with Locals (a=4, u1=3, no b); "
+          "unreached line does not stop")
     return 0
 
 

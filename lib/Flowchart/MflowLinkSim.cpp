@@ -524,7 +524,8 @@ parseMatlabFunctionBody(const std::string &Source);
 std::vector<double> runMatlabFunction(const MflowLinkSim::MatlabFunctionState &S,
                                       const std::vector<double> &Inputs, double T,
                                       const std::set<int> *WatchLines = nullptr,
-                                      int *HitLine = nullptr);
+                                      int *HitLine = nullptr,
+                                      std::map<std::string, double> *HitVars = nullptr);
 // §17.5 #8 — accessor for the parsed-function input count. The
 // constructor needs this to decide how many `u1..uN` slots the JIT
 // wrapper should declare, but `MatlabFunctionState` is defined
@@ -2553,14 +2554,16 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       }
       if (Watch && MatlabFnCache_[I]) {
         int Hit = -1;
+        std::map<std::string, double> HitVars;
         std::vector<double> Ys =
-            runMatlabFunction(*MatlabFnCache_[I], U, T, Watch, &Hit);
+            runMatlabFunction(*MatlabFnCache_[I], U, T, Watch, &Hit, &HitVars);
         Out_[I] = Ys.empty() ? 0.0 : Ys[0];
         for (size_t K = 0; K < Ys.size(); ++K)
           PortOut_[I]["out" + std::to_string(K + 1)] = Ys[K];
         if (Hit >= 0 && LastSourceHit_.Line < 0) {
           LastSourceHit_.BlockId = M_.Blocks[I].Id;
           LastSourceHit_.Line = Hit;
+          LastSourceHit_.Vars = std::move(HitVars);
         }
       } else if (MatlabFnJit_[I]) {
         // §17.5 #8 — JIT'd entrypoint. Pad inputs out to the arity
@@ -3833,6 +3836,9 @@ struct InterpEnv {
   const std::set<int> *WatchLines = nullptr;
   const matlab::SourceManager *SM = nullptr;
   int *HitLine = nullptr;
+  // #354 — on the first armed-line hit, snapshot the body's locals here (the
+  // values visible *before* that line executes), for the DAP "Locals" scope.
+  std::map<std::string, double> *HitVars = nullptr;
 };
 struct ReturnSignal {};
 // §17.5 #8 — break / continue inside for / while bodies.
@@ -3961,7 +3967,10 @@ void interpStmt(const matlab::Stmt *S, InterpEnv &Env) {
   if (Env.WatchLines && Env.SM && Env.HitLine && *Env.HitLine < 0 &&
       S->Range.Begin.isValid()) {
     int Ln = static_cast<int>(Env.SM->getLineColumn(S->Range.Begin).Line);
-    if (Env.WatchLines->count(Ln)) *Env.HitLine = Ln;
+    if (Env.WatchLines->count(Ln)) {
+      *Env.HitLine = Ln;
+      if (Env.HitVars) *Env.HitVars = Env.Vars; // locals before this line runs
+    }
   }
   switch (S->Kind) {
   case MNK::ExprStmt: {
@@ -4060,7 +4069,8 @@ std::vector<double> runMatlabFunction(const MflowLinkSim::MatlabFunctionState &S
                                       const std::vector<double> &Inputs,
                                       double T,
                                       const std::set<int> *WatchLines,
-                                      int *HitLine) {
+                                      int *HitLine,
+                                      std::map<std::string, double> *HitVars) {
   InterpEnv Env;
   Env.Vars["t"] = T;
   for (size_t I = 0; I < S.InNames.size(); ++I)
@@ -4073,6 +4083,7 @@ std::vector<double> runMatlabFunction(const MflowLinkSim::MatlabFunctionState &S
     Env.WatchLines = WatchLines;
     Env.SM = S.SM.get();
     Env.HitLine = HitLine;
+    Env.HitVars = HitVars;
   }
   try {
     interpBlock(S.Fn->Body, Env);

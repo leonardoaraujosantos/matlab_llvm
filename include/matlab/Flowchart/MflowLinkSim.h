@@ -173,7 +173,11 @@ public:
   void clearSourceBreakpoints() { SourceBreakpoints_.clear(); }
   // Returns { blockId, line } of the most recent source-line hit and clears it;
   // line < 0 means "no hit".
-  struct SourceHit { std::string BlockId; int Line = -1; };
+  struct SourceHit {
+    std::string BlockId;
+    int Line = -1;
+    std::map<std::string, double> Vars; // body locals captured at the hit line
+  };
   SourceHit consumeSourceBreakpointHit();
 
   //===-------------------------------------------------------------===//
