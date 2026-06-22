@@ -1,0 +1,29 @@
+{
+  "schema": "matforge.flowchart", "version": "0.1.0", "entry": "filt_test",
+  "settings": { "kind": "signal_flow",
+    "solver": { "type": "fixed_step", "algorithm": "ode4", "startTime": 0.0, "stopTime": 10.0, "maxStep": "0.05" } },
+  "flows": [{
+    "id": "flow_filt", "kind": "function", "name": "filt_test",
+    "signature": { "inputs": [], "outputs": [] },
+    "nodes": [
+      { "id": "c5", "kind": "signal_constant", "data": { "params": { "value": 5.0 } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "lp", "kind": "signal_lowpass", "data": { "params": { "alpha": 0.1, "sampleTime": 0.05 } }, "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "slp", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } },
+
+      { "id": "hp", "kind": "signal_highpass", "data": { "params": { "alpha": 0.9, "sampleTime": 0.05 } }, "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "shp", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } },
+
+      { "id": "c3", "kind": "signal_constant", "data": { "params": { "value": 3.0 } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "dc", "kind": "signal_dcblock", "data": { "params": { "r": 0.9, "sampleTime": 0.05 } }, "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "sdc", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } }
+    ],
+    "edges": [
+      { "id": "e0", "kind": "data", "from": {"node": "c5", "port": "out"}, "to": {"node": "lp", "port": "in"} },
+      { "id": "e1", "kind": "data", "from": {"node": "lp", "port": "out"}, "to": {"node": "slp", "port": "in"} },
+      { "id": "e2", "kind": "data", "from": {"node": "c5", "port": "out"}, "to": {"node": "hp", "port": "in"} },
+      { "id": "e3", "kind": "data", "from": {"node": "hp", "port": "out"}, "to": {"node": "shp", "port": "in"} },
+      { "id": "e4", "kind": "data", "from": {"node": "c3", "port": "out"}, "to": {"node": "dc", "port": "in"} },
+      { "id": "e5", "kind": "data", "from": {"node": "dc", "port": "out"}, "to": {"node": "sdc", "port": "in"} }
+    ]
+  }]
+}

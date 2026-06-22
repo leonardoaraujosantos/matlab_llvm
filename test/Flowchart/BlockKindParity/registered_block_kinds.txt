@@ -10,6 +10,7 @@ signal_compare_to_zero
 signal_constant
 signal_counter
 signal_custom
+signal_dcblock
 signal_dead_zone
 signal_demux
 signal_derivative
@@ -25,6 +26,7 @@ signal_from_workspace
 signal_function_call_generator
 signal_gain
 signal_goto
+signal_highpass
 signal_if_action
 signal_ifft
 signal_inport
@@ -35,6 +37,7 @@ signal_logical
 signal_lookup_1d
 signal_lookup_2d
 signal_lookup_nd
+signal_lowpass
 signal_lqr
 signal_math_fcn
 signal_matlab_fcn

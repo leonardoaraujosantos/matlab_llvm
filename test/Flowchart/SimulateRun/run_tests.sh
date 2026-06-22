@@ -731,6 +731,21 @@ check "lqr header"           "[[ '$LQ_HEAD' == 't,su,sv[1],sv[2]' ]]" ""
 check "lqr scalar gain"      "awk 'BEGIN{exit !(($LQ_U+10)^2<1e-9)}'" "u = -K·x with K=[3 4], x=[2 1] is -10"
 check "lqr MIMO gain"        "awk 'BEGIN{exit !(($LQ_V1+5)^2<1e-9 && ($LQ_V2+6)^2<1e-9)}'" "2×2 gain produces the vector u = -[5; 6]"
 
+#--- #343: DSP — streaming filters (lowpass / highpass / dcblock) ---------
+# One-pole streaming filters as discrete_filter presets. On a constant input:
+# the lowpass passes DC (output → input, with a settling transient); the
+# highpass and dcblock both reject DC (output → 0). Columns: t, slp, shp, sdc.
+FL="$("$MATLABC" -simulate "$EX/streaming_filters.mflow")"
+FL_HEAD=$(printf '%s\n' "$FL" | head -1)
+FL_LP=$(printf '%s\n'  "$FL" | tail -1 | awk -F, '{print $2}')
+FL_LP0=$(printf '%s\n' "$FL" | awk -F, '$1>0.1 && $1<0.2{print $2; exit}')  # transient < 5
+FL_HP=$(printf '%s\n'  "$FL" | tail -1 | awk -F, '{v=$3; print (v<0)?-v:v}')
+FL_DC=$(printf '%s\n'  "$FL" | tail -1 | awk -F, '{v=$4; print (v<0)?-v:v}')
+check "filters header"       "[[ '$FL_HEAD' == 't,slp,shp,sdc' ]]" ""
+check "lowpass passes DC"    "awk 'BEGIN{exit !(($FL_LP-5)^2<1e-4 && $FL_LP0<4.9)}'" "one-pole lowpass settles to the DC input (5) with a transient"
+check "highpass blocks DC"   "awk 'BEGIN{exit !($FL_HP<1e-3)}'" "one-pole highpass must reject the constant (→ 0)"
+check "dcblock blocks DC"    "awk 'BEGIN{exit !($FL_DC<1e-3)}'" "DC blocker must reject the constant (→ 0)"
+
 #--- #343: HDL sequential blocks — D flip-flop / T flip-flop / counter -----
 # A 1 Hz pulse clock drives a D-FF (D=1), a free-running T-FF, and an up
 # counter over 5 s. Each updates once per clock posedge (once per major step,

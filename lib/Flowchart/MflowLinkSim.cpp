@@ -406,6 +406,16 @@ void parseSimMatrix(const std::string &S, std::vector<double> &Vals,
 // O(n³) implementation is more than adequate.
 //===----------------------------------------------------------------------===//
 
+// #343 — the discrete-IIR family that shares the direct-form-II difference
+// engine (TFCache_ / Z_ / FirHistory_ / fireDiscreteTicks). discrete_filter
+// takes num/den directly; biquad and the streaming filters build num/den from
+// their own parameters at cache time.
+static bool isDiscreteIirKind(const std::string &K) {
+  return K == "signal_discrete_filter" || K == "signal_biquad" ||
+         K == "signal_lowpass" || K == "signal_highpass" ||
+         K == "signal_dcblock";
+}
+
 // DSP window taper coefficient at index k of an N-point window (#343).
 // Supported: rectangular ("rect"/"none"), Hamming, Blackman; default Hann.
 static double windowCoef(const std::string *Type, int k, int N) {
@@ -586,8 +596,7 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
   // Pre-size FIR history per discrete_filter block to max(NumLen,
   // DenLen) so every reference index is in-range.
   for (size_t I = 0; I < N; ++I) {
-    if (M_.Blocks[I].Kind != "signal_discrete_filter" &&
-        M_.Blocks[I].Kind != "signal_biquad")
+    if (!isDiscreteIirKind(M_.Blocks[I].Kind))
       continue;
     const auto &TF = TFCache_[I];
     size_t Sz = std::max(TF.Num.size(), TF.Den.size());
@@ -673,6 +682,31 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
       Num.resize(3, 0.0);
       Den.resize(3, 0.0);
       if (Den[0] == 0.0) Den[0] = 1.0; // normalise a0
+      TFCache_[I].Num = std::move(Num);
+      TFCache_[I].Den = std::move(Den);
+      TFCache_[I].Valid = true;
+    } else if (B.Kind == "signal_lowpass" || B.Kind == "signal_highpass" ||
+               B.Kind == "signal_dcblock") {
+      // #343 DSP — streaming first-order filters as discrete_filter presets.
+      // `alpha`∈(0,1] sets the pole; `lowpass` defaults to heavy smoothing,
+      // `highpass`/`dcblock` to a pole near 1 (wide passband).
+      std::vector<double> Num, Den;
+      if (B.Kind == "signal_lowpass") {
+        // y[n] = α·x[n] + (1-α)·y[n-1] — H(z)=α/(1-(1-α)z⁻¹), unity DC gain.
+        double A = MflowLinkSim::paramD(B, "alpha", 0.1);
+        Num = {A};
+        Den = {1.0, -(1.0 - A)};
+      } else if (B.Kind == "signal_highpass") {
+        // H(z) = α(1 - z⁻¹)/(1 - α z⁻¹) — zero DC gain, ~unity at Nyquist.
+        double A = MflowLinkSim::paramD(B, "alpha", 0.9);
+        Num = {A, -A};
+        Den = {1.0, -A};
+      } else { // signal_dcblock
+        // H(z) = (1 - z⁻¹)/(1 - r z⁻¹) — removes DC, passes everything else.
+        double R = MflowLinkSim::paramD(B, "r", 0.995);
+        Num = {1.0, -1.0};
+        Den = {1.0, -R};
+      }
       TFCache_[I].Num = std::move(Num);
       TFCache_[I].Den = std::move(Den);
       TFCache_[I].Valid = true;
@@ -1001,7 +1035,9 @@ void MflowLinkSim::reset() {
     } else if (B.Kind == "signal_discrete_integrator" ||
                B.Kind == "signal_rate_transition" ||
                B.Kind == "signal_discrete_filter" ||
-               B.Kind == "signal_biquad") {
+               B.Kind == "signal_biquad" ||
+               B.Kind == "signal_lowpass" || B.Kind == "signal_highpass" ||
+               B.Kind == "signal_dcblock") {
       // Initial discrete state: `initialCondition` (or 0). For
       // signal_discrete_filter the IIR taps all start at 0; the
       // first sample at NextFire_ then writes the new state.
@@ -2165,6 +2201,8 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
     } else if (K == "signal_discrete_integrator" ||
                K == "signal_discrete_filter" ||
                K == "signal_biquad" ||
+               K == "signal_lowpass" || K == "signal_highpass" ||
+               K == "signal_dcblock" ||
                K == "signal_rate_transition") {
       // All read the same single-scalar latch as Unit Delay / ZOH (for the
       // filters it's the most-recent output y[n]). The fireDiscreteTicks
@@ -3003,8 +3041,7 @@ void MflowLinkSim::fireDiscreteTicks() {
       Z_[Off]     = Y;
       Znext_[Off] = Y;
       DiscPrevU_[I] = U;
-    } else if (B.Kind == "signal_discrete_filter" ||
-               B.Kind == "signal_biquad") {
+    } else if (isDiscreteIirKind(B.Kind)) {
       // §17.5 #5 — full direct-form-II IIR with u-history (FIR
       // numerator path). User provides num and den as polynomials
       // in z, highest order first. We rewrite as z^-1:
