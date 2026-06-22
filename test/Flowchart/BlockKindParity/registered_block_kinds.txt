@@ -18,12 +18,14 @@ signal_discrete_integrator
 signal_display
 signal_enabled_subsystem
 signal_error_rate
+signal_fft
 signal_from
 signal_from_workspace
 signal_function_call_generator
 signal_gain
 signal_goto
 signal_if_action
+signal_ifft
 signal_inport
 signal_integrator
 signal_jkff
@@ -67,5 +69,6 @@ signal_transport_delay
 signal_trig_fcn
 signal_triggered_subsystem
 signal_unit_delay
+signal_window
 signal_zero_pole
 signal_zoh

@@ -39,6 +39,9 @@ diagnostic) until its evaluator lands.
 | `signal_error_rate`   | ✓ | `tolerance: 0.5`                                                          | Communications (#343) — error-rate (BER) sink. Ports `tx`/`rx` (or `in1`/`in2`); output is the running mismatch ratio (a symbol counts as different when `\|tx − rx\| > tolerance`). Accumulated once per major step (not per RK4 substep), output bounded in `[0, 1]` |
 | `signal_running_stats`| ✓ | `stat: "mean"`                                                           | Statistics (#343) — streaming `mean` / `var` / `std` over the input via an online Welford accumulator (numerically stable, single pass). Updated once per major step. Beats a MATLAB Function block, which can't hold persistent state in the flow today |
 | `signal_kalman`       | ✓ | `A`, `C`, `Q`, `R`, opt `B`, `x0`, `P0` (matrix literals)                | Sensor Fusion (#343) — discrete Kalman filter. Ports `z` (measurement, `Mz`-vector), opt `u` (control, `P`-vector); output is the `N`-vector state estimate (`N` = rows of `A`). Standard predict (`x⁻=A·x+B·u`, `P⁻=A·P·Aᵀ+Q`) / update (`K=P⁻·Cᵀ·(C·P⁻·Cᵀ+R)⁻¹`) recursion runs once per major step. Matrices are MATLAB literals (`"1 0.05; 0 1"`). See the [worked examples](#kalman-filter-worked-examples-343) |
+| `signal_fft`          | ✓ | `n` (frame size, required)                                               | DSP (#343) — frame DFT of a real `n`-point vector input. Output is the complex spectrum packed as `[Re₀…Re₍ₙ₋₁₎, Im₀…Im₍ₙ₋₁₎]`, width `2n`. O(n²) direct DFT (no FFTW); pairs with `signal_ifft`. See [DSP frame examples](#dsp-frame-transforms-343) |
+| `signal_ifft`         | ✓ | `n` (frame size, required)                                               | DSP (#343) — inverse DFT. Input is a complex `[Re;Im]` width-`2n` frame; output is the real `n`-point reconstruction. `fft → ifft` is the identity |
+| `signal_window`       | ✓ | `n` (frame size), `type: "hann"`                                         | DSP (#343) — windowing taper over an `n`-point frame. `type`: `hann` (default), `hamming`, `blackman`, `rect`. Output `w[k]·x[k]` (width `n`) |
 | `signal_from_workspace` |  | reserved                                                                | Needs workspace var binding (no equivalent in our runtime today) |
 | `signal_function_call_generator` | ✓ | `period: 1.0`, `phaseDelay: 0.0`                               | Tier-F carve-out — emits `1` over a 1.5×step window at every `period` boundary, `0` otherwise. Designed to drive `signal_triggered_subsystem` via a rising edge. |
 
@@ -140,6 +143,25 @@ A singular innovation covariance `S = C·P⁻·Cᵀ + R` is handled by skipping 
 update and keeping the prediction for that step; non-conforming matrix
 dimensions degrade the block to a pass-through of its (zero-initialised)
 estimate rather than crashing.
+
+### DSP frame transforms (#343)
+
+`signal_fft` / `signal_ifft` / `signal_window` operate on a **frame** — a
+vector signal of width `n`. Build a frame with a vector `signal_constant`
+(`value: "[1 2 3 4]"`), a `signal_mux`, or any width-`n` source; a scope on a
+frame expands into one column per element (`sf[1]`, `sf[2]`, …).
+
+Complex spectra are carried as a real vector `[Re₀…Re₍ₙ₋₁₎, Im₀…Im₍ₙ₋₁₎]` of
+width `2n`, so `fft → ifft` is a closed loop without a separate complex type.
+
+| Model | Demonstrates |
+|---|---|
+| `fft_roundtrip.mflow` | `[1 2 3 4] → fft → ifft`. The spectrum is `Re=[10,-2,-2,-2]`, `Im=[0,2,0,-2]`; the inverse recovers `[1 2 3 4]` exactly (round-trip identity) |
+| `window_taper.mflow`  | A flat frame `[1 1 1 1]` through a 4-point **Hann** window → `[0, 0.75, 0.75, 0]` |
+
+The DFT is a direct O(n²) evaluation — frames in a control/DSP model are small,
+so there's no FFTW dependency. `n` is required on `fft`/`ifft` so the output
+width is stamped at lowering time.
 
 ## Math
 

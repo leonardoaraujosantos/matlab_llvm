@@ -43,8 +43,8 @@ econ, finance, curvefit, optim, gads, PDE, symbolic, GPU, ident (batch/frequency
 
 ## 3. DSP / Signal Processing catalog (follow-on PRs)
 
-- [ ] 3.1 `signal_fft` / `signal_ifft` — frame DFT/IDFT (`matlab_fft_c`/`matlab_ifft_c`, `VecOut_` frame path)
-- [ ] 3.2 `signal_window` — windowing (Hann/Hamming/Blackman)
+- [x] 3.1 `signal_fft` / `signal_ifft` — frame DFT/IDFT — DONE. Operate on a width-`n` vector signal (frame); complex spectrum carried as `[Re;Im]` width `2n` so `fft→ifft` is a closed identity loop. Direct O(n²) DFT inline (no FFTW/runtime link); `n` param stamps the output width. `fft_roundtrip.mflow` + SimulateRun checks (DC bin = Σx, round-trip recovers the frame exactly).
+- [x] 3.2 `signal_window` — windowing — DONE. Hann (default) / Hamming / Blackman / rect taper over an `n`-point frame; `windowCoef` helper. `window_taper.mflow` + checks (Hann N=4 → [0, 0.75, 0.75, 0]).
 - [ ] 3.3 `signal_spectrum` — power-spectrum / spectrum-analyzer sink
 - [ ] 3.4 `signal_biquad` — Biquad/SOS section (delegates to the DSP runtime; complements the existing `signal_discrete_filter` IIR)
 - [ ] 3.5 `signal_dcblock` / `signal_lowpass` / `signal_highpass` — streaming filters (DSP `*_step` runtimes; need the obj-step delegation pattern)
