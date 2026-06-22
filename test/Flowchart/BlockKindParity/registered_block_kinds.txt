@@ -26,6 +26,7 @@ signal_goto
 signal_if_action
 signal_inport
 signal_integrator
+signal_jkff
 signal_logical
 signal_lookup_1d
 signal_lookup_2d
@@ -49,6 +50,7 @@ signal_reshape
 signal_saturation
 signal_scope
 signal_sine
+signal_srff
 signal_state_space
 signal_step
 signal_subsystem

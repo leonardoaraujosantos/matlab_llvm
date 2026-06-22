@@ -576,6 +576,23 @@ check "tff toggles ~50%"  "awk 'BEGIN{exit !($HD_TFF_MEAN>0.30 && $HD_TFF_MEAN<0
 check "counter ~1/clk"    "awk 'BEGIN{exit !($HD_CNT_END>=4 && $HD_CNT_END<=6)}'" "one increment per clock period (5 periods)"
 check "counter monotonic" "[[ '$HD_MONO' == '0' ]]" "a clock edge must increment exactly once (not per RK4 substep)"
 
+#--- #343: HDL JK / SR flip-flops -----------------------------------------
+# A 1 Hz clock drives a JK-FF (J=K=1 → toggles every posedge, a /2 divider)
+# and an SR-FF (set pulse high over [0,3), reset pulse high over [4,7)). The
+# JK output toggles (mean ~0.5); the SR latches set=1 mid-set-window and
+# reset=0 mid-reset-window. Columns: t,sjk,ssr.
+JS="$("$MATLABC" -simulate "$EX/hdl_jk_sr.mflow")"
+JS_HEAD=$(printf '%s\n' "$JS" | head -1)
+JS_JK_MEAN=$(printf '%s\n' "$JS" | awk -F, 'NR>1{n++; s+=$2} END{print s/n}')
+JS_JK_TRANS=$(printf '%s\n' "$JS" | awk -F, 'NR>1{v=($2>0.5)?1:0; if(NR>2 && v!=p)c++; p=v} END{print c+0}')
+JS_SR_SET=$(printf '%s\n'  "$JS" | awk -F, '$1>2.49 && $1<2.51{print ($3>0.5)?1:0; exit}')
+JS_SR_RST=$(printf '%s\n'  "$JS" | awk -F, '$1>5.49 && $1<5.51{print ($3>0.5)?1:0; exit}')
+check "jksr header"        "[[ '$JS_HEAD' == 't,sjk,ssr' ]]" ""
+check "jkff toggles ~50%"  "awk 'BEGIN{exit !($JS_JK_MEAN>0.40 && $JS_JK_MEAN<0.60)}'" "J=K=1 must toggle on every clock posedge"
+check "jkff transitions"   "awk 'BEGIN{exit !($JS_JK_TRANS>=6)}'" "an 8 s / 1 Hz toggle must flip several times (not stick)"
+check "srff sets"          "[[ '$JS_SR_SET' == '1' ]]" "S=1,R=0 must latch Q=1"
+check "srff resets"        "[[ '$JS_SR_RST' == '0' ]]" "S=0,R=1 must clear Q=0"
+
 #--- #343: HDL example circuits (combinational + sequential) --------------
 # Combinational — half adder: SUM=A XOR B, CARRY=A AND B. A=clk/2, B=clk/1.
 HA="$("$MATLABC" -simulate "$EX/hdl_half_adder.mflow")"

@@ -101,6 +101,8 @@ unwired (the module `clk` is the clock); `reset` maps to the module reset. See
 | `signal_dff`     | ✓ | `initialValue: 0.0`            | `d`/`in`, `clk`, opt `reset` | D flip-flop — on `clk` posedge `Q ← D`; holds otherwise. `always @(posedge clk) Q <= D` |
 | `signal_tff`     | ✓ | `initialValue: 0.0`            | opt `t`/`in`, `clk`, opt `reset` | T flip-flop — toggles `Q` on `clk` posedge when `t` is high (free-toggles when `t` unconnected) |
 | `signal_counter` | ✓ | `step: 1.0`, `modulus: 0.0`   | `clk`, opt `reset` | Up counter — `+step` per `clk` posedge; wraps at `modulus` (> 0) |
+| `signal_jkff`    | ✓ | `initialValue: 0.0`           | `j`/`in1`, `k`/`in2`, `clk`, opt `reset` | JK flip-flop — on `clk` posedge: `00` hold, `01` reset, `10` set, `11` toggle |
+| `signal_srff`    | ✓ | `initialValue: 0.0`           | `s`/`in1`, `r`/`in2`, `clk`, opt `reset` | SR flip-flop — on `clk` posedge: `10` set, `01` reset, `00`/`11` hold (`11` is undefined in HW) |
 
 **Example circuits** (`examples/mflowlink/`, regression-checked in
 `test/Flowchart/SimulateRun`):

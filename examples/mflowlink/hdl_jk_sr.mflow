@@ -1,0 +1,31 @@
+{
+  "schema": "matforge.flowchart", "version": "0.1.0", "entry": "jk_sr_test",
+  "settings": { "kind": "signal_flow",
+    "solver": { "type": "fixed_step", "algorithm": "ode4", "startTime": 0.0, "stopTime": 8.0, "maxStep": "0.01" } },
+  "flows": [{
+    "id": "flow_jksr", "kind": "function", "name": "jk_sr_test",
+    "signature": { "inputs": [], "outputs": [] },
+    "nodes": [
+      { "id": "clk", "kind": "signal_pulse", "data": { "params": { "amplitude": 1.0, "period": 1.0, "pulseWidth": 50.0, "phaseDelay": 0.0 } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "one", "kind": "signal_constant", "data": { "params": { "value": 1.0 } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "setp", "kind": "signal_pulse", "data": { "params": { "amplitude": 1.0, "period": 8.0, "pulseWidth": 37.5, "phaseDelay": 0.0 } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "rstp", "kind": "signal_pulse", "data": { "params": { "amplitude": 1.0, "period": 8.0, "pulseWidth": 37.5, "phaseDelay": 4.0 } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+
+      { "id": "jk", "kind": "signal_jkff", "data": { "params": { "initialValue": 0.0 } }, "ports": { "in": [{"id": "j"}, {"id": "k"}, {"id": "clk"}], "out": [{"id": "out"}] } },
+      { "id": "sr", "kind": "signal_srff", "data": { "params": { "initialValue": 0.0 } }, "ports": { "in": [{"id": "s"}, {"id": "r"}, {"id": "clk"}], "out": [{"id": "out"}] } },
+
+      { "id": "sjk", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } },
+      { "id": "ssr", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } }
+    ],
+    "edges": [
+      { "id": "e0", "kind": "data", "from": {"node": "one",  "port": "out"}, "to": {"node": "jk", "port": "j"} },
+      { "id": "e1", "kind": "data", "from": {"node": "one",  "port": "out"}, "to": {"node": "jk", "port": "k"} },
+      { "id": "e2", "kind": "data", "from": {"node": "clk",  "port": "out"}, "to": {"node": "jk", "port": "clk"} },
+      { "id": "e3", "kind": "data", "from": {"node": "setp", "port": "out"}, "to": {"node": "sr", "port": "s"} },
+      { "id": "e4", "kind": "data", "from": {"node": "rstp", "port": "out"}, "to": {"node": "sr", "port": "r"} },
+      { "id": "e5", "kind": "data", "from": {"node": "clk",  "port": "out"}, "to": {"node": "sr", "port": "clk"} },
+      { "id": "e6", "kind": "data", "from": {"node": "jk", "port": "out"}, "to": {"node": "sjk", "port": "in"} },
+      { "id": "e7", "kind": "data", "from": {"node": "sr", "port": "out"}, "to": {"node": "ssr", "port": "in"} }
+    ]
+  }]
+}
