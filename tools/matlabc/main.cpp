@@ -8639,6 +8639,9 @@ int runMflowLinkDap(const std::string &Path) {
   // empty description when nothing fired. Side-effect: marks the
   // matching breakpoint as `Hit` so it doesn't refire on the next
   // step.
+  // #354 — body locals captured at the most recent source-line breakpoint, so
+  // the `scopes`/`variables` requests can expose a "Locals" view at the stop.
+  std::map<std::string, double> StopLocals;
   auto checkBreakpoints = [&]() -> std::string {
     // Time breakpoints first — they're cheaper to test and the
     // expected "stop at t = 5s" UX wants priority over signal
@@ -8670,6 +8673,7 @@ int runMflowLinkDap(const std::string &Path) {
     // interpreter records a hit when a step's body reaches an armed line.
     auto SrcHit = Sim.consumeSourceBreakpointHit();
     if (SrcHit.Line >= 0) {
+      StopLocals = std::move(SrcHit.Vars);
       std::ostringstream OS;
       OS << SrcHit.BlockId << ":" << SrcHit.Line;
       return OS.str();
@@ -8843,12 +8847,32 @@ int runMflowLinkDap(const std::string &Path) {
       Array Sc{Object{{"name", "Signals"},
                       {"variablesReference", 1},
                       {"expensive", false}}};
+      // #354 — when stopped on a source-line breakpoint inside a MATLAB
+      // Function body, expose the body's locals (captured at the hit line).
+      if (!StopLocals.empty())
+        Sc.push_back(Object{{"name", "Locals"},
+                            {"variablesReference", 2},
+                            {"expensive", false}});
       sendResponse(Seq, *Cmd, true,
                    Object{{"scopes", Value(std::move(Sc))}});
       continue;
     }
     if (*Cmd == "variables") {
       Array Vars;
+      // #354 — variablesReference 2 is the "Locals" scope: the MATLAB Function
+      // body's variables captured at the source-line breakpoint.
+      auto Args = Root->getObject("arguments");
+      int64_t Ref = 1;
+      if (Args) if (auto R = Args->getInteger("variablesReference")) Ref = *R;
+      if (Ref == 2) {
+        for (auto &P : StopLocals)
+          Vars.push_back(Object{{"name", P.first},
+                                {"value", std::to_string(P.second)},
+                                {"variablesReference", 0}});
+        sendResponse(Seq, *Cmd, true,
+                     Object{{"variables", Value(std::move(Vars))}});
+        continue;
+      }
       Vars.push_back(Object{{"name", "t"},
                             {"value", std::to_string(Sim.currentTime())},
                             {"variablesReference", 0}});
