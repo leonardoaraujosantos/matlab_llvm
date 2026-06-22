@@ -114,6 +114,12 @@ const std::map<std::string, KindInfo> &kindTable() {
     // triggered, loop-breaking, held in DigitalLatch_ outside the state vectors.
     add("signal_jkff",       {true, true, false, true, false, FIM});
     add("signal_srff",       {true, true, false, true, false, FIM});
+    // HDL memory (#343) — array-state blocks. Shift register and RAM update on
+    // a `clk` posedge (loop-breaking, held array); ROM is a combinational
+    // address→value lookup (stateless). Array state lives in HdlMem_.
+    add("signal_shift_register", {true, true, false, true, false, FIM});
+    add("signal_ram",        {true, true, false, true,  false, FIM});
+    add("signal_rom",        {true, true, false, false, false, FIM});
     // Lookup tables (Tier H — table-driven scalar evaluation).
     add("signal_lookup_1d",  {true, true, false, false, false, FIM});
     add("signal_lookup_2d",  {true, true, false, false, false, FIM});

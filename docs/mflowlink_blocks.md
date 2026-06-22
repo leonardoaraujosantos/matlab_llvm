@@ -115,6 +115,9 @@ unwired (the module `clk` is the clock); `reset` maps to the module reset. See
 | `signal_counter` | ✓ | `step: 1.0`, `modulus: 0.0`   | `clk`, opt `reset` | Up counter — `+step` per `clk` posedge; wraps at `modulus` (> 0) |
 | `signal_jkff`    | ✓ | `initialValue: 0.0`           | `j`/`in1`, `k`/`in2`, `clk`, opt `reset` | JK flip-flop — on `clk` posedge: `00` hold, `01` reset, `10` set, `11` toggle |
 | `signal_srff`    | ✓ | `initialValue: 0.0`           | `s`/`in1`, `r`/`in2`, `clk`, opt `reset` | SR flip-flop — on `clk` posedge: `10` set, `01` reset, `00`/`11` hold (`11` is undefined in HW) |
+| `signal_shift_register` | ✓ | `length: 4`, `initialValue: 0.0` | `in`, `clk`, opt `reset` | N-stage shift register — on `clk` posedge each stage takes the previous one, serial `in` enters stage 0; output is the last stage (an N-clock delay line) |
+| `signal_ram`     | ✓ | `depth: 8`, `initialValue: 0.0` | `addr`, `data`, `we`, `clk` | Synchronous RAM — reads `mem[addr]` combinationally; on `clk` posedge writes `data` at `addr` when `we` is high |
+| `signal_rom`     | ✓ | `content: "1 2 3 …"`           | `addr` | Read-only memory — combinational `content[addr]` lookup (space/comma vector literal) |
 
 **Example circuits** (`examples/mflowlink/`, regression-checked in
 `test/Flowchart/SimulateRun`):
