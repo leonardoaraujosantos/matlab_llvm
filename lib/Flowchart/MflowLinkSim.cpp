@@ -1883,6 +1883,48 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       } else {
         Out_[I] = 0.0;
       }
+    } else if (K == "signal_dnn_predict") {
+      // #343 Deep Learning — one-hidden-layer MLP inference, in the loop:
+      //   y = W2·act(W1·x + b1) + b2
+      // W1 (H×N), b1 (H), W2 (M×H), b2 (M) are matrix literals; `activation`
+      // is relu (default) / tanh / sigmoid / linear. Stateless feedthrough;
+      // reuses the dense matMul kernel.
+      std::vector<double> W1, B1, W2, B2;
+      int w1r = 0, w1c = 0, b1r = 0, b1c = 0, w2r = 0, w2c = 0, b2r = 0, b2c = 0;
+      if (const std::string *S = paramS(B, "W1")) parseSimMatrix(*S, W1, w1r, w1c);
+      if (const std::string *S = paramS(B, "b1")) parseSimMatrix(*S, B1, b1r, b1c);
+      if (const std::string *S = paramS(B, "W2")) parseSimMatrix(*S, W2, w2r, w2c);
+      if (const std::string *S = paramS(B, "b2")) parseSimMatrix(*S, B2, b2r, b2c);
+      const std::string *Act = paramS(B, "activation");
+      auto activate = [&](double v) {
+        const std::string a = Act ? *Act : "relu";
+        if (a == "tanh") return std::tanh(v);
+        if (a == "sigmoid") return 1.0 / (1.0 + std::exp(-v));
+        if (a == "linear" || a == "none") return v;
+        return v > 0.0 ? v : 0.0; // relu (default)
+      };
+      // Gather the N-element input.
+      std::vector<double> x(w1c > 0 ? w1c : 1, 0.0);
+      if (!Inputs_[I].empty()) {
+        size_t Src = Inputs_[I].front().SrcBlock;
+        if (OutWidth_[Src] > 1)
+          for (int e = 0; e < (int)x.size() && e < (int)VecOut_[Src].size(); ++e)
+            x[e] = VecOut_[Src][e];
+        else
+          x[0] = Out_[Src];
+      }
+      if (w1r > 0 && w1c > 0 && w2r > 0 && w2c == w1r) {
+        std::vector<double> h = matMul(W1, w1r, w1c, x, w1c, 1); // H×1
+        for (int j = 0; j < w1r; ++j)
+          h[j] = activate(h[j] + (j < (int)B1.size() ? B1[j] : 0.0));
+        std::vector<double> y = matMul(W2, w2r, w2c, h, w2c, 1); // M×1
+        VecOut_[I].assign(w2r, 0.0);
+        for (int j = 0; j < w2r; ++j)
+          VecOut_[I][j] = y[j] + (j < (int)B2.size() ? B2[j] : 0.0);
+        Out_[I] = VecOut_[I].front();
+      } else {
+        Out_[I] = 0.0;
+      }
     } else if (K == "signal_dff" || K == "signal_tff" ||
                K == "signal_counter" || K == "signal_jkff" ||
                K == "signal_srff") {

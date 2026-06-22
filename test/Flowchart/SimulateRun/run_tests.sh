@@ -746,6 +746,20 @@ check "lowpass passes DC"    "awk 'BEGIN{exit !(($FL_LP-5)^2<1e-4 && $FL_LP0<4.9
 check "highpass blocks DC"   "awk 'BEGIN{exit !($FL_HP<1e-3)}'" "one-pole highpass must reject the constant (→ 0)"
 check "dcblock blocks DC"    "awk 'BEGIN{exit !($FL_DC<1e-3)}'" "DC blocker must reject the constant (→ 0)"
 
+#--- #343: Deep Learning — signal_dnn_predict (MLP inference) -------------
+# One-hidden-layer MLP, y = W2·relu(W1·x + b1) + b2. Case A: x=[3 -2] through
+# identity W1 + relu + W2=[1 1] gives 3 (linear would give 1 — proves the relu
+# nonlinearity fires). Case B: scalar x=1 with W1=[2;-3], b1=[1 1] → hidden
+# relu([3 -2]) = [3 0], 2-output identity → [3 0]. Columns: t, sa, sb[1],sb[2].
+DN="$("$MATLABC" -simulate "$EX/dnn_predict.mflow")"
+DN_HEAD=$(printf '%s\n' "$DN" | head -1)
+DN_A=$(printf '%s\n'  "$DN" | tail -1 | awk -F, '{print $2}')
+DN_B1=$(printf '%s\n' "$DN" | tail -1 | awk -F, '{print $3}')
+DN_B2=$(printf '%s\n' "$DN" | tail -1 | awk -F, '{v=$4; print (v<0)?-v:v}')
+check "dnn header"           "[[ '$DN_HEAD' == 't,sa,sb[1],sb[2]' ]]" ""
+check "dnn relu nonlinearity" "awk 'BEGIN{exit !(($DN_A-3)^2<1e-9)}'" "relu must zero the negative pre-activation (output 3, not the linear 1)"
+check "dnn scale+bias+2out"  "awk 'BEGIN{exit !(($DN_B1-3)^2<1e-9 && $DN_B2<1e-9)}'" "W1 scaling + b1 bias + relu + 2-output → [3, 0]"
+
 #--- #343: HDL sequential blocks — D flip-flop / T flip-flop / counter -----
 # A 1 Hz pulse clock drives a D-FF (D=1), a free-running T-FF, and an up
 # counter over 5 s. Each updates once per clock posedge (once per major step,
