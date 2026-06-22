@@ -5,6 +5,7 @@
 #include <iosfwd>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -162,6 +163,18 @@ public:
   // and the Tier-D DAP `variables` request.
   // Returns { logged-block-id → current output value }.
   std::vector<std::pair<std::string, double>> currentLoggedOutputs() const;
+
+  // #354 — source-line breakpoints inside a MATLAB Function block. Arm a set of
+  // 1-based body lines on a `signal_matlab_fcn` block; when the interpreter
+  // reaches one during a step, it records the hit, which the simulate-DAP polls
+  // via consumeSourceBreakpointHit() to pause the run.
+  void setSourceBreakpoints(const std::string &BlockId,
+                            const std::vector<int> &Lines);
+  void clearSourceBreakpoints() { SourceBreakpoints_.clear(); }
+  // Returns { blockId, line } of the most recent source-line hit and clears it;
+  // line < 0 means "no hit".
+  struct SourceHit { std::string BlockId; int Line = -1; };
+  SourceHit consumeSourceBreakpointHit();
 
   //===-------------------------------------------------------------===//
   // Tier-D snapshot ring (§7.5).
@@ -383,6 +396,10 @@ private:
 
   double T_ = 0.0;
   size_t MajorSteps_ = 0;
+  // #354 — armed source-line breakpoints per matlab_fcn block, and the most
+  // recent hit recorded by the interpreter during a step.
+  std::map<std::string, std::set<int>> SourceBreakpoints_;
+  SourceHit LastSourceHit_;
   double StepSize_ = 0.01;
   // Item-2 — adaptive step state for the Dormand-Prince RK4(5)
   // integrator. CurrentAdaptiveH_ is the last accepted step size;

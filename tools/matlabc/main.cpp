@@ -8666,6 +8666,14 @@ int runMflowLinkDap(const std::string &Path) {
         return OS.str();
       }
     }
+    // #354 — source-line breakpoints inside a MATLAB Function block. The
+    // interpreter records a hit when a step's body reaches an armed line.
+    auto SrcHit = Sim.consumeSourceBreakpointHit();
+    if (SrcHit.Line >= 0) {
+      std::ostringstream OS;
+      OS << SrcHit.BlockId << ":" << SrcHit.Line;
+      return OS.str();
+    }
     return std::string{};
   };
 
@@ -8715,9 +8723,44 @@ int runMflowLinkDap(const std::string &Path) {
       ConfDone = true;
       continue;
     }
-    if (*Cmd == "setBreakpoints" || *Cmd == "setExceptionBreakpoints") {
-      // Source-file breakpoints don't apply to a block-diagram —
-      // ack with an empty `breakpoints` array.
+    if (*Cmd == "setBreakpoints") {
+      // #354 — source-line breakpoints inside a MATLAB Function block. The IDE
+      // sends `{ source: { name|path: <blockId> }, breakpoints: [{ line }] }`;
+      // we arm those body lines on the block so the run pauses when execution
+      // reaches one (replaces any previously-armed set for that block — DAP
+      // convention). For a block-diagram without a source identifier, this is a
+      // no-op ack (time/signal breakpoints have their own requests).
+      Array Out;
+      auto Args = Root->getObject("arguments");
+      std::string BlockId;
+      if (Args) {
+        if (auto *Src = Args->getObject("source")) {
+          if (auto S = Src->getString("name")) BlockId = std::string(*S);
+          else if (auto S = Src->getString("path")) BlockId = std::string(*S);
+        }
+      }
+      std::vector<int> Lines;
+      if (Args) {
+        if (auto *Arr = Args->getArray("breakpoints")) {
+          for (auto &V : *Arr) {
+            const Object *BP = V.getAsObject();
+            if (!BP) continue;
+            std::optional<int64_t> Ln = BP->getInteger("line");
+            if (Ln) {
+              Lines.push_back(static_cast<int>(*Ln));
+              Out.push_back(Object{{"verified", !BlockId.empty()},
+                                   {"line", *Ln}});
+            }
+          }
+        }
+      }
+      if (!BlockId.empty())
+        Sim.setSourceBreakpoints(BlockId, Lines);
+      sendResponse(Seq, *Cmd, true,
+                   Object{{"breakpoints", Value(std::move(Out))}});
+      continue;
+    }
+    if (*Cmd == "setExceptionBreakpoints") {
       sendResponse(Seq, *Cmd, true, Object{{"breakpoints", Array{}}});
       continue;
     }

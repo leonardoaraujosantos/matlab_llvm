@@ -914,6 +914,14 @@ add_test(
           $<TARGET_FILE:matlabc>
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/SimulateDap
 )
+# #354 — source-line breakpoints inside a MATLAB Function block: a DAP
+# setBreakpoints on a body line pauses the run when execution reaches it.
+add_test(
+  NAME flowchart-simulate-dap-source-breakpoint-tests
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/test/Flowchart/SimulateDap/run_source_breakpoints.py
+          $<TARGET_FILE:matlabc>
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/SimulateDap
+)
 # #310 regression — the `matlabc` usage banner must advertise the
 # top-level `-simulate` mode (and its `--sim-dap` live-DAP transport),
 # which it previously omitted.

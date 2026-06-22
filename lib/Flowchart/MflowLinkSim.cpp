@@ -522,7 +522,9 @@ static bool matInv(const std::vector<double> &A, int m,
 std::pair<std::unique_ptr<MflowLinkSim::MatlabFunctionState>, std::string>
 parseMatlabFunctionBody(const std::string &Source);
 std::vector<double> runMatlabFunction(const MflowLinkSim::MatlabFunctionState &S,
-                                      const std::vector<double> &Inputs, double T);
+                                      const std::vector<double> &Inputs, double T,
+                                      const std::set<int> *WatchLines = nullptr,
+                                      int *HitLine = nullptr);
 // §17.5 #8 — accessor for the parsed-function input count. The
 // constructor needs this to decide how many `u1..uN` slots the JIT
 // wrapper should declare, but `MatlabFunctionState` is defined
@@ -2540,7 +2542,27 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       std::vector<double> U;
       U.reserve(Sorted.size());
       for (auto &PR : Sorted) U.push_back(PR.second);
-      if (MatlabFnJit_[I]) {
+      // #354 — if this block has armed source-line breakpoints, route through
+      // the AST interpreter (the JIT path has no per-statement hook) so the
+      // body's lines can be watched and a hit recorded for the simulate-DAP.
+      const std::set<int> *Watch = nullptr;
+      {
+        auto It = SourceBreakpoints_.find(M_.Blocks[I].Id);
+        if (It != SourceBreakpoints_.end() && !It->second.empty())
+          Watch = &It->second;
+      }
+      if (Watch && MatlabFnCache_[I]) {
+        int Hit = -1;
+        std::vector<double> Ys =
+            runMatlabFunction(*MatlabFnCache_[I], U, T, Watch, &Hit);
+        Out_[I] = Ys.empty() ? 0.0 : Ys[0];
+        for (size_t K = 0; K < Ys.size(); ++K)
+          PortOut_[I]["out" + std::to_string(K + 1)] = Ys[K];
+        if (Hit >= 0 && LastSourceHit_.Line < 0) {
+          LastSourceHit_.BlockId = M_.Blocks[I].Id;
+          LastSourceHit_.Line = Hit;
+        }
+      } else if (MatlabFnJit_[I]) {
         // §17.5 #8 — JIT'd entrypoint. Pad inputs out to the arity
         // the wrapper expects (the unused trailing slots are zero,
         // matching the AST interpreter's behaviour for missing
@@ -3670,6 +3692,22 @@ MflowLinkSim::currentLoggedOutputs() const {
   return Out;
 }
 
+// #354 — source-line breakpoints inside MATLAB Function blocks.
+void MflowLinkSim::setSourceBreakpoints(const std::string &BlockId,
+                                        const std::vector<int> &Lines) {
+  std::set<int> S(Lines.begin(), Lines.end());
+  if (S.empty())
+    SourceBreakpoints_.erase(BlockId);
+  else
+    SourceBreakpoints_[BlockId] = std::move(S);
+}
+
+MflowLinkSim::SourceHit MflowLinkSim::consumeSourceBreakpointHit() {
+  SourceHit H = LastSourceHit_;
+  LastSourceHit_ = SourceHit{};
+  return H;
+}
+
 std::string validateMatlabFcnExpression(const std::string &Expr) {
   ExprParser P(Expr);
   std::string Err;
@@ -3788,6 +3826,13 @@ parseMatlabFunctionBody(const std::string &Source) {
 
 struct InterpEnv {
   std::map<std::string, double> Vars;
+  // #354 — source-line breakpoints inside a MATLAB Function block. When set,
+  // interpStmt resolves each statement's body line via `SM` and, if it is in
+  // `WatchLines`, records it in `*HitLine` (the first hit wins). Null in normal
+  // (non-debug) runs, so the hook is zero-cost.
+  const std::set<int> *WatchLines = nullptr;
+  const matlab::SourceManager *SM = nullptr;
+  int *HitLine = nullptr;
 };
 struct ReturnSignal {};
 // §17.5 #8 — break / continue inside for / while bodies.
@@ -3911,6 +3956,13 @@ void interpBlock(const matlab::Block *B, InterpEnv &Env) {
 void interpStmt(const matlab::Stmt *S, InterpEnv &Env) {
   using MNK = matlab::NodeKind;
   if (!S) return;
+  // #354 — source-line breakpoint hook: record the first armed body line that
+  // execution reaches. Zero-cost when no breakpoints are armed (WatchLines null).
+  if (Env.WatchLines && Env.SM && Env.HitLine && *Env.HitLine < 0 &&
+      S->Range.Begin.isValid()) {
+    int Ln = static_cast<int>(Env.SM->getLineColumn(S->Range.Begin).Line);
+    if (Env.WatchLines->count(Ln)) *Env.HitLine = Ln;
+  }
   switch (S->Kind) {
   case MNK::ExprStmt: {
     auto *ES = static_cast<const matlab::ExprStmt *>(S);
@@ -4006,7 +4058,9 @@ void interpStmt(const matlab::Stmt *S, InterpEnv &Env) {
 // output variable never assigned by the body reads back as 0.
 std::vector<double> runMatlabFunction(const MflowLinkSim::MatlabFunctionState &S,
                                       const std::vector<double> &Inputs,
-                                      double T) {
+                                      double T,
+                                      const std::set<int> *WatchLines,
+                                      int *HitLine) {
   InterpEnv Env;
   Env.Vars["t"] = T;
   for (size_t I = 0; I < S.InNames.size(); ++I)
@@ -4014,6 +4068,12 @@ std::vector<double> runMatlabFunction(const MflowLinkSim::MatlabFunctionState &S
   // The shorthand `u` alias (matches our expression-evaluator
   // semantics — first input is `u`).
   if (!Inputs.empty()) Env.Vars["u"] = Inputs.front();
+  // #354 — arm the source-line breakpoint hook for this body, if any.
+  if (WatchLines && !WatchLines->empty() && HitLine) {
+    Env.WatchLines = WatchLines;
+    Env.SM = S.SM.get();
+    Env.HitLine = HitLine;
+  }
   try {
     interpBlock(S.Fn->Body, Env);
   } catch (const ReturnSignal &) {
