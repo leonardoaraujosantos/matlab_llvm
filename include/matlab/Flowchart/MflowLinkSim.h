@@ -318,6 +318,12 @@ private:
   //   value lives outside the continuous/discrete state vectors. Seeded on
   //   `reset()` from `params.initialValue` (#343).
   std::vector<double> DigitalLatch_;
+  // - `HdlMem_[I]` is the per-block array state for the HDL memory blocks
+  //   (#343): the shift chain of a `signal_shift_register`, the storage of a
+  //   `signal_ram`, or the (read-only) contents of a `signal_rom`. Sized and
+  //   seeded on `reset()`; shift/write happen once per major step on a `clk`
+  //   posedge in commitDigitalRegisters().
+  std::vector<std::vector<double>> HdlMem_;
   // - `ErrAccum_` / `TotAccum_` hold the running error / symbol counts for
   //   each `signal_error_rate` block (Communications BER sink, #343). They
   //   accumulate once per major step in commitDigitalRegisters() (NOT in

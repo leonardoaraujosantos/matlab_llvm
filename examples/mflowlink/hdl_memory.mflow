@@ -1,0 +1,38 @@
+{
+  "schema": "matforge.flowchart", "version": "0.1.0", "entry": "mem_test",
+  "settings": { "kind": "signal_flow",
+    "solver": { "type": "fixed_step", "algorithm": "ode4", "startTime": 0.0, "stopTime": 4.0, "maxStep": "0.05" } },
+  "flows": [{
+    "id": "flow_mem", "kind": "function", "name": "mem_test",
+    "signature": { "inputs": [], "outputs": [] },
+    "nodes": [
+      { "id": "clk", "kind": "signal_pulse", "data": { "params": { "amplitude": 1.0, "period": 0.5, "pulseWidth": 50.0, "phaseDelay": 0.0 } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+
+      { "id": "din", "kind": "signal_constant", "data": { "params": { "value": 1.0 } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "shift", "kind": "signal_shift_register", "data": { "params": { "length": 3, "initialValue": 0.0 } }, "ports": { "in": [{"id": "in"}, {"id": "clk"}], "out": [{"id": "out"}] } },
+      { "id": "ss", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } },
+
+      { "id": "addr", "kind": "signal_constant", "data": { "params": { "value": 2.0 } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "data", "kind": "signal_constant", "data": { "params": { "value": 7.0 } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "we", "kind": "signal_constant", "data": { "params": { "value": 1.0 } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "ram", "kind": "signal_ram", "data": { "params": { "depth": 8, "initialValue": 0.0 } }, "ports": { "in": [{"id": "addr"}, {"id": "data"}, {"id": "we"}, {"id": "clk"}], "out": [{"id": "out"}] } },
+      { "id": "sr", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } },
+
+      { "id": "addr2", "kind": "signal_constant", "data": { "params": { "value": 2.0 } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "rom", "kind": "signal_rom", "data": { "params": { "content": "10 20 30 40" } }, "ports": { "in": [{"id": "addr"}], "out": [{"id": "out"}] } },
+      { "id": "so", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } }
+    ],
+    "edges": [
+      { "id": "e0", "kind": "data", "from": {"node": "din", "port": "out"}, "to": {"node": "shift", "port": "in"} },
+      { "id": "e1", "kind": "data", "from": {"node": "clk", "port": "out"}, "to": {"node": "shift", "port": "clk"} },
+      { "id": "e2", "kind": "data", "from": {"node": "shift", "port": "out"}, "to": {"node": "ss", "port": "in"} },
+      { "id": "e3", "kind": "data", "from": {"node": "addr", "port": "out"}, "to": {"node": "ram", "port": "addr"} },
+      { "id": "e4", "kind": "data", "from": {"node": "data", "port": "out"}, "to": {"node": "ram", "port": "data"} },
+      { "id": "e5", "kind": "data", "from": {"node": "we", "port": "out"}, "to": {"node": "ram", "port": "we"} },
+      { "id": "e6", "kind": "data", "from": {"node": "clk", "port": "out"}, "to": {"node": "ram", "port": "clk"} },
+      { "id": "e7", "kind": "data", "from": {"node": "ram", "port": "out"}, "to": {"node": "sr", "port": "in"} },
+      { "id": "e8", "kind": "data", "from": {"node": "addr2", "port": "out"}, "to": {"node": "rom", "port": "addr"} },
+      { "id": "e9", "kind": "data", "from": {"node": "rom", "port": "out"}, "to": {"node": "so", "port": "in"} }
+    ]
+  }]
+}

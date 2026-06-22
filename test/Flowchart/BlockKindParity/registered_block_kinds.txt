@@ -50,14 +50,17 @@ signal_psk_mod
 signal_pulse
 signal_qam_demod
 signal_qam_mod
+signal_ram
 signal_ramp
 signal_rate_transition
 signal_relay
 signal_relop
 signal_reshape
+signal_rom
 signal_running_stats
 signal_saturation
 signal_scope
+signal_shift_register
 signal_sine
 signal_srff
 signal_state_space

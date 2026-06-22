@@ -67,8 +67,8 @@ verilog,cocotb}` lane. Mux/Demux + logic gates already ship (`signal_mux`/`demux
 - [x] 4b.x example circuits: `hdl_half_adder`, `hdl_full_adder` (combinational), `hdl_shift_register`, `hdl_freq_divider` (sequential) — DONE
 - [x] 4b.2 `signal_jkff` / `signal_srff` — JK / SR flip-flops — DONE (sim). Same clocked single-latch family as D/T (DigitalLatch_, once-per-major-step edge update). JK: 00 hold / 01 reset / 10 set / 11 toggle; SR: 10 set / 01 reset / 00,11 hold. `hdl_jk_sr.mflow` + SimulateRun checks (JK toggles as /2 divider, SR latches set/reset).
 - [x] 4b.2b `signal_jkff` / `signal_srff` → SystemVerilog — DONE. Branch-free next-state via the SubsystemToMatlab persistent-register path (JK: `J(1-Q)+(1-K)Q`; SR: `set+(1-set-rst)Q` with set/rst captured as helper locals to avoid a shared S·R cross-term AST node). `{jkff,srff}_register.mflow` coder fixtures + `sv_jksr_smoke` in EmitSubsystem; both `-check-synthesizable` clean. The entire register family (D/T/JK/SR/counter) now synthesizes.
-- [ ] 4b.3 `signal_shift_register` — N-bit serial/parallel shift register block (the example wires DFFs by hand today)
-- [ ] 4b.4 `signal_ram` / `signal_rom` — addressable memory (addr/data/we ports; vector state)
+- [x] 4b.3 `signal_shift_register` — N-stage shift register — DONE. Array state in `HdlMem_`; on `clk` posedge each stage takes the previous, serial `in` → stage 0, output = last stage (N-clock delay line). Reset reloads the chain.
+- [x] 4b.4 `signal_ram` / `signal_rom` — addressable memory — DONE. RAM: combinational read `mem[addr]`, synchronous write `data`@`addr` on `clk` posedge when `we` high. ROM: combinational `content[addr]` lookup. Both array-state in `HdlMem_`. `hdl_memory.mflow` + SimulateRun (shift delay line, RAM write/read, ROM lookup).
 - [x] 4b.5b emit-SystemVerilog for `signal_tff` (toggle) and `signal_counter` (increment+wrap) — DONE. Arithmetic next-state (`Q + T*(1-2Q)`, `inc - mod*(inc>=mod)`) keeps both branch-free and synthesizable; `sv_tff_smoke`/`sv_counter_smoke` in EmitSubsystem assert the always_ff register + `-check-synthesizable` clean
 
 ## 5. Computer Vision / Image Processing catalog (follow-on PRs)

@@ -613,6 +613,7 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
   Lookup2DCache_.assign(N, {});
   NoiseSeed_.assign(N, 0);
   DigitalLatch_.assign(N, 0.0);
+  HdlMem_.assign(N, {});
   ErrAccum_.assign(N, 0.0);
   TotAccum_.assign(N, 0.0);
   RunCount_.assign(N, 0.0);
@@ -1036,6 +1037,21 @@ void MflowLinkSim::reset() {
                B.Kind == "signal_srff") {
       // Clocked HDL registers start at their initial/reset value (#343).
       DigitalLatch_[I] = paramD(B, "initialValue", 0.0);
+    } else if (B.Kind == "signal_shift_register") {
+      // #343 — N-stage shift chain, all seeded to initialValue.
+      int Len = std::max(1, (int)paramD(B, "length", 4.0));
+      HdlMem_[I].assign(Len, paramD(B, "initialValue", 0.0));
+    } else if (B.Kind == "signal_ram") {
+      // #343 — depth-word RAM, seeded to initialValue (default 0).
+      int Depth = std::max(1, (int)paramD(B, "depth", 8.0));
+      HdlMem_[I].assign(Depth, paramD(B, "initialValue", 0.0));
+    } else if (B.Kind == "signal_rom") {
+      // #343 — read-only memory; `content` is a space/comma vector literal.
+      std::vector<double> C;
+      int r = 0, c = 0;
+      if (const std::string *S = paramS(B, "content")) parseSimMatrix(*S, C, r, c);
+      if (C.empty()) C.push_back(0.0);
+      HdlMem_[I] = std::move(C);
     }
   }
 
@@ -1799,6 +1815,22 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       // commitDigitalRegisters() (NOT here — evalAll runs multiple times
       // per RK4 step, which would multiply-count a single clock edge).
       Out_[I] = DigitalLatch_[I];
+    } else if (K == "signal_shift_register" || K == "signal_ram" ||
+               K == "signal_rom") {
+      // #343 HDL memory reads. shift_register → serial-out (last stage); RAM /
+      // ROM → word at the `addr` input (clamped). The clocked shift / write
+      // happens once per major step in commitDigitalRegisters().
+      const auto &Mem = HdlMem_[I];
+      if (Mem.empty()) {
+        Out_[I] = 0.0;
+      } else if (K == "signal_shift_register") {
+        Out_[I] = Mem.back();
+      } else {
+        int Addr = (int)std::llround(inputOf(I, "addr"));
+        if (Addr < 0) Addr = 0;
+        if (Addr >= (int)Mem.size()) Addr = (int)Mem.size() - 1;
+        Out_[I] = Mem[Addr];
+      }
     } else if (K == "signal_math_fcn") {
       const std::string *F = paramS(B, "function");
       double U  = inputOf(I, "in");
@@ -2671,6 +2703,52 @@ double MflowLinkSim::stepMajor() {
       if (S && !R)      Q = 1.0;
       else if (R && !S) Q = 0.0;
       // S==R: hold (the 1,1 case is undefined in HW; we hold)
+    }
+  }
+  // #343 — HDL memory (signal_shift_register / signal_ram). On a `clk` posedge
+  // the shift register marches every stage one step (serial `in` → stage 0),
+  // and the RAM writes `data` at `addr` when `we` is high. ROM is stateless.
+  // Active-high reset reloads the shift chain's initial value.
+  for (size_t I = 0; I < M_.Blocks.size(); ++I) {
+    const std::string &K = M_.Blocks[I].Kind;
+    if (K != "signal_shift_register" && K != "signal_ram")
+      continue;
+    auto srcOf = [&](const char *Port) -> int {
+      for (auto &P : Inputs_[I])
+        if (P.DstPort == Port) return static_cast<int>(P.SrcBlock);
+      return -1;
+    };
+    int ClkSrc = srcOf("clk");
+    bool Posedge =
+        ClkSrc >= 0 && PrevOut_[ClkSrc] <= 0.0 && Out_[ClkSrc] > 0.0;
+    auto &Mem = HdlMem_[I];
+    if (Mem.empty()) continue;
+    if (K == "signal_shift_register") {
+      int RstSrc = srcOf("reset");
+      if (RstSrc < 0) RstSrc = srcOf("rst");
+      if (RstSrc >= 0 && Out_[RstSrc] > 0.5) {
+        std::fill(Mem.begin(), Mem.end(),
+                  paramD(M_.Blocks[I], "initialValue", 0.0));
+        continue;
+      }
+      if (!Posedge) continue;
+      int InSrc = srcOf("in");
+      if (InSrc < 0) InSrc = srcOf("in1");
+      double NewBit = (InSrc >= 0) ? Out_[InSrc] : 0.0;
+      for (int s = (int)Mem.size() - 1; s >= 1; --s) Mem[s] = Mem[s - 1];
+      Mem[0] = NewBit;
+    } else { // signal_ram
+      if (!Posedge) continue;
+      int WeSrc = srcOf("we");
+      bool We = WeSrc < 0 || Out_[WeSrc] > 0.5; // no `we` wired ⇒ always write
+      if (!We) continue;
+      int AddrSrc = srcOf("addr");
+      int Addr = (AddrSrc >= 0) ? (int)std::llround(Out_[AddrSrc]) : 0;
+      if (Addr < 0) Addr = 0;
+      if (Addr >= (int)Mem.size()) Addr = (int)Mem.size() - 1;
+      int DataSrc = srcOf("data");
+      if (DataSrc < 0) DataSrc = srcOf("in");
+      Mem[Addr] = (DataSrc >= 0) ? Out_[DataSrc] : 0.0;
     }
   }
   // #343 — Communications error-rate (BER) sink. Once per major step, compare

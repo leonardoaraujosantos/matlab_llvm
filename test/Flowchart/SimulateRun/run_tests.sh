@@ -688,6 +688,22 @@ check "awgn link recovers @20dB" "awk 'BEGIN{exit !($LK_BER20<1e-9)}'" "high-SNR
 check "awgn link degrades @0dB"  "awk 'BEGIN{exit !($LK_BER0>0.1)}'" "low-SNR channel must cause symbol errors (BER>0)"
 check "awgn noises Q component"  "awk 'BEGIN{exit !($LK_QVAR>0.05)}'" "vector AWGN must noise the quadrature, not just in-phase"
 
+#--- #343: HDL memory — shift register / RAM / ROM -----------------------
+# A 3-stage shift register (serial in = 1) is a delay line: the 1 marches one
+# stage per clock and reaches the output after exactly 3 posedges (t≈1.5). A
+# RAM writes data=7 at addr=2 on the clock and reads it back. A ROM maps
+# addr=2 to content[2]=30. Columns: t, ss (shift out), sr (RAM), so (ROM).
+MM="$("$MATLABC" -simulate "$EX/hdl_memory.mflow")"
+MM_HEAD=$(printf '%s\n' "$MM" | head -1)
+MM_SH_EARLY=$(printf '%s\n' "$MM" | awk -F, '$1>0.9 && $1<1.1{print $2; exit}')  # after 2 clks: 0
+MM_SH_LATE=$(printf '%s\n'  "$MM" | tail -1 | awk -F, '{print $2}')              # after 3+ clks: 1
+MM_RAM=$(printf '%s\n'      "$MM" | tail -1 | awk -F, '{print $3}')              # 7
+MM_ROM=$(printf '%s\n'      "$MM" | tail -1 | awk -F, '{print $4}')              # 30
+check "hdl_memory header"    "[[ '$MM_HEAD' == 't,ss,sr,so' ]]" ""
+check "shift reg delay line" "awk 'BEGIN{exit !(($MM_SH_EARLY)^2<1e-9 && ($MM_SH_LATE-1)^2<1e-9)}'" "3-stage shift register delays the serial input by 3 clocks"
+check "ram write/read"       "awk 'BEGIN{exit !(($MM_RAM-7)^2<1e-9)}'" "RAM must read back the value written at the address"
+check "rom lookup"           "awk 'BEGIN{exit !(($MM_ROM-30)^2<1e-9)}'" "ROM addr 2 → content[2] = 30"
+
 #--- #343: HDL sequential blocks — D flip-flop / T flip-flop / counter -----
 # A 1 Hz pulse clock drives a D-FF (D=1), a free-running T-FF, and an up
 # counter over 5 s. Each updates once per clock posedge (once per major step,
