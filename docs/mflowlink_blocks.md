@@ -79,14 +79,21 @@ single update); the held value is the output, and they are loop-breakers like
 reloads `initialValue`. Mux/Demux and logic gates already ship as
 `signal_mux`/`signal_demux`/`signal_logical`/`signal_multiport_switch`.
 
-**`signal_dff` synthesises to RTL.** `matlabc -emit-sv <model.mflow> --subsystem
-<name>` lowers a D flip-flop to a clocked register — `always_ff @(posedge clk or
-negedge rst_n) s_ff <= s_ff_next` with `s_ff_next = D` and the output `= s_ff`.
-The block's `clk` input maps to the module's implicit clock (single-clock
-design), so for synthesis leave `clk` unwired (the module `clk` is the clock);
-`reset` maps to the module reset. See `examples/mflowlink/coder/dff_register.mflow`.
-`signal_tff` / `signal_counter` simulate today but aren't SV-lowered yet (their
-toggle / increment next-state is the follow-up).
+**The clocked registers synthesise to RTL.** `matlabc -emit-sv <model.mflow>
+--subsystem <name>` lowers each to a posedge register —
+`always_ff @(posedge clk or negedge rst_n) s_ff <= s_ff_next` with the output
+`= s_ff` and a per-block next-state:
+
+| Block | `s_ff_next` (combinational) |
+|---|---|
+| `signal_dff`     | `D` |
+| `signal_tff`     | `Q + T*(1 - 2*Q)` (= `1-Q` when `T` is high or unwired; arithmetic toggle, no branch) |
+| `signal_counter` | `Q + step`, wrapped via `inc - mod*(inc >= mod)` when `modulus > 0` |
+
+All three pass `-check-synthesizable`. The block's `clk` input maps to the
+module's implicit clock (single-clock design), so for synthesis leave `clk`
+unwired (the module `clk` is the clock); `reset` maps to the module reset. See
+`examples/mflowlink/coder/{dff,tff,counter}_register.mflow`.
 
 | Kind | Tier-C | Params | Ports | Notes |
 |---|---|---|---|---|

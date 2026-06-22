@@ -1,0 +1,15 @@
+{
+  "schema": "matforge.flowchart", "version": "0.1.0", "entry": "counter_reg",
+  "settings": { "kind": "signal_flow" },
+  "flows": [{
+    "id": "flow_cnt", "kind": "function", "name": "counter_reg",
+    "signature": { "inputs": [], "outputs": ["q"] },
+    "nodes": [
+      { "id": "cnt", "kind": "signal_counter", "data": { "params": { "initialValue": 0.0, "step": 1.0, "modulus": 16.0 } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "qout", "kind": "signal_outport", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } }
+    ],
+    "edges": [
+      { "id": "e1", "kind": "data", "from": {"node": "cnt", "port": "out"}, "to": {"node": "qout", "port": "in"} }
+    ]
+  }]
+}
