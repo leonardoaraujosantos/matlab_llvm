@@ -62,6 +62,7 @@ signal_saturation
 signal_scope
 signal_shift_register
 signal_sine
+signal_spectrum
 signal_srff
 signal_state_space
 signal_step

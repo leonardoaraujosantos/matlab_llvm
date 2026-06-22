@@ -704,6 +704,20 @@ check "shift reg delay line" "awk 'BEGIN{exit !(($MM_SH_EARLY)^2<1e-9 && ($MM_SH
 check "ram write/read"       "awk 'BEGIN{exit !(($MM_RAM-7)^2<1e-9)}'" "RAM must read back the value written at the address"
 check "rom lookup"           "awk 'BEGIN{exit !(($MM_ROM-30)^2<1e-9)}'" "ROM addr 2 → content[2] = 30"
 
+#--- #343: DSP — signal_spectrum (power spectrum |X[k]|²) -----------------
+# A DC frame [1 1 1 1] concentrates all power at bin 0 (|DFT[0]|² = 4² = 16);
+# a Nyquist frame [1 -1 1 -1] concentrates it at bin 2 (16). Columns:
+# t, sd[1..4] (DC spectrum), sn[1..4] (Nyquist spectrum).
+SP="$("$MATLABC" -simulate "$EX/spectrum.mflow")"
+SP_HEAD=$(printf '%s\n' "$SP" | head -1)
+SP_DC0=$(printf '%s\n'  "$SP" | tail -1 | awk -F, '{print $2}')   # DC bin power = 16
+SP_DC1=$(printf '%s\n'  "$SP" | tail -1 | awk -F, '{v=$3; print (v<0)?-v:v}') # ~0
+SP_NYQ=$(printf '%s\n'  "$SP" | tail -1 | awk -F, '{print $8}')   # Nyquist bin power = 16
+SP_NY0=$(printf '%s\n'  "$SP" | tail -1 | awk -F, '{v=$6; print (v<0)?-v:v}') # bin0 ~0
+check "spectrum header"      "[[ '$SP_HEAD' == 't,sd[1],sd[2],sd[3],sd[4],sn[1],sn[2],sn[3],sn[4]' ]]" ""
+check "spectrum DC bin = 16" "awk 'BEGIN{exit !(($SP_DC0-16)^2<1e-6 && $SP_DC1<1e-6)}'" "DC frame puts all power in bin 0"
+check "spectrum Nyquist bin = 16" "awk 'BEGIN{exit !(($SP_NYQ-16)^2<1e-6 && $SP_NY0<1e-6)}'" "alternating frame puts all power at the Nyquist bin"
+
 #--- #343: HDL sequential blocks — D flip-flop / T flip-flop / counter -----
 # A 1 Hz pulse clock drives a D-FF (D=1), a free-running T-FF, and an up
 # counter over 5 s. Each updates once per clock posedge (once per major step,

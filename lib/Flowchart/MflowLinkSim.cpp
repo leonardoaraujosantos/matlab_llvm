@@ -1519,7 +1519,7 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       // the proper switch / demux semantics + zero-crossing.
       Out_[I] = Inputs_[I].empty() ? 0.0 : edgeValue(Inputs_[I].front());
     } else if (K == "signal_window" || K == "signal_fft" ||
-               K == "signal_ifft") {
+               K == "signal_ifft" || K == "signal_spectrum") {
       // #343 DSP frame transforms over a vector signal. Read `Want` elements
       // from the single input (a width-W source fills from VecOut_, a scalar
       // source broadcasts its value into element 0). Stateless: the whole
@@ -1560,7 +1560,7 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
           VecOut_[I][kk] = re;
           VecOut_[I][Nf + kk] = im;
         }
-      } else { // signal_ifft
+      } else if (K == "signal_ifft") {
         // Inverse DFT of a complex [Re;Im] (width 2N) frame → real N-point
         // output: x[n] = (1/N) Σ_k (Re[k]cos − Im[k]sin)(2πkn/N).
         int Nf = OutWidth_[I];
@@ -1573,6 +1573,20 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
             re += X[kk] * std::cos(ang) - X[Nf + kk] * std::sin(ang);
           }
           VecOut_[I][n] = Nf > 0 ? re / Nf : 0.0;
+        }
+      } else { // signal_spectrum
+        // Power spectrum of a real N-frame: |X[k]|² = Re[k]² + Im[k]² (width N).
+        int Nf = OutWidth_[I];
+        std::vector<double> x = frame(Nf);
+        VecOut_[I].assign(Nf, 0.0);
+        for (int kk = 0; kk < Nf; ++kk) {
+          double re = 0.0, im = 0.0;
+          for (int n = 0; n < Nf; ++n) {
+            double ang = -2.0 * M_PI * kk * n / Nf;
+            re += x[n] * std::cos(ang);
+            im += x[n] * std::sin(ang);
+          }
+          VecOut_[I][kk] = re * re + im * im;
         }
       }
       Out_[I] = VecOut_[I].empty() ? 0.0 : VecOut_[I].front();
