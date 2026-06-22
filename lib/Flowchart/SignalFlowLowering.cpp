@@ -139,6 +139,13 @@ const std::map<std::string, KindInfo> &kindTable() {
     // estimate (N = rows of A); stateful predict/update each major step, so it
     // breaks algebraic loops (the estimate is prior-derived, not feedthrough).
     add("signal_kalman",     {true, true, false, true,  false, FIM});
+    // DSP (#343) — frame transforms over a vector signal. Stateless,
+    // direct-feedthrough (output is this step's frame), so not loop breakers.
+    // signal_fft maps a real N-frame → complex [Re;Im] (width 2N); signal_ifft
+    // inverts it; signal_window applies a Hann/Hamming/Blackman taper.
+    add("signal_fft",        {true, true, false, false, false, FIM});
+    add("signal_ifft",       {true, true, false, false, false, FIM});
+    add("signal_window",     {true, true, false, false, false, FIM});
     add("signal_relop",      {true, true, false, false, false, FIM});
     add("signal_logical",    {true, true, false, false, false, FIM});
     add("signal_compare_to_zero",
@@ -916,6 +923,22 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
           if (R * C > B.OutWidth) B.OutWidth = R * C;
         }
       }
+    } else if (N.Kind == "signal_window") {
+      // DSP (#343) — windowing. Output width = frame size `n`; if `n` is
+      // absent the width inherits the input element count (sentinel 0).
+      int Nf = N.getParam("n") ? std::atoi(N.getParam("n")->c_str()) : 0;
+      B.OutWidth = Nf > 0 ? Nf : 0;
+    } else if (N.Kind == "signal_fft") {
+      // DSP (#343) — frame DFT. A real N-point frame maps to a complex
+      // spectrum carried as [Re_0..Re_{N-1}, Im_0..Im_{N-1}], width 2N.
+      // `n` (frame size) is required to stamp a deterministic width.
+      int Nf = N.getParam("n") ? std::atoi(N.getParam("n")->c_str()) : 0;
+      B.OutWidth = Nf > 0 ? 2 * Nf : 0;
+    } else if (N.Kind == "signal_ifft") {
+      // DSP (#343) — frame IDFT. A complex [Re;Im] width-2N frame maps back
+      // to a real N-point frame.
+      int Nf = N.getParam("n") ? std::atoi(N.getParam("n")->c_str()) : 0;
+      B.OutWidth = Nf > 0 ? Nf : 0;
     } else if (N.Kind == "signal_reshape") {
       // §17.5 #9 — reshape (rows, cols). Total element count must
       // match the input; width inference picks the input's element

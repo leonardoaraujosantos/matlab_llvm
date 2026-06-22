@@ -406,6 +406,19 @@ void parseSimMatrix(const std::string &S, std::vector<double> &Vals,
 // O(n³) implementation is more than adequate.
 //===----------------------------------------------------------------------===//
 
+// DSP window taper coefficient at index k of an N-point window (#343).
+// Supported: rectangular ("rect"/"none"), Hamming, Blackman; default Hann.
+static double windowCoef(const std::string *Type, int k, int N) {
+  if (N <= 1) return 1.0;
+  double t = 2.0 * M_PI * k / (N - 1);
+  const std::string ty = Type ? *Type : "hann";
+  if (ty == "rect" || ty == "rectangular" || ty == "none") return 1.0;
+  if (ty == "hamming") return 0.54 - 0.46 * std::cos(t);
+  if (ty == "blackman")
+    return 0.42 - 0.5 * std::cos(t) + 0.08 * std::cos(2.0 * t);
+  return 0.5 * (1.0 - std::cos(t)); // Hann (default)
+}
+
 // C[r×c] = A[r×k] · B[k×c].
 static std::vector<double> matMul(const std::vector<double> &A, int Ar, int Ak,
                                   const std::vector<double> &B, int Bk, int Bc) {
@@ -1460,6 +1473,64 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       // Algebra-only Tier-C stub: passthrough first input. Tier-E adds
       // the proper switch / demux semantics + zero-crossing.
       Out_[I] = Inputs_[I].empty() ? 0.0 : edgeValue(Inputs_[I].front());
+    } else if (K == "signal_window" || K == "signal_fft" ||
+               K == "signal_ifft") {
+      // #343 DSP frame transforms over a vector signal. Read `Want` elements
+      // from the single input (a width-W source fills from VecOut_, a scalar
+      // source broadcasts its value into element 0). Stateless: the whole
+      // frame is recomputed from the current input each step.
+      auto frame = [&](int Want) {
+        std::vector<double> v(Want > 0 ? Want : 0, 0.0);
+        if (Inputs_[I].empty() || Want <= 0) return v;
+        size_t Src = Inputs_[I].front().SrcBlock;
+        if (OutWidth_[Src] > 1)
+          for (int e = 0; e < Want && e < (int)VecOut_[Src].size(); ++e)
+            v[e] = VecOut_[Src][e];
+        else
+          v[0] = Out_[Src];
+        return v;
+      };
+      if (K == "signal_window") {
+        int Nf = OutWidth_[I];
+        std::vector<double> x = frame(Nf);
+        const std::string *WT = paramS(B, "type");
+        VecOut_[I].assign(Nf, 0.0);
+        for (int k = 0; k < Nf; ++k)
+          VecOut_[I][k] = windowCoef(WT, k, Nf) * x[k];
+      } else if (K == "signal_fft") {
+        // Real N-point DFT: X[k] = Σ_n x[n] e^{-j2πkn/N}, output packed as
+        // [Re_0..Re_{N-1}, Im_0..Im_{N-1}] (width 2N). O(N²) — frames are
+        // small; no FFTW dependency.
+        int N2 = OutWidth_[I];
+        int Nf = N2 / 2;
+        std::vector<double> x = frame(Nf);
+        VecOut_[I].assign(N2, 0.0);
+        for (int kk = 0; kk < Nf; ++kk) {
+          double re = 0.0, im = 0.0;
+          for (int n = 0; n < Nf; ++n) {
+            double ang = -2.0 * M_PI * kk * n / Nf;
+            re += x[n] * std::cos(ang);
+            im += x[n] * std::sin(ang);
+          }
+          VecOut_[I][kk] = re;
+          VecOut_[I][Nf + kk] = im;
+        }
+      } else { // signal_ifft
+        // Inverse DFT of a complex [Re;Im] (width 2N) frame → real N-point
+        // output: x[n] = (1/N) Σ_k (Re[k]cos − Im[k]sin)(2πkn/N).
+        int Nf = OutWidth_[I];
+        std::vector<double> X = frame(2 * Nf);
+        VecOut_[I].assign(Nf, 0.0);
+        for (int n = 0; n < Nf; ++n) {
+          double re = 0.0;
+          for (int kk = 0; kk < Nf; ++kk) {
+            double ang = 2.0 * M_PI * kk * n / Nf;
+            re += X[kk] * std::cos(ang) - X[Nf + kk] * std::sin(ang);
+          }
+          VecOut_[I][n] = Nf > 0 ? re / Nf : 0.0;
+        }
+      }
+      Out_[I] = VecOut_[I].empty() ? 0.0 : VecOut_[I].front();
     } else if (K == "signal_reshape") {
       // §17.5 #9 — copy the upstream flat buffer through; shape
       // change is purely a metadata switch (OutRows / OutCols

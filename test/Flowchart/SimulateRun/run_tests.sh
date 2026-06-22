@@ -600,6 +600,34 @@ check "kalman2 tracks pos"   "awk 'BEGIN{exit !($KT_POS>9.0 && $KT_POS<11.0)}'" 
 check "kalman2 infers vel"   "awk 'BEGIN{exit !($KT_VEL>0.4 && $KT_VEL<0.6)}'" "velocity state must converge to the true slope 0.5 (state coupling)"
 check "kalman2 smoother"     "[[ '$KT_SMOOTH' == '1' ]]" "tracked position must be smoother than the raw measurement"
 
+#--- #343: DSP frame trio — signal_fft / signal_ifft ----------------------
+# A constant frame [1 2 3 4] → fft → ifft. The fft output (width 2N = 8) packs
+# [Re_0..Re_3, Im_0..Im_3]; the round-trip ifft (width 4) must recover the
+# input exactly. Columns: t, sf[1..8] (spectrum), si[1..4] (reconstruction).
+FF="$("$MATLABC" -simulate "$EX/fft_roundtrip.mflow")"
+FF_HEAD=$(printf '%s\n' "$FF" | head -1)
+FF_LAST=$(printf '%s\n' "$FF" | tail -1)
+FF_DC=$(printf '%s\n'  "$FF" | tail -1 | awk -F, '{print $2}')   # Re[0] = Σx = 10
+FF_IMDC=$(printf '%s\n' "$FF" | tail -1 | awk -F, '{print $6}')  # Im[0] = 0
+FF_R1=$(printf '%s\n'  "$FF" | tail -1 | awk -F, '{print $10}')  # ifft[0] = 1
+FF_R4=$(printf '%s\n'  "$FF" | tail -1 | awk -F, '{print $13}')  # ifft[3] = 4
+check "fft header (2N spectrum + N recon)" "[[ '$FF_HEAD' == 't,sf[1],sf[2],sf[3],sf[4],sf[5],sf[6],sf[7],sf[8],si[1],si[2],si[3],si[4]' ]]" ""
+check "fft DC bin = sum"     "awk 'BEGIN{exit !(($FF_DC-10)^2<1e-6)}'" "Re[0] of [1 2 3 4] DFT is the sum, 10"
+check "fft DC imag = 0"      "awk 'BEGIN{exit !($FF_IMDC^2<1e-6)}'" "Im[0] of a real frame is 0"
+check "ifft recovers x[0]"   "awk 'BEGIN{exit !(($FF_R1-1)^2<1e-6)}'" "fft→ifft round-trip must recover the input frame"
+check "ifft recovers x[3]"   "awk 'BEGIN{exit !(($FF_R4-4)^2<1e-6)}'" "fft→ifft round-trip must recover the input frame"
+
+#--- #343: DSP — signal_window (Hann taper) -------------------------------
+# A flat frame [1 1 1 1] through a 4-point Hann window → [0, 0.75, 0.75, 0].
+# Columns: t, sw[1..4].
+WW="$("$MATLABC" -simulate "$EX/window_taper.mflow")"
+WW_HEAD=$(printf '%s\n' "$WW" | head -1)
+WW_E1=$(printf '%s\n' "$WW" | tail -1 | awk -F, '{print $2}')  # 0
+WW_E2=$(printf '%s\n' "$WW" | tail -1 | awk -F, '{print $3}')  # 0.75
+check "window header"        "[[ '$WW_HEAD' == 't,sw[1],sw[2],sw[3],sw[4]' ]]" ""
+check "window endpoint = 0"  "awk 'BEGIN{exit !($WW_E1^2<1e-9)}'" "Hann window is 0 at the first sample"
+check "window peak = 0.75"   "awk 'BEGIN{exit !(($WW_E2-0.75)^2<1e-6)}'" "Hann(N=4) interior coefficient is 0.75"
+
 #--- #343: HDL sequential blocks — D flip-flop / T flip-flop / counter -----
 # A 1 Hz pulse clock drives a D-FF (D=1), a free-running T-FF, and an up
 # counter over 5 s. Each updates once per clock posedge (once per major step,
