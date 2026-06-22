@@ -5,6 +5,7 @@ signal_bus_creator
 signal_bus_selector
 signal_chirp
 signal_clock
+signal_color_space
 signal_compare_to_constant
 signal_compare_to_zero
 signal_constant

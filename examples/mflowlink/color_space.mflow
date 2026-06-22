@@ -1,0 +1,14 @@
+{ "schema": "matforge.flowchart", "version": "0.1.0", "entry": "cs_test",
+  "settings": { "kind": "signal_flow", "solver": { "type": "fixed_step", "algorithm": "ode4", "startTime": 0.0, "stopTime": 0.2, "maxStep": "0.1" } },
+  "flows": [{ "id": "f", "kind": "function", "name": "cs_test", "signature": { "inputs": [], "outputs": [] },
+    "nodes": [
+      { "id": "rgb", "kind": "signal_constant", "data": { "params": { "value": "[1 0 0 0 1 0]" } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "g", "kind": "signal_color_space", "data": { "params": { "mode": "rgb2gray" } }, "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "sg", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } },
+      { "id": "gr", "kind": "signal_constant", "data": { "params": { "value": "0.5" } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "r", "kind": "signal_color_space", "data": { "params": { "mode": "gray2rgb" } }, "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "sr", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } } ],
+    "edges": [ { "id": "e0", "kind": "data", "from": {"node": "rgb", "port": "out"}, "to": {"node": "g", "port": "in"} },
+               { "id": "e1", "kind": "data", "from": {"node": "g", "port": "out"}, "to": {"node": "sg", "port": "in"} },
+               { "id": "e2", "kind": "data", "from": {"node": "gr", "port": "out"}, "to": {"node": "r", "port": "in"} },
+               { "id": "e3", "kind": "data", "from": {"node": "r", "port": "out"}, "to": {"node": "sr", "port": "in"} } ] }] }

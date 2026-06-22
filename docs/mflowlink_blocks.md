@@ -217,15 +217,37 @@ and a scope on it renders `[row,col]`-indexed columns (`sBox[2,2]`, …).
 | `signal_image_source` | `rows`, `cols`, `data` | Constant grayscale image source. `data` is the row-major pixel list (any layout; flattened). Lowering rejects a `data` whose pixel count ≠ `rows·cols` |
 | `signal_image_filter` | `kernel` or `type` | 2-D correlation, zero-padded borders, output shape = input. `type`: `box` / `gaussian3` / `sobelx` / `sobely`, or an explicit `kernel` matrix literal |
 | `signal_threshold` | `level: 0.5` | Per-pixel binarize: `1` where pixel `> level`, else `0`; shape preserved |
+| `signal_color_space` | `mode: "rgb2gray"` | RGB↔grayscale over interleaved triples. `rgb2gray`: `0.299·R + 0.587·G + 0.114·B` (Rec.601 luma, width 3W→W); `gray2rgb`: replicate to R=G=B (W→3W) |
 
 **Worked example** (`image_blocks.mflow`): a 3×3 constant-5 image through a
 normalized **box** filter keeps its interior (`center = 5`, unity DC) and loses the
 zero-padded border; a vertical-edge image through **Sobel-x** gives a strong center
-response (`4`); a 2×2 ramp **thresholds** at 0.5 to `[0 1; 0 1]`.
+response (`4`); a 2×2 ramp **thresholds** at 0.5 to `[0 1; 0 1]`. `color_space.mflow`:
+red `[1 0 0]` → `0.299`, green → `0.587`; `gray2rgb` of `0.5` → `[0.5 0.5 0.5]`.
 
-Color (`channels > 1`) and a `signal_color_space` block are scoped as a follow-on
-(OpenSpec `mflow-2d-image-signals` group 6) — the grayscale path validates the
-representation first.
+`signal_color_space` operates on interleaved RGB triples (3:1 / 1:3 width via
+the inference pass). The remaining color-**image** integration — a `channels`
+param on `signal_image_source` and per-channel `signal_image_filter` so a 2-D
+color image carries its channel count in the shape — is the residual follow-on
+(OpenSpec `mflow-2d-image-signals` group 6).
+
+### 2-D block authoring recipe
+
+To add a 2-D image block, follow the 1-D [recipe](#adding-a-toolbox-library-block-343)
+plus three shape steps:
+1. **Stamp the output shape.** A shape-*defining* block (e.g. `image_source`)
+   sets `OutWidth = rows·cols`, `OutRows = rows`, `OutCols = cols` in the
+   lowering's per-kind dispatch. A shape-*preserving* block (e.g. `filter`,
+   `threshold`) leaves `OutWidth = 0` (inherit) — the shape-inference fixpoint
+   propagates `(rows, cols)` automatically once `rows·cols == OutWidth`. A block
+   that *changes* the element count (e.g. `color_space`, 3:1) adds a rule in the
+   width-inference fixpoint.
+2. **Index row-major.** Pixel `(r, c)` is at flat index `r·cols + c`; read the
+   input image's `rows`/`cols` from `OutRows_[src]`/`OutCols_[src]` in the
+   evaluator. (A scope on the result then renders `[row,col]` columns.)
+3. **Test over a small image.** Add a `SimulateRun` numeric check on a tiny
+   (2×2 / 3×3) image with known pixel values, asserting both the shape (header
+   columns) and the per-pixel result.
 
 ## Math
 

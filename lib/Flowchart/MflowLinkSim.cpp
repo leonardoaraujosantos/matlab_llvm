@@ -1671,6 +1671,40 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
         }
       }
       Out_[I] = VecOut_[I].empty() ? 0.0 : VecOut_[I].front();
+    } else if (K == "signal_color_space") {
+      // #343 Vision — RGB↔grayscale over interleaved triples. rgb2gray:
+      // out[i] = 0.299·R + 0.587·G + 0.114·B per pixel (width 3W→W).
+      // gray2rgb: replicate each gray to R=G=B (width W→3W).
+      std::vector<double> in;
+      if (!Inputs_[I].empty()) {
+        size_t Src = Inputs_[I].front().SrcBlock;
+        in.assign(OutWidth_[Src], 0.0);
+        if (OutWidth_[Src] > 1)
+          for (int e = 0; e < OutWidth_[Src] && e < (int)VecOut_[Src].size(); ++e)
+            in[e] = VecOut_[Src][e];
+        else if (!in.empty())
+          in[0] = Out_[Src];
+      }
+      const std::string *M = paramS(B, "mode");
+      bool ToGray = !M || *M == "rgb2gray";
+      int W = OutWidth_[I];
+      VecOut_[I].assign(W, 0.0);
+      if (ToGray) {
+        for (int p = 0; p < W; ++p) {
+          double r = (3 * p < (int)in.size()) ? in[3 * p] : 0.0;
+          double g = (3 * p + 1 < (int)in.size()) ? in[3 * p + 1] : 0.0;
+          double b = (3 * p + 2 < (int)in.size()) ? in[3 * p + 2] : 0.0;
+          VecOut_[I][p] = 0.299 * r + 0.587 * g + 0.114 * b;
+        }
+      } else { // gray2rgb
+        for (int p = 0; 3 * p + 2 < W; ++p) {
+          double v = (p < (int)in.size()) ? in[p] : 0.0;
+          VecOut_[I][3 * p] = v;
+          VecOut_[I][3 * p + 1] = v;
+          VecOut_[I][3 * p + 2] = v;
+        }
+      }
+      Out_[I] = VecOut_[I].empty() ? 0.0 : VecOut_[I].front();
     } else if (K == "signal_image_source" || K == "signal_image_filter" ||
                K == "signal_threshold") {
       // #343 Vision — grayscale image blocks over the flattened row-major 2-D

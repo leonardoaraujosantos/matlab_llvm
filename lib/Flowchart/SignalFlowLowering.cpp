@@ -177,6 +177,9 @@ const std::map<std::string, KindInfo> &kindTable() {
     add("signal_image_source", {true, true, false, false, false, FIM});
     add("signal_image_filter", {true, true, false, false, false, FIM});
     add("signal_threshold",    {true, true, false, false, false, FIM});
+    // Color conversion (#343 / mflow-2d-image-signals group 6): rgb2gray
+    // collapses interleaved RGB triples (width 3W→W), gray2rgb expands (W→3W).
+    add("signal_color_space",  {true, true, false, false, false, FIM});
     // Statistics (#343) — streaming mean/variance/std over the input via an
     // online Welford accumulator. Stateful (carries across steps), so it
     // breaks algebraic loops; beats a MATLAB Function block, which can't hold
@@ -1298,6 +1301,13 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
           int Sum = 0;
           for (int W : Ws) Sum += W;
           B.OutWidth = Sum > 0 ? Sum : 1;
+        } else if (B.Kind == "signal_color_space") {
+          // #343 Vision — RGB↔grayscale changes the channel count: rgb2gray
+          // collapses interleaved RGB triples 3→1, gray2rgb expands 1→3.
+          int Win = Ws.empty() ? 1 : Ws.front();
+          auto It = B.Params.find("mode");
+          bool ToGray = It == B.Params.end() || It->second == "rgb2gray";
+          B.OutWidth = ToGray ? std::max(1, Win / 3) : Win * 3;
         } else {
           // Element-wise broadcast: max(1, max(Ws)). Mixed sizes
           // beyond scalar-vs-vector are an error.
