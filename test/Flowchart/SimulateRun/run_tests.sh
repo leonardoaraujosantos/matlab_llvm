@@ -808,6 +808,20 @@ check "dwt Haar approx"      "awk 'BEGIN{exit !(($DW_A0-2.1213203)^2<1e-6)}'" "H
 check "dwt Haar detail"      "awk 'BEGIN{exit !(($DW_D0+0.7071068)^2<1e-6)}'" "Haar detail[0] of [1 2] is (1-2)/√2 = -0.7071"
 check "dwt→idwt identity"    "awk 'BEGIN{exit !(($DW_R1-1)^2<1e-9 && ($DW_R4-4)^2<1e-9)}'" "dwt → idwt round-trip recovers the frame"
 
+#--- #343: RF — signal_rf_2port (scattering 2-port b = S·a) ---------------
+# An attenuating 2-port S=[0.1 0.9; 0.9 0.1] on incident a=[3 5] gives
+# b=[0.1·3+0.9·5, 0.9·3+0.1·5]=[4.8, 3.2]; an ideal-through S=[0 1; 1 0] swaps
+# the waves → [5, 3]. Columns: t, sa[1],sa[2] (attenuator), st[1],st[2] (thru).
+RF="$("$MATLABC" -simulate "$EX/rf_2port.mflow")"
+RF_HEAD=$(printf '%s\n' "$RF" | head -1)
+RF_B1=$(printf '%s\n' "$RF" | tail -1 | awk -F, '{print $2}')
+RF_B2=$(printf '%s\n' "$RF" | tail -1 | awk -F, '{print $3}')
+RF_T1=$(printf '%s\n' "$RF" | tail -1 | awk -F, '{print $4}')
+RF_T2=$(printf '%s\n' "$RF" | tail -1 | awk -F, '{print $5}')
+check "rf_2port header"      "[[ '$RF_HEAD' == 't,sa[1],sa[2],st[1],st[2]' ]]" ""
+check "rf_2port scatter"     "awk 'BEGIN{exit !(($RF_B1-4.8)^2<1e-9 && ($RF_B2-3.2)^2<1e-9)}'" "b = S·a for the attenuating 2-port is [4.8, 3.2]"
+check "rf_2port ideal thru"  "awk 'BEGIN{exit !(($RF_T1-5)^2<1e-9 && ($RF_T2-3)^2<1e-9)}'" "an ideal through 2-port (anti-diagonal S) swaps the waves → [5, 3]"
+
 #--- #343: HDL sequential blocks — D flip-flop / T flip-flop / counter -----
 # A 1 Hz pulse clock drives a D-FF (D=1), a free-running T-FF, and an up
 # counter over 5 s. Each updates once per clock posedge (once per major step,
