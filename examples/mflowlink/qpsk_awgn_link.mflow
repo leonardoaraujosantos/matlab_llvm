@@ -1,0 +1,45 @@
+{
+  "schema": "matforge.flowchart", "version": "0.1.0", "entry": "qpsk_link",
+  "settings": { "kind": "signal_flow",
+    "solver": { "type": "fixed_step", "algorithm": "ode4", "startTime": 0.0, "stopTime": 10.0, "maxStep": "0.05" } },
+  "flows": [{
+    "id": "flow_link", "kind": "function", "name": "qpsk_link",
+    "signature": { "inputs": [], "outputs": [] },
+    "nodes": [
+      { "id": "clk", "kind": "signal_pulse", "data": { "params": { "amplitude": 1.0, "period": 0.5, "pulseWidth": 50.0, "phaseDelay": 0.0 } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "cnt", "kind": "signal_counter", "data": { "params": { "initialValue": 0.0, "step": 1.0, "modulus": 4.0 } }, "ports": { "in": [{"id": "clk"}], "out": [{"id": "out"}] } },
+      { "id": "mod", "kind": "signal_psk_mod", "data": { "params": { "M": 4 } }, "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "chan", "kind": "signal_awgn", "data": { "params": { "snr": 20.0, "signalPower": 1.0, "seed": 5.0 } }, "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "dem", "kind": "signal_psk_demod", "data": { "params": { "M": 4 } }, "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "ber", "kind": "signal_error_rate", "data": { "params": { "tolerance": 0.5 } }, "ports": { "in": [{"id": "tx"}, {"id": "rx"}], "out": [{"id": "out"}] } },
+      { "id": "sb", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } },
+
+      { "id": "c0", "kind": "signal_constant", "data": { "params": { "value": 0.0 } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "mod0", "kind": "signal_psk_mod", "data": { "params": { "M": 4 } }, "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "ch0", "kind": "signal_awgn", "data": { "params": { "snr": 10.0, "signalPower": 1.0, "seed": 9.0 } }, "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "sc", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } },
+
+      { "id": "chanLo", "kind": "signal_awgn", "data": { "params": { "snr": 0.0, "signalPower": 1.0, "seed": 3.0 } }, "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "demLo", "kind": "signal_psk_demod", "data": { "params": { "M": 4 } }, "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "berLo", "kind": "signal_error_rate", "data": { "params": { "tolerance": 0.5 } }, "ports": { "in": [{"id": "tx"}, {"id": "rx"}], "out": [{"id": "out"}] } },
+      { "id": "sl", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } }
+    ],
+    "edges": [
+      { "id": "e0", "kind": "data", "from": {"node": "clk", "port": "out"}, "to": {"node": "cnt", "port": "clk"} },
+      { "id": "e1", "kind": "data", "from": {"node": "cnt", "port": "out"}, "to": {"node": "mod", "port": "in"} },
+      { "id": "e2", "kind": "data", "from": {"node": "mod", "port": "out"}, "to": {"node": "chan", "port": "in"} },
+      { "id": "e3", "kind": "data", "from": {"node": "chan", "port": "out"}, "to": {"node": "dem", "port": "in"} },
+      { "id": "e4", "kind": "data", "from": {"node": "cnt", "port": "out"}, "to": {"node": "ber", "port": "tx"} },
+      { "id": "e5", "kind": "data", "from": {"node": "dem", "port": "out"}, "to": {"node": "ber", "port": "rx"} },
+      { "id": "e6", "kind": "data", "from": {"node": "ber", "port": "out"}, "to": {"node": "sb", "port": "in"} },
+      { "id": "e7", "kind": "data", "from": {"node": "c0", "port": "out"}, "to": {"node": "mod0", "port": "in"} },
+      { "id": "e8", "kind": "data", "from": {"node": "mod0", "port": "out"}, "to": {"node": "ch0", "port": "in"} },
+      { "id": "e9", "kind": "data", "from": {"node": "ch0", "port": "out"}, "to": {"node": "sc", "port": "in"} },
+      { "id": "e10", "kind": "data", "from": {"node": "mod", "port": "out"}, "to": {"node": "chanLo", "port": "in"} },
+      { "id": "e11", "kind": "data", "from": {"node": "chanLo", "port": "out"}, "to": {"node": "demLo", "port": "in"} },
+      { "id": "e12", "kind": "data", "from": {"node": "cnt", "port": "out"}, "to": {"node": "berLo", "port": "tx"} },
+      { "id": "e13", "kind": "data", "from": {"node": "demLo", "port": "out"}, "to": {"node": "berLo", "port": "rx"} },
+      { "id": "e14", "kind": "data", "from": {"node": "berLo", "port": "out"}, "to": {"node": "sl", "port": "in"} }
+    ]
+  }]
+}

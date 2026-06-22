@@ -1654,22 +1654,40 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       // n ~ N(0, σ²), σ² = signalPower / 10^(snr/10) (the Simulink AWGN
       // Channel "SNR + input signal power" mode). Reuses the per-block
       // xorshift64 + Box-Muller Gaussian generator (same seed state as
-      // signal_noise). First dedicated toolbox-domain library block added
-      // through the mflow-toolbox-library-blocks authoring recipe.
-      double X = inputOf(I, "in");
+      // signal_noise). For a vector input (e.g. a complex [I, Q] symbol from a
+      // modulator) each component gets an independent N(0, σ²) draw, so the
+      // block models a noisy link end-to-end with PSK/QAM mod/demod.
       double Snr = paramD(B, "snr", 10.0);
       double Sp = paramD(B, "signalPower", 1.0);
       if (Sp < 0.0) Sp = 0.0;
       double Sigma = std::sqrt(Sp / std::pow(10.0, Snr / 10.0));
       uint64_t &S = NoiseSeed_[I];
-      S ^= S << 13; S ^= S >> 7; S ^= S << 17;
-      double U1 = (S >> 11) / 9007199254740992.0;
-      uint64_t S2 = S ^ 0xDEADBEEFCAFEBABEULL;
-      S2 ^= S2 << 13; S2 ^= S2 >> 7; S2 ^= S2 << 17;
-      double U2 = (S2 >> 11) / 9007199254740992.0;
-      if (U1 < 1e-12) U1 = 1e-12;
-      double G = std::sqrt(-2.0 * std::log(U1)) * std::cos(2.0 * M_PI * U2);
-      Out_[I] = X + Sigma * G;
+      auto gauss = [&]() {
+        S ^= S << 13; S ^= S >> 7; S ^= S << 17;
+        double U1 = (S >> 11) / 9007199254740992.0;
+        uint64_t S2 = S ^ 0xDEADBEEFCAFEBABEULL;
+        S2 ^= S2 << 13; S2 ^= S2 >> 7; S2 ^= S2 << 17;
+        double U2 = (S2 >> 11) / 9007199254740992.0;
+        if (U1 < 1e-12) U1 = 1e-12;
+        return std::sqrt(-2.0 * std::log(U1)) * std::cos(2.0 * M_PI * U2);
+      };
+      if (OutWidth_[I] > 1) {
+        int W = OutWidth_[I];
+        std::vector<double> X(W, 0.0);
+        if (!Inputs_[I].empty()) {
+          size_t Src = Inputs_[I].front().SrcBlock;
+          if (OutWidth_[Src] > 1)
+            for (int e = 0; e < W && e < (int)VecOut_[Src].size(); ++e)
+              X[e] = VecOut_[Src][e];
+          else
+            X[0] = Out_[Src];
+        }
+        VecOut_[I].assign(W, 0.0);
+        for (int e = 0; e < W; ++e) VecOut_[I][e] = X[e] + Sigma * gauss();
+        Out_[I] = VecOut_[I].front();
+      } else {
+        Out_[I] = inputOf(I, "in") + Sigma * gauss();
+      }
     } else if (K == "signal_error_rate") {
       // #343 — Communications error-rate (BER) sink. Output is the running
       // ratio of symbol mismatches between the `tx`/`rx` inputs. The compare +

@@ -35,7 +35,7 @@ diagnostic) until its evaluator lands.
 | `signal_clock`        | ✓ | *(none)*                                                                  | Tier-H — outputs the current simulation time `t` |
 | `signal_chirp`        | ✓ | `amplitude: 1.0`, `f0: 0.1`, `f1: 1.0`, `t1: 10.0`                        | Tier-H — linear frequency sweep `f0 → f1` over `[0, t1]` |
 | `signal_noise`        | ✓ | `amplitude: 1.0`, `seed: 1.0`, `kind: "uniform"`                          | Tier-H — uniform `[-amp, +amp]` or `kind: "gaussian"` (σ = amp) via xorshift64 + Box-Muller. Seed is per-block for reproducibility |
-| `signal_awgn`         | ✓ | `snr: 10.0`, `signalPower: 1.0`, `seed: 1.0`                              | Communications (#343) — AWGN channel `y = x + N(0, σ²)`, `σ² = signalPower / 10^(snr/10)` (Simulink "SNR + input signal power" mode). Reuses the xorshift64 + Box-Muller Gaussian generator. First toolbox-domain library block via the [authoring recipe](#adding-a-toolbox-library-block-343) |
+| `signal_awgn`         | ✓ | `snr: 10.0`, `signalPower: 1.0`, `seed: 1.0`                              | Communications (#343) — AWGN channel `y = x + N(0, σ²)`, `σ² = signalPower / 10^(snr/10)` (Simulink "SNR + input signal power" mode). **Vector-aware**: a width-W input (e.g. a complex `[I, Q]` symbol) gets an independent N(0, σ²) draw per component, so it models a noisy PSK/QAM link end-to-end. xorshift64 + Box-Muller generator |
 | `signal_error_rate`   | ✓ | `tolerance: 0.5`                                                          | Communications (#343) — error-rate (BER) sink. Ports `tx`/`rx` (or `in1`/`in2`); output is the running mismatch ratio (a symbol counts as different when `\|tx − rx\| > tolerance`). Accumulated once per major step (not per RK4 substep), output bounded in `[0, 1]` |
 | `signal_psk_mod`      | ✓ | `M: 4`, `phaseOffset: 0.0`                                               | Communications (#343) — M-PSK modulator. Symbol index → constellation point `exp(j(2πk/M + φ))`, output as a width-2 `[I, Q]` vector |
 | `signal_psk_demod`    | ✓ | `M: 4`, `phaseOffset: 0.0`                                               | Communications (#343) — M-PSK demodulator. Nearest-angle hard decision on a `[I, Q]` input → scalar symbol index. Exact inverse of `signal_psk_mod` on clean points |
@@ -181,9 +181,11 @@ channel → demodulate → BER` link on the canvas.
 |---|---|
 | `psk_qpsk.mflow` | a counter cycles symbols 0–3 → QPSK mod → demod; the round-trip recovers every symbol (BER 0). Symbol 1 maps to `exp(jπ/2) = (0, 1)` |
 | `qam16.mflow`    | symbols 0–15 → 16-QAM mod → demod, BER 0 over all 16; symbol 0 sits at the grid corner `(I,Q) = (-3, -3)` |
+| `qpsk_awgn_link.mflow` | full noisy link `counter → QPSK mod → vector AWGN → demod → error_rate`. At 20 dB SNR the link recovers every symbol (BER 0); at 0 dB the channel degrades it (BER ≈ 0.45). The noisy symbol-0 tap `(1,0)` shows **both** I and Q carry noise |
 
-(`signal_awgn` is a scalar channel today, so end-to-end noisy-link BER awaits a
-vector/two-component AWGN — tracked in the catalog.)
+`signal_awgn` noises every component of a vector signal, so the complex `[I, Q]`
+symbol picks up noise on both axes — the `mod → awgn → demod → error_rate` chain
+measures real BER-vs-SNR on the canvas.
 
 ## Math
 
