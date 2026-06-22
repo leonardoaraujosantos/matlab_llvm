@@ -41,4 +41,4 @@ editor `NodeKind` (IDE repo).
 
 - [x] 6.1 Channel layout RESOLVED: **interleaved** RGB triples (matches typical image buffers; `(r·cols+c)·channels+ch`).
 - [x] 6.2 `signal_color_space` — RGB↔grayscale conversion over interleaved triples (rgb2gray 3→1 Rec.601 luma; gray2rgb 1→3). Width handled by a rule in the width-inference fixpoint. `color_space.mflow` + SimulateRun (red→0.299, green→0.587; gray2rgb→[v v v]).
-- [ ] 6.3 Color **image** integration — a `channels` param on `signal_image_source` and per-channel `signal_image_filter` so a 2-D color image carries its channel count in the shape. (Residual: `color_space` already converts; this threads channels through the 2-D image shape end-to-end.)
+- [x] 6.3 Color **image** integration — SUBSUMED by `mflow-nd-signals`: a color image is a rank-3 `[rows, cols, channels]` signal via the general N-D model (`signal_image_source channels`), and `signal_color_space` carries the channel axis. (Per-channel `image_filter` is the lone residual, tracked in `mflow-nd-signals` 3.2.)

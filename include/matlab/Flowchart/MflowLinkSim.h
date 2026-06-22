@@ -421,6 +421,10 @@ private:
   // unchanged.
   std::vector<int>                 OutRows_;
   std::vector<int>                 OutCols_;
+  // mflow-nd-signals — per-block N-D shape (rank 1–6) over the same flat
+  // VecOut_ buffer. `prod(OutShape_[I]) == OutWidth_[I]`. OutRows_/OutCols_
+  // remain the 2-D projection for the legacy paths.
+  std::vector<std::vector<int>>    OutShape_;
   std::vector<std::vector<double>> VecOut_;
   std::vector<double> Y_;             // continuous state, length M_.ContStateCount
   // Discrete state — one scalar slot per `Unit Delay` / `ZOH`, indexed

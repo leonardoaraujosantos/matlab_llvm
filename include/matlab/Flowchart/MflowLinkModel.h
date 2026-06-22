@@ -75,6 +75,12 @@ struct MflBlock {
   // observe their pre-#9 single-row layout.
   int OutRows = 1;
   int OutCols = 1;
+  // mflow-nd-signals — N-D shape (rank 1–6) over the same flat row-major
+  // `VecOut_` buffer. When non-empty, this is the canonical shape and
+  // `prod(OutShape) == OutWidth`; `OutRows`/`OutCols` above are kept as a 2-D
+  // projection (OutShape[0], prod(rest)) for the legacy 1-D/2-D code paths.
+  // Empty means "derive from OutRows/OutCols/OutWidth" (the pre-N-D default).
+  std::vector<int> OutShape;
   // For multi-input blocks the widths line up with `Inputs_` in
   // `MflowLinkSim` once edges are resolved. The lowering doesn't
   // try to populate this — the runtime fills it on first use.

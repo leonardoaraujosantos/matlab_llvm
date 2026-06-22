@@ -850,6 +850,31 @@ check "color_space header"   "[[ '$CS_HEAD' == 't,sg[1],sg[2],sr[1],sr[2],sr[3]'
 check "rgb2gray luma"        "awk 'BEGIN{exit !(($CS_R-0.299)^2<1e-9 && ($CS_G-0.587)^2<1e-9)}'" "red→0.299, green→0.587 (Rec.601 luma weights)"
 check "gray2rgb replicate"   "awk 'BEGIN{exit !(($CS_X1-0.5)^2<1e-9 && ($CS_X3-0.5)^2<1e-9)}'" "gray2rgb replicates the gray value across R,G,B"
 
+#--- mflow-nd-signals: N-D wire signals (up to 6-D) ----------------------
+# A width-24 frame reshaped to [2,3,4] flows as a rank-3 signal: the scope
+# renders [i,j,k] columns (s[1,1,1]…s[2,3,4]) and the 24 values pass through
+# unchanged (1…24). Reuses the existing flat buffer; only the shape generalizes.
+ND="$("$MATLABC" -simulate "$EX/nd_reshape.mflow")"
+ND_HEAD=$(printf '%s\n' "$ND" | head -1)
+ND_FIRST=$(printf '%s\n' "$ND" | tail -1 | awk -F, '{print $2}')
+ND_LAST=$(printf '%s\n'  "$ND" | tail -1 | awk -F, '{print $NF}')
+ND_NCOL=$(printf '%s\n'  "$ND" | tail -1 | awk -F, '{print NF-1}')
+check "nd reshape 3-D names" "grep -q 's\[1,1,1\]' <<< '$ND_HEAD' && grep -q 's\[2,3,4\]' <<< '$ND_HEAD'" "a rank-3 signal must render [i,j,k] scope columns"
+check "nd reshape passthrough" "awk 'BEGIN{exit !(($ND_FIRST-1)^2<1e-9 && ($ND_LAST-24)^2<1e-9 && $ND_NCOL==24)}'" "the 24 elements pass through the reshape unchanged"
+
+#--- mflow-nd-signals: color image as a rank-3 signal --------------------
+# signal_image_source rows=2 cols=2 channels=3 → a [2,2,3] interleaved color
+# signal (width 12): red/green/blue/white pixels. Subsumes the color-image
+# channels residual as a special case of the N-D model.
+NC="$("$MATLABC" -simulate "$EX/nd_color_image.mflow")"
+NC_HEAD=$(printf '%s\n' "$NC" | head -1)
+NC_NCOL=$(printf '%s\n' "$NC" | tail -1 | awk -F, '{print NF-1}')
+NC_R=$(printf '%s\n'    "$NC" | tail -1 | awk -F, '{print $2}')   # red pixel R = 1
+NC_G=$(printf '%s\n'    "$NC" | tail -1 | awk -F, '{print $3}')   # red pixel G = 0
+check "nd color rank-3 shape" "grep -q 's\[1,1,1\]' <<< '$NC_HEAD' && grep -q 's\[2,2,3\]' <<< '$NC_HEAD'" "a color image flows as a [rows,cols,channels] rank-3 signal"
+check "nd color width 12"     "awk 'BEGIN{exit !($NC_NCOL==12)}'" "2×2×3 color image = 12 interleaved elements"
+check "nd color pixel data"   "awk 'BEGIN{exit !(($NC_R-1)^2<1e-9 && $NC_G^2<1e-9)}'" "first pixel is red [1,0,0]"
+
 #--- #343: HDL sequential blocks — D flip-flop / T flip-flop / counter -----
 # A 1 Hz pulse clock drives a D-FF (D=1), a free-running T-FF, and an up
 # counter over 5 s. Each updates once per clock posedge (once per major step,
