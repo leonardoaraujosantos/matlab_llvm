@@ -571,6 +571,35 @@ check "running_stats header" "[[ '$ST_HEAD' == 't,sm,sv' ]]" ""
 check "running mean ~ bias"  "awk 'BEGIN{exit !($ST_MEAN>2.95 && $ST_MEAN<3.05)}'" "mean of A*sin+bias over whole periods is the bias (3)"
 check "running var ~ A^2/2"  "awk 'BEGIN{exit !($ST_VAR>1.90 && $ST_VAR<2.10)}'" "variance of a 2.0-amplitude sine is A^2/2 = 2"
 
+#--- #343: signal_kalman (1-state) — constant estimation from noisy meas ---
+# A scalar Kalman (A=C=1) estimates a constant 5.0 from a measurement
+# corrupted by AWGN (variance ~0.1, R=0.1). The estimate converges to 5 and
+# its steady-state (t>10) variance is far below the measurement variance.
+# Columns: t,se,sm (estimate, measurement).
+KF="$("$MATLABC" -simulate "$EX/kalman_constant.mflow")"
+KF_HEAD=$(printf '%s\n' "$KF" | head -1)
+KF_EST=$(printf '%s\n'  "$KF" | awk -F, 'NR>1 && $1>10{n++; s+=$2} END{print s/n}')
+KF_RATIO=$(printf '%s\n' "$KF" | awk -F, 'NR>1 && $1>10{n++; se+=$2; se2+=$2*$2; sm+=$3; sm2+=$3*$3} END{ev=se2/n-(se/n)^2; mv=sm2/n-(sm/n)^2; print (mv>0)?ev/mv:1}')
+check "kalman header"        "[[ '$KF_HEAD' == 't,se,sm' ]]" ""
+check "kalman est ~ truth"   "awk 'BEGIN{exit !($KF_EST>4.7 && $KF_EST<5.3)}'" "estimate must converge to the constant 5.0"
+check "kalman smooths noise" "awk 'BEGIN{exit !($KF_RATIO<0.25)}'" "estimate variance must be well below the measurement variance"
+
+#--- #343: signal_kalman (2-state) — constant-velocity tracker ------------
+# A 2-state Kalman (A=[1 dt;0 1], C=[1 0]) tracks a ramp (slope 0.5) from a
+# noisy position measurement. It must (a) track position to ~10 at t=20,
+# (b) infer the velocity ~0.5 from position changes alone (the coupling that
+# exercises the 2x2 matrix recursion), (c) be smoother than the measurement.
+# The vector estimate expands to two scope columns: t,se[1]=pos,se[2]=vel,truth,meas.
+KT="$("$MATLABC" -simulate "$EX/kalman_tracker.mflow")"
+KT_HEAD=$(printf '%s\n' "$KT" | head -1)
+KT_POS=$(printf '%s\n'  "$KT" | tail -1 | awk -F, '{print $2}')
+KT_VEL=$(printf '%s\n'  "$KT" | awk -F, 'NR>1 && $1>10{n++; s+=$3} END{print s/n}')
+KT_SMOOTH=$(printf '%s\n' "$KT" | awk -F, 'NR>1 && $1>10{pe=$2-$4; spe+=pe*pe; me=$5-$4; sme+=me*me} END{print (spe<sme)?1:0}')
+check "kalman2 header"       "[[ '$KT_HEAD' == 't,se[1],se[2],st,sm' ]]" "vector estimate must expand to per-element scope columns"
+check "kalman2 tracks pos"   "awk 'BEGIN{exit !($KT_POS>9.0 && $KT_POS<11.0)}'" "position estimate must track the ramp to ~10 at t=20"
+check "kalman2 infers vel"   "awk 'BEGIN{exit !($KT_VEL>0.4 && $KT_VEL<0.6)}'" "velocity state must converge to the true slope 0.5 (state coupling)"
+check "kalman2 smoother"     "[[ '$KT_SMOOTH' == '1' ]]" "tracked position must be smoother than the raw measurement"
+
 #--- #343: HDL sequential blocks — D flip-flop / T flip-flop / counter -----
 # A 1 Hz pulse clock drives a D-FF (D=1), a free-running T-FF, and an up
 # counter over 5 s. Each updates once per clock posedge (once per major step,

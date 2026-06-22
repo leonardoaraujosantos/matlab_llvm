@@ -399,6 +399,83 @@ void parseSimMatrix(const std::string &S, std::vector<double> &Vals,
   }
 }
 
+//===----------------------------------------------------------------------===//
+// Small dense linear algebra for the Kalman-filter block (#343). Matrices are
+// flat row-major `vector<double>` with explicit (rows, cols). These are sized
+// by the user's A/C/Q/R literals (typically ≤ a handful of states), so a plain
+// O(n³) implementation is more than adequate.
+//===----------------------------------------------------------------------===//
+
+// C[r×c] = A[r×k] · B[k×c].
+static std::vector<double> matMul(const std::vector<double> &A, int Ar, int Ak,
+                                  const std::vector<double> &B, int Bk, int Bc) {
+  std::vector<double> Cm(static_cast<size_t>(Ar) * Bc, 0.0);
+  if (Ak != Bk) return Cm; // non-conformant → zeros (caller validates)
+  for (int i = 0; i < Ar; ++i)
+    for (int j = 0; j < Bc; ++j) {
+      double s = 0.0;
+      for (int k = 0; k < Ak; ++k)
+        s += A[static_cast<size_t>(i) * Ak + k] * B[static_cast<size_t>(k) * Bc + j];
+      Cm[static_cast<size_t>(i) * Bc + j] = s;
+    }
+  return Cm;
+}
+
+// Aᵀ for an r×c matrix.
+static std::vector<double> matT(const std::vector<double> &A, int Ar, int Ac) {
+  std::vector<double> T(static_cast<size_t>(Ar) * Ac, 0.0);
+  for (int i = 0; i < Ar; ++i)
+    for (int j = 0; j < Ac; ++j)
+      T[static_cast<size_t>(j) * Ar + i] = A[static_cast<size_t>(i) * Ac + j];
+  return T;
+}
+
+// In-place A += B (both r×c). Used for P⁻ = A·P·Aᵀ + Q etc.
+static void matAddInto(std::vector<double> &A, const std::vector<double> &B) {
+  for (size_t i = 0; i < A.size() && i < B.size(); ++i) A[i] += B[i];
+}
+
+// Inverse of an m×m matrix via Gauss-Jordan with partial pivoting. Returns
+// false (and leaves Out untouched) if the matrix is singular to working tol.
+static bool matInv(const std::vector<double> &A, int m,
+                   std::vector<double> &Out) {
+  std::vector<double> M = A; // working copy
+  Out.assign(static_cast<size_t>(m) * m, 0.0);
+  for (int i = 0; i < m; ++i) Out[static_cast<size_t>(i) * m + i] = 1.0;
+  for (int col = 0; col < m; ++col) {
+    // Partial pivot: largest |entry| in this column at/below the diagonal.
+    int piv = col;
+    double best = std::fabs(M[static_cast<size_t>(col) * m + col]);
+    for (int r = col + 1; r < m; ++r) {
+      double v = std::fabs(M[static_cast<size_t>(r) * m + col]);
+      if (v > best) { best = v; piv = r; }
+    }
+    if (best < 1e-12) return false; // singular
+    if (piv != col)
+      for (int j = 0; j < m; ++j) {
+        std::swap(M[static_cast<size_t>(col) * m + j],
+                  M[static_cast<size_t>(piv) * m + j]);
+        std::swap(Out[static_cast<size_t>(col) * m + j],
+                  Out[static_cast<size_t>(piv) * m + j]);
+      }
+    double d = M[static_cast<size_t>(col) * m + col];
+    for (int j = 0; j < m; ++j) {
+      M[static_cast<size_t>(col) * m + j] /= d;
+      Out[static_cast<size_t>(col) * m + j] /= d;
+    }
+    for (int r = 0; r < m; ++r) {
+      if (r == col) continue;
+      double f = M[static_cast<size_t>(r) * m + col];
+      if (f == 0.0) continue;
+      for (int j = 0; j < m; ++j) {
+        M[static_cast<size_t>(r) * m + j] -= f * M[static_cast<size_t>(col) * m + j];
+        Out[static_cast<size_t>(r) * m + j] -= f * Out[static_cast<size_t>(col) * m + j];
+      }
+    }
+  }
+  return true;
+}
+
 std::pair<std::unique_ptr<MflowLinkSim::MatlabFunctionState>, std::string>
 parseMatlabFunctionBody(const std::string &Source);
 std::vector<double> runMatlabFunction(const MflowLinkSim::MatlabFunctionState &S,
@@ -526,6 +603,7 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
   RunCount_.assign(N, 0.0);
   RunMean_.assign(N, 0.0);
   RunM2_.assign(N, 0.0);
+  Kalman_.assign(N, {});
   MatlabFcnCache_.resize(N);
   MatlabFnCache_.resize(N);
   // §17.5 #8 — snapshot the currently installed JIT factory once.
@@ -813,6 +891,53 @@ void MflowLinkSim::reset() {
         else if (X0v.size() == 1) V = X0v[0];                 // scalar broadcast
         else V = (J < static_cast<int>(X0v.size())) ? X0v[J] : 0.0;
         Y_[StateOffset_[I] + J] = V;
+      }
+    } else if (B.Kind == "signal_kalman") {
+      // #343 — discrete Kalman filter. Parse A/C/Q/R (+ optional B) once and
+      // size the estimate X (length N = rows of A) and covariance Pc (N×N).
+      // Dimensions must conform or the block degrades to a pass-through.
+      KalmanState &KS = Kalman_[I];
+      int Ar = 0, Ac = 0, Cr = 0, Cc = 0;
+      if (const std::string *S = paramS(B, "A")) parseSimMatrix(*S, KS.A, Ar, Ac);
+      if (const std::string *S = paramS(B, "C")) parseSimMatrix(*S, KS.C, Cr, Cc);
+      KS.N = Ar;
+      KS.Mz = Cr;
+      KS.Valid = (Ar > 0 && Ar == Ac && Cc == Ar && Cr > 0);
+      // Q defaults to 0 (no process noise), R to identity (unit measurement
+      // noise) when unset or malformed; both must be square of the right size.
+      int Qr = 0, Qc = 0, Rr = 0, Rc = 0;
+      if (const std::string *S = paramS(B, "Q")) parseSimMatrix(*S, KS.Q, Qr, Qc);
+      if (Qr != KS.N || Qc != KS.N)
+        KS.Q.assign(static_cast<size_t>(KS.N) * KS.N, 0.0);
+      if (const std::string *S = paramS(B, "R")) parseSimMatrix(*S, KS.R, Rr, Rc);
+      if (Rr != KS.Mz || Rc != KS.Mz) {
+        KS.R.assign(static_cast<size_t>(KS.Mz) * KS.Mz, 0.0);
+        for (int d = 0; d < KS.Mz; ++d)
+          KS.R[static_cast<size_t>(d) * KS.Mz + d] = 1.0;
+      }
+      // Optional control matrix B (N×P).
+      int Br = 0, Bc = 0;
+      if (const std::string *S = paramS(B, "B")) parseSimMatrix(*S, KS.B, Br, Bc);
+      KS.P = (Br == KS.N && Bc > 0) ? Bc : 0;
+      if (KS.P == 0) KS.B.clear();
+      // Initial estimate x0 (vector, default 0); scalar broadcasts.
+      std::vector<double> X0v; int X0r = 0, X0c = 0;
+      if (const std::string *S = paramS(B, "x0")) parseSimMatrix(*S, X0v, X0r, X0c);
+      KS.X.assign(KS.N, 0.0);
+      for (int J = 0; J < KS.N; ++J)
+        KS.X[J] = X0v.empty() ? 0.0
+                  : (X0v.size() == 1 ? X0v[0]
+                                     : (J < (int)X0v.size() ? X0v[J] : 0.0));
+      // Initial covariance P0: full N×N literal, scalar (×I), or default I.
+      std::vector<double> P0v; int P0r = 0, P0c = 0;
+      if (const std::string *S = paramS(B, "P0")) parseSimMatrix(*S, P0v, P0r, P0c);
+      KS.Pc.assign(static_cast<size_t>(KS.N) * KS.N, 0.0);
+      if (P0r == KS.N && P0c == KS.N) {
+        KS.Pc = P0v;
+      } else {
+        double diag = P0v.size() == 1 ? P0v[0] : 1.0;
+        for (int d = 0; d < KS.N; ++d)
+          KS.Pc[static_cast<size_t>(d) * KS.N + d] = diag;
       }
     } else if (B.Kind == "signal_relay") {
       // Initial relay state: `initialState` (bool/0|1) wins, else
@@ -1466,6 +1591,20 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
         Out_[I] = std::sqrt(Var);
       else
         Out_[I] = RunMean_[I];
+    } else if (K == "signal_kalman") {
+      // #343 — discrete Kalman filter. The predict+update recursion runs once
+      // per major step in commitDigitalRegisters(); here we only publish the
+      // current N-vector state estimate (Out_ mirrors element 0 for scalar
+      // consumers, VecOut_ carries the full vector).
+      const KalmanState &KS = Kalman_[I];
+      if (OutWidth_[I] > 1) {
+        VecOut_[I].assign(OutWidth_[I], 0.0);
+        for (int j = 0; j < OutWidth_[I] && j < (int)KS.X.size(); ++j)
+          VecOut_[I][j] = KS.X[j];
+        Out_[I] = VecOut_[I].front();
+      } else {
+        Out_[I] = KS.X.empty() ? 0.0 : KS.X.front();
+      }
     } else if (K == "signal_dff" || K == "signal_tff" ||
                K == "signal_counter" || K == "signal_jkff" ||
                K == "signal_srff") {
@@ -2390,6 +2529,81 @@ double MflowLinkSim::stepMajor() {
     double Delta = X - RunMean_[I];
     RunMean_[I] += Delta / RunCount_[I];
     RunM2_[I] += Delta * (X - RunMean_[I]);
+  }
+  // #343 — discrete Kalman filter. Once per major step, fold the measurement
+  // (and optional control) into the standard predict/update recursion:
+  //   predict: x⁻ = A·x + B·u ;  P⁻ = A·P·Aᵀ + Q
+  //   update:  S = C·P⁻·Cᵀ + R ;  K = P⁻·Cᵀ·S⁻¹
+  //            x = x⁻ + K·(z − C·x⁻) ;  P = (I − K·C)·P⁻
+  for (size_t I = 0; I < M_.Blocks.size(); ++I) {
+    if (M_.Blocks[I].Kind != "signal_kalman")
+      continue;
+    KalmanState &KS = Kalman_[I];
+    if (!KS.Valid)
+      continue;
+    const int N = KS.N, Mz = KS.Mz;
+    // Read a (possibly vector) input port into a fixed-width vector.
+    auto readVec = [&](std::initializer_list<const char *> names,
+                       int Want) -> std::vector<double> {
+      std::vector<double> V(Want, 0.0);
+      int Src = -1;
+      for (const char *nm : names) {
+        for (auto &P : Inputs_[I])
+          if (P.DstPort == nm) { Src = static_cast<int>(P.SrcBlock); break; }
+        if (Src >= 0) break;
+      }
+      if (Src < 0) return V;
+      if (OutWidth_[Src] > 1)
+        for (int e = 0; e < Want && e < (int)VecOut_[Src].size(); ++e)
+          V[e] = VecOut_[Src][e];
+      else
+        V[0] = Out_[Src];
+      return V;
+    };
+    std::vector<double> z = readVec({"z", "measurement", "in1", "in"}, Mz);
+    // Predict. x⁻ = A·x (+ B·u)
+    std::vector<double> xPred = matMul(KS.A, N, N, KS.X, N, 1);
+    if (KS.P > 0) {
+      std::vector<double> u = readVec({"u", "control", "in2"}, KS.P);
+      std::vector<double> Bu = matMul(KS.B, N, KS.P, u, KS.P, 1);
+      matAddInto(xPred, Bu);
+    }
+    // P⁻ = A·P·Aᵀ + Q
+    std::vector<double> AP = matMul(KS.A, N, N, KS.Pc, N, N);
+    std::vector<double> At = matT(KS.A, N, N);
+    std::vector<double> Ppred = matMul(AP, N, N, At, N, N);
+    matAddInto(Ppred, KS.Q);
+    // S = C·P⁻·Cᵀ + R
+    std::vector<double> Ct = matT(KS.C, Mz, N);
+    std::vector<double> CP = matMul(KS.C, Mz, N, Ppred, N, N);
+    std::vector<double> S = matMul(CP, Mz, N, Ct, N, Mz);
+    matAddInto(S, KS.R);
+    std::vector<double> Sinv;
+    if (!matInv(S, Mz, Sinv)) {
+      // Singular innovation covariance — skip the update, keep the prediction.
+      KS.X = xPred;
+      KS.Pc = Ppred;
+      continue;
+    }
+    // K = P⁻·Cᵀ·S⁻¹   (N×Mz)
+    std::vector<double> PCt = matMul(Ppred, N, N, Ct, N, Mz);
+    std::vector<double> Kg = matMul(PCt, N, Mz, Sinv, Mz, Mz);
+    // innovation y = z − C·x⁻
+    std::vector<double> Cx = matMul(KS.C, Mz, N, xPred, N, 1);
+    std::vector<double> y(Mz, 0.0);
+    for (int e = 0; e < Mz; ++e) y[e] = z[e] - Cx[e];
+    // x = x⁻ + K·y
+    std::vector<double> Ky = matMul(Kg, N, Mz, y, Mz, 1);
+    KS.X = xPred;
+    matAddInto(KS.X, Ky);
+    // P = (I − K·C)·P⁻
+    std::vector<double> KC = matMul(Kg, N, Mz, KS.C, Mz, N); // N×N
+    std::vector<double> ImKC(static_cast<size_t>(N) * N, 0.0);
+    for (int r = 0; r < N; ++r)
+      for (int c = 0; c < N; ++c)
+        ImKC[static_cast<size_t>(r) * N + c] =
+            (r == c ? 1.0 : 0.0) - KC[static_cast<size_t>(r) * N + c];
+    KS.Pc = matMul(ImKC, N, N, Ppred, N, N);
   }
   // Refresh outputs once more so the reset-into-state propagates
   // visibly into the post-step Out_ slot (the integrator's output

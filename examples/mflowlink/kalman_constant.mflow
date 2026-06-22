@@ -1,0 +1,26 @@
+{
+  "schema": "matforge.flowchart", "version": "0.1.0", "entry": "kalman_test",
+  "settings": { "kind": "signal_flow",
+    "solver": { "type": "fixed_step", "algorithm": "ode4", "startTime": 0.0, "stopTime": 20.0, "maxStep": "0.02" } },
+  "flows": [{
+    "id": "flow_kf", "kind": "function", "name": "kalman_test",
+    "signature": { "inputs": [], "outputs": [] },
+    "nodes": [
+      { "id": "truth", "kind": "signal_constant", "data": { "params": { "value": 5.0 } },
+        "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "meas", "kind": "signal_awgn", "data": { "params": { "snr": 10.0, "signalPower": 1.0, "seed": 7.0 } },
+        "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "kf", "kind": "signal_kalman",
+        "data": { "params": { "A": "1", "C": "1", "Q": "0.0001", "R": "0.1", "x0": "0", "P0": "1" } },
+        "ports": { "in": [{"id": "z"}], "out": [{"id": "out"}] } },
+      { "id": "se", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } },
+      { "id": "sm", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } }
+    ],
+    "edges": [
+      { "id": "e0", "kind": "data", "from": {"node": "truth", "port": "out"}, "to": {"node": "meas", "port": "in"} },
+      { "id": "e1", "kind": "data", "from": {"node": "meas",  "port": "out"}, "to": {"node": "kf",   "port": "z"} },
+      { "id": "e2", "kind": "data", "from": {"node": "kf",    "port": "out"}, "to": {"node": "se",   "port": "in"} },
+      { "id": "e3", "kind": "data", "from": {"node": "meas",  "port": "out"}, "to": {"node": "sm",   "port": "in"} }
+    ]
+  }]
+}
