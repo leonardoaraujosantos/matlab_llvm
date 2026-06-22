@@ -644,6 +644,34 @@ check "biquad DC gain ~ 1"   "awk 'BEGIN{exit !($BQ_MEAN>1.8 && $BQ_MEAN<2.2)}'"
 check "biquad smooths"       "awk 'BEGIN{exit !($BQ_RATIO<0.5)}'" "filtered variance must be well below the noisy input's"
 check "biquad has transient" "awk 'BEGIN{exit !($BQ_FIRST<0.5)}'" "2nd-order step response rises from ~0, not a pass-through"
 
+#--- #343: Communications — PSK modulator / demodulator -------------------
+# A counter cycles symbols 0..3; QPSK-mod → demod recovers them, so the BER
+# (vs the source symbol) is 0 over every symbol. A constant symbol 1 maps to
+# the constellation point exp(j·π/2) = (0, 1). Columns: t,sb (BER),
+# sc[1],sc[2] (I/Q of symbol 1).
+PQ="$("$MATLABC" -simulate "$EX/psk_qpsk.mflow")"
+PQ_HEAD=$(printf '%s\n' "$PQ" | head -1)
+PQ_BERMAX=$(printf '%s\n' "$PQ" | awk -F, 'NR>1{if($2>m)m=$2} END{print m+0}')
+PQ_CI=$(printf '%s\n' "$PQ" | tail -1 | awk -F, '{print ($3<0)?-$3:$3}')  # |I| ~ 0
+PQ_CQ=$(printf '%s\n' "$PQ" | tail -1 | awk -F, '{print $4}')             # Q ~ 1
+check "psk header"           "[[ '$PQ_HEAD' == 't,sb,sc[1],sc[2]' ]]" ""
+check "psk round-trip BER=0" "awk 'BEGIN{exit !($PQ_BERMAX<1e-9)}'" "QPSK mod→demod must recover every symbol (0 errors)"
+check "psk constellation I~0" "awk 'BEGIN{exit !($PQ_CI<1e-6)}'" "symbol 1 → exp(jπ/2): in-phase ≈ 0"
+check "psk constellation Q~1" "awk 'BEGIN{exit !(($PQ_CQ-1)^2<1e-6)}'" "symbol 1 → exp(jπ/2): quadrature ≈ 1"
+
+#--- #343: Communications — QAM modulator / demodulator -------------------
+# A counter cycles symbols 0..15; 16-QAM mod → demod recovers them all (BER 0).
+# Symbol 0 sits at the grid corner (I,Q) = (-3,-3). Columns: t,sb (BER),
+# sc[1],sc[2] (I/Q of symbol 0).
+QM="$("$MATLABC" -simulate "$EX/qam16.mflow")"
+QM_HEAD=$(printf '%s\n' "$QM" | head -1)
+QM_BERMAX=$(printf '%s\n' "$QM" | awk -F, 'NR>1{if($2>m)m=$2} END{print m+0}')
+QM_CI=$(printf '%s\n' "$QM" | tail -1 | awk -F, '{print $3}')  # -3
+QM_CQ=$(printf '%s\n' "$QM" | tail -1 | awk -F, '{print $4}')  # -3
+check "qam header"           "[[ '$QM_HEAD' == 't,sb,sc[1],sc[2]' ]]" ""
+check "qam round-trip BER=0" "awk 'BEGIN{exit !($QM_BERMAX<1e-9)}'" "16-QAM mod→demod must recover every symbol (0 errors)"
+check "qam constellation corner" "awk 'BEGIN{exit !(($QM_CI+3)^2<1e-6 && ($QM_CQ+3)^2<1e-6)}'" "symbol 0 → grid corner (I,Q)=(-3,-3)"
+
 #--- #343: HDL sequential blocks — D flip-flop / T flip-flop / counter -----
 # A 1 Hz pulse clock drives a D-FF (D=1), a free-running T-FF, and an up
 # counter over 5 s. Each updates once per clock posedge (once per major step,

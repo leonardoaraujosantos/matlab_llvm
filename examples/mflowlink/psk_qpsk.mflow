@@ -1,0 +1,31 @@
+{
+  "schema": "matforge.flowchart", "version": "0.1.0", "entry": "qpsk_test",
+  "settings": { "kind": "signal_flow",
+    "solver": { "type": "fixed_step", "algorithm": "ode4", "startTime": 0.0, "stopTime": 10.0, "maxStep": "0.05" } },
+  "flows": [{
+    "id": "flow_qpsk", "kind": "function", "name": "qpsk_test",
+    "signature": { "inputs": [], "outputs": [] },
+    "nodes": [
+      { "id": "clk", "kind": "signal_pulse", "data": { "params": { "amplitude": 1.0, "period": 0.5, "pulseWidth": 50.0, "phaseDelay": 0.0 } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "cnt", "kind": "signal_counter", "data": { "params": { "initialValue": 0.0, "step": 1.0, "modulus": 4.0 } }, "ports": { "in": [{"id": "clk"}], "out": [{"id": "out"}] } },
+      { "id": "mod", "kind": "signal_psk_mod", "data": { "params": { "M": 4 } }, "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "dem", "kind": "signal_psk_demod", "data": { "params": { "M": 4 } }, "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "ber", "kind": "signal_error_rate", "data": { "params": { "tolerance": 0.5 } }, "ports": { "in": [{"id": "tx"}, {"id": "rx"}], "out": [{"id": "out"}] } },
+      { "id": "sb", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } },
+
+      { "id": "c1", "kind": "signal_constant", "data": { "params": { "value": 1.0 } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "mod1", "kind": "signal_psk_mod", "data": { "params": { "M": 4 } }, "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "sc", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } }
+    ],
+    "edges": [
+      { "id": "e0", "kind": "data", "from": {"node": "clk", "port": "out"}, "to": {"node": "cnt", "port": "clk"} },
+      { "id": "e1", "kind": "data", "from": {"node": "cnt", "port": "out"}, "to": {"node": "mod", "port": "in"} },
+      { "id": "e2", "kind": "data", "from": {"node": "mod", "port": "out"}, "to": {"node": "dem", "port": "in"} },
+      { "id": "e3", "kind": "data", "from": {"node": "cnt", "port": "out"}, "to": {"node": "ber", "port": "tx"} },
+      { "id": "e4", "kind": "data", "from": {"node": "dem", "port": "out"}, "to": {"node": "ber", "port": "rx"} },
+      { "id": "e5", "kind": "data", "from": {"node": "ber", "port": "out"}, "to": {"node": "sb", "port": "in"} },
+      { "id": "e6", "kind": "data", "from": {"node": "c1", "port": "out"}, "to": {"node": "mod1", "port": "in"} },
+      { "id": "e7", "kind": "data", "from": {"node": "mod1", "port": "out"}, "to": {"node": "sc", "port": "in"} }
+    ]
+  }]
+}

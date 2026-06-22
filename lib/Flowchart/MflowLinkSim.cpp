@@ -1677,6 +1677,74 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       // (evalAll runs multiple times per RK4 step and would over-count); here
       // we only surface the accumulated ratio so it logs and feeds downstream.
       Out_[I] = (TotAccum_[I] > 0.0) ? (ErrAccum_[I] / TotAccum_[I]) : 0.0;
+    } else if (K == "signal_psk_mod" || K == "signal_qam_mod" ||
+               K == "signal_psk_demod" || K == "signal_qam_demod") {
+      // #343 Communications — PSK / QAM constellation map (modulator: symbol
+      // index → complex [I, Q] vector, width 2) and demap (demodulator: I/Q
+      // vector → nearest symbol index, hard decision). Stateless, both ways
+      // are exact inverses on clean points, so mod → demod is the identity.
+      int M = static_cast<int>(paramD(B, "M", 4.0));
+      if (M < 2) M = 2;
+      auto readIQ = [&](double &Iv, double &Qv) {
+        Iv = 0.0; Qv = 0.0;
+        if (Inputs_[I].empty()) return;
+        size_t Src = Inputs_[I].front().SrcBlock;
+        if (OutWidth_[Src] > 1) {
+          const auto &V = VecOut_[Src];
+          if (!V.empty()) Iv = V[0];
+          if (V.size() > 1) Qv = V[1];
+        } else {
+          Iv = Out_[Src];
+        }
+      };
+      if (K == "signal_psk_mod") {
+        // M-PSK: symbol k → exp(j(2πk/M + φ)), unit amplitude.
+        double Phi = paramD(B, "phaseOffset", 0.0);
+        int k = static_cast<int>(std::llround(inputOf(I, "in")));
+        k = ((k % M) + M) % M;
+        double Ang = 2.0 * M_PI * k / M + Phi;
+        VecOut_[I].assign(2, 0.0);
+        VecOut_[I][0] = std::cos(Ang);
+        VecOut_[I][1] = std::sin(Ang);
+        Out_[I] = VecOut_[I][0];
+      } else if (K == "signal_psk_demod") {
+        // Nearest-angle hard decision: k = round((∠(I,Q) − φ)·M/2π) mod M.
+        double Phi = paramD(B, "phaseOffset", 0.0);
+        double Iv, Qv; readIQ(Iv, Qv);
+        double Ang = std::atan2(Qv, Iv) - Phi;
+        int k = static_cast<int>(std::llround(Ang * M / (2.0 * M_PI)));
+        Out_[I] = static_cast<double>(((k % M) + M) % M);
+      } else {
+        // Square M-QAM on the L×L grid (L = √M). Symbol k → (iIdx, qIdx) with
+        // iIdx = k mod L, qIdx = k div L; levels are the odd integers
+        // ±1, ±3, …, ±(L−1). `normalize` scales to unit average power.
+        int L = static_cast<int>(std::lround(std::sqrt((double)M)));
+        if (L < 1) L = 1;
+        bool Norm = paramD(B, "normalize", 0.0) > 0.5;
+        double Scale = std::sqrt(2.0 * (M - 1) / 3.0);
+        if (Scale <= 0.0) Scale = 1.0;
+        if (K == "signal_qam_mod") {
+          int k = static_cast<int>(std::llround(inputOf(I, "in")));
+          k = ((k % M) + M) % M;
+          double Ip = 2.0 * (k % L) - (L - 1);
+          double Qp = 2.0 * (k / L) - (L - 1);
+          if (Norm) { Ip /= Scale; Qp /= Scale; }
+          VecOut_[I].assign(2, 0.0);
+          VecOut_[I][0] = Ip;
+          VecOut_[I][1] = Qp;
+          Out_[I] = Ip;
+        } else { // signal_qam_demod
+          double Iv, Qv; readIQ(Iv, Qv);
+          if (Norm) { Iv *= Scale; Qv *= Scale; }
+          auto level = [&](double v) {
+            int idx = static_cast<int>(std::lround((v + (L - 1)) / 2.0));
+            if (idx < 0) idx = 0;
+            if (idx > L - 1) idx = L - 1;
+            return idx;
+          };
+          Out_[I] = static_cast<double>(level(Qv) * L + level(Iv));
+        }
+      }
     } else if (K == "signal_running_stats") {
       // #343 — streaming statistics over the input. The Welford state is
       // updated once per major step in commitDigitalRegisters(); here we only

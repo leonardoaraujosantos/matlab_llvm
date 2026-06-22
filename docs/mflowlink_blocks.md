@@ -37,6 +37,10 @@ diagnostic) until its evaluator lands.
 | `signal_noise`        | ✓ | `amplitude: 1.0`, `seed: 1.0`, `kind: "uniform"`                          | Tier-H — uniform `[-amp, +amp]` or `kind: "gaussian"` (σ = amp) via xorshift64 + Box-Muller. Seed is per-block for reproducibility |
 | `signal_awgn`         | ✓ | `snr: 10.0`, `signalPower: 1.0`, `seed: 1.0`                              | Communications (#343) — AWGN channel `y = x + N(0, σ²)`, `σ² = signalPower / 10^(snr/10)` (Simulink "SNR + input signal power" mode). Reuses the xorshift64 + Box-Muller Gaussian generator. First toolbox-domain library block via the [authoring recipe](#adding-a-toolbox-library-block-343) |
 | `signal_error_rate`   | ✓ | `tolerance: 0.5`                                                          | Communications (#343) — error-rate (BER) sink. Ports `tx`/`rx` (or `in1`/`in2`); output is the running mismatch ratio (a symbol counts as different when `\|tx − rx\| > tolerance`). Accumulated once per major step (not per RK4 substep), output bounded in `[0, 1]` |
+| `signal_psk_mod`      | ✓ | `M: 4`, `phaseOffset: 0.0`                                               | Communications (#343) — M-PSK modulator. Symbol index → constellation point `exp(j(2πk/M + φ))`, output as a width-2 `[I, Q]` vector |
+| `signal_psk_demod`    | ✓ | `M: 4`, `phaseOffset: 0.0`                                               | Communications (#343) — M-PSK demodulator. Nearest-angle hard decision on a `[I, Q]` input → scalar symbol index. Exact inverse of `signal_psk_mod` on clean points |
+| `signal_qam_mod`      | ✓ | `M: 16`, `normalize: false`                                              | Communications (#343) — square M-QAM modulator (M = 4/16/64…). Symbol → `[I, Q]` on the L×L odd-integer grid (L=√M); `normalize` scales to unit average power |
+| `signal_qam_demod`    | ✓ | `M: 16`, `normalize: false`                                              | Communications (#343) — square M-QAM demodulator. Nearest-grid-point hard decision on `[I, Q]` → scalar symbol. Exact inverse of `signal_qam_mod` |
 | `signal_running_stats`| ✓ | `stat: "mean"`                                                           | Statistics (#343) — streaming `mean` / `var` / `std` over the input via an online Welford accumulator (numerically stable, single pass). Updated once per major step. Beats a MATLAB Function block, which can't hold persistent state in the flow today |
 | `signal_kalman`       | ✓ | `A`, `C`, `Q`, `R`, opt `B`, `x0`, `P0` (matrix literals)                | Sensor Fusion (#343) — discrete Kalman filter. Ports `z` (measurement, `Mz`-vector), opt `u` (control, `P`-vector); output is the `N`-vector state estimate (`N` = rows of `A`). Standard predict (`x⁻=A·x+B·u`, `P⁻=A·P·Aᵀ+Q`) / update (`K=P⁻·Cᵀ·(C·P⁻·Cᵀ+R)⁻¹`) recursion runs once per major step. Matrices are MATLAB literals (`"1 0.05; 0 1"`). See the [worked examples](#kalman-filter-worked-examples-343) |
 | `signal_fft`          | ✓ | `n` (frame size, required)                                               | DSP (#343) — frame DFT of a real `n`-point vector input. Output is the complex spectrum packed as `[Re₀…Re₍ₙ₋₁₎, Im₀…Im₍ₙ₋₁₎]`, width `2n`. O(n²) direct DFT (no FFTW); pairs with `signal_ifft`. See [DSP frame examples](#dsp-frame-transforms-343) |
@@ -163,6 +167,23 @@ width `2n`, so `fft → ifft` is a closed loop without a separate complex type.
 The DFT is a direct O(n²) evaluation — frames in a control/DSP model are small,
 so there's no FFTW dependency. `n` is required on `fft`/`ifft` so the output
 width is stamped at lowering time.
+
+### Communications link chain (#343)
+
+`signal_psk_mod`/`demod` and `signal_qam_mod`/`demod` carry the complex symbol
+as the same width-2 `[I, Q]` vector convention as the FFT spectra. A modulator
+maps a scalar symbol index to its constellation point; a demodulator makes a
+hard decision back to the nearest symbol. With `signal_awgn` on the channel and
+`signal_error_rate` on the output, you can model a full `source → modulate →
+channel → demodulate → BER` link on the canvas.
+
+| Model | Demonstrates |
+|---|---|
+| `psk_qpsk.mflow` | a counter cycles symbols 0–3 → QPSK mod → demod; the round-trip recovers every symbol (BER 0). Symbol 1 maps to `exp(jπ/2) = (0, 1)` |
+| `qam16.mflow`    | symbols 0–15 → 16-QAM mod → demod, BER 0 over all 16; symbol 0 sits at the grid corner `(I,Q) = (-3, -3)` |
+
+(`signal_awgn` is a scalar channel today, so end-to-end noisy-link BER awaits a
+vector/two-component AWGN — tracked in the catalog.)
 
 ## Math
 

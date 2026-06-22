@@ -134,6 +134,13 @@ const std::map<std::string, KindInfo> &kindTable() {
     // mismatch ratio between two inputs; the accumulation is stateful (carried
     // across steps), so it breaks algebraic loops like the clocked registers.
     add("signal_error_rate", {true, true, false, true,  false, FIM});
+    // Communications (#343) — PSK / QAM modulators & demodulators. Stateless,
+    // direct-feedthrough constellation map (symbol → I/Q vector, width 2) and
+    // demap (I/Q vector → nearest symbol index). Not loop breakers.
+    add("signal_psk_mod",    {true, true, false, false, false, FIM});
+    add("signal_psk_demod",  {true, true, false, false, false, FIM});
+    add("signal_qam_mod",    {true, true, false, false, false, FIM});
+    add("signal_qam_demod",  {true, true, false, false, false, FIM});
     // Statistics (#343) — streaming mean/variance/std over the input via an
     // online Welford accumulator. Stateful (carries across steps), so it
     // breaks algebraic loops; beats a MATLAB Function block, which can't hold
@@ -927,6 +934,19 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
           if (R * C > B.OutWidth) B.OutWidth = R * C;
         }
       }
+    } else if (N.Kind == "signal_psk_mod" || N.Kind == "signal_qam_mod") {
+      // Communications (#343) — a modulator maps a symbol index to a complex
+      // constellation point, carried as a width-2 [I, Q] vector signal.
+      B.OutWidth = 2;
+      B.OutRows = 1;
+      B.OutCols = 2;
+    } else if (N.Kind == "signal_psk_demod" || N.Kind == "signal_qam_demod") {
+      // A demodulator's output is always a scalar symbol index, regardless of
+      // its width-2 I/Q input — stamp it explicitly so the width-inference
+      // pass doesn't make it inherit the input's width.
+      B.OutWidth = 1;
+      B.OutRows = 1;
+      B.OutCols = 1;
     } else if (N.Kind == "signal_window") {
       // DSP (#343) — windowing. Output width = frame size `n`; if `n` is
       // absent the width inherits the input element count (sentinel 0).

@@ -52,8 +52,8 @@ econ, finance, curvefit, optim, gads, PDE, symbolic, GPU, ident (batch/frequency
 ## 4. Communications catalog (follow-on PRs)
 
 - [x] 4.3 `signal_awgn` — AWGN channel (SNR + signal power) — DONE (PR #351)
-- [ ] 4.1 `signal_psk_mod` / `signal_psk_demod` — PSK modulator/demodulator (comm runtime)
-- [ ] 4.2 `signal_qam_mod` / `signal_qam_demod` — QAM modulator/demodulator
+- [x] 4.1 `signal_psk_mod` / `signal_psk_demod` — PSK modulator/demodulator — DONE. Symbol↔constellation as a width-2 [I,Q] vector (same convention as fft spectra). Mod: `exp(j(2πk/M+φ))`; demod: nearest-angle hard decision. `psk_qpsk.mflow` + SimulateRun (counter cycles all symbols → mod→demod BER 0; constellation spot-check).
+- [x] 4.2 `signal_qam_mod` / `signal_qam_demod` — QAM modulator/demodulator — DONE. Square M-QAM on the L×L odd-integer grid (L=√M), optional unit-average-power `normalize`; demod is nearest-grid hard decision. `qam16.mflow` + SimulateRun (16 symbols round-trip BER 0; corner constellation check). Note: end-to-end noisy-link BER needs a vector/2-component AWGN (awgn is scalar today) — follow-up.
 - [x] 4.4 `signal_error_rate` — error-rate (BER) calculation sink — DONE. Running mismatch ratio over `tx`/`rx`, accumulated once per major step; `error_rate.mflow` + SimulateRun checks (converges to 0.5 on a 50%-duty mismatch, bounded [0,1])
 
 ## 4b. HDL / digital catalog (follow-on PRs)
