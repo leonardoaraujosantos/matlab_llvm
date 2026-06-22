@@ -231,6 +231,17 @@ param on `signal_image_source` and per-channel `signal_image_filter` so a 2-D
 color image carries its channel count in the shape — is the residual follow-on
 (OpenSpec `mflow-2d-image-signals` group 6).
 
+> **Image blocks are a simulation target, not a synthesis target.** Unlike the
+> HDL register family, the image blocks (`image_source`/`image_filter`/
+> `threshold`/`color_space`) are deliberately **not** lowered to SystemVerilog
+> by `-emit-sv`. They operate on whole-image vector signals and 2-D convolution;
+> synthesizing them would require an image-pipeline HW architecture (line
+> buffers, sliding-window datapaths, per-pixel streaming) that is a distinct,
+> large effort with no current demand — and the SV emit path is built for
+> scalar / small-state control logic, not image pipelines. If hardware image
+> processing becomes a goal, it warrants its own dedicated design (a streaming
+> pixel interface), not a retrofit of the simulation blocks.
+
 ### 2-D block authoring recipe
 
 To add a 2-D image block, follow the 1-D [recipe](#adding-a-toolbox-library-block-343)
