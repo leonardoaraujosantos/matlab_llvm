@@ -85,8 +85,8 @@ shape machinery — no new wire type).
 
 ## 6. RF catalog (follow-on PRs)
 
-- [ ] 6.1 Triage which RF capabilities are time-domain-meaningful as blocks vs frequency-domain functions (design Open Question)
-- [ ] 6.2 Implement the agreed RF blocks (e.g. an S-parameter-driven 2-port in the time domain) delegating to `runtime/toolbox/rf`
+- [x] 6.1 Triage — RESOLVED: the time-domain-meaningful RF primitive is a memoryless scattering block (incident → reflected waves via a real S-matrix); frequency-domain S-parameter sweeps stay functions.
+- [x] 6.2 `signal_rf_2port` — memoryless 2-port `b = S·a` (real 2×2 S-matrix), reuses the matrix-vector kernel. `rf_2port.mflow` + SimulateRun (attenuator b=[4.8,3.2]; ideal-through swaps to [5,3]). Cascade instances for a network.
 
 ## 7. Control / Stats round-outs (follow-on PRs)
 

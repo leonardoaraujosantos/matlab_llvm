@@ -1,0 +1,24 @@
+{
+  "schema": "matforge.flowchart", "version": "0.1.0", "entry": "rf_test",
+  "settings": { "kind": "signal_flow",
+    "solver": { "type": "fixed_step", "algorithm": "ode4", "startTime": 0.0, "stopTime": 0.2, "maxStep": "0.1" } },
+  "flows": [{
+    "id": "flow_rf", "kind": "function", "name": "rf_test",
+    "signature": { "inputs": [], "outputs": [] },
+    "nodes": [
+      { "id": "a1", "kind": "signal_constant", "data": { "params": { "value": "[3 5]" } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "att", "kind": "signal_rf_2port", "data": { "params": { "S": "0.1 0.9; 0.9 0.1" } }, "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "sa", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } },
+
+      { "id": "a2", "kind": "signal_constant", "data": { "params": { "value": "[3 5]" } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "thru", "kind": "signal_rf_2port", "data": { "params": { "S": "0 1; 1 0" } }, "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "st", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } }
+    ],
+    "edges": [
+      { "id": "e0", "kind": "data", "from": {"node": "a1", "port": "out"}, "to": {"node": "att", "port": "in"} },
+      { "id": "e1", "kind": "data", "from": {"node": "att", "port": "out"}, "to": {"node": "sa", "port": "in"} },
+      { "id": "e2", "kind": "data", "from": {"node": "a2", "port": "out"}, "to": {"node": "thru", "port": "in"} },
+      { "id": "e3", "kind": "data", "from": {"node": "thru", "port": "out"}, "to": {"node": "st", "port": "in"} }
+    ]
+  }]
+}

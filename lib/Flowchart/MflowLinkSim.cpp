@@ -1988,6 +1988,29 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       } else {
         Out_[I] = 0.0;
       }
+    } else if (K == "signal_rf_2port") {
+      // #343 RF — memoryless scattering 2-port: b = S·a, S a real 2×2 S-matrix
+      // ([S11 S12; S21 S22]), a = [a1, a2] the incident-wave vector input.
+      // Cascade instances to build an ideal time-domain network.
+      std::vector<double> S;
+      int Sr = 0, Sc = 0;
+      if (const std::string *SS = paramS(B, "S")) parseSimMatrix(*SS, S, Sr, Sc);
+      double a1 = 0.0, a2 = 0.0;
+      if (!Inputs_[I].empty()) {
+        size_t Src = Inputs_[I].front().SrcBlock;
+        if (OutWidth_[Src] > 1) {
+          if (!VecOut_[Src].empty()) a1 = VecOut_[Src][0];
+          if (VecOut_[Src].size() > 1) a2 = VecOut_[Src][1];
+        } else {
+          a1 = Out_[Src];
+        }
+      }
+      VecOut_[I].assign(2, 0.0);
+      if (Sr == 2 && Sc == 2) {
+        VecOut_[I][0] = S[0] * a1 + S[1] * a2; // b1 = S11·a1 + S12·a2
+        VecOut_[I][1] = S[2] * a1 + S[3] * a2; // b2 = S21·a1 + S22·a2
+      }
+      Out_[I] = VecOut_[I].front();
     } else if (K == "signal_dnn_predict") {
       // #343 Deep Learning — one-hidden-layer MLP inference, in the loop:
       //   y = W2·act(W1·x + b1) + b2

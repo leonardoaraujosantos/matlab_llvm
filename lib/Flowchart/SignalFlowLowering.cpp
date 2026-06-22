@@ -89,6 +89,9 @@ const std::map<std::string, KindInfo> &kindTable() {
     // Control (#343) — static state-feedback gain: u = -K·x (LQR / pole
     // placement). Direct-feedthrough matrix-vector product, not a loop breaker.
     add("signal_lqr",          {true, true, false, false, false, FIM});
+    // RF (#343) — memoryless scattering 2-port: reflected waves b = S·a, with
+    // S a real 2×2 S-matrix. Direct-feedthrough; cascade for a network.
+    add("signal_rf_2port",     {true, true, false, false, false, FIM});
     // Deep Learning (#343) — feedforward MLP inference in a loop. One hidden
     // layer: y = W2·act(W1·x + b1) + b2. Stateless, direct-feedthrough.
     add("signal_dnn_predict",  {true, true, false, false, false, FIM});
@@ -988,6 +991,12 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
       int Mr = matrixRows(N.getParam("W2") ? *N.getParam("W2") : "");
       B.OutWidth = Mr > 0 ? Mr : 1;
       B.OutRows = B.OutWidth;
+      B.OutCols = 1;
+    } else if (N.Kind == "signal_rf_2port") {
+      // RF (#343) — a 2-port maps the 2-vector of incident waves to the
+      // 2-vector of reflected waves.
+      B.OutWidth = 2;
+      B.OutRows = 2;
       B.OutCols = 1;
     } else if (N.Kind == "signal_image_source") {
       // Vision (#343) — a 2-D grayscale image source. Shape comes from `rows`
