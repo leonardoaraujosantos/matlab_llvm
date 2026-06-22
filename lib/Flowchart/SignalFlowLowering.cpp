@@ -92,6 +92,9 @@ const std::map<std::string, KindInfo> &kindTable() {
     // RF (#343) — memoryless scattering 2-port: reflected waves b = S·a, with
     // S a real 2×2 S-matrix. Direct-feedthrough; cascade for a network.
     add("signal_rf_2port",     {true, true, false, false, false, FIM});
+    // Navigation / Robotics (#343) — 2-D rigid-body pose transform of a point:
+    // out = R(theta)·p + [x, y]. Direct-feedthrough.
+    add("signal_pose_transform", {true, true, false, false, false, FIM});
     // Deep Learning (#343) — feedforward MLP inference in a loop. One hidden
     // layer: y = W2·act(W1·x + b1) + b2. Stateless, direct-feedthrough.
     add("signal_dnn_predict",  {true, true, false, false, false, FIM});
@@ -995,6 +998,11 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
     } else if (N.Kind == "signal_rf_2port") {
       // RF (#343) — a 2-port maps the 2-vector of incident waves to the
       // 2-vector of reflected waves.
+      B.OutWidth = 2;
+      B.OutRows = 2;
+      B.OutCols = 1;
+    } else if (N.Kind == "signal_pose_transform") {
+      // Nav/Robotics (#343) — outputs the transformed 2-D point [x, y].
       B.OutWidth = 2;
       B.OutRows = 2;
       B.OutCols = 1;

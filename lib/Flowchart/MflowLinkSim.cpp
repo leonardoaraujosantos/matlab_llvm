@@ -2011,6 +2011,30 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
         VecOut_[I][1] = S[2] * a1 + S[3] * a2; // b2 = S21·a1 + S22·a2
       }
       Out_[I] = VecOut_[I].front();
+    } else if (K == "signal_pose_transform") {
+      // #343 Nav/Robotics — apply a 2-D rigid-body pose to a point:
+      //   out = R(theta)·[px, py] + [x, y]
+      // The point [px, py] is the (vector) input; the pose (x, y, theta in rad)
+      // is from params. Useful for body→world frame conversion in a fusion /
+      // SLAM loop.
+      double Px = 0.0, Py = 0.0;
+      if (!Inputs_[I].empty()) {
+        size_t Src = Inputs_[I].front().SrcBlock;
+        if (OutWidth_[Src] > 1) {
+          if (!VecOut_[Src].empty()) Px = VecOut_[Src][0];
+          if (VecOut_[Src].size() > 1) Py = VecOut_[Src][1];
+        } else {
+          Px = Out_[Src];
+        }
+      }
+      double Th = paramD(B, "theta", 0.0);
+      double Tx = paramD(B, "x", 0.0);
+      double Ty = paramD(B, "y", 0.0);
+      double c = std::cos(Th), s = std::sin(Th);
+      VecOut_[I].assign(2, 0.0);
+      VecOut_[I][0] = c * Px - s * Py + Tx;
+      VecOut_[I][1] = s * Px + c * Py + Ty;
+      Out_[I] = VecOut_[I].front();
     } else if (K == "signal_dnn_predict") {
       // #343 Deep Learning — one-hidden-layer MLP inference, in the loop:
       //   y = W2·act(W1·x + b1) + b2

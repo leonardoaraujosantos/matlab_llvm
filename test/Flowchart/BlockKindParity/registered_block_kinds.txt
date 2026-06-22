@@ -53,6 +53,7 @@ signal_mux
 signal_noise
 signal_outport
 signal_pid
+signal_pose_transform
 signal_product
 signal_psk_demod
 signal_psk_mod

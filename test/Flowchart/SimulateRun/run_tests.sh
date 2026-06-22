@@ -822,6 +822,20 @@ check "rf_2port header"      "[[ '$RF_HEAD' == 't,sa[1],sa[2],st[1],st[2]' ]]" "
 check "rf_2port scatter"     "awk 'BEGIN{exit !(($RF_B1-4.8)^2<1e-9 && ($RF_B2-3.2)^2<1e-9)}'" "b = S·a for the attenuating 2-port is [4.8, 3.2]"
 check "rf_2port ideal thru"  "awk 'BEGIN{exit !(($RF_T1-5)^2<1e-9 && ($RF_T2-3)^2<1e-9)}'" "an ideal through 2-port (anti-diagonal S) swaps the waves → [5, 3]"
 
+#--- #343: Nav/Robotics — signal_pose_transform (2-D rigid transform) -----
+# out = R(theta)·p + [x, y]. Rotating [1 0] by 90° then translating by (2,3)
+# gives [0 1] + [2 3] = [2 4]; a pure translation (theta=0) of [1 1] by (5,5)
+# gives [6 6]. Columns: t, sr[1],sr[2] (rotate+translate), st[1],st[2] (translate).
+PT="$("$MATLABC" -simulate "$EX/pose_transform.mflow")"
+PT_HEAD=$(printf '%s\n' "$PT" | head -1)
+PT_R1=$(printf '%s\n' "$PT" | tail -1 | awk -F, '{print $2}')
+PT_R2=$(printf '%s\n' "$PT" | tail -1 | awk -F, '{print $3}')
+PT_T1=$(printf '%s\n' "$PT" | tail -1 | awk -F, '{print $4}')
+PT_T2=$(printf '%s\n' "$PT" | tail -1 | awk -F, '{print $5}')
+check "pose header"          "[[ '$PT_HEAD' == 't,sr[1],sr[2],st[1],st[2]' ]]" ""
+check "pose rotate+translate" "awk 'BEGIN{exit !(($PT_R1-2)^2<1e-9 && ($PT_R2-4)^2<1e-9)}'" "R(90°)·[1 0] + (2,3) = [2 4]"
+check "pose pure translate"  "awk 'BEGIN{exit !(($PT_T1-6)^2<1e-9 && ($PT_T2-6)^2<1e-9)}'" "θ=0 translation of [1 1] by (5,5) = [6 6]"
+
 #--- #343: HDL sequential blocks — D flip-flop / T flip-flop / counter -----
 # A 1 Hz pulse clock drives a D-FF (D=1), a free-running T-FF, and an up
 # counter over 5 s. Each updates once per clock posedge (once per major step,
