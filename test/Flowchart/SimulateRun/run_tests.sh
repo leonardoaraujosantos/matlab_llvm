@@ -760,6 +760,19 @@ check "dnn header"           "[[ '$DN_HEAD' == 't,sa,sb[1],sb[2]' ]]" ""
 check "dnn relu nonlinearity" "awk 'BEGIN{exit !(($DN_A-3)^2<1e-9)}'" "relu must zero the negative pre-activation (output 3, not the linear 1)"
 check "dnn scale+bias+2out"  "awk 'BEGIN{exit !(($DN_B1-3)^2<1e-9 && $DN_B2<1e-9)}'" "W1 scaling + b1 bias + relu + 2-output → [3, 0]"
 
+#--- #343: Reinforcement Learning — signal_rl_agent (policy in the loop) --
+# A trained policy maps state → action. Discrete: the MLP emits Q=[2 5 1] and
+# the agent picks argmax → action index 1. Continuous: a saturating raw value
+# (W2=10) through actionScale·tanh → 2·tanh(10) ≈ 2, bounded by ±actionScale.
+# Columns: t, sda (discrete action index), sca (continuous action).
+RL="$("$MATLABC" -simulate "$EX/rl_agent.mflow")"
+RL_HEAD=$(printf '%s\n' "$RL" | head -1)
+RL_D=$(printf '%s\n'  "$RL" | tail -1 | awk -F, '{print $2}')
+RL_C=$(printf '%s\n'  "$RL" | tail -1 | awk -F, '{print $3}')
+check "rl_agent header"      "[[ '$RL_HEAD' == 't,sda,sca' ]]" ""
+check "rl discrete argmax"   "awk 'BEGIN{exit !(($RL_D-1)^2<1e-9)}'" "discrete policy must select the argmax action (index 1 of [2 5 1])"
+check "rl continuous bound"  "awk 'BEGIN{exit !($RL_C>1.99 && $RL_C<=2.0)}'" "continuous policy must bound the action to ±actionScale via tanh"
+
 #--- #343: HDL sequential blocks — D flip-flop / T flip-flop / counter -----
 # A 1 Hz pulse clock drives a D-FF (D=1), a free-running T-FF, and an up
 # counter over 5 s. Each updates once per clock posedge (once per major step,

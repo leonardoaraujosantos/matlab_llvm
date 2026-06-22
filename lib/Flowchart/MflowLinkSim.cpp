@@ -1925,6 +1925,60 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       } else {
         Out_[I] = 0.0;
       }
+    } else if (K == "signal_rl_agent") {
+      // #343 Reinforcement Learning — a trained deterministic policy in the
+      // loop. The same one-hidden-layer MLP as signal_dnn_predict maps the
+      // state to a raw output; then `actionType` post-processes:
+      //   discrete   → argmax index (a single scalar action, e.g. DQN)
+      //   continuous → actionScale·tanh(raw) per output (bounded, e.g. DDPG)
+      std::vector<double> W1, B1, W2, B2;
+      int w1r = 0, w1c = 0, b1r = 0, b1c = 0, w2r = 0, w2c = 0, b2r = 0, b2c = 0;
+      if (const std::string *S = paramS(B, "W1")) parseSimMatrix(*S, W1, w1r, w1c);
+      if (const std::string *S = paramS(B, "b1")) parseSimMatrix(*S, B1, b1r, b1c);
+      if (const std::string *S = paramS(B, "W2")) parseSimMatrix(*S, W2, w2r, w2c);
+      if (const std::string *S = paramS(B, "b2")) parseSimMatrix(*S, B2, b2r, b2c);
+      const std::string *Act = paramS(B, "activation");
+      auto activate = [&](double v) {
+        const std::string a = Act ? *Act : "relu";
+        if (a == "tanh") return std::tanh(v);
+        if (a == "sigmoid") return 1.0 / (1.0 + std::exp(-v));
+        if (a == "linear" || a == "none") return v;
+        return v > 0.0 ? v : 0.0;
+      };
+      std::vector<double> s(w1c > 0 ? w1c : 1, 0.0);
+      if (!Inputs_[I].empty()) {
+        size_t Src = Inputs_[I].front().SrcBlock;
+        if (OutWidth_[Src] > 1)
+          for (int e = 0; e < (int)s.size() && e < (int)VecOut_[Src].size(); ++e)
+            s[e] = VecOut_[Src][e];
+        else
+          s[0] = Out_[Src];
+      }
+      std::vector<double> raw;
+      if (w1r > 0 && w1c > 0 && w2r > 0 && w2c == w1r) {
+        std::vector<double> h = matMul(W1, w1r, w1c, s, w1c, 1);
+        for (int j = 0; j < w1r; ++j)
+          h[j] = activate(h[j] + (j < (int)B1.size() ? B1[j] : 0.0));
+        raw = matMul(W2, w2r, w2c, h, w2c, 1);
+        for (int j = 0; j < w2r; ++j)
+          raw[j] += (j < (int)B2.size() ? B2[j] : 0.0);
+      }
+      const std::string *AT = paramS(B, "actionType");
+      bool Discrete = !AT || *AT == "discrete";
+      if (raw.empty()) {
+        Out_[I] = 0.0;
+      } else if (Discrete) {
+        int best = 0;
+        for (int j = 1; j < (int)raw.size(); ++j)
+          if (raw[j] > raw[best]) best = j;
+        Out_[I] = static_cast<double>(best);
+      } else {
+        double Scale = paramD(B, "actionScale", 1.0);
+        VecOut_[I].assign(raw.size(), 0.0);
+        for (size_t j = 0; j < raw.size(); ++j)
+          VecOut_[I][j] = Scale * std::tanh(raw[j]);
+        Out_[I] = VecOut_[I].front();
+      }
     } else if (K == "signal_dff" || K == "signal_tff" ||
                K == "signal_counter" || K == "signal_jkff" ||
                K == "signal_srff") {
