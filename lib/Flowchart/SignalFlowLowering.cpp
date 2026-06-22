@@ -135,6 +135,10 @@ const std::map<std::string, KindInfo> &kindTable() {
     // breaks algebraic loops; beats a MATLAB Function block, which can't hold
     // persistent state in the flow today.
     add("signal_running_stats", {true, true, false, true, false, FIM});
+    // Sensor Fusion (#343) — discrete Kalman filter. Outputs the N-vector state
+    // estimate (N = rows of A); stateful predict/update each major step, so it
+    // breaks algebraic loops (the estimate is prior-derived, not feedthrough).
+    add("signal_kalman",     {true, true, false, true,  false, FIM});
     add("signal_relop",      {true, true, false, false, false, FIM});
     add("signal_logical",    {true, true, false, false, false, FIM});
     add("signal_compare_to_zero",
@@ -1002,6 +1006,14 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
       B.ContStateCount = matrixRows(N.getParam("A") ? *N.getParam("A") : "");
       const std::string *D = N.getParam("D");
       if (!D || *D == "0" || D->empty()) B.IsLoopBreaker = true;
+    } else if (N.Kind == "signal_kalman") {
+      // The estimate output is an N-vector (N = rows of A). Kalman state lives
+      // in a dedicated per-block stash in MflowLinkSim (not Y_/Z_), so no
+      // Cont/Disc state slots — only the output width is stamped here.
+      int Ns = matrixRows(N.getParam("A") ? *N.getParam("A") : "");
+      B.OutWidth = Ns > 0 ? Ns : 1;
+      B.OutRows = B.OutWidth;
+      B.OutCols = 1;
     } else if (N.Kind == "signal_relay") {
       // One discrete bit (on / off). The relay is a fixed-in-minor
       // block — its output is read every step, but state transitions

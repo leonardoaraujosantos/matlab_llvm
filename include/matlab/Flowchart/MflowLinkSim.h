@@ -332,6 +332,23 @@ private:
   std::vector<double> RunCount_;
   std::vector<double> RunMean_;
   std::vector<double> RunM2_;
+  // - `Kalman_[I]` is the per-block discrete Kalman-filter state for a
+  //   `signal_kalman` block (#343): the parsed A/C/Q/R/B matrices (flat
+  //   row-major) plus the running estimate `X` (length N) and error covariance
+  //   `Pc` (N×N). Built once at `reset()` from the block's matrix params; the
+  //   predict+update recursion runs once per major step. `Valid` is false when
+  //   the matrices don't conform (the block then passes its estimate through
+  //   unchanged). The N-vector estimate is published via Out_/VecOut_.
+  struct KalmanState {
+    int N = 0;   // state dimension (rows of A)
+    int Mz = 0;  // measurement dimension (rows of C)
+    int P = 0;   // control dimension (cols of B); 0 ⇒ no control input
+    std::vector<double> A, C, Q, R, B; // flat row-major
+    std::vector<double> X;             // current estimate, length N
+    std::vector<double> Pc;            // current covariance, N×N
+    bool Valid = false;
+  };
+  std::vector<KalmanState> Kalman_;
   // - `MatlabFcnCache_[I]` holds the parsed expression tree for a
   //   `signal_matlab_fcn` block with `params.expression`. Empty
   //   `unique_ptr` means "not a matlab_fcn block" or "the block

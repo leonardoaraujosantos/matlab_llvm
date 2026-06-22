@@ -90,6 +90,6 @@ verilog,cocotb}` lane. Mux/Demux + logic gates already ship (`signal_mux`/`demux
 
 ## 8. Estimation / ML in-the-loop catalog (follow-on PRs)
 
-- [ ] 8.1 `signal_kalman` — Kalman filter (predict/update; A/B/C/Q/R params; vector state) delegating to `runtime/toolbox/fusion`. Classic Simulink block, no ergonomic function equivalent.
+- [x] 8.1 `signal_kalman` — discrete Kalman filter — DONE. A/C/Q/R (+ optional B/x0/P0) matrix-literal params; N-vector state estimate output; standard predict/update recursion once per major step with a small in-file dense linalg kernel (matMul/matT/matInv via Gauss-Jordan). `kalman_constant.mflow` (1-state, ~100× variance reduction) + `kalman_tracker.mflow` (2-state CV tracker, infers velocity from noisy position) + SimulateRun checks. Highest-value new block delivered.
 - [ ] 8.2 `signal_dnn_predict` — neural-net inference block in a control/sim loop (`runtime/toolbox/dlnet`); serialized network param
 - [ ] 8.3 `signal_rl_agent` — trained policy-in-the-loop block (`runtime/toolbox/rl`)

@@ -38,6 +38,7 @@ diagnostic) until its evaluator lands.
 | `signal_awgn`         | ✓ | `snr: 10.0`, `signalPower: 1.0`, `seed: 1.0`                              | Communications (#343) — AWGN channel `y = x + N(0, σ²)`, `σ² = signalPower / 10^(snr/10)` (Simulink "SNR + input signal power" mode). Reuses the xorshift64 + Box-Muller Gaussian generator. First toolbox-domain library block via the [authoring recipe](#adding-a-toolbox-library-block-343) |
 | `signal_error_rate`   | ✓ | `tolerance: 0.5`                                                          | Communications (#343) — error-rate (BER) sink. Ports `tx`/`rx` (or `in1`/`in2`); output is the running mismatch ratio (a symbol counts as different when `\|tx − rx\| > tolerance`). Accumulated once per major step (not per RK4 substep), output bounded in `[0, 1]` |
 | `signal_running_stats`| ✓ | `stat: "mean"`                                                           | Statistics (#343) — streaming `mean` / `var` / `std` over the input via an online Welford accumulator (numerically stable, single pass). Updated once per major step. Beats a MATLAB Function block, which can't hold persistent state in the flow today |
+| `signal_kalman`       | ✓ | `A`, `C`, `Q`, `R`, opt `B`, `x0`, `P0` (matrix literals)                | Sensor Fusion (#343) — discrete Kalman filter. Ports `z` (measurement, `Mz`-vector), opt `u` (control, `P`-vector); output is the `N`-vector state estimate (`N` = rows of `A`). Standard predict (`x⁻=A·x+B·u`, `P⁻=A·P·Aᵀ+Q`) / update (`K=P⁻·Cᵀ·(C·P⁻·Cᵀ+R)⁻¹`) recursion runs once per major step. Matrices are MATLAB literals (`"1 0.05; 0 1"`). See the [worked examples](#kalman-filter-worked-examples-343) |
 | `signal_from_workspace` |  | reserved                                                                | Needs workspace var binding (no equivalent in our runtime today) |
 | `signal_function_call_generator` | ✓ | `period: 1.0`, `phaseDelay: 0.0`                               | Tier-F carve-out — emits `1` over a 1.5×step window at every `period` boundary, `0` otherwise. Designed to drive `signal_triggered_subsystem` via a rising edge. |
 
@@ -120,6 +121,25 @@ unwired (the module `clk` is the clock); `reset` maps to the module reset. See
 > as a ripple (one flip-flop's output clocking the next). The register state is
 > committed once per major step, so a downstream flip-flop clocked by an
 > upstream flip-flop's output won't see that output's edge within the same step.
+
+### Kalman filter worked examples (#343)
+
+`signal_kalman` is a discrete linear Kalman filter. Its `A`/`C`/`Q`/`R` (and
+optional `B`, `x0`, `P0`) are MATLAB matrix literals; the state estimate is an
+`N`-vector (`N` = rows of `A`) published on the output — a scope on that wire
+expands into one column per state (`se[1]`, `se[2]`, …). The predict/update
+recursion runs once per major step, so size `A` for that step (e.g. `dt` in a
+constant-velocity model = the solver `maxStep`).
+
+| Model | Demonstrates |
+|---|---|
+| `kalman_constant.mflow` | 1-state filter (`A=C=1`) estimating a constant `5.0` from an AWGN-corrupted measurement — converges to 5 with ~100× lower variance than the raw measurement |
+| `kalman_tracker.mflow`  | 2-state constant-velocity tracker (`A=[1 dt;0 1]`, `C=[1 0]`) — tracks a ramp's position to ~10 **and infers velocity ≈ 0.5 from noisy position alone** (the state coupling that exercises the 2×2 recursion); RMS error ~5× below the measurement |
+
+A singular innovation covariance `S = C·P⁻·Cᵀ + R` is handled by skipping the
+update and keeping the prediction for that step; non-conforming matrix
+dimensions degrade the block to a pass-through of its (zero-initialised)
+estimate rather than crashing.
 
 ## Math
 
