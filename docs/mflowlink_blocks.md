@@ -100,11 +100,13 @@ reloads `initialValue`. Mux/Demux and logic gates already ship as
 | `signal_dff`     | `D` |
 | `signal_tff`     | `Q + T*(1 - 2*Q)` (= `1-Q` when `T` is high or unwired; arithmetic toggle, no branch) |
 | `signal_counter` | `Q + step`, wrapped via `inc - mod*(inc >= mod)` when `modulus > 0` |
+| `signal_jkff`    | `J*(1-Q) + (1-K)*Q` |
+| `signal_srff`    | `set + (1 - set - rst)*Q`, with `set = S*(1-R)`, `rst = R*(1-S)` (emitted via helper locals so the `S·R` cross term isn't a shared AST node) |
 
-All three pass `-check-synthesizable`. The block's `clk` input maps to the
+All five pass `-check-synthesizable`. The block's `clk` input maps to the
 module's implicit clock (single-clock design), so for synthesis leave `clk`
 unwired (the module `clk` is the clock); `reset` maps to the module reset. See
-`examples/mflowlink/coder/{dff,tff,counter}_register.mflow`.
+`examples/mflowlink/coder/{dff,tff,counter,jkff,srff}_register.mflow`.
 
 | Kind | Tier-C | Params | Ports | Notes |
 |---|---|---|---|---|

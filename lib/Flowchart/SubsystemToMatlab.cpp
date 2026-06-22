@@ -111,9 +111,12 @@ const std::set<std::string> &tier1Kinds() {
       //   signal_dff     → `always_ff @(posedge clk) Q <= D`
       //   signal_tff     → toggle: Q_next = Q + T*(1 - 2*Q)
       //   signal_counter → up-count: Q_next = Q + step (mod wrap if set)
-      // The toggle/counter next-state forms are pure arithmetic (no branch)
-      // so they stay synthesizable through HWLegalize.
+      //   signal_jkff    → Q_next = J*(1-Q) + (1-K)*Q
+      //   signal_srff    → Q_next = set + (1-set-rst)*Q  (set=S(1-R), rst=R(1-S))
+      // The next-state forms are pure arithmetic (no branch) so they stay
+      // synthesizable through HWLegalize.
       "signal_dff", "signal_tff", "signal_counter",
+      "signal_jkff", "signal_srff",
       // Tier 5 — inline user MATLAB. The block's `params.function_body`
       // becomes a sibling local function in the same TU; the call
       // site emits as `<out> = <fn_name>(<inputs...>)`. SV emit
@@ -178,7 +181,8 @@ bool isStatefulKind(const std::string &K) {
          // unit_delay shape (`always_ff @(posedge clk) Q <= D`). signal_tff
          // (toggle) and signal_counter (increment+wrap) carry the same single
          // slot with a conditional/arithmetic next-state form.
-         K == "signal_dff" || K == "signal_tff" || K == "signal_counter";
+         K == "signal_dff" || K == "signal_tff" || K == "signal_counter" ||
+         K == "signal_jkff" || K == "signal_srff";
 }
 
 // Tier-5i — does this block's output equation overwrite the
@@ -1949,6 +1953,53 @@ matlab::Function *lowerSubsystemImpl(
           NextExpr = B.bin(BinOp::Sub, inc(), Wrap);
         } else {
           NextExpr = inc();
+        }
+      } else if (N->Kind == "signal_jkff" || N->Kind == "signal_srff") {
+        // #343 JK / SR flip-flops, branch-free arithmetic next-state (Q, J/K
+        // or S/R are 0/1). JK: Q_next = J*(1-Q) + (1-K)*Q — each input used
+        // once, so no AST sharing. SR has an S·R cross term, so its inputs are
+        // captured into helper locals first (set = S(1-R), rst = R(1-S)) and
+        // every use is a fresh B.name reference. clk maps to the module clock.
+        std::string LR = B.WrapFi ? VarOfNode[N->Id] : CurS;
+        auto one = [&]() { return B.WrapFi ? B.lit(1.0) : B.number(1.0); };
+        auto findPort = [&](std::initializer_list<const char *> names) -> Expr * {
+          for (size_t pi = 0; pi < Ports.size() && pi < Ins.size(); ++pi)
+            for (const char *nm : names)
+              if (Ports[pi] == nm) return Ins[pi];
+          return nullptr;
+        };
+        if (N->Kind == "signal_jkff") {
+          Expr *J = findPort({"j", "in1"});
+          Expr *K = findPort({"k", "in2"});
+          Expr *JTerm = J ? B.bin(BinOp::Mul, J,
+                                  B.bin(BinOp::Sub, one(), B.name(LR)))
+                          : (Expr *)nullptr;
+          Expr *KComp = K ? B.bin(BinOp::Sub, one(), K) : one();
+          Expr *KTerm = B.bin(BinOp::Mul, KComp, B.name(LR));
+          NextExpr = JTerm ? B.bin(BinOp::Add, JTerm, KTerm) : KTerm;
+        } else {
+          // Capture S, R into locals so the cross term doesn't share nodes.
+          std::string SV = "srs_" + sanitizeIdent(N->Id);
+          std::string RV = "srr_" + sanitizeIdent(N->Id);
+          std::string SetV = "srset_" + sanitizeIdent(N->Id);
+          std::string RstV = "srrst_" + sanitizeIdent(N->Id);
+          Expr *S = findPort({"s", "in1"});
+          Expr *R = findPort({"r", "in2"});
+          Body->Stmts.push_back(B.assign(SV, S ? S : one()));
+          Body->Stmts.push_back(B.assign(RV, R ? R : B.number(0.0)));
+          // set = S*(1-R) ; rst = R*(1-S)
+          Body->Stmts.push_back(B.assign(
+              SetV, B.bin(BinOp::Mul, B.name(SV),
+                          B.bin(BinOp::Sub, one(), B.name(RV)))));
+          Body->Stmts.push_back(B.assign(
+              RstV, B.bin(BinOp::Mul, B.name(RV),
+                          B.bin(BinOp::Sub, one(), B.name(SV)))));
+          // Q_next = set + (1 - set - rst)*Q
+          Expr *Gate = B.bin(BinOp::Sub,
+                             B.bin(BinOp::Sub, one(), B.name(SetV)),
+                             B.name(RstV));
+          NextExpr = B.bin(BinOp::Add, B.name(SetV),
+                           B.bin(BinOp::Mul, Gate, B.name(LR)));
         }
       } else if (N->Kind == "signal_discrete_integrator" ||
                  N->Kind == "signal_integrator") {
@@ -4014,6 +4065,50 @@ matlab::TranslationUnit *buildDiagramTU(
                            B.bin(BinOp::ElemMul, B.number(Mod), Ge));
         } else {
           NextExpr = inc();
+        }
+      } else if (N->Kind == "signal_jkff" || N->Kind == "signal_srff") {
+        // #343 JK / SR flip-flops — arithmetic next-state (see the persistent
+        // path for the derivation). JK uses each input once; SR captures its
+        // inputs into helper locals to avoid a shared S·R cross term.
+        auto findPort = [&](std::initializer_list<const char *> names) -> Expr * {
+          for (size_t pi = 0; pi < Ports.size() && pi < Ins.size(); ++pi)
+            for (const char *nm : names)
+              if (Ports[pi] == nm) return Ins[pi];
+          return nullptr;
+        };
+        if (N->Kind == "signal_jkff") {
+          // Q_next = J*(1-Q) + (1-K)*Q
+          Expr *J = findPort({"j", "in1"});
+          Expr *K = findPort({"k", "in2"});
+          Expr *JTerm = J ? B.bin(BinOp::ElemMul, J,
+                                  B.bin(BinOp::Sub, B.number(1.0),
+                                        B.name(Slot->Var)))
+                          : (Expr *)nullptr;
+          Expr *KComp = K ? (Expr *)B.bin(BinOp::Sub, B.number(1.0), K)
+                          : (Expr *)B.number(1.0);
+          Expr *KTerm = B.bin(BinOp::ElemMul, KComp, B.name(Slot->Var));
+          NextExpr = JTerm ? B.bin(BinOp::Add, JTerm, KTerm) : KTerm;
+        } else {
+          // set = S*(1-R) ; rst = R*(1-S) ; Q_next = set + (1-set-rst)*Q
+          std::string SV = "srs_" + sanitizeIdent(N->Id);
+          std::string RV = "srr_" + sanitizeIdent(N->Id);
+          std::string SetV = "srset_" + sanitizeIdent(N->Id);
+          std::string RstV = "srrst_" + sanitizeIdent(N->Id);
+          Expr *S = findPort({"s", "in1"});
+          Expr *R = findPort({"r", "in2"});
+          Loop->Stmts.push_back(B.assign(SV, S ? S : B.number(1.0)));
+          Loop->Stmts.push_back(B.assign(RV, R ? R : B.number(0.0)));
+          Loop->Stmts.push_back(B.assign(
+              SetV, B.bin(BinOp::ElemMul, B.name(SV),
+                          B.bin(BinOp::Sub, B.number(1.0), B.name(RV)))));
+          Loop->Stmts.push_back(B.assign(
+              RstV, B.bin(BinOp::ElemMul, B.name(RV),
+                          B.bin(BinOp::Sub, B.number(1.0), B.name(SV)))));
+          Expr *Gate = B.bin(BinOp::Sub,
+                             B.bin(BinOp::Sub, B.number(1.0), B.name(SetV)),
+                             B.name(RstV));
+          NextExpr = B.bin(BinOp::Add, B.name(SetV),
+                           B.bin(BinOp::ElemMul, Gate, B.name(Slot->Var)));
         }
       } else if (N->Kind == "signal_discrete_integrator" ||
                  N->Kind == "signal_integrator") {

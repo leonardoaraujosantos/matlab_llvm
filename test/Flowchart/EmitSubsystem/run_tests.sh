@@ -432,6 +432,37 @@ sv_counter_smoke() {
 }
 sv_counter_smoke
 
+# #343 HDL — signal_jkff / signal_srff → SystemVerilog. The JK/SR flip-flops
+# emit the same posedge register as the D/T flip-flops, with an arithmetic
+# next-state (JK: J(1-Q)+(1-K)Q; SR via set/reset helper locals). Both must be
+# synthesizable and carry the always_ff register.
+sv_jksr_smoke() {
+  local kind
+  for kind in jkff:jkff_reg srff:srff_reg; do
+    local file="${kind%%:*}_register"
+    local sub="${kind##*:}"
+    local sv="$SCRATCH/${file}.sv"
+    "$MATLABC" -emit-sv "$EX/${file}.mflow" --subsystem "$sub" \
+         > "$sv" 2> "$SCRATCH/emit.err"
+    if ! "$MATLABC" -emit-sv "$EX/${file}.mflow" --subsystem "$sub" \
+         -check-synthesizable > /dev/null 2> "$SCRATCH/chk.err"; then
+      fail=$((fail+1)); fails+=("${file} (-check-synthesizable failed)")
+      sed 's/^/  /' "$SCRATCH/chk.err" >&2; continue
+    fi
+    if ! grep -q "module ${sub}" "$sv"; then
+      fail=$((fail+1)); fails+=("${file} (missing module)"); continue
+    fi
+    if ! grep -q "always_ff @(posedge clk" "$sv"; then
+      fail=$((fail+1)); fails+=("${file} (no always_ff)"); continue
+    fi
+    if ! grep -q "s_ff <= s_ff_next" "$sv"; then
+      fail=$((fail+1)); fails+=("${file} (register not clocked)"); continue
+    fi
+    pass=$((pass+1))
+  done
+}
+sv_jksr_smoke
+
 # Tier-5d — saturation → SV. The pure-arith form (used for
 # software targets) routes through bool-by-fi multiplication
 # that the SV synthcheck rejects. HDL mode now emits an explicit
