@@ -672,6 +672,22 @@ check "qam header"           "[[ '$QM_HEAD' == 't,sb,sc[1],sc[2]' ]]" ""
 check "qam round-trip BER=0" "awk 'BEGIN{exit !($QM_BERMAX<1e-9)}'" "16-QAM mod→demod must recover every symbol (0 errors)"
 check "qam constellation corner" "awk 'BEGIN{exit !(($QM_CI+3)^2<1e-6 && ($QM_CQ+3)^2<1e-6)}'" "symbol 0 → grid corner (I,Q)=(-3,-3)"
 
+#--- #343: vector AWGN — end-to-end noisy QPSK link -----------------------
+# QPSK symbols through a *vector* AWGN channel (noises both I and Q). At high
+# SNR (20 dB) the link recovers every symbol (BER 0); at low SNR (0 dB) the
+# channel degrades it (BER > 0). The constant-symbol-0 tap (1,0) shows BOTH
+# components carry noise — the scalar AWGN would leave Q at exactly 0.
+# Columns: t, sb (BER@20), sc[1]=I, sc[2]=Q (noisy sym0), sl (BER@0).
+LK="$("$MATLABC" -simulate "$EX/qpsk_awgn_link.mflow")"
+LK_HEAD=$(printf '%s\n' "$LK" | head -1)
+LK_BER20=$(printf '%s\n' "$LK" | awk -F, 'NR>1{if($2>m)m=$2} END{print m+0}')
+LK_BER0=$(printf '%s\n'  "$LK" | tail -1 | awk -F, '{print $5}')
+LK_QVAR=$(printf '%s\n'  "$LK" | awk -F, 'NR>1{n++; q+=$4; q2+=$4*$4} END{print q2/n-(q/n)^2}')
+check "awgn link header"     "[[ '$LK_HEAD' == 't,sb,sc[1],sc[2],sl' ]]" ""
+check "awgn link recovers @20dB" "awk 'BEGIN{exit !($LK_BER20<1e-9)}'" "high-SNR QPSK link must recover every symbol"
+check "awgn link degrades @0dB"  "awk 'BEGIN{exit !($LK_BER0>0.1)}'" "low-SNR channel must cause symbol errors (BER>0)"
+check "awgn noises Q component"  "awk 'BEGIN{exit !($LK_QVAR>0.05)}'" "vector AWGN must noise the quadrature, not just in-phase"
+
 #--- #343: HDL sequential blocks — D flip-flop / T flip-flop / counter -----
 # A 1 Hz pulse clock drives a D-FF (D=1), a free-running T-FF, and an up
 # counter over 5 s. Each updates once per clock posedge (once per major step,
