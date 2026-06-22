@@ -546,6 +546,19 @@ check "awgn header"      "[[ '$AW_HEAD' == 't,sc' ]]" ""
 check "awgn mean ~ input" "awk 'BEGIN{exit !($AW_MEAN>0.95 && $AW_MEAN<1.05)}'" "noise should average out to the 1.0 input"
 check "awgn var ~ 0.1"    "awk 'BEGIN{exit !($AW_VAR>0.07 && $AW_VAR<0.13)}'" "variance must track sigma^2 = 1/10^(snr/10)"
 
+#--- #343: signal_error_rate — Communications BER sink ---------------------
+# tx = constant 1, rx = a 50%-duty square wave (period 2 s). Half the symbols
+# mismatch, so the running error rate converges to 0.5 over the 10 s run. The
+# accumulation is once-per-major-step (in commitDigitalRegisters, not evalAll),
+# so the ratio is well-formed and bounded in [0, 1].
+ER="$("$MATLABC" -simulate "$EX/error_rate.mflow")"
+ER_HEAD=$(printf '%s\n' "$ER" | head -1)
+ER_FINAL=$(printf '%s\n' "$ER" | tail -1 | awk -F, '{print $2}')
+ER_OOR=$(printf '%s\n'  "$ER" | awk -F, 'NR>1{v=$2+0; if(v<-1e-9||v>1+1e-9)bad=1} END{print bad+0}')
+check "error_rate header"   "[[ '$ER_HEAD' == 't,sc' ]]" ""
+check "error_rate ~ 0.5"    "awk 'BEGIN{exit !($ER_FINAL>0.45 && $ER_FINAL<0.55)}'" "50%-duty mismatch must converge to BER 0.5"
+check "error_rate bounded"  "[[ '$ER_OOR' == '0' ]]" "a probability ratio must stay within [0, 1]"
+
 #--- #343: HDL sequential blocks — D flip-flop / T flip-flop / counter -----
 # A 1 Hz pulse clock drives a D-FF (D=1), a free-running T-FF, and an up
 # counter over 5 s. Each updates once per clock posedge (once per major step,

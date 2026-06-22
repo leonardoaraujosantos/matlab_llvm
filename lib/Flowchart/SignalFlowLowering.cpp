@@ -122,6 +122,10 @@ const std::map<std::string, KindInfo> &kindTable() {
     // mflow-toolbox-library-blocks recipe. AWGN channel: direct-feedthrough
     // additive noise, stateless aside from the per-block RNG seed.
     add("signal_awgn",       {true, true, false, false, false, FIM});
+    // Communications (#343) — error-rate (BER) sink. Output is the running
+    // mismatch ratio between two inputs; the accumulation is stateful (carried
+    // across steps), so it breaks algebraic loops like the clocked registers.
+    add("signal_error_rate", {true, true, false, true,  false, FIM});
     add("signal_relop",      {true, true, false, false, false, FIM});
     add("signal_logical",    {true, true, false, false, false, FIM});
     add("signal_compare_to_zero",

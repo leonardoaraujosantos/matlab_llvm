@@ -54,7 +54,7 @@ econ, finance, curvefit, optim, gads, PDE, symbolic, GPU, ident (batch/frequency
 - [x] 4.3 `signal_awgn` — AWGN channel (SNR + signal power) — DONE (PR #351)
 - [ ] 4.1 `signal_psk_mod` / `signal_psk_demod` — PSK modulator/demodulator (comm runtime)
 - [ ] 4.2 `signal_qam_mod` / `signal_qam_demod` — QAM modulator/demodulator
-- [ ] 4.4 `signal_error_rate` — error-rate calculation sink
+- [x] 4.4 `signal_error_rate` — error-rate (BER) calculation sink — DONE. Running mismatch ratio over `tx`/`rx`, accumulated once per major step; `error_rate.mflow` + SimulateRun checks (converges to 0.5 on a 50%-duty mismatch, bounded [0,1])
 
 ## 4b. HDL / digital catalog (follow-on PRs)
 

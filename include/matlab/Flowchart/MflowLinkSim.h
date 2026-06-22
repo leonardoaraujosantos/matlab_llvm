@@ -318,6 +318,13 @@ private:
   //   value lives outside the continuous/discrete state vectors. Seeded on
   //   `reset()` from `params.initialValue` (#343).
   std::vector<double> DigitalLatch_;
+  // - `ErrAccum_` / `TotAccum_` hold the running error / symbol counts for
+  //   each `signal_error_rate` block (Communications BER sink, #343). They
+  //   accumulate once per major step in commitDigitalRegisters() (NOT in
+  //   evalAll, which runs multiple times per RK4 step); the block's output is
+  //   the running ratio `ErrAccum_/TotAccum_`. Reset to 0 on `reset()`.
+  std::vector<double> ErrAccum_;
+  std::vector<double> TotAccum_;
   // - `MatlabFcnCache_[I]` holds the parsed expression tree for a
   //   `signal_matlab_fcn` block with `params.expression`. Empty
   //   `unique_ptr` means "not a matlab_fcn block" or "the block

@@ -521,6 +521,8 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
   Lookup2DCache_.assign(N, {});
   NoiseSeed_.assign(N, 0);
   DigitalLatch_.assign(N, 0.0);
+  ErrAccum_.assign(N, 0.0);
+  TotAccum_.assign(N, 0.0);
   MatlabFcnCache_.resize(N);
   MatlabFnCache_.resize(N);
   // §17.5 #8 — snapshot the currently installed JIT factory once.
@@ -1439,6 +1441,13 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       if (U1 < 1e-12) U1 = 1e-12;
       double G = std::sqrt(-2.0 * std::log(U1)) * std::cos(2.0 * M_PI * U2);
       Out_[I] = X + Sigma * G;
+    } else if (K == "signal_error_rate") {
+      // #343 — Communications error-rate (BER) sink. Output is the running
+      // ratio of symbol mismatches between the `tx`/`rx` inputs. The compare +
+      // accumulate happens once per major step in commitDigitalRegisters()
+      // (evalAll runs multiple times per RK4 step and would over-count); here
+      // we only surface the accumulated ratio so it logs and feeds downstream.
+      Out_[I] = (TotAccum_[I] > 0.0) ? (ErrAccum_[I] / TotAccum_[I]) : 0.0;
     } else if (K == "signal_dff" || K == "signal_tff" ||
                K == "signal_counter") {
       // #343 — clocked HDL registers. The output is the held value; the
@@ -2293,6 +2302,30 @@ double MflowLinkSim::stepMajor() {
       double Mod = paramD(M_.Blocks[I], "modulus", 0.0);
       if (Mod > 0.0 && Q >= Mod) Q -= Mod;
     }
+  }
+  // #343 — Communications error-rate (BER) sink. Once per major step, compare
+  // the `tx`/`rx` inputs and accumulate the symbol/mismatch counts. Symbols
+  // count as different when |tx - rx| exceeds half a level (default 0.5, or
+  // `params.tolerance`), matching hard-decision BER on 0/1-valued streams.
+  for (size_t I = 0; I < M_.Blocks.size(); ++I) {
+    if (M_.Blocks[I].Kind != "signal_error_rate")
+      continue;
+    auto srcOf = [&](const char *Port) -> int {
+      for (auto &P : Inputs_[I])
+        if (P.DstPort == Port) return static_cast<int>(P.SrcBlock);
+      return -1;
+    };
+    int TxSrc = srcOf("tx");
+    if (TxSrc < 0) TxSrc = srcOf("in1");
+    if (TxSrc < 0) TxSrc = srcOf("in");
+    int RxSrc = srcOf("rx");
+    if (RxSrc < 0) RxSrc = srcOf("in2");
+    if (TxSrc < 0 || RxSrc < 0)
+      continue; // both inputs required to score a symbol
+    double Tol = paramD(M_.Blocks[I], "tolerance", 0.5);
+    TotAccum_[I] += 1.0;
+    if (std::fabs(Out_[TxSrc] - Out_[RxSrc]) > Tol)
+      ErrAccum_[I] += 1.0;
   }
   // Refresh outputs once more so the reset-into-state propagates
   // visibly into the post-step Out_ slot (the integrator's output
