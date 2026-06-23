@@ -53,6 +53,7 @@ signal_multiport_switch
 signal_mux
 signal_noise
 signal_outport
+signal_permute
 signal_pid
 signal_pose_transform
 signal_product
@@ -76,6 +77,7 @@ signal_scope
 signal_shift_register
 signal_sine
 signal_spectrum
+signal_squeeze
 signal_srff
 signal_state_space
 signal_step

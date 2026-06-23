@@ -281,6 +281,13 @@ the runtime rank-N descriptor (`matlab_matN`, ≤ 16-D), the MLIR `RankedTensorT
 - **Color image = rank-3.** `signal_image_source` with `channels` emits a
   `[rows, cols, channels]` signal (interleaved); grayscale is the `channels = 1`
   (rank-2) case. This subsumes the color-image-channels residual.
+- **`signal_squeeze`** drops every singleton dimension of its input shape
+  (e.g. `[1,3,1,2] → [3,2]`); an all-singleton input collapses to a scalar /
+  1-D vector. Pure metadata — the flat buffer is copied verbatim.
+- **`signal_permute`** reorders the input axes per a 1-based `order = "p1,p2,…"`
+  permutation (e.g. `order "2,1"` transposes a 2-D signal). `order` must be a
+  valid permutation of `1..rank` (a sourced error otherwise). A real element
+  remap: output axis `k` carries input axis `order[k]`.
 
 **Worked example** (`nd_reshape.mflow`): a width-24 frame → `reshape "2,3,4"` flows
 as a rank-3 signal (`s[1,1,1] … s[2,3,4]`), the 24 values passing through unchanged.
