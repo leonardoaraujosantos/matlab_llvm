@@ -318,6 +318,18 @@ check "ode23t tracks cos(10)"   "awk 'BEGIN{exit !(($OT_X+0.83907)^2 < 1e-2)}'" 
 OB_E=$("$MATLABC" -simulate <(sed 's/"ode23t"/"ode15s"/' "$EX/ode23t_oscillator.mflow") | tail -1 | awk -F, '{print $2*$2+$3*$3}')
 check "ode15s multi-state bounded" "awk 'BEGIN{exit !($OB_E > 0.3 && $OB_E < 0.95)}'" "coupled-integrator BDF1 must stay bounded and dissipate (not diverge: #398)"
 
+#--- ode23tb TR-BDF2 (mflow-variable-step-stiff-solvers) --------------------
+# The last stiff method to wire (was the final RK4 fall-through). L-stable
+# composite (trapezoidal sub-step + BDF2 sub-step) on the same stiff plant as
+# ode23s at fixed h=0.1; tracks the drive and stays bounded where RK4 explodes.
+TB="$("$MATLABC" -simulate "$EX/ode23tb_stiff.mflow")"
+TB_HEAD=$(printf '%s\n' "$TB" | head -1)
+TB_T2=$(printf '%s\n' "$TB" | awk -F, 'NR>1 && $1+0==2.0 {print $3-$2; exit}')
+TB_MAX=$(printf '%s\n' "$TB" | awk -F, 'NR>1{v=$3<0?-$3:$3; if(v>m)m=v} END{print m}')
+check "ode23tb_stiff header" "[[ '$TB_HEAD' == 't,drive,plant,scope' ]]" ""
+check "ode23tb stiff tracks drive @t=2.0" "awk 'BEGIN{exit !(($TB_T2)^2 < 1e-2)}'" "TR-BDF2 must track the stiff plant"
+check "ode23tb stiff stays bounded"        "awk 'BEGIN{exit !($TB_MAX < 200)}'" "RK4 fall-through would blow up; TR-BDF2 is L-stable"
+
 #--- ode23 native Bogacki-Shampine 3(2) (mflow-variable-step-stiff-solvers) -
 # y' = -y, y(0)=1 (integrator with -1 feedback) integrated with the native
 # ode23 pair → y(2) must converge to e^-2 = 0.13533528. A regression to the
