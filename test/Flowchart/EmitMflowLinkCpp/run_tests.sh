@@ -93,7 +93,8 @@ for name in lowpass pid_tracking multirate saturation_zc enabled_subsystem \
             running_stats dnn_predict rl_agent rf_2port pose_transform \
             color_space image_blocks nd_reshape nd_color_image \
             hdl_registers hdl_jk_sr hdl_memory hdl_half_adder \
-            hdl_full_adder hdl_shift_register hdl_freq_divider; do
+            hdl_full_adder hdl_shift_register hdl_freq_divider \
+            workspace_io; do
   run_one "$name"
 done
 
