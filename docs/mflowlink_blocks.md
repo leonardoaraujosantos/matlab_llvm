@@ -66,6 +66,7 @@ diagnostic) until its evaluator lands.
 | Kind | Tier-C | Params | Notes |
 |---|---|---|---|
 | `signal_scope`         | ✓ | `yMin: -1.0`, `yMax: 1.0`, `title: ""`, `decimation: 1` | Implicitly logged; CSV column = block id |
+| `signal_scope3d`       | ✓ | `title: ""` | 3-D trajectory scope. Three scalar input ports `x` / `y` / `z` logged as a `<id>[x]`, `<id>[y]`, `<id>[z]` column group (distinct from the `[1]/[2]/[3]` vector form), so a 3-D path viewer can plot the trajectory. See `examples/quadrotor/mflowlink/` |
 | `signal_display`       | ✓ | *(none)*                                                | Implicitly logged |
 | `signal_to_workspace`  | ✓ | `variableName: "simout"`                                | CSV column = `variableName` |
 | `signal_terminator`    | ✓ | *(none)*                                                | Drops the signal |

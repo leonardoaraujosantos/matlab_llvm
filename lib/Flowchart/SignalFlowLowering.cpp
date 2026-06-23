@@ -74,6 +74,9 @@ const std::map<std::string, KindInfo> &kindTable() {
                            {true, true, false, false, false, FIM});
     // Sinks.
     add("signal_scope",        {true, true, false, false, false, FIM});
+    // A 3-D trajectory scope: three scalar inputs (x, y, z) logged as a
+    // `<id>[x] / <id>[y] / <id>[z]` column group for a 3-D path viewer.
+    add("signal_scope3d",      {true, true, false, false, false, FIM});
     add("signal_display",      {true, true, false, false, false, FIM});
     add("signal_to_workspace", {true, true, false, false, false, FIM});
     add("signal_terminator",   {true, true, false, false, false, FIM});
@@ -1177,6 +1180,13 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
       // scalar; full N-output demux needs per-port output offsets
       // which is a follow-up.
       B.OutWidth = 1;
+    } else if (N.Kind == "signal_scope3d") {
+      // Three scalar inputs (x, y, z) gathered into a width-3 trajectory
+      // sample; logged as a `[x]/[y]/[z]` column group.
+      B.OutWidth = 3;
+      B.OutShape = {3};
+      B.OutRows = 1;
+      B.OutCols = 3;
     } else {
       // For most blocks, the output width inherits from the input
       // width when this block has a data input. The width-inference
