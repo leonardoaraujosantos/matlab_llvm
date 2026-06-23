@@ -58,7 +58,7 @@ diagnostic) until its evaluator lands.
 | `signal_highpass`     | ✓ | `alpha: 0.9`, `sampleTime: 1.0`                                         | DSP (#343) — one-pole highpass `H(z)=α(1-z⁻¹)/(1-α z⁻¹)`; rejects DC |
 | `signal_dcblock`      | ✓ | `r: 0.995`, `sampleTime: 1.0`                                           | DSP (#343) — DC blocker `H(z)=(1-z⁻¹)/(1-r z⁻¹)`; removes the DC offset, passes everything else |
 | `signal_biquad`       | ✓ | `b`, `a` (or `b0..b2`/`a0..a2`), `sampleTime: 1.0`                       | DSP (#343) — streaming 2nd-order section (SOS): `H(z)=(b0+b1z⁻¹+b2z⁻²)/(a0+a1z⁻¹+a2z⁻²)`. Coefficients as space/comma vectors (`b: "0.07 0.13 0.07"`) or named scalars. Runs the discrete-filter difference engine on its `sampleTime` grid; 2 state slots. Cascade instances for higher-order IIR |
-| `signal_from_workspace` |  | reserved                                                                | Needs workspace var binding (no equivalent in our runtime today) |
+| `signal_from_workspace` | ✓ | `data: "t0 v0; t1 v1; …"`, `interpolation: "linear"`                     | From Workspace — replays the inline `data` time-series at the current sim time (`linear` interpolation, default, or `zoh` hold), clamped to the first/last sample. The data rides in the `.mflow` (the mflowLink equivalent of a live MATLAB workspace variable). Pairs with `signal_to_workspace` |
 | `signal_function_call_generator` | ✓ | `period: 1.0`, `phaseDelay: 0.0`                               | Tier-F carve-out — emits `1` over a 1.5×step window at every `period` boundary, `0` otherwise. Designed to drive `signal_triggered_subsystem` via a rising edge. |
 
 ## Sinks
@@ -365,7 +365,6 @@ failing at simulate (#323). The five rows below are the current
 
 | Kind | Prerequisite |
 |---|---|
-| `signal_from_workspace` | Mechanism to bind a runtime `simout`-style variable into the simulation as a time-indexed source. The matlabc workspace model and the mflowLink runtime currently share no such handle. |
 | `signal_custom` | Plugin layer for user-defined evaluators. The shipped `signal_matlab_fcn` covers the inline-expression case; `signal_custom` would let the IDE register evaluators implemented elsewhere (a `.cpp` the user compiles into the runtime, a remote service, …). Needs a registry + ABI design. |
 | `signal_if_action`, `signal_switch_case_action` | A parent `signal_if_subsystem` / `signal_switch_case_subsystem` container that scopes which case fires. The IDE's `SignalFlowParamSpec` doesn't ship these containers yet — IDE-side prerequisite. |
 | `signal_lookup_nd` | Settle the `lookup_1d` / `lookup_2d` pair (breakpoint shape + extrapolation policy + cached table format) before generalising to N dimensions. |

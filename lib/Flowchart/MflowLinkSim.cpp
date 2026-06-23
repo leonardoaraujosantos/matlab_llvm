@@ -1298,6 +1298,45 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       double F  = paramD(B, "frequency", 1.0);
       double P  = paramD(B, "phase", 0.0);
       Out_[I] = A * std::sin(F * T + P) + Bs;
+    } else if (K == "signal_from_workspace") {
+      // From Workspace — replay the inline `data` time-series ([t v; …]) at the
+      // current sim time T. Linear interpolation by default; `interpolation:
+      // "zoh"` holds. Clamped to the first/last sample outside the range. (Data
+      // is small; parsed per-eval — the .mflow carries it, no live workspace.)
+      std::vector<double> Tab;
+      int R = 0, C = 0;
+      if (const std::string *D = paramS(B, "data")) parseSimMatrix(*D, Tab, R, C);
+      double V = 0.0;
+      if (R >= 1 && C >= 2) {
+        const std::string *Ip = paramS(B, "interpolation");
+        bool ZOH = Ip && (*Ip == "zoh" || *Ip == "hold" || *Ip == "previous");
+        auto tAt = [&](int r) { return Tab[(size_t)r * C]; };
+        auto vAt = [&](int r) { return Tab[(size_t)r * C + 1]; };
+        if (T <= tAt(0)) {
+          V = vAt(0);
+        } else if (T >= tAt(R - 1)) {
+          V = vAt(R - 1);
+        } else if (ZOH) {
+          // Zero-order hold: the value of the last sample with time ≤ T (the
+          // new sample takes effect at its own time).
+          V = vAt(0);
+          for (int r = 0; r < R; ++r)
+            if (tAt(r) <= T) V = vAt(r); else break;
+        } else {
+          for (int r = 0; r + 1 < R; ++r) {
+            if (T >= tAt(r) && T <= tAt(r + 1)) {
+              double ta = tAt(r), tb = tAt(r + 1);
+              V = (tb == ta)
+                      ? vAt(r)
+                      : vAt(r) + (vAt(r + 1) - vAt(r)) * (T - ta) / (tb - ta);
+              break;
+            }
+          }
+        }
+      } else if (R * C >= 1) {
+        V = Tab[0]; // a bare value list with no time column — hold the first
+      }
+      Out_[I] = V;
     } else if (K == "signal_ramp") {
       double Slope = paramD(B, "slope", 1.0);
       double Start = paramD(B, "startTime", 0.0);
