@@ -958,6 +958,10 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
     StiffMethod_ = StiffMethod::TRBDF2;
   else
     StiffMethod_ = StiffMethod::BDF1;
+  // Adaptive stiff stepping is wired for BDF1 (`ode15s`) under variable_step;
+  // the other stiff methods remain fixed-step for now.
+  ImplicitAdaptive_ = Implicit_ && (M_.Solver.Type != "fixed_step") &&
+                      (StiffMethod_ == StiffMethod::BDF1);
   CurrentAdaptiveH_ = StepSize_;
 
   if (M_.Snapshot.Enabled && M_.Snapshot.Depth > 0)
@@ -3389,12 +3393,68 @@ double MflowLinkSim::stepMajor() {
 
   std::vector<double> K1(Nx), K2(Nx), K3(Nx), K4(Nx), Yt(Nx), Y1(Nx);
   if (Nx > 0) {
-    if (Implicit_) {
-      // §17.5 #3 / mflow-variable-step-stiff-solvers — fixed-step
-      // implicit stiff lane. `ode15s` runs BDF1 (Backward Euler via
-      // Newton); `ode23s` runs the modified Rosenbrock (2)3. The user
-      // picks the step via `settings.solver.maxStep` (variable-step
-      // stiff control lands with the BDF slice).
+    if (ImplicitAdaptive_) {
+      // mflow-variable-step-stiff-solvers — adaptive BDF1 (`ode15s` under
+      // variable_step). Sub-step the major window with step-size control
+      // driven by a step-doubling (Richardson) error estimate: a full step
+      // of `HTry` vs two half steps. For the order-1 method the difference
+      // estimates the local error; advance with the (more accurate) half-step
+      // result. The exponent is 1/(order+1) = 1/2. `maxStep` caps the step.
+      const double RelTol = EffectiveRelTol_;
+      const double AbsTol = EffectiveAbsTol_;
+      double TLocal = T_;
+      double TEnd   = T_ + H;
+      double HCur   = std::min(CurrentAdaptiveH_, H);
+      std::vector<double> YFull(Nx), YHalf1(Nx), YHalf2(Nx);
+      const int MaxRetries = 32;
+      while (TLocal < TEnd - 1e-15) {
+        double HTry = std::min(HCur, TEnd - TLocal);
+        if (HTry <= 1e-15) break;
+        int Retry = 0;
+        bool Accepted = false;
+        while (!Accepted && Retry++ < MaxRetries) {
+          bdf1Step(*this, &MflowLinkSim::derivative, TLocal, HTry, Y_, YFull,
+                   RelTol, AbsTol);
+          bdf1Step(*this, &MflowLinkSim::derivative, TLocal, 0.5 * HTry, Y_,
+                   YHalf1, RelTol, AbsTol);
+          bdf1Step(*this, &MflowLinkSim::derivative, TLocal + 0.5 * HTry,
+                   0.5 * HTry, YHalf1, YHalf2, RelTol, AbsTol);
+          double Norm = 0.0;
+          for (size_t I = 0; I < Nx; ++I) {
+            double Sc = AbsTol + RelTol *
+                        std::max(std::fabs(Y_[I]), std::fabs(YHalf2[I]));
+            if (Sc <= 0.0) Sc = AbsTol > 0 ? AbsTol : 1e-12;
+            double E = std::fabs(YHalf2[I] - YFull[I]) / Sc;
+            if (E > Norm) Norm = E;
+          }
+          if (Norm <= 1.0) {
+            Accepted = true;
+            Y1 = YHalf2; // advance with the more accurate half-step solution
+            double Factor = (Norm > 1e-12) ? 0.9 * std::pow(Norm, -0.5) : 5.0;
+            if (Factor > 5.0) Factor = 5.0;
+            HCur = std::min(HTry * Factor, StepSize_);
+          } else {
+            double Factor = 0.9 * std::pow(Norm, -0.5);
+            if (Factor < 0.1) Factor = 0.1;
+            HTry = HTry * Factor;
+            if (HTry < 1e-15) break;
+          }
+        }
+        if (!Accepted) {
+          // Last resort — take the plain Backward-Euler step and move on.
+          bdf1Step(*this, &MflowLinkSim::derivative, TLocal, HTry, Y_, YFull,
+                   RelTol, AbsTol);
+          Y1 = YFull;
+        }
+        Y_ = Y1;
+        TLocal += HTry;
+      }
+      CurrentAdaptiveH_ = HCur;
+    } else if (Implicit_) {
+      // §17.5 #3 / mflow-variable-step-stiff-solvers — fixed-step implicit
+      // stiff lane. `ode15s` (BDF1, Backward Euler via Newton), `ode23s`
+      // (modified Rosenbrock), `ode23t` (trapezoidal), `ode23tb` (TR-BDF2);
+      // the user picks the step via `settings.solver.maxStep`.
       if (StiffMethod_ == StiffMethod::ROSENBROCK) {
         std::vector<double> Err(Nx, 0.0);
         rosenbrockStep(*this, &MflowLinkSim::derivative, T_, H, Y_, Y1, Err);

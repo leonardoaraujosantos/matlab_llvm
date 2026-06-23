@@ -20,10 +20,14 @@ Land incrementally; each slice is independently testable and BDF1/RK4 remain the
 - [x] Regression `ode23_decay.mflow` (y'=-y → e^-2; ode23 vs ode45 agreement) + emit-parity.
 
 ## 3. Variable-step BDF1 → variable-order BDF (ode15s)
-- [ ] Add a `(t, y)` history ring buffer (≤5) + reset on discrete change / zero-crossing / restart.
-- [ ] Variable-step BDF1 via the shared controller (error from step-doubling or the BDF2 estimate).
-- [ ] Add BDF2; then orders 3–5 with NDF-style order selection.
-- [ ] Keep fixed-step BDF1 reachable (order 1, controller off) so current `ode15s` numerics persist.
+- [x] **Variable-step BDF1** (`ImplicitAdaptive_`): under `variable_step`, `ode15s` sub-steps each
+      major window with **step-doubling** (Richardson) error control — full step vs two half steps,
+      advance with the half-step result, exponent 1/(order+1)=1/2, `maxStep` caps the step.
+      Regression `ode15s_adaptive.mflow` (e^-2 within 1e-4 vs fixed-step's 0.013 error).
+- [x] Keep fixed-step BDF1 reachable: `type: fixed_step` keeps the existing one-step path
+      (stiff_bdf and the ode23s/t/tb fixtures are byte-identical).
+- [ ] Variable-**order** BDF: add a `(t, y)` history ring buffer (≤5), BDF2, then orders 3–5
+      with NDF-style order selection (the larger remaining piece).
 
 ## 4. Jacobian amortisation + analytic hook
 - [ ] Cache the Newton Jacobian + LU factors; refactor only on step-change / Newton stall / order-change.

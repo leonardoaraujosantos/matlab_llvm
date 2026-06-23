@@ -342,6 +342,17 @@ check "ode23tb_stiff header" "[[ '$TB_HEAD' == 't,drive,plant,scope' ]]" ""
 check "ode23tb stiff tracks drive @t=2.0" "awk 'BEGIN{exit !(($TB_T2)^2 < 1e-2)}'" "TR-BDF2 must track the stiff plant"
 check "ode23tb stiff stays bounded"        "awk 'BEGIN{exit !($TB_MAX < 200)}'" "RK4 fall-through would blow up; TR-BDF2 is L-stable"
 
+#--- ode15s variable-step (adaptive BDF1) (mflow-variable-step-stiff-solvers) -
+# y'=-y, y(0)=1 with ode15s under variable_step at maxStep=0.1. Adaptive BDF1
+# sub-steps within each major window (step-doubling control) to hit e^-2 within
+# ~1e-4, where FIXED-step BDF1 at the same maxStep=0.1 is only order-1 accurate
+# (y(2)~0.1486, error ~0.013). So variable-step must be far closer to e^-2 than
+# fixed-step — proving the adaptive sub-stepping is active.
+AD_FIN=$("$MATLABC" -simulate "$EX/ode15s_adaptive.mflow" | tail -1 | awk -F, '{print $2}')
+FX_FIN=$("$MATLABC" -simulate <(sed 's/"variable_step"/"fixed_step"/' "$EX/ode15s_adaptive.mflow") | tail -1 | awk -F, '{print $2}')
+check "ode15s adaptive hits e^-2" "awk 'BEGIN{exit !(($AD_FIN-0.13533528)^2 < (1e-4)^2)}'" "variable-step BDF1 sub-steps to converge to e^-2"
+check "ode15s adaptive beats fixed" "awk 'BEGIN{ea=($AD_FIN-0.13533528);ef=($FX_FIN-0.13533528);exit !(ea*ea < 0.01*ef*ef)}'" "adaptive BDF1 must be >10x closer to e^-2 than fixed-step BDF1 at the same maxStep"
+
 #--- ode23 native Bogacki-Shampine 3(2) (mflow-variable-step-stiff-solvers) -
 # y' = -y, y(0)=1 (integrator with -1 feedback) integrated with the native
 # ode23 pair → y(2) must converge to e^-2 = 0.13533528. A regression to the

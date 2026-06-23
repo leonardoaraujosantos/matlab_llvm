@@ -464,6 +464,12 @@ private:
   // fixed-step in the current slice.
   enum class StiffMethod { BDF1, ROSENBROCK, TRAPEZOIDAL, TRBDF2 };
   StiffMethod StiffMethod_ = StiffMethod::BDF1;
+  // mflow-variable-step-stiff-solvers — `ode15s` with `type: variable_step`
+  // runs adaptive BDF1: it sub-steps within each major step via step-doubling
+  // (Richardson) error control from `relTol`/`absTol`, instead of taking one
+  // fixed Backward-Euler step of `maxStep`. The other stiff methods stay
+  // fixed-step for now.
+  bool   ImplicitAdaptive_ = false;
   double CurrentAdaptiveH_ = 0.01;
   // §17.5 #7 — effective tolerances after applying per-flow
   // solver overrides. Equal to `M_.Solver.{Rel,Abs}Tol` when no

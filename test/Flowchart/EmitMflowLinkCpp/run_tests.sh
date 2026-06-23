@@ -96,7 +96,7 @@ for name in lowpass pid_tracking multirate saturation_zc enabled_subsystem \
             hdl_full_adder hdl_shift_register hdl_freq_divider \
             workspace_io color_image_filter nd_permute nd_squeeze \
             ode23_decay ode23s_stiff ode23t_oscillator ode23tb_stiff \
-            ode23t_ss_oscillator; do
+            ode23t_ss_oscillator ode15s_adaptive; do
   run_one "$name"
 done
 
