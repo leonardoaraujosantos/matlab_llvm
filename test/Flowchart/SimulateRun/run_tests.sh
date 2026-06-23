@@ -318,6 +318,18 @@ check "ode23t tracks cos(10)"   "awk 'BEGIN{exit !(($OT_X+0.83907)^2 < 1e-2)}'" 
 OB_E=$("$MATLABC" -simulate <(sed 's/"ode23t"/"ode15s"/' "$EX/ode23t_oscillator.mflow") | tail -1 | awk -F, '{print $2*$2+$3*$3}')
 check "ode15s multi-state bounded" "awk 'BEGIN{exit !($OB_E > 0.3 && $OB_E < 0.95)}'" "coupled-integrator BDF1 must stay bounded and dissipate (not diverge: #398)"
 
+# #398 widened: the same oscillator built from two coupled *state_space* blocks
+# (px: x'=u, pv: v'=u, with a -1 feedback) — a different state-block kind that
+# exercises the same cross-block staleness path. Verified to diverge to 3.35e12
+# without the settling-pass fix. ode23t conserves energy; ode15s stays bounded.
+OSS="$("$MATLABC" -simulate "$EX/ode23t_ss_oscillator.mflow")"
+OSS_HEAD=$(printf '%s\n' "$OSS" | head -1)
+OSS_E=$(printf '%s\n' "$OSS" | tail -1 | awk -F, '{print $2*$2+$3*$3}')
+OSS_B=$("$MATLABC" -simulate <(sed 's/"ode23t"/"ode15s"/' "$EX/ode23t_ss_oscillator.mflow") | tail -1 | awk -F, '{print $2*$2+$3*$3}')
+check "ss-coupled header" "[[ '$OSS_HEAD' == 't,px,pv,s' ]]" ""
+check "ode23t ss-coupled conserves energy" "awk 'BEGIN{exit !(($OSS_E-1.0)^2 < (5e-2)^2)}'" "coupled state_space blocks: trapezoidal stays non-dissipative"
+check "ode15s ss-coupled bounded"           "awk 'BEGIN{exit !($OSS_B > 0.3 && $OSS_B < 0.95)}'" "coupled state_space BDF1 must stay bounded (not diverge: #398)"
+
 #--- ode23tb TR-BDF2 (mflow-variable-step-stiff-solvers) --------------------
 # The last stiff method to wire (was the final RK4 fall-through). L-stable
 # composite (trapezoidal sub-step + BDF2 sub-step) on the same stiff plant as
