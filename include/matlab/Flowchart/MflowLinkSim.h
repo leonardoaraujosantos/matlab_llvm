@@ -180,6 +180,17 @@ public:
   };
   SourceHit consumeSourceBreakpointHit();
 
+  // #386 — statement stepping inside a MATLAB Function body, via deterministic
+  // replay: the body's inputs are captured at the breakpoint, and each step
+  // re-runs the (pure) body to the next statement index, surfacing the new line
+  // + locals. `isFcnStepping()` is true once a source breakpoint has paused
+  // inside a body; `fcnStepNext()` advances one statement (returns Line < 0 and
+  // ends stepping when the body completes); `fcnStepFinish()` ends stepping so
+  // the simulation's `continue` can resume.
+  bool isFcnStepping() const { return FcnStep_.Active; }
+  SourceHit fcnStepNext();
+  void fcnStepFinish() { FcnStep_.Active = false; FcnStep_.Valid = false; }
+
   //===-------------------------------------------------------------===//
   // Tier-D snapshot ring (§7.5).
   //
@@ -404,6 +415,20 @@ private:
   // recent hit recorded by the interpreter during a step.
   std::map<std::string, std::set<int>> SourceBreakpoints_;
   SourceHit LastSourceHit_;
+  // #386 — deterministic-replay context for statement stepping inside a body.
+  // Captured when a source breakpoint fires (`PendingStep_`); `Active` is set
+  // once stepping begins (on consumeSourceBreakpointHit).
+  struct FcnStepState {
+    bool Valid = false;   // a body invocation is captured
+    bool Active = false;  // currently stepping through it
+    std::string BlockId;
+    std::vector<double> Inputs;
+    double T = 0.0;
+    int StmtIndex = -1;   // index of the statement currently paused before
+    const MatlabFunctionState *Cache = nullptr;
+  };
+  FcnStepState PendingStep_;  // captured at the hit
+  FcnStepState FcnStep_;      // active stepping session
   double StepSize_ = 0.01;
   // Item-2 — adaptive step state for the Dormand-Prince RK4(5)
   // integrator. CurrentAdaptiveH_ is the last accepted step size;

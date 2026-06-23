@@ -136,13 +136,74 @@ def main(matlabc):
     if stop2 and stop2.get("reason") == "breakpoint":
         failures.append("a breakpoint on an unreached line must not stop the run")
 
+    # Case 3 — statement stepping (#386): pause at line 3, then `next` advances
+    # to line 4 (b = a*2 has now run, so b = 8); a further `next` steps off the
+    # end of the body ("function returned").
+    def step_session():
+        proc = subprocess.Popen(
+            [matlabc, "-simulate", "--sim-dap", mflow],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL)
+        seq = [0]
+
+        def send(cmd, args=None):
+            seq[0] += 1
+            proc.stdin.write(frame({"seq": seq[0], "type": "request",
+                                    "command": cmd, "arguments": args or {}}))
+            proc.stdin.flush()
+
+        def wait_stop():
+            for _ in range(400):
+                m = read_msg(proc.stdout)
+                if m is None:
+                    return None
+                if m.get("type") == "event" and m.get("event") == "stopped":
+                    return m.get("body", {})
+            return None
+
+        def locals_now():
+            send("variables", {"variablesReference": 2})
+            for _ in range(400):
+                m = read_msg(proc.stdout)
+                if m is None:
+                    return {}
+                if m.get("type") == "response" and m.get("command") == "variables":
+                    return {x["name"]: x["value"]
+                            for x in m.get("body", {}).get("variables", [])}
+            return {}
+
+        send("initialize", {"adapterID": "x"}); send("launch", {})
+        send("setBreakpoints",
+             {"source": {"name": "fn"}, "breakpoints": [{"line": 3}]})
+        send("configurationDone")
+        wait_stop()                      # entry
+        send("continue", {}); bp = wait_stop()
+        l0 = locals_now()
+        send("next", {}); s1 = wait_stop()
+        l1 = locals_now()
+        send("next", {}); s2 = wait_stop()
+        proc.kill()
+        return bp, l0, s1, l1, s2
+
+    bp, l0, s1, l1, s2 = step_session()
+    if not bp or bp.get("description") != "fn:3":
+        failures.append(f"step: breakpoint should be fn:3, got {bp}")
+    if "b" in l0:
+        failures.append("step: 'b' should not exist at fn:3 before stepping")
+    if not s1 or s1.get("description") != "fn:4":
+        failures.append(f"step: `next` should advance to fn:4, got {s1}")
+    if abs(float(l1.get("b", "nan")) - 8.0) > 1e-9:
+        failures.append(f"step: after `next` to fn:4, b should be 8, got {l1.get('b')}")
+    if not s2 or s2.get("description") != "function returned":
+        failures.append(f"step: `next` off the end should report 'function returned', got {s2}")
+
     if failures:
         print("FAIL: source-line breakpoints inside MATLAB Function blocks")
         for f in failures:
             print(f"  - {f}")
         return 1
     print("PASS: breakpoint stops at fn:3 with Locals (a=4, u1=3, no b); "
-          "unreached line does not stop")
+          "next steps to fn:4 (b=8) then off the end; unreached line no-stops")
     return 0
 
 

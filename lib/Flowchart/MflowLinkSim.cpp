@@ -525,7 +525,8 @@ std::vector<double> runMatlabFunction(const MflowLinkSim::MatlabFunctionState &S
                                       const std::vector<double> &Inputs, double T,
                                       const std::set<int> *WatchLines = nullptr,
                                       int *HitLine = nullptr,
-                                      std::map<std::string, double> *HitVars = nullptr);
+                                      std::map<std::string, double> *HitVars = nullptr,
+                                      int StopAtStmt = -1, int *HitStmtIdx = nullptr);
 // §17.5 #8 — accessor for the parsed-function input count. The
 // constructor needs this to decide how many `u1..uN` slots the JIT
 // wrapper should declare, but `MatlabFunctionState` is defined
@@ -983,6 +984,10 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
 void MflowLinkSim::reset() {
   T_ = M_.Solver.StartTime;
   MajorSteps_ = 0;
+  // #354/#386 — a restart clears any pending breakpoint hit + stepping session.
+  LastSourceHit_ = SourceHit{};
+  PendingStep_ = FcnStepState{};
+  FcnStep_ = FcnStepState{};
   std::fill(Y_.begin(), Y_.end(), 0.0);
   std::fill(Z_.begin(), Z_.end(), 0.0);
   std::fill(Znext_.begin(), Znext_.end(), 0.0);
@@ -2553,10 +2558,10 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
           Watch = &It->second;
       }
       if (Watch && MatlabFnCache_[I]) {
-        int Hit = -1;
+        int Hit = -1, HitIdx = -1;
         std::map<std::string, double> HitVars;
-        std::vector<double> Ys =
-            runMatlabFunction(*MatlabFnCache_[I], U, T, Watch, &Hit, &HitVars);
+        std::vector<double> Ys = runMatlabFunction(
+            *MatlabFnCache_[I], U, T, Watch, &Hit, &HitVars, -1, &HitIdx);
         Out_[I] = Ys.empty() ? 0.0 : Ys[0];
         for (size_t K = 0; K < Ys.size(); ++K)
           PortOut_[I]["out" + std::to_string(K + 1)] = Ys[K];
@@ -2564,6 +2569,14 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
           LastSourceHit_.BlockId = M_.Blocks[I].Id;
           LastSourceHit_.Line = Hit;
           LastSourceHit_.Vars = std::move(HitVars);
+          // #386 — capture the deterministic-replay context so the simulate-DAP
+          // can step statement-by-statement through this body invocation.
+          PendingStep_.BlockId = M_.Blocks[I].Id;
+          PendingStep_.Inputs = U;
+          PendingStep_.T = T;
+          PendingStep_.Cache = MatlabFnCache_[I].get();
+          PendingStep_.StmtIndex = HitIdx;
+          PendingStep_.Valid = true;
         }
       } else if (MatlabFnJit_[I]) {
         // §17.5 #8 — JIT'd entrypoint. Pad inputs out to the arity
@@ -3708,6 +3721,38 @@ void MflowLinkSim::setSourceBreakpoints(const std::string &BlockId,
 MflowLinkSim::SourceHit MflowLinkSim::consumeSourceBreakpointHit() {
   SourceHit H = LastSourceHit_;
   LastSourceHit_ = SourceHit{};
+  // #386 — a hit transitions the captured replay context into an active
+  // stepping session, so the next/stepIn/stepOut requests can walk the body.
+  if (H.Line >= 0 && PendingStep_.Valid) {
+    FcnStep_ = PendingStep_;
+    FcnStep_.Active = true;
+    PendingStep_ = FcnStepState{};
+  }
+  return H;
+}
+
+MflowLinkSim::SourceHit MflowLinkSim::fcnStepNext() {
+  // Re-run the (pure) body to the next statement index and surface its line +
+  // locals. When the body completes before reaching that index, stepping ends.
+  if (!FcnStep_.Active || !FcnStep_.Cache) return SourceHit{};
+  int Target = FcnStep_.StmtIndex + 1;
+  int Line = -1, Idx = -1;
+  std::map<std::string, double> Vars;
+  std::vector<double> Inputs = FcnStep_.Inputs;
+  runMatlabFunction(*FcnStep_.Cache, Inputs, FcnStep_.T,
+                    /*WatchLines=*/nullptr, &Line, &Vars,
+                    /*StopAtStmt=*/Target, &Idx);
+  if (Line < 0) {
+    // The body completed without reaching the target — stepping is done.
+    FcnStep_.Active = false;
+    FcnStep_.Valid = false;
+    return SourceHit{};
+  }
+  FcnStep_.StmtIndex = Target;
+  SourceHit H;
+  H.BlockId = FcnStep_.BlockId;
+  H.Line = Line;
+  H.Vars = std::move(Vars);
   return H;
 }
 
@@ -3839,8 +3884,17 @@ struct InterpEnv {
   // #354 — on the first armed-line hit, snapshot the body's locals here (the
   // values visible *before* that line executes), for the DAP "Locals" scope.
   std::map<std::string, double> *HitVars = nullptr;
+  // #386 — statement stepping via deterministic replay. `StmtCounter` is the
+  // execution-order index of the next statement; when it equals `StopAtStmt`,
+  // interpStmt captures line + locals and unwinds (StepStop). `HitStmtIdx`
+  // records the index at a breakpoint hit so stepping knows where it paused.
+  int StmtCounter = 0;
+  int StopAtStmt = -1;
+  int *HitStmtIdx = nullptr;
 };
 struct ReturnSignal {};
+// #386 — thrown to unwind the body interpreter at a step target.
+struct StepStop {};
 // §17.5 #8 — break / continue inside for / while bodies.
 struct BreakSignal {};
 struct ContinueSignal {};
@@ -3962,16 +4016,27 @@ void interpBlock(const matlab::Block *B, InterpEnv &Env) {
 void interpStmt(const matlab::Stmt *S, InterpEnv &Env) {
   using MNK = matlab::NodeKind;
   if (!S) return;
-  // #354 — source-line breakpoint hook: record the first armed body line that
-  // execution reaches. Zero-cost when no breakpoints are armed (WatchLines null).
-  if (Env.WatchLines && Env.SM && Env.HitLine && *Env.HitLine < 0 &&
-      S->Range.Begin.isValid()) {
+  // #354/#386 — debug hook. Resolve this statement's body line, then:
+  //  - step mode (StopAtStmt ≥ 0): stop *before* the target statement,
+  //    capturing line + locals, and unwind (StepStop). Zero-cost otherwise.
+  //  - breakpoint (WatchLines): record the first armed line + its statement
+  //    index + locals; the body keeps running (stepping replays it afterward).
+  if (Env.SM && S->Range.Begin.isValid() &&
+      (Env.StopAtStmt >= 0 || Env.WatchLines)) {
     int Ln = static_cast<int>(Env.SM->getLineColumn(S->Range.Begin).Line);
-    if (Env.WatchLines->count(Ln)) {
+    if (Env.StopAtStmt >= 0 && Env.StmtCounter == Env.StopAtStmt) {
+      if (Env.HitLine) *Env.HitLine = Ln;
+      if (Env.HitVars) *Env.HitVars = Env.Vars;
+      throw StepStop{};
+    }
+    if (Env.WatchLines && Env.HitLine && *Env.HitLine < 0 &&
+        Env.WatchLines->count(Ln)) {
       *Env.HitLine = Ln;
       if (Env.HitVars) *Env.HitVars = Env.Vars; // locals before this line runs
+      if (Env.HitStmtIdx) *Env.HitStmtIdx = Env.StmtCounter;
     }
   }
+  ++Env.StmtCounter;
   switch (S->Kind) {
   case MNK::ExprStmt: {
     auto *ES = static_cast<const matlab::ExprStmt *>(S);
@@ -4070,7 +4135,8 @@ std::vector<double> runMatlabFunction(const MflowLinkSim::MatlabFunctionState &S
                                       double T,
                                       const std::set<int> *WatchLines,
                                       int *HitLine,
-                                      std::map<std::string, double> *HitVars) {
+                                      std::map<std::string, double> *HitVars,
+                                      int StopAtStmt, int *HitStmtIdx) {
   InterpEnv Env;
   Env.Vars["t"] = T;
   for (size_t I = 0; I < S.InNames.size(); ++I)
@@ -4084,11 +4150,22 @@ std::vector<double> runMatlabFunction(const MflowLinkSim::MatlabFunctionState &S
     Env.SM = S.SM.get();
     Env.HitLine = HitLine;
     Env.HitVars = HitVars;
+    Env.HitStmtIdx = HitStmtIdx;
+  }
+  // #386 — step mode is armed independently of breakpoints (replay stepping).
+  if (StopAtStmt >= 0 && HitLine) {
+    Env.SM = S.SM.get();
+    Env.HitLine = HitLine;
+    Env.HitVars = HitVars;
+    Env.StopAtStmt = StopAtStmt;
   }
   try {
     interpBlock(S.Fn->Body, Env);
   } catch (const ReturnSignal &) {
     // Normal `return` exit.
+  } catch (const StepStop &) {
+    // #386 — body unwound at the step target; outputs are partial (unused —
+    // stepping only inspects line + locals).
   }
   std::vector<double> Outs;
   Outs.reserve(S.OutNames.size());
