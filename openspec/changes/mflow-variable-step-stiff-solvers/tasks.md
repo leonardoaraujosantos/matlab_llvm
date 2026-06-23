@@ -3,21 +3,21 @@
 Land incrementally; each slice is independently testable and BDF1/RK4 remain the fallback.
 
 ## 0. Record-correction (cheap, do first)
-- [ ] Fix stale solver comments in `MflowLinkSim.cpp` (the "Tier G not yet landed" note ~2830;
+- [x] Fix stale solver comments in `MflowLinkSim.cpp` (the "Tier G not yet landed" note ~2830;
       the BDF1 "fixed-point iteration" caveat ~2956 — the code uses Newton).
-- [ ] Correct `docs/mflow_link_roadmap.md` §17.4 solver table (BDF1 *is* shipped; ode23 aliases
-      DOPRI5; ode23s/t/tb fall through to RK4).
+- [x] Correct `docs/mflow_link_roadmap.md` §17.4 solver table (BDF1 *is* shipped; ode23 was an
+      alias, now native; ode23s/t/tb fall through to RK4). *(PR #395 + ode23-native update)*
 
 ## 1. Shared step controller
-- [ ] Extract the inline accept/reject logic from `stepMajor` into a `StepController` helper
-      parameterised by method order `p` (error-norm in → accept + next-`h` out); honour
-      `maxStep`/`minStep`.
-- [ ] Re-route DOPRI5 through it; assert `ode45` output is byte-identical (pure refactor).
+- [~] The adaptive accept/reject loop now keys its step exponent off the method's embedded-error
+      order (`1/(order+1)`), shared by DOPRI5 and BS32. A full `StepController` extraction (so the
+      implicit lane can reuse it) lands with the variable-step BDF slice (task 3).
+- [x] DOPRI5 numerics unchanged (exponent 0.2 preserved); `ode45` output byte-identical.
 
-## 2. Native ode23 (Bogacki–Shampine 3(2))
-- [ ] Add `bs32Step` (BS 3(2) tableau, FSAL, embedded 2nd-order error).
-- [ ] Route `ode23` to `bs32Step` instead of aliasing DOPRI5.
-- [ ] Doc note + fresh goldens; sanity-check BS32 vs DOPRI5 agree on a smooth reference.
+## 2. Native ode23 (Bogacki–Shampine 3(2)) — DONE
+- [x] Add `bs32Step` (BS 3(2) tableau, FSAL, embedded 2nd-order error).
+- [x] Route `ode23` to `bs32Step` (method enum `AdaptiveMethod_`) instead of aliasing DOPRI5.
+- [x] Regression `ode23_decay.mflow` (y'=-y → e^-2; ode23 vs ode45 agreement) + emit-parity.
 
 ## 3. Variable-step BDF1 → variable-order BDF (ode15s)
 - [ ] Add a `(t, y)` history ring buffer (≤5) + reset on discrete change / zero-crossing / restart.

@@ -285,6 +285,20 @@ SB_T2=$(printf '%s\n' "$SB" | awk -F, 'NR>1 && $1+0==2.0 {print $3-$2; exit}')
 check "stiff plant tracks drive at t=2.0" \
   "awk 'BEGIN{exit !(($SB_T2)^2 < 1e-2)}'" ""
 
+#--- ode23 native Bogacki-Shampine 3(2) (mflow-variable-step-stiff-solvers) -
+# y' = -y, y(0)=1 (integrator with -1 feedback) integrated with the native
+# ode23 pair → y(2) must converge to e^-2 = 0.13533528. A regression to the
+# RK4 fixed fallback (or a broken BS32 tableau) would miss the analytic value;
+# ode23 must also agree with ode45 on the same model. e^-2 within 5e-4 of the
+# 3rd-order adaptive result; ode23 vs ode45 within 1e-3.
+O23=$("$MATLABC" -simulate "$EX/ode23_decay.mflow")
+O23_FIN=$(printf '%s\n' "$O23" | tail -1 | awk -F, '{print $2}')
+O45_FIN=$("$MATLABC" -simulate <(sed 's/"ode23"/"ode45"/' "$EX/ode23_decay.mflow") | tail -1 | awk -F, '{print $2}')
+check "ode23 converges to e^-2" \
+  "awk 'BEGIN{exit !(($O23_FIN-0.13533528)^2 < (5e-4)^2)}'" "native BS 3(2) must integrate y'=-y to e^-2"
+check "ode23 agrees with ode45" \
+  "awk 'BEGIN{exit !(($O23_FIN-$O45_FIN)^2 < (1e-3)^2)}'" "the 3(2) and 5(4) adaptive pairs must agree on a smooth reference"
+
 #--- per_flow_solver (§17.5 #7): per-flow maxStep override ----------------
 PFS="$("$MATLABC" -simulate "$EX/per_flow_solver.mflow")"
 PFS_HEAD=$(printf '%s\n' "$PFS" | head -1)
