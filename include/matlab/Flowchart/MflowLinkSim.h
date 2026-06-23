@@ -462,7 +462,7 @@ private:
   // lane runs: Backward Euler (BDF1, `ode15s`) via Newton, or the modified
   // Rosenbrock (2)3 (`ode23s`) one-step linearly-implicit method. Both are
   // fixed-step in the current slice.
-  enum class StiffMethod { BDF1, ROSENBROCK, TRAPEZOIDAL };
+  enum class StiffMethod { BDF1, ROSENBROCK, TRAPEZOIDAL, TRBDF2 };
   StiffMethod StiffMethod_ = StiffMethod::BDF1;
   double CurrentAdaptiveH_ = 0.01;
   // §17.5 #7 — effective tolerances after applying per-flow

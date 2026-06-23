@@ -948,11 +948,14 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
   // either routes away from the explicit RK4 fall-through.
   Implicit_ = (M_.Solver.Algorithm == "ode15s" ||
                M_.Solver.Algorithm == "ode23s" ||
-               M_.Solver.Algorithm == "ode23t");
+               M_.Solver.Algorithm == "ode23t" ||
+               M_.Solver.Algorithm == "ode23tb");
   if (M_.Solver.Algorithm == "ode23s")
     StiffMethod_ = StiffMethod::ROSENBROCK;
   else if (M_.Solver.Algorithm == "ode23t")
     StiffMethod_ = StiffMethod::TRAPEZOIDAL;
+  else if (M_.Solver.Algorithm == "ode23tb")
+    StiffMethod_ = StiffMethod::TRBDF2;
   else
     StiffMethod_ = StiffMethod::BDF1;
   CurrentAdaptiveH_ = StepSize_;
@@ -3278,6 +3281,71 @@ void rosenbrockStep(MflowLinkSim &Sim,
   for (int I = 0; I < Nx; ++I)
     Err[I] = (H / 6.0) * (K1[I] - 2.0 * K2[I] + K3[I]);
 }
+
+//===-----------------------------------------------------------------===//
+// mflow-variable-step-stiff-solvers — TR-BDF2 (`ode23tb`). A two-stage
+// composite: a trapezoidal sub-step to t+γ·h (γ = 2−√2), then a BDF2
+// sub-step over the three points (t, y), (t+γh, y_γ), (t+h, y₁) to t+h.
+// L-stable and 2nd order; the trapezoidal stage keeps it accurate while
+// the BDF2 stage damps high-frequency stiff modes. Both stages reuse the
+// Newton + forward-difference Jacobian + dense LU machinery; the BDF2
+// coefficients come from the Lagrange derivative on the non-uniform mesh
+// (α₂·y₁ + α₁·y_γ + α₀·y₀ − h·f = 0, with α₀+α₁+α₂ = 0 for consistency).
+// Fixed-step in this slice.
+//===-----------------------------------------------------------------===//
+
+void trBDF2Step(MflowLinkSim &Sim,
+                void (MflowLinkSim::*Deriv)(double, const double *, double *),
+                double TBegin, double H,
+                const std::vector<double> &YIn,
+                std::vector<double> &YOut,
+                double RelTol, double AbsTol) {
+  const int Nx = static_cast<int>(YIn.size());
+  YOut.assign(Nx, 0.0);
+  if (Nx == 0) return;
+  const double Gamma = 2.0 - std::sqrt(2.0);
+  // Stage 1 (trapezoidal): a step of size γ·h → y_γ.
+  std::vector<double> YG;
+  trapezoidalStep(Sim, Deriv, TBegin, Gamma * H, YIn, YG, RelTol, AbsTol);
+
+  // Stage 2 (BDF2): α₂·y₁ + α₁·y_γ + α₀·y₀ − h·f(t+h, y₁) = 0.
+  const double A2 = (2.0 - Gamma) / (1.0 - Gamma);
+  const double A1 = -1.0 / (Gamma * (1.0 - Gamma));
+  const double A0 = (1.0 - Gamma) / Gamma;
+  std::vector<double> F(Nx), FP(Nx), G(Nx), Delta(Nx);
+  YOut = YG; // predictor
+
+  for (int It = 0; It < 20; ++It) {
+    (Sim.*Deriv)(TBegin + H, YOut.data(), F.data());
+    for (int I = 0; I < Nx; ++I)
+      G[I] = A2 * YOut[I] + A1 * YG[I] + A0 * YIn[I] - H * F[I];
+
+    double GNorm = 0.0;
+    for (int I = 0; I < Nx; ++I) {
+      double Sc = AbsTol + RelTol * std::fabs(YOut[I]);
+      if (Sc < 1e-15) Sc = 1e-15;
+      double E = std::fabs(G[I]) / Sc;
+      if (E > GNorm) GNorm = E;
+    }
+    if (GNorm < 1.0) break;
+
+    std::vector<double> J(Nx * Nx, 0.0);
+    std::vector<double> YPert = YOut;
+    for (int Jc = 0; Jc < Nx; ++Jc) {
+      double Eps = 1e-7 * std::max(1.0, std::fabs(YOut[Jc]));
+      YPert[Jc] += Eps;
+      (Sim.*Deriv)(TBegin + H, YPert.data(), FP.data());
+      YPert[Jc] = YOut[Jc];
+      for (int I = 0; I < Nx; ++I) {
+        double Dfdy = (FP[I] - F[I]) / Eps;
+        J[I * Nx + Jc] = (I == Jc ? A2 : 0.0) - H * Dfdy;
+      }
+    }
+    Delta = G;
+    if (!solveDense(J, Nx, Delta)) break;
+    for (int I = 0; I < Nx; ++I) YOut[I] -= Delta[I];
+  }
+}
 } // namespace
 
 double MflowLinkSim::stepMajor() {
@@ -3333,6 +3401,9 @@ double MflowLinkSim::stepMajor() {
       } else if (StiffMethod_ == StiffMethod::TRAPEZOIDAL) {
         trapezoidalStep(*this, &MflowLinkSim::derivative, T_, H, Y_, Y1,
                         EffectiveRelTol_, EffectiveAbsTol_);
+      } else if (StiffMethod_ == StiffMethod::TRBDF2) {
+        trBDF2Step(*this, &MflowLinkSim::derivative, T_, H, Y_, Y1,
+                   EffectiveRelTol_, EffectiveAbsTol_);
       } else {
         bdf1Step(*this, &MflowLinkSim::derivative, T_, H, Y_, Y1,
                  EffectiveRelTol_, EffectiveAbsTol_);

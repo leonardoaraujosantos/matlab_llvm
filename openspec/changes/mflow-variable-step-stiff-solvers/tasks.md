@@ -41,7 +41,10 @@ Land incrementally; each slice is independently testable and BDF1/RK4 remain the
 - [x] **Bug fix (#398):** `derivative()` now settles all block outputs before reading
       derivatives — coupled multi-state implicit solvers (ode15s/ode23s/ode23t) diverged
       because a single eval pass read stale cross-coupled outputs into the FD Jacobian.
-- [ ] Add `ode23tb` (TR-BDF2) on the same machinery (follow-up); remove its RK4 fall-through.
+- [x] `ode23tb` (TR-BDF2) via `trBDF2Step`: trapezoidal sub-step (reuses `trapezoidalStep`) +
+      BDF2 sub-step (Lagrange-derived non-uniform-mesh coefficients, consistency-checked
+      α₀+α₁+α₂=0). `StiffMethod::TRBDF2`. Regression `ode23tb_stiff.mflow`. No named method
+      now falls through to RK4.
 
 ## 6. Mass matrix / index-1 DAE
 - [ ] Generalise the implicit residual to `M·(y − y_old) − h·f`, Jacobian `M − h·∂f/∂y`.
