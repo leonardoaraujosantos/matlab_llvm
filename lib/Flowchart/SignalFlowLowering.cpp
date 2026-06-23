@@ -151,6 +151,9 @@ const std::map<std::string, KindInfo> &kindTable() {
     // Lookup tables (Tier H — table-driven scalar evaluation).
     add("signal_lookup_1d",  {true, true, false, false, false, FIM});
     add("signal_lookup_2d",  {true, true, false, false, false, FIM});
+    // N-D lookup table — multilinear interpolation over per-dimension
+    // breakpoints + a flat row-major table; inputs in1..inN. Direct-feedthrough.
+    add("signal_lookup_nd",  {true, true, false, false, false, FIM});
     // Math.
     add("signal_gain",       {true, true, false, false, false, FIM});
     add("signal_sum",        {true, true, false, false, false, FIM});
@@ -286,7 +289,6 @@ const std::map<std::string, KindInfo> &kindTable() {
     // lookup_1d / 2d are solid). See `docs/mflowlink_blocks.md`.
     for (const char *Name : {
              "signal_if_action", "signal_switch_case_action",
-             "signal_lookup_nd",
              "signal_custom"}) { // NOTE: signal_custom remains
                                   // reserved — it needs a plugin
                                   // hook the runtime doesn't have

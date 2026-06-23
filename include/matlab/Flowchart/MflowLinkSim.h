@@ -335,8 +335,17 @@ private:
     std::vector<double> X, Y;       // breakpoints
     std::vector<double> Z;          // row-major, size = X.size()·Y.size()
   };
+  // #343 — N-D lookup table: `Axes[d]` is dimension d's breakpoint vector,
+  // `Z` is the row-major flat table (size = prod of axis lengths). Evaluated by
+  // multilinear interpolation over 2^N corners. Inputs are in1..inN.
+  struct LookupND {
+    bool Valid = false;
+    std::vector<std::vector<double>> Axes;
+    std::vector<double> Z;
+  };
   std::vector<Lookup1D> Lookup1DCache_;
   std::vector<Lookup2D> Lookup2DCache_;
+  std::vector<LookupND> LookupNDCache_;
   // - `NoiseSeed_` is the per-block RNG state (xorshift64). Reseeded
   //   on `reset()` from `params.seed`.
   std::vector<uint64_t> NoiseSeed_;

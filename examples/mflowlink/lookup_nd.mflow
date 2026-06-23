@@ -1,0 +1,13 @@
+{ "schema": "matforge.flowchart", "version": "0.1.0", "entry": "lut_nd",
+  "settings": { "kind": "signal_flow", "solver": { "type": "fixed_step", "algorithm": "ode4", "startTime": 0.0, "stopTime": 0.1, "maxStep": "0.1" } },
+  "flows": [{ "id": "f", "kind": "function", "name": "lut_nd", "signature": { "inputs": [], "outputs": [] },
+    "nodes": [
+      { "id": "x", "kind": "signal_constant", "data": { "params": { "value": 0.5 } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "y", "kind": "signal_constant", "data": { "params": { "value": 0.5 } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "z", "kind": "signal_constant", "data": { "params": { "value": 0.5 } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "lut", "kind": "signal_lookup_nd", "data": { "params": { "breakpoints1": "0 1", "breakpoints2": "0 1", "breakpoints3": "0 1", "tableData": "0 1 10 11 100 101 110 111" } }, "ports": { "in": [{"id": "in1"}, {"id": "in2"}, {"id": "in3"}], "out": [{"id": "out"}] } },
+      { "id": "s", "kind": "signal_scope", "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } } ],
+    "edges": [ { "id": "e1", "kind": "data", "from": {"node": "x", "port": "out"}, "to": {"node": "lut", "port": "in1"} },
+               { "id": "e2", "kind": "data", "from": {"node": "y", "port": "out"}, "to": {"node": "lut", "port": "in2"} },
+               { "id": "e3", "kind": "data", "from": {"node": "z", "port": "out"}, "to": {"node": "lut", "port": "in3"} },
+               { "id": "e4", "kind": "data", "from": {"node": "lut", "port": "out"}, "to": {"node": "s", "port": "in"} } ] }] }

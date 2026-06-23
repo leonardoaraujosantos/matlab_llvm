@@ -499,11 +499,11 @@ check "signal_constant supported" \
 # A reserved kind is flagged unsupported.
 check "signal_custom reserved" \
   "printf '%s' \"\$LK\" | grep -q '\"kind\": \"signal_custom\", \"supported\": false'" ""
-# Exactly the four reserved kinds report supported:false (signal_if_action,
-# signal_switch_case_action, signal_lookup_nd, signal_custom). From Workspace
-# is now supported (inline time-series source).
+# Exactly the three reserved kinds report supported:false (signal_if_action,
+# signal_switch_case_action, signal_custom) — they need IDE-side container
+# subsystems / a plugin ABI. From Workspace and N-D lookup are now supported.
 LK_RES=$(printf '%s\n' "$LK" | grep -c '"supported": false')
-check "exactly 4 reserved kinds" "[[ '$LK_RES' == '4' ]]" ""
+check "exactly 3 reserved kinds" "[[ '$LK_RES' == '3' ]]" ""
 
 #--- #345: state_space vector x0 + per-output C --------------------------
 # Undamped oscillator A=[0 1;-1 0], x0=[2;0], C=[1 0;0 1]: analytic solution
@@ -866,6 +866,14 @@ WS_ZOH_AFTER=$(printf '%s\n' "$WS" | awk -F, '$1>0.99 && $1<1.01{print $3; exit}
 check "workspace header"     "[[ '$WS_HEAD' == 't,simout,held' ]]" "to_workspace names the CSV column after variableName"
 check "from_workspace linear" "awk 'BEGIN{exit !(($WS_LIN_MID-5)^2<1e-9 && ($WS_LIN_END-20)^2<1e-9)}'" "linear interpolation of the inline time-series at t=0.5 (5) and t=2 (20)"
 check "from_workspace zoh"    "awk 'BEGIN{exit !(($WS_ZOH_BEFORE-1)^2<1e-9 && ($WS_ZOH_AFTER-5)^2<1e-9)}'" "zero-order hold holds 1 until t=1, then steps to 5"
+
+#--- signal_lookup_nd — N-D multilinear interpolation --------------------
+# A 3-D table over axes [0 1]×[0 1]×[0 1] with corner values 0,1,10,11,100,…,111
+# (Z[i,j,k] = 100i+10j+k). At the center (0.5,0.5,0.5) the trilinear result is
+# the mean of the 8 corners = 55.5. Column: t, s.
+LN="$("$MATLABC" -simulate "$EX/lookup_nd.mflow")"
+LN_V=$(printf '%s\n' "$LN" | tail -1 | awk -F, '{print $2}')
+check "lookup_nd trilinear"  "awk 'BEGIN{exit !(($LN_V-55.5)^2<1e-6)}'" "trilinear interpolation at the cell center is the mean of the 8 corners (55.5)"
 
 #--- mflow-nd-signals: N-D wire signals (up to 6-D) ----------------------
 # A width-24 frame reshaped to [2,3,4] flows as a rank-3 signal: the scope

@@ -324,7 +324,7 @@ as a rank-3 signal (`s[1,1,1] … s[2,3,4]`), the 24 values passing through unch
 |---|---|---|---|
 | `signal_lookup_1d` | ✓ | `breakpointsX: ""`, `tableData: ""`                                  | Tier-H — comma-separated breakpoint vector + same-length output vector. Linear interp; out-of-range inputs clamp to the endpoints |
 | `signal_lookup_2d` | ✓ | `breakpointsX: ""`, `breakpointsY: ""`, `tableData: ""`              | Tier-H — bilinear interp. `tableData` is row-major `len(X) × len(Y)` |
-| `signal_lookup_nd` |   | reserved                                                              | Generalisation pending the 1d/2d pair settling |
+| `signal_lookup_nd` | ✓ | `breakpoints1…breakpointsN`, `tableData`                              | N-D multilinear interpolation (≤ 6 dims). One `breakpointsK` vector per dimension; `tableData` is the flat row-major table (dim 0 outermost); inputs `in1…inN`. Clamps at the table edges |
 
 ## Composite
 
@@ -367,7 +367,6 @@ failing at simulate (#323). The five rows below are the current
 |---|---|
 | `signal_custom` | Plugin layer for user-defined evaluators. The shipped `signal_matlab_fcn` covers the inline-expression case; `signal_custom` would let the IDE register evaluators implemented elsewhere (a `.cpp` the user compiles into the runtime, a remote service, …). Needs a registry + ABI design. |
 | `signal_if_action`, `signal_switch_case_action` | A parent `signal_if_subsystem` / `signal_switch_case_subsystem` container that scopes which case fires. The IDE's `SignalFlowParamSpec` doesn't ship these containers yet — IDE-side prerequisite. |
-| `signal_lookup_nd` | Settle the `lookup_1d` / `lookup_2d` pair (breakpoint shape + extrapolation policy + cached table format) before generalising to N dimensions. |
 
 ## Cross-repo invariants
 
