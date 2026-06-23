@@ -1225,3 +1225,24 @@ optimisation, real hardware-in-the-loop) is a follow-up that
 
 Together the three pieces (kernel ✓, driver + cocotb SIL
 planned, RT follow-up) close §17.5 #12.
+
+### 16.1 The production-RT slice — OpenSpec `mflow-embedded-rt-codegen`
+
+The first, deployable part of the production-RT half is now scoped
+as OpenSpec change **`mflow-embedded-rt-codegen`** (under
+`openspec/changes/`). It wraps the existing flat kernel (Tiers 1–7)
+in the Embedded-Coder real-time contract rather than re-implementing
+codegen:
+
+| Adds | Detail |
+|---|---|
+| **ERT entry points** | `model_initialize` / `model_step` / `model_terminate` over a static caller-owned `RT_MODEL` (`*_DW` state, `*_U`/`*_Y` IO) in a generated `model.h` — replacing the `simulate()` driver for embedded use. The step code must reproduce `-simulate` byte-for-byte (`EmitRt` parity lane). |
+| **Multirate scheduling** | base-rate + sub-rate `model_step(m, tid)` with a generated `rt_OneStep()` rate-counter template (reuses Tier-6c sample-time inference). |
+| **Static / MISRA-leaning C** | `--rt-profile=misra`: no heap in the step path, all state in `RT_MODEL`, fixed sizes, deviation markers; smoke-tested for no `malloc`. |
+| **Whole-diagram SystemVerilog** | composes per-subsystem SV into one synthesizable top module (closes the "per-subsystem only" carve-out above); continuous blocks rejected. |
+| **Packaging** | `--emit-package <dir>` → sources + `model.h` + build manifest, cross-compilable standalone. |
+
+Explicitly **still** out of that slice (true follow-up): AUTOSAR RTE
+/ `.arxml`, PIL board bring-up + on-target timing, Simscape/Stateflow
+codegen, and a full RTOS port (the lane emits hooks/templates, not an
+OS abstraction layer).

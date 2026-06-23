@@ -26,7 +26,11 @@ Companion docs:
 - [`ode.md`](ode.md) — existing `ode45`/`ode23`/`ode23s` + `pdepe`.
 - [`mflow_link_roadmap.md`](mflow_link_roadmap.md) — causal signal-flow
   simulator. **Behavioral** VA (single-input/output) lowers to mflowLink;
-  **conservative** VA networks lower to MNA + these solvers.
+  **conservative** VA networks lower to MNA + these solvers. Note: the
+  mflowLink *simulator's own* stiff solver gains mass-matrix / index-1
+  support via OpenSpec `mflow-variable-step-stiff-solvers` — a sibling of
+  this runtime DAE core (the simulator integrates block continuous-state;
+  this core integrates MATLAB-language `ode15s`/`ode15i` IVPs/DAEs).
 - [`acceleration_roadmap.md`](acceleration_roadmap.md),
   [`gpu_coder_roadmap.md`](gpu_coder_roadmap.md) — the GPU/CUDA lane reused
   in Tiers 7/10.
