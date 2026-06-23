@@ -8926,6 +8926,9 @@ int runMflowLinkDap(const std::string &Path) {
       // go so the IDE's signal scopes stay live.
       sendResponse(Seq, *Cmd, true,
                    Object{{"allThreadsContinued", true}});
+      // #386 — a continue while paused inside a body ends the step session and
+      // clears its locals; the simulation resumes from the current step.
+      if (Sim.isFcnStepping()) { Sim.fcnStepFinish(); StopLocals.clear(); }
       bool ZCStopped = false;
       std::string BPDesc;     // Tier-F: non-empty when a breakpoint fired
       size_t Before = Sim.majorStepsTaken();
@@ -8982,13 +8985,38 @@ int runMflowLinkDap(const std::string &Path) {
     }
     if (*Cmd == "next" || *Cmd == "stepIn" || *Cmd == "stepMajor") {
       sendResponse(Seq, *Cmd, true, Object{});
+      // #386 — when paused inside a MATLAB Function body, next/stepIn advance
+      // one statement (deterministic replay), surfacing the new line + locals.
+      // stepMajor always advances the whole simulation.
+      if (*Cmd != "stepMajor" && Sim.isFcnStepping()) {
+        auto H = Sim.fcnStepNext();
+        if (H.Line >= 0) {
+          StopLocals = std::move(H.Vars);
+          std::ostringstream OS;
+          OS << H.BlockId << ":" << H.Line;
+          sendEvent("stopped", mflStoppedBody("step", OS.str().c_str()));
+        } else {
+          // The body returned — stepping is done; pause at the function exit.
+          StopLocals.clear();
+          sendEvent("stopped", mflStoppedBody("step", "function returned"));
+        }
+        continue;
+      }
       stepN(1);
       sendEvent("stopped", mflStoppedBody("step"));
       continue;
     }
     if (*Cmd == "stepOut") {
-      // No call stack to step out of — fall through to a single step.
       sendResponse(Seq, *Cmd, true, Object{});
+      // #386 — stepping out of a MATLAB Function body ends the step session;
+      // the body's effect was already applied, so re-stop at the sim position.
+      if (Sim.isFcnStepping()) {
+        Sim.fcnStepFinish();
+        StopLocals.clear();
+        sendEvent("stopped", mflStoppedBody("step", "function returned"));
+        continue;
+      }
+      // No call stack to step out of — fall through to a single step.
       stepN(1);
       sendEvent("stopped", mflStoppedBody("step"));
       continue;
