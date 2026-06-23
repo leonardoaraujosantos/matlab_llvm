@@ -654,7 +654,7 @@ Items marked ✓ closed since the original list was written.
 | Algebraic-loop *solver* | ✓ closed | §7.4 — was hard-error at lowering | Fixed-point Picard iteration each step, tolerance keyed off `settings.solver.relTol`; non-convergence queued via `consumeAlgebraicLoopFailures` (Item 2 / `0091a2d`). The `"off"` method preserves the hard-error path |
 | Vector signal type | ✓ closed | Tier H carve-out justification | Per-block `OutWidth` + `VecOut_`; element-wise broadcast for Gain / Sum / Product / Abs / Saturation; Mux concatenates, scope logs per-element columns; sample-time inheritance walks topo order (Item 1 / `8cbdf7a`) |
 | `signal_transfer_fcn` output scaling | ✓ closed | Pre-existing bug — output divided by `Lead` (leading denominator coefficient) when it shouldn't have. Masked by every demo with `den = "1, ..."` (Lead = 1) | Surfaced by the masked-library demo (τ = 0.1 → 10× output overshoot); fixed in the Item 3 chain. Same path covers `signal_zero_pole` |
-| BDF stiff solver | ○ open | §16 open — only `ode23s` Rosenbrock is wired elsewhere | `ode15s`-style implicit integration for stiff chemistry / electronics / thermal models |
+| BDF stiff solver | ◐ partial | §16 — `ode15s` ships as **BDF1** (Backward Euler) with a real Newton corrector, finite-difference Jacobian, and dense LU (`bdf1Step`); fixed-step only. The full variable-order/variable-step suite (`ode15s` BDF1–5, native `ode23`, `ode23s`/`ode23t`/`ode23tb`, mass-matrix/index-1 DAE, dense output) is scoped in OpenSpec change `mflow-variable-step-stiff-solvers` | `ode15s`-style implicit integration for stiff chemistry / electronics / thermal models |
 | Per-flow solver overrides | ○ open | §16 open | Model-reference flows with different solver settings than the parent |
 | Cross-dialect composition | ○ open | §9 follow-up | `-emit-cpp` linking `runtime_mflowlink` so a `.m` script can call into a baked signal-flow simulation |
 | `bouncing_ball.mflow` demo | ✓ done | §12 example carve-out | `signal_integrator` external `reset`/`init` ports ship; `examples/mflowlink/bouncing_ball.mflow` is a SimulateRun fixture (zero-crossing → state-reset, energy-dissipating bounces) |
@@ -696,7 +696,7 @@ expect that aren't on the current roadmap at all.
 | **Complex numbers** | Native complex-valued signals | ○ Real `double` only |
 | **Fixed-point arithmetic** | Q-format with overflow handling, FxP-aware codegen | ○ Floating-point only |
 | **Variable-size signals** | Array sizes change at runtime; max-size declared at design time | ○ Fixed at construction |
-| **Stiff / implicit solvers** | `ode15s`, `ode23t`, `ode23tb`, fixed-step `ode4` / `ode5` / Heun | ○ Only DOPRI5 + RK4; BDF / Rosenbrock still TODO |
+| **Stiff / implicit solvers** | `ode15s`, `ode23t`, `ode23tb`, fixed-step `ode4` / `ode5` / Heun | ◐ DOPRI5 (`ode45`) + RK4 + **`ode15s` BDF1** (Newton + FD Jacobian + dense LU, fixed-step); `ode23` aliases DOPRI5, `ode23s`/`ode23t`/`ode23tb` fall through to RK4. Full variable-order/variable-step suite + native `ode23` + Rosenbrock/TR + mass-matrix DAE + dense output scoped in OpenSpec `mflow-variable-step-stiff-solvers` |
 | **Frame-based processing** | Process N samples per tick (DSP convention) | ○ One sample per tick |
 
 #### 17.4.2 Authoring features Simulink users expect
@@ -890,6 +890,11 @@ foundation:
     codegen)*. Builds on Tier G but adds timing constraints,
     target-specific optimisations, AUTOSAR, fixed-step real-time
     hooks. Adjacent to but separate from the simulation surface.
+    **Now scoped** in OpenSpec change `mflow-embedded-rt-codegen`
+    (§17.7): the deployable bare-metal/RTOS slice (ERT-style
+    `model_step` entry points, multirate scheduling, static/MISRA
+    C, whole-diagram SV, packaging) on top of the shipped flat
+    emit lanes — AUTOSAR/PIL stay out of that first slice.
 
 ### 17.6 What this section *isn't*
 
@@ -899,3 +904,19 @@ shipped surface (§17.1) is internally consistent and tested; the
 deferred deviations (§17.2) have working alternatives; the
 blocked carve-outs (§17.3) wait on specific prerequisites; the
 Simulink gap (§17.4) is the **product** delta, not a bug list.
+
+### 17.7 Active OpenSpec proposals — two Simulink-parity pillars
+
+Two of the §17.4 gaps are now formally scoped as OpenSpec changes
+(under `openspec/changes/`), framed as precise **deltas** on top of
+what already ships, not greenfield rewrites:
+
+| Change | Pillar | Closes | Starting reality |
+|---|---|---|---|
+| `mflow-variable-step-stiff-solvers` | Variable-step / stiff solvers | §17.4.1 stiff row, §17.2 BDF row | `ode45` (DOPRI5) + `ode15s` (BDF1, Newton, fixed-step) already ship; adds native `ode23`, variable-order/variable-step BDF1–5, `ode23s`/`ode23t`/`ode23tb`, Jacobian reuse + analytic hook, mass-matrix/index-1 DAE, dense output + `Refine` |
+| `mflow-embedded-rt-codegen` | Code generation (Embedded Coder) | §17.5 #12 | Flat AOT C/C++/Python/TS/SV subsystem + whole-diagram emit already ships (Tiers 1–7); adds the real-time wrapper — `model_initialize`/`model_step`/`model_terminate` over a static struct, multirate task scheduling, static/MISRA C profile, whole-diagram SystemVerilog, packaged build bundle |
+
+Both run the same evaluator/emitter in the interpreter and the
+compiled `-emit-mflowlink-cpp` binary, so additions are inherited by
+compiled models with byte-parity. See each change's `proposal.md` /
+`design.md` / `tasks.md` for the incremental landing plan.
