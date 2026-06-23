@@ -42,7 +42,8 @@ failed_names=()
 
 run_one() {
   local name="$1"
-  local in="$EX/$name.mflow"
+  local srcdir="${2:-$EX}"
+  local in="$srcdir/$name.mflow"
   local cpp="$SCRATCH/$name.cpp"
   local bin="$SCRATCH/$name"
   local gen_csv="$SCRATCH/$name.gen.csv"
@@ -96,8 +97,14 @@ for name in lowpass pid_tracking multirate saturation_zc enabled_subsystem \
             hdl_full_adder hdl_shift_register hdl_freq_divider \
             workspace_io color_image_filter nd_permute nd_squeeze \
             ode23_decay ode23s_stiff ode23t_oscillator ode23tb_stiff \
-            ode23t_ss_oscillator ode15s_adaptive; do
+            ode23t_ss_oscillator ode15s_adaptive inverted_pendulum_pid; do
   run_one "$name"
+done
+
+# Control demos that live in examples/quadrotor/mflowlink/ — same compiled-vs-
+# interpreted byte-parity contract, just a different source directory.
+for name in quadrotor_pid quadrotor_mpc; do
+  run_one "$name" "$ROOT/examples/quadrotor/mflowlink"
 done
 
 echo "----"

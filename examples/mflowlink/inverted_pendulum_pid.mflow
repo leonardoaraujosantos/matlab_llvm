@@ -1,0 +1,22 @@
+{ "schema": "matforge.flowchart", "version": "0.1.0", "entry": "inv_pend",
+  "settings": { "kind": "signal_flow", "solver": { "type": "fixed_step", "algorithm": "ode4", "startTime": 0.0, "stopTime": 5.0, "maxStep": "0.005" } },
+  "flows": [{ "id": "inv_pend", "kind": "program", "name": "inv_pend", "signature": { "inputs": [], "outputs": [] },
+    "nodes": [
+      { "id": "ref",   "kind": "signal_constant",   "data": { "params": { "value": 0.0 } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "err",   "kind": "signal_sum",         "data": { "params": { "signs": "+-" } }, "ports": { "in": [{"id": "in1"}, {"id": "in2"}], "out": [{"id": "out"}] } },
+      { "id": "pid",   "kind": "signal_pid",         "data": { "params": { "Kp": 40.0, "Ki": 20.0, "Kd": 8.0, "N": 100.0 } }, "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "grav",  "kind": "signal_gain",        "data": { "params": { "gain": 19.62 } }, "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "acc",   "kind": "signal_sum",         "data": { "params": { "signs": "++" } }, "ports": { "in": [{"id": "in1"}, {"id": "in2"}], "out": [{"id": "out"}] } },
+      { "id": "rate",  "kind": "signal_integrator",  "data": { "log_signal": true, "params": { "initialCondition": 0.0 } }, "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "theta", "kind": "signal_integrator",  "data": { "log_signal": true, "params": { "initialCondition": 0.2 } }, "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "sc",    "kind": "signal_scope",       "data": { "params": { "title": "pendulum angle", "yMin": -0.3, "yMax": 0.3 } }, "ports": { "in": [{"id": "in"}], "out": [] } } ],
+    "edges": [
+      { "id": "e0", "kind": "data", "from": {"node": "ref",   "port": "out"}, "to": {"node": "err",   "port": "in1"} },
+      { "id": "e1", "kind": "data", "from": {"node": "theta", "port": "out"}, "to": {"node": "err",   "port": "in2"} },
+      { "id": "e2", "kind": "data", "from": {"node": "err",   "port": "out"}, "to": {"node": "pid",   "port": "in"} },
+      { "id": "e3", "kind": "data", "from": {"node": "theta", "port": "out"}, "to": {"node": "grav",  "port": "in"} },
+      { "id": "e4", "kind": "data", "from": {"node": "grav",  "port": "out"}, "to": {"node": "acc",   "port": "in1"} },
+      { "id": "e5", "kind": "data", "from": {"node": "pid",   "port": "out"}, "to": {"node": "acc",   "port": "in2"} },
+      { "id": "e6", "kind": "data", "from": {"node": "acc",   "port": "out"}, "to": {"node": "rate",  "port": "in"} },
+      { "id": "e7", "kind": "data", "from": {"node": "rate",  "port": "out"}, "to": {"node": "theta", "port": "in"} },
+      { "id": "e8", "kind": "data", "from": {"node": "theta", "port": "out"}, "to": {"node": "sc",    "port": "in"} } ] }] }

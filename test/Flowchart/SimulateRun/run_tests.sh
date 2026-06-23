@@ -1082,6 +1082,33 @@ FD="$("$MATLABC" -simulate "$EX/hdl_freq_divider.mflow")"
 FD_R=$(printf '%s\n' "$FD" | awk -F, 'NR>1{for(i=2;i<=4;i++){v=($i>0.5); if(seen[i]&&v!=p[i])tr[i]++; p[i]=v; seen[i]=1}} END{print (tr[2]>tr[3] && tr[3]>tr[4] && tr[4]>=3)?1:0}')
 check "freq_divider /2 > /4 > /8" "[[ '$FD_R' == '1' ]]" "each T-FF stage halves the toggle rate"
 
+#--- Control demos: inverted pendulum (PID) + quadrotor (PID / MPC) ---------
+# Inverted pendulum: an unstable plant (theta'' = 19.62*theta + u) starting at
+# theta=0.2 rad. The PID must stabilise it upright — theta decays to ~0 and
+# never runs away (without control the 19.62*theta term diverges exponentially).
+IP="$("$MATLABC" -simulate "$EX/inverted_pendulum_pid.mflow")"
+IP_END=$(printf '%s\n' "$IP" | tail -1 | awk -F, '{print $3}')
+IP_MAX=$(printf '%s\n' "$IP" | awk -F, 'NR>1{v=$3<0?-$3:$3; if(v>m)m=v} END{print m}')
+check "inverted pendulum balances" "awk 'BEGIN{exit !(($IP_END)^2 < (1e-2)^2)}'" "PID drives the pole upright (theta→0)"
+check "inverted pendulum never topples" "awk 'BEGIN{exit !($IP_MAX < 0.5)}'" "stays in the small-angle regime (no run-away)"
+
+# Quadrotor cascade PID: outer position PID → tilt cmd → inner attitude PID →
+# 6-DOF-style plant; altitude PID. Both x and z track a step to 1.0 m.
+# Columns: t, xth(theta), xpos, x_sc(ref+pos), zpos, z_sc.
+QP="$("$MATLABC" -simulate "$ROOT/examples/quadrotor/mflowlink/quadrotor_pid.mflow")"
+QP_X=$(printf '%s\n' "$QP" | tail -1 | awk -F, '{print $3}')
+QP_Z=$(printf '%s\n' "$QP" | tail -1 | awk -F, '{print $5}')
+check "quadrotor PID x→1" "awk 'BEGIN{exit !(($QP_X-1.0)^2 < (5e-2)^2)}'" "cascade PID tracks the x setpoint"
+check "quadrotor PID z→1" "awk 'BEGIN{exit !(($QP_Z-1.0)^2 < (5e-2)^2)}'" "altitude PID tracks the z setpoint"
+
+# Quadrotor MPC: outer signal_mpc_move (with velocity-lead damping) → attitude
+# PID inner; altitude PID. x tracks the step with no overshoot, z to 1.0 m.
+QM="$("$MATLABC" -simulate "$ROOT/examples/quadrotor/mflowlink/quadrotor_mpc.mflow")"
+QM_X=$(printf '%s\n' "$QM" | tail -1 | awk -F, '{print $3}')
+QM_Z=$(printf '%s\n' "$QM" | tail -1 | awk -F, '{print $5}')
+check "quadrotor MPC x→1" "awk 'BEGIN{exit !(($QM_X-1.0)^2 < (5e-2)^2)}'" "MPC outer loop tracks the x setpoint"
+check "quadrotor MPC z→1" "awk 'BEGIN{exit !(($QM_Z-1.0)^2 < (5e-2)^2)}'" "altitude PID tracks the z setpoint"
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 exit $(( fail > 0 ? 1 : 0 ))
