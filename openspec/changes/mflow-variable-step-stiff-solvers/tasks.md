@@ -36,8 +36,12 @@ Land incrementally; each slice is independently testable and BDF1/RK4 remain the
       `solveDense`, embedded error estimate. `StiffMethod_` enum dispatches BDF1 vs Rosenbrock.
 - [x] `Loader` already passes `ode23s` through; wiring it removes its RK4 fall-through.
       Regression `ode23s_stiff.mflow` (stiff plant at fixed h=0.1 RK4 would explode) + emit-parity.
-- [ ] Add `ode23t` (trapezoidal) and `ode23tb` (TR-BDF2) on the same Newton + `solveDense`
-      machinery (follow-up slice); remove their RK4 fall-through.
+- [x] `ode23t` (trapezoidal rule, non-dissipative) via `trapezoidalStep` on the same Newton +
+      `solveDense` machinery; `StiffMethod::TRAPEZOIDAL`. Regression `ode23t_oscillator.mflow`.
+- [x] **Bug fix (#398):** `derivative()` now settles all block outputs before reading
+      derivatives — coupled multi-state implicit solvers (ode15s/ode23s/ode23t) diverged
+      because a single eval pass read stale cross-coupled outputs into the FD Jacobian.
+- [ ] Add `ode23tb` (TR-BDF2) on the same machinery (follow-up); remove its RK4 fall-through.
 
 ## 6. Mass matrix / index-1 DAE
 - [ ] Generalise the implicit residual to `M·(y − y_old) − h·f`, Jacobian `M − h·∂f/∂y`.
