@@ -31,6 +31,7 @@ with a cascade controller — **linear MPC** for horizontal position and
 | `quadrotor_pid_mpc.m` | Full closed-loop simulation: MIMO MPC (position) + 4 PIDs (attitude/altitude) driving the nonlinear plant, with reference previewing. Renders a 4-panel plot to `quadrotor_pid_mpc.png`. |
 | `quadrotor_fp_derive.m` | **Richer** first-principles symbolic derivation: builds the ZYX rotation matrix column by column, the full nonlinear translational + rotational (Euler) dynamics, the rotor→wrench mixing matrix, then the hover linearizations feeding *all three* control layers. |
 | `quadrotor_fp_flight.m` | **Animated** three-layer cascade flight demo (outer MPC + inner PID + inner MPC) flying a climbing figure-8. Renders a static 4-panel summary **and** a cool tilting-body 3-D animation (MP4) you can watch the attitude loop work in. |
+| [`mflowlink/`](mflowlink/) | **Block-diagram** (drag-and-drop) versions of the cascade controller as `.mflow` signal-flow models: `quadrotor_pid.mflow` (cascade PID) and `quadrotor_mpc.mflow` (MPC outer + attitude PID). Run on the mflowLink simulator in interpreted and compiled mode; regression-gated in CI. See [`mflowlink/README.md`](mflowlink/README.md). |
 
 ## Animated demo — `quadrotor_fp_*`
 
