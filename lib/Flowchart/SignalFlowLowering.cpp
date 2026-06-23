@@ -235,6 +235,12 @@ const std::map<std::string, KindInfo> &kindTable() {
     // must match the input width — enforced by the width-
     // inference pass.
     add("signal_reshape", {true, true, false, false, false, FIM});
+    // mflow-nd-signals — N-D axis utilities. `squeeze` drops singleton
+    // dimensions (pure metadata; buffer unchanged); `permute` reorders axes
+    // per a 1-based `order` permutation (a real element remap). Both preserve
+    // the element count, so width inheritance is the generic path.
+    add("signal_squeeze", {true, true, false, false, false, FIM});
+    add("signal_permute", {true, true, false, false, false, FIM});
     add("signal_switch", {true, true, false, false, true,  FIM});
     add("signal_multiport_switch",
                          {true, true, false, false, false, FIM});
@@ -281,12 +287,9 @@ const std::map<std::string, KindInfo> &kindTable() {
 
     // --- Reserved (Known, not yet Supported) --------------------------------
     // The remaining reserved kinds need prerequisites the runtime
-    // doesn't have yet (vector signal type for bus creator/selector,
-    // workspace var binding for from_workspace, an inline MATLAB
-    // expression evaluator for matlab_fcn / custom, parent If /
-    // SwitchCase subsystem containers for *_action, the goto / from
-    // virtual-wire lowering pass, and the N-d generalisation after
-    // lookup_1d / 2d are solid). See `docs/mflowlink_blocks.md`.
+    // doesn't have yet: parent If / SwitchCase subsystem containers for
+    // the *_action blocks, and a plugin hook for signal_custom. See
+    // `docs/mflowlink_blocks.md`.
     for (const char *Name : {
              "signal_if_action", "signal_switch_case_action",
              "signal_custom"}) { // NOTE: signal_custom remains
@@ -1439,6 +1442,84 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
               B.OutRows = 1;
               B.OutCols = B.OutWidth > 0 ? B.OutWidth : Total;
             }
+            Done[I] = true; ShapeChanged = true;
+            continue;
+          }
+          if (B.Kind == "signal_squeeze" || B.Kind == "signal_permute") {
+            // mflow-nd-signals — derive the output shape from the *input*
+            // shape: squeeze drops singletons, permute reorders axes. Both
+            // keep the element count, so OutWidth is already inherited.
+            auto Ws = inputWidths(I);
+            int Total = Ws.empty() ? 0 : Ws.front();
+            if (Total <= 0) continue; // wait for upstream width
+            std::vector<int> In = dominantInputShape(I);
+            if (In.empty()) {
+              // No N-D anchor yet. If an N-D upstream simply hasn't published
+              // its shape this sweep, wait; otherwise it is a genuine 1-D input.
+              bool PendingND = false;
+              for (auto &E : M.Edges) {
+                if (E.ToBlock != B.Id) continue;
+                auto It = IdxOf.find(E.FromBlock);
+                if (It == IdxOf.end()) continue;
+                size_t Src = It->second;
+                if (Src != I && M.Blocks[Src].OutWidth > 1 && !Done[Src])
+                  PendingND = true;
+              }
+              if (PendingND) continue;
+              In = {Total};
+            }
+            std::vector<int> Outp;
+            if (B.Kind == "signal_squeeze") {
+              for (int d : In) if (d != 1) Outp.push_back(d);
+              if (Outp.empty()) Outp.push_back(Total); // all-singleton → 1-D
+            } else { // signal_permute
+              std::vector<int> Ord;
+              auto It = B.Params.find("order");
+              if (It != B.Params.end()) {
+                std::string tok, s = It->second;
+                s.push_back(' ');
+                for (char ch : s) {
+                  if (ch == ',' || ch == 'x' || ch == ';' || ch == ' ' ||
+                      ch == '\t' || ch == '[' || ch == ']') {
+                    if (!tok.empty()) {
+                      int d = std::atoi(tok.c_str());
+                      if (d > 0) Ord.push_back(d);
+                      tok.clear();
+                    }
+                  } else {
+                    tok.push_back(ch);
+                  }
+                }
+              }
+              if (Ord.size() != In.size()) {
+                Diag.error(B.Loc, "signal_permute \"" + B.Id +
+                                      "\": `order` must list " +
+                                      std::to_string(In.size()) +
+                                      " axes (got " +
+                                      std::to_string(Ord.size()) + ")");
+                return std::nullopt;
+              }
+              std::vector<bool> Seen(In.size(), false);
+              Outp.resize(In.size());
+              for (size_t K = 0; K < Ord.size(); ++K) {
+                int Ax = Ord[K] - 1;
+                if (Ax < 0 || Ax >= (int)In.size() || Seen[Ax]) {
+                  Diag.error(B.Loc, "signal_permute \"" + B.Id +
+                                        "\": `order` is not a valid 1-based "
+                                        "permutation of 1.." +
+                                        std::to_string(In.size()));
+                  return std::nullopt;
+                }
+                Seen[Ax] = true;
+                Outp[K] = In[Ax];
+              }
+            }
+            B.OutShape = Outp;
+            B.OutWidth = Total;
+            B.OutRows = Outp.empty() ? 1 : Outp[0];
+            int Rest = 1;
+            for (size_t d = 1; d < Outp.size(); ++d) Rest *= Outp[d];
+            B.OutCols = Outp.size() > 1 ? Rest : Total;
             Done[I] = true; ShapeChanged = true;
             continue;
           }

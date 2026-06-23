@@ -915,6 +915,23 @@ CF_GBSUM=$(printf '%s\n' "$CF" | tail -1 | awk -F, '{print $3+$4+$6+$7+$9+$10}')
 check "color filter width 9"   "awk 'BEGIN{exit !($CF_NCOL==9)}'" "1×3×3 colour image keeps 9 interleaved elements"
 check "color filter per-chan"  "awk 'BEGIN{exit !(($CF_RSUM-27)^2<1e-9 && $CF_GBSUM^2<1e-9)}'" "box blur spreads the red channel to [9 9 9] (sum 27) without bleeding into G/B"
 
+#--- mflow-nd-signals: permute / squeeze N-D axis utilities ----------------
+# permute: a 2×3 matrix [1 2 3; 4 5 6] (row-major 1..6) with order [2,1] is the
+# transpose → 3×2, flat row-major 1 4 2 5 3 6. squeeze: a 1×3×1×2 signal drops
+# its singleton dims to 3×2, values unchanged (1..6). Both preserve the element
+# count; permute is a real element remap, squeeze is pure metadata.
+PM="$("$MATLABC" -simulate "$EX/nd_permute.mflow")"
+PM_HEAD=$(printf '%s\n' "$PM" | head -1)
+PM_SEQ=$(printf '%s\n' "$PM" | tail -1 | awk -F, '{printf "%d %d %d %d %d %d", $2,$3,$4,$5,$6,$7}')
+check "permute transpose shape" "grep -q 's\[3,2\]' <<< '$PM_HEAD'" "permute [2,1] of a 2×3 signal yields a 3×2 shape"
+check "permute transpose data"  "[[ '$PM_SEQ' == '1 4 2 5 3 6' ]]" "permute order [2,1] transposes [1 2 3; 4 5 6] to flat 1 4 2 5 3 6"
+SQ="$("$MATLABC" -simulate "$EX/nd_squeeze.mflow")"
+SQ_HEAD=$(printf '%s\n' "$SQ" | head -1)
+SQ_NCOL=$(printf '%s\n' "$SQ" | tail -1 | awk -F, '{print NF-1}')
+SQ_SEQ=$(printf '%s\n' "$SQ" | tail -1 | awk -F, '{printf "%d %d %d %d %d %d", $2,$3,$4,$5,$6,$7}')
+check "squeeze drops singletons" "grep -q 's\[3,2\]' <<< '$SQ_HEAD' && awk 'BEGIN{exit !($SQ_NCOL==6)}'" "squeeze collapses 1×3×1×2 to 3×2"
+check "squeeze passthrough"      "[[ '$SQ_SEQ' == '1 2 3 4 5 6' ]]" "squeeze keeps the row-major buffer byte-identical"
+
 #--- #343: HDL sequential blocks — D flip-flop / T flip-flop / counter -----
 # A 1 Hz pulse clock drives a D-FF (D=1), a free-running T-FF, and an up
 # counter over 5 s. Each updates once per clock posedge (once per major step,

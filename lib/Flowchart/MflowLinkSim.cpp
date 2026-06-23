@@ -1872,11 +1872,13 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
         }
         Out_[I] = VecOut_[I].empty() ? 0.0 : VecOut_[I].front();
       }
-    } else if (K == "signal_reshape") {
-      // §17.5 #9 — copy the upstream flat buffer through; shape
-      // change is purely a metadata switch (OutRows / OutCols
-      // already stamped by lowering). The element count contract
-      // is enforced at lowering time.
+    } else if (K == "signal_reshape" || K == "signal_squeeze") {
+      // §17.5 #9 / mflow-nd-signals — copy the upstream flat buffer
+      // through; the shape change (reshape's target shape, or squeeze
+      // dropping singleton dims) is a pure metadata switch — OutShape /
+      // OutRows / OutCols were stamped by lowering, the row-major byte
+      // layout is identical. The element-count contract is enforced
+      // at lowering time.
       if (Inputs_[I].empty()) {
         if (OutWidth_[I] > 1)
           std::fill(VecOut_[I].begin(), VecOut_[I].end(), 0.0);
@@ -1897,6 +1899,59 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
           Out_[I] = VecOut_[I].front();
         } else {
           Out_[I] = Out_[Src];
+        }
+      }
+    } else if (K == "signal_permute") {
+      // mflow-nd-signals — reorder the axes of an N-D input per the 1-based
+      // `order` permutation. Element movement: output axis k carries input
+      // axis order[k]-1, so the output index o decodes (row-major over the
+      // permuted OutShape) to an input multi-index whose axis order[k]-1
+      // equals o's k-th coordinate. The order list was validated at lowering.
+      if (Inputs_[I].empty()) {
+        if (OutWidth_[I] > 1)
+          std::fill(VecOut_[I].begin(), VecOut_[I].end(), 0.0);
+        Out_[I] = 0.0;
+      } else {
+        size_t Src = Inputs_[I].front().SrcBlock;
+        VecOut_[I].assign(OutWidth_[I], 0.0);
+        if (OutWidth_[Src] <= 1) {
+          // Scalar permute is the identity.
+          std::fill(VecOut_[I].begin(), VecOut_[I].end(), Out_[Src]);
+          Out_[I] = VecOut_[I].empty() ? 0.0 : VecOut_[I].front();
+        } else {
+          std::vector<int> InSh = OutShape_[Src];
+          if (InSh.empty()) InSh = {OutWidth_[Src]};
+          const std::vector<int> &OutSh = OutShape_[I];
+          int N = (int)InSh.size();
+          std::vector<int> Ord;
+          if (const std::string *OP = paramS(B, "order")) {
+            std::vector<double> Tmp; int r = 0, c = 0;
+            parseSimMatrix(*OP, Tmp, r, c);
+            for (double d : Tmp) Ord.push_back((int)(d + 0.5));
+          }
+          if ((int)Ord.size() != N) { Ord.clear();
+            for (int k = 0; k < N; ++k) Ord.push_back(k + 1); }
+          // Row-major strides for input and (permuted) output shapes.
+          std::vector<int> InStr(N, 1);
+          for (int d = N - 2; d >= 0; --d) InStr[d] = InStr[d + 1] * InSh[d + 1];
+          int OutN = (int)OutSh.size();
+          std::vector<int> OutStr(OutN > 0 ? OutN : 1, 1);
+          for (int d = OutN - 2; d >= 0; --d)
+            OutStr[d] = OutStr[d + 1] * OutSh[d + 1];
+          const auto &SV = VecOut_[Src];
+          int W = OutWidth_[I];
+          for (int o = 0; o < W; ++o) {
+            int Rem = o, InFlat = 0;
+            for (int k = 0; k < OutN; ++k) {
+              int Oi = Rem / OutStr[k];
+              Rem %= OutStr[k];
+              int InAxis = Ord[k] - 1; // output axis k came from input axis
+              if (InAxis >= 0 && InAxis < N) InFlat += Oi * InStr[InAxis];
+            }
+            if (InFlat >= 0 && InFlat < (int)SV.size())
+              VecOut_[I][o] = SV[InFlat];
+          }
+          Out_[I] = VecOut_[I].empty() ? 0.0 : VecOut_[I].front();
         }
       }
     } else if (K == "signal_unit_delay" || K == "signal_zoh") {
