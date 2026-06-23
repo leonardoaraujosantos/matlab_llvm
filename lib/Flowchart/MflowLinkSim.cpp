@@ -947,10 +947,14 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
   // `ode15s` (BDF1, Newton) and `ode23s` (modified Rosenbrock). Selecting
   // either routes away from the explicit RK4 fall-through.
   Implicit_ = (M_.Solver.Algorithm == "ode15s" ||
-               M_.Solver.Algorithm == "ode23s");
-  StiffMethod_ = (M_.Solver.Algorithm == "ode23s")
-                     ? StiffMethod::ROSENBROCK
-                     : StiffMethod::BDF1;
+               M_.Solver.Algorithm == "ode23s" ||
+               M_.Solver.Algorithm == "ode23t");
+  if (M_.Solver.Algorithm == "ode23s")
+    StiffMethod_ = StiffMethod::ROSENBROCK;
+  else if (M_.Solver.Algorithm == "ode23t")
+    StiffMethod_ = StiffMethod::TRAPEZOIDAL;
+  else
+    StiffMethod_ = StiffMethod::BDF1;
   CurrentAdaptiveH_ = StepSize_;
 
   if (M_.Snapshot.Enabled && M_.Snapshot.Depth > 0)
@@ -2793,6 +2797,18 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
 }
 
 void MflowLinkSim::derivative(double T, const double *State, double *Deriv) {
+  // mflow-variable-step-stiff-solvers — settle every block output from
+  // `State` BEFORE reading derivatives. A continuous-state block computes
+  // its derivative from its input (`Deriv[Off] = inputOf(...)`), which
+  // reads the *current* `Out_` of the source block. With two mutually
+  // coupled state blocks (e.g. a harmonic oscillator: x' = v, v' = -x), a
+  // single pass would let whichever block is visited first read a stale
+  // cross-coupled output left over from the previous evaluation. The
+  // explicit RK lanes tolerate that one-evaluation lag, but the implicit
+  // Jacobian divides the O(state) staleness by the FD step (~1e-7) and
+  // explodes. A settling pass (Deriv = null) makes every `Out_` current,
+  // so the derivative pass reads a coherent state.
+  if (Deriv) evalAll(T, State, nullptr);
   evalAll(T, State, Deriv);
   // Item-2 — algebraic-loop solver. After the topological pass has
   // written every output, re-iterate the loop members until their
@@ -3121,6 +3137,66 @@ void bdf1Step(MflowLinkSim &Sim,
 }
 
 //===-----------------------------------------------------------------===//
+// mflow-variable-step-stiff-solvers — Trapezoidal rule (`ode23t`).
+// Implicit, A-stable, 2nd order, and *non-dissipative*: unlike BDF1 it
+// does not artificially damp oscillations, so it suits moderately-stiff
+// oscillatory systems. Newton on the residual
+//   G(y) = y − y_old − (h/2)·(f0 + f(t+h, y)),  J = I − (h/2)·∂f/∂y,
+// reusing the forward-difference Jacobian + dense LU from `bdf1Step`.
+// Fixed-step in this slice (user picks `maxStep`).
+//===-----------------------------------------------------------------===//
+
+void trapezoidalStep(MflowLinkSim &Sim,
+                     void (MflowLinkSim::*Deriv)(double, const double *,
+                                                 double *),
+                     double TBegin, double H,
+                     const std::vector<double> &YIn,
+                     std::vector<double> &YOut,
+                     double RelTol, double AbsTol) {
+  const int Nx = static_cast<int>(YIn.size());
+  YOut.assign(Nx, 0.0);
+  if (Nx == 0) return;
+  std::vector<double> F0(Nx), F(Nx), FP(Nx), G(Nx), Delta(Nx);
+  // f0 = f(t0, y0) is fixed across the iteration (the explicit half).
+  (Sim.*Deriv)(TBegin, YIn.data(), F0.data());
+  // Predictor: explicit Euler.
+  for (int I = 0; I < Nx; ++I) YOut[I] = YIn[I] + H * F0[I];
+
+  for (int It = 0; It < 20; ++It) {
+    (Sim.*Deriv)(TBegin + H, YOut.data(), F.data());
+    for (int I = 0; I < Nx; ++I)
+      G[I] = YOut[I] - YIn[I] - 0.5 * H * (F0[I] + F[I]);
+
+    double GNorm = 0.0;
+    for (int I = 0; I < Nx; ++I) {
+      double Sc = AbsTol + RelTol * std::fabs(YOut[I]);
+      if (Sc < 1e-15) Sc = 1e-15;
+      double E = std::fabs(G[I]) / Sc;
+      if (E > GNorm) GNorm = E;
+    }
+    if (GNorm < 1.0) break;
+
+    // J = I − (h/2)·∂f/∂y by forward difference.
+    std::vector<double> J(Nx * Nx, 0.0);
+    std::vector<double> YPert = YOut;
+    for (int Jc = 0; Jc < Nx; ++Jc) {
+      double Eps = 1e-7 * std::max(1.0, std::fabs(YOut[Jc]));
+      YPert[Jc] += Eps;
+      (Sim.*Deriv)(TBegin + H, YPert.data(), FP.data());
+      YPert[Jc] = YOut[Jc];
+      for (int I = 0; I < Nx; ++I) {
+        double Dfdy = (FP[I] - F[I]) / Eps;
+        J[I * Nx + Jc] = (I == Jc ? 1.0 : 0.0) - 0.5 * H * Dfdy;
+      }
+    }
+
+    Delta = G;
+    if (!solveDense(J, Nx, Delta)) break;
+    for (int I = 0; I < Nx; ++I) YOut[I] -= Delta[I];
+  }
+}
+
+//===-----------------------------------------------------------------===//
 // mflow-variable-step-stiff-solvers — modified Rosenbrock (2)3 stiff
 // integrator: MATLAB's `ode23s` (Bank/Shampine-Reichelt). A one-step,
 // linearly-implicit method — one Jacobian factorisation per step and no
@@ -3254,6 +3330,9 @@ double MflowLinkSim::stepMajor() {
       if (StiffMethod_ == StiffMethod::ROSENBROCK) {
         std::vector<double> Err(Nx, 0.0);
         rosenbrockStep(*this, &MflowLinkSim::derivative, T_, H, Y_, Y1, Err);
+      } else if (StiffMethod_ == StiffMethod::TRAPEZOIDAL) {
+        trapezoidalStep(*this, &MflowLinkSim::derivative, T_, H, Y_, Y1,
+                        EffectiveRelTol_, EffectiveAbsTol_);
       } else {
         bdf1Step(*this, &MflowLinkSim::derivative, T_, H, Y_, Y1,
                  EffectiveRelTol_, EffectiveAbsTol_);

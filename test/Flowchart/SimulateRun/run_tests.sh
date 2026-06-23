@@ -300,6 +300,24 @@ check "ode23s stiff tracks drive @t=0.5" "awk 'BEGIN{exit !(($RS_T05)^2 < 1e-2)}
 check "ode23s stiff tracks drive @t=2.0" "awk 'BEGIN{exit !(($RS_T2)^2 < 1e-2)}'" ""
 check "ode23s stiff stays bounded"       "awk 'BEGIN{exit !($RS_MAX < 200)}'" "RK4 fall-through would blow up (|hλ|=1000); Rosenbrock stays L-stable"
 
+#--- ode23t trapezoidal + multi-state implicit fix (#398) -------------------
+# Harmonic oscillator (two coupled integrators: x'=v, v'=-x, x0=1,v0=0). The
+# trapezoidal rule is non-dissipative: the energy x^2+v^2 stays ~1 and x(10)
+# tracks cos(10)=-0.839. This also guards the #398 fix: before settling block
+# outputs before reading derivatives, the implicit Jacobian for two coupled
+# state blocks was garbage and ALL implicit solvers diverged to ~1e12.
+OT="$("$MATLABC" -simulate "$EX/ode23t_oscillator.mflow")"
+OT_HEAD=$(printf '%s\n' "$OT" | head -1)
+OT_E=$(printf '%s\n' "$OT" | tail -1 | awk -F, '{print $2*$2+$3*$3}')
+OT_X=$(printf '%s\n' "$OT" | tail -1 | awk -F, '{print $2}')
+check "ode23t header" "[[ '$OT_HEAD' == 't,x,v,s' ]]" ""
+check "ode23t conserves energy" "awk 'BEGIN{exit !(($OT_E-1.0)^2 < (5e-2)^2)}'" "trapezoidal rule is non-dissipative: energy x^2+v^2 stays ~1"
+check "ode23t tracks cos(10)"   "awk 'BEGIN{exit !(($OT_X+0.83907)^2 < 1e-2)}'" "x(10) must track cos(10)=-0.839"
+# Same oscillator under ode15s (BDF1): bounded + dissipative (energy decays).
+# A regression of the #398 fix would blow up to ~1e12 here.
+OB_E=$("$MATLABC" -simulate <(sed 's/"ode23t"/"ode15s"/' "$EX/ode23t_oscillator.mflow") | tail -1 | awk -F, '{print $2*$2+$3*$3}')
+check "ode15s multi-state bounded" "awk 'BEGIN{exit !($OB_E > 0.3 && $OB_E < 0.95)}'" "coupled-integrator BDF1 must stay bounded and dissipate (not diverge: #398)"
+
 #--- ode23 native Bogacki-Shampine 3(2) (mflow-variable-step-stiff-solvers) -
 # y' = -y, y(0)=1 (integrator with -1 feedback) integrated with the native
 # ode23 pair → y(2) must converge to e^-2 = 0.13533528. A regression to the
