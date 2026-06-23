@@ -900,6 +900,17 @@ check "nd color rank-3 shape" "grep -q 's\[1,1,1\]' <<< '$NC_HEAD' && grep -q 's
 check "nd color width 12"     "awk 'BEGIN{exit !($NC_NCOL==12)}'" "2×2×3 color image = 12 interleaved elements"
 check "nd color pixel data"   "awk 'BEGIN{exit !(($NC_R-1)^2<1e-9 && $NC_G^2<1e-9)}'" "first pixel is red [1,0,0]"
 
+#--- #392: CSV header is RFC 4180-valid — multi-index names carry commas, so
+# they must be double-quoted (else a comma-splitting parser mis-counts fields
+# and rejects every data row). A standard parser must see header field count ==
+# data field count. We emulate the RFC rule: strip "..." cells before counting.
+NC_HEAD_FIELDS=$(printf '%s\n' "$NC_HEAD" | awk '{
+  n=1; inq=0; for(i=1;i<=length($0);i++){c=substr($0,i,1);
+    if(c=="\"") inq=!inq; else if(c=="," && !inq) n++ } print n }')
+check "csv header quotes commas" "grep -qF '\"s[1,1,1]\"' <<< '$NC_HEAD'" "a name containing a comma (s[1,1,1]) must be double-quoted per RFC 4180"
+check "csv header no bare comma-name" "! grep -qE '(^|,)s\[1,1,1\](,|\$)' <<< '$NC_HEAD'" "the comma-bearing name must never appear unquoted"
+check "csv field count matches"  "[[ \$((NC_HEAD_FIELDS-1)) -eq $NC_NCOL ]]" "RFC 4180-parsed header field count must equal the data-row field count (13)"
+
 #--- mflow-nd-signals: per-channel image_filter on a colour image ----------
 # A 1×3×3 image with one red impulse (R=9 at the middle pixel, G=B=0) is blurred
 # with a horizontal [1 1 1] box kernel. The filter must run *independently per

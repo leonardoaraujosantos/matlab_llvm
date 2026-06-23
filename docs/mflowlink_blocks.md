@@ -269,6 +269,12 @@ index `((…(i1·d2 + i2)·d3 + i3)…)·dN + iN`. 1-D and 2-D are special cases
 **byte-identical** (a vector renders `<id>[k]`, a matrix `<id>[r,c]`); a rank-≥3
 signal renders `<id>[i1,…,iN]`. A reshape to rank > 6 is a sourced error.
 
+> **CSV encoding.** Multi-index column names (`<id>[r,c]`, `<id>[i1,…,iN]`) contain
+> commas, so the `-simulate` CSV **double-quotes** those header cells per RFC 4180 —
+> `t,"sBox[1,1]","sBox[1,2]",…`. Scalar / 1-D names (`<id>`, `<id>[k]`) have no comma
+> and stay unquoted. The header is therefore valid CSV for any standard parser (the
+> live `--sim-dap` path is unaffected — it carries the name as a JSON string).
+
 This is purely a mflowLink generalization — the rest of the stack was already N-D:
 the runtime rank-N descriptor (`matlab_matN`, ≤ 16-D), the MLIR `RankedTensorType`
 (unbounded), and the DAP debugger (8-D display) all exceed 6 without changes.
