@@ -943,7 +943,14 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
     AdaptiveMethod_ = AdaptiveMethod::DOPRI5;
     AdaptiveErrOrder_ = 4;
   }
-  Implicit_ = (M_.Solver.Algorithm == "ode15s");
+  // mflow-variable-step-stiff-solvers — the implicit/stiff lane covers
+  // `ode15s` (BDF1, Newton) and `ode23s` (modified Rosenbrock). Selecting
+  // either routes away from the explicit RK4 fall-through.
+  Implicit_ = (M_.Solver.Algorithm == "ode15s" ||
+               M_.Solver.Algorithm == "ode23s");
+  StiffMethod_ = (M_.Solver.Algorithm == "ode23s")
+                     ? StiffMethod::ROSENBROCK
+                     : StiffMethod::BDF1;
   CurrentAdaptiveH_ = StepSize_;
 
   if (M_.Snapshot.Enabled && M_.Snapshot.Depth > 0)
@@ -3112,6 +3119,89 @@ void bdf1Step(MflowLinkSim &Sim,
     for (int I = 0; I < Nx; ++I) YOut[I] -= Delta[I];
   }
 }
+
+//===-----------------------------------------------------------------===//
+// mflow-variable-step-stiff-solvers — modified Rosenbrock (2)3 stiff
+// integrator: MATLAB's `ode23s` (Bank/Shampine-Reichelt). A one-step,
+// linearly-implicit method — one Jacobian factorisation per step and no
+// Newton loop (three back-substitutions against the same `W = I − h·d·J`).
+// L-stable, 2nd order. `d = 1/(2+√2)`, `e32 = 6+√2`. The time-derivative
+// term `T0 = ∂f/∂t` is finite-differenced (mflowLink models are usually
+// non-autonomous: time-varying sources). Fixed-step in this slice (the
+// user picks `maxStep`), matching the BDF1 lane; `Err` is filled for the
+// variable-step controller that lands with the BDF slice.
+//===-----------------------------------------------------------------===//
+
+void rosenbrockStep(MflowLinkSim &Sim,
+                    void (MflowLinkSim::*Deriv)(double, const double *,
+                                                double *),
+                    double TBegin, double H,
+                    const std::vector<double> &YIn,
+                    std::vector<double> &YOut,
+                    std::vector<double> &Err) {
+  const int Nx = static_cast<int>(YIn.size());
+  YOut.assign(Nx, 0.0);
+  Err.assign(Nx, 0.0);
+  if (Nx == 0) return;
+  const double D = 1.0 / (2.0 + std::sqrt(2.0));
+  const double E32 = 6.0 + std::sqrt(2.0);
+
+  std::vector<double> F0(Nx), F1(Nx), F2(Nx), FP(Nx), Yt(Nx);
+  (Sim.*Deriv)(TBegin, YIn.data(), F0.data());
+
+  // Time derivative T0 = ∂f/∂t by forward difference.
+  std::vector<double> T0(Nx, 0.0);
+  double DtEps = 1e-7 * std::max(1.0, std::fabs(TBegin));
+  if (H > 0) {
+    (Sim.*Deriv)(TBegin + DtEps, YIn.data(), FP.data());
+    for (int I = 0; I < Nx; ++I) T0[I] = (FP[I] - F0[I]) / DtEps;
+  }
+
+  // W = I − h·d·J, J = ∂f/∂y by forward difference (column by column).
+  std::vector<double> W(Nx * Nx, 0.0);
+  std::vector<double> YPert = YIn;
+  for (int Jc = 0; Jc < Nx; ++Jc) {
+    double Eps = 1e-7 * std::max(1.0, std::fabs(YIn[Jc]));
+    YPert[Jc] += Eps;
+    (Sim.*Deriv)(TBegin, YPert.data(), FP.data());
+    YPert[Jc] = YIn[Jc];
+    for (int I = 0; I < Nx; ++I) {
+      double Dfdy = (FP[I] - F0[I]) / Eps;
+      W[I * Nx + Jc] = (I == Jc ? 1.0 : 0.0) - H * D * Dfdy;
+    }
+  }
+
+  auto solveW = [&](std::vector<double> &Rhs) -> bool {
+    std::vector<double> Wc = W; // solveDense factors in place
+    return solveDense(Wc, Nx, Rhs);
+  };
+
+  // Stage 1: W·k1 = F0 + h·d·T0.
+  std::vector<double> K1(Nx), K2(Nx), K3(Nx);
+  for (int I = 0; I < Nx; ++I) K1[I] = F0[I] + H * D * T0[I];
+  if (!solveW(K1)) { for (int I = 0; I < Nx; ++I) YOut[I] = YIn[I] + H * F0[I]; return; }
+
+  // Stage 2: F1 = f(t + h/2, y + h/2·k1); W·(k2 − k1) = F1 − k1.
+  for (int I = 0; I < Nx; ++I) Yt[I] = YIn[I] + 0.5 * H * K1[I];
+  (Sim.*Deriv)(TBegin + 0.5 * H, Yt.data(), F1.data());
+  std::vector<double> Dk(Nx);
+  for (int I = 0; I < Nx; ++I) Dk[I] = F1[I] - K1[I];
+  if (!solveW(Dk)) { for (int I = 0; I < Nx; ++I) YOut[I] = YIn[I] + H * K1[I]; return; }
+  for (int I = 0; I < Nx; ++I) K2[I] = K1[I] + Dk[I];
+
+  // 2nd-order solution: y1 = y0 + h·k2.
+  for (int I = 0; I < Nx; ++I) YOut[I] = YIn[I] + H * K2[I];
+
+  // Stage 3 (error): F2 = f(t+h, y1);
+  // W·k3 = F2 − e32·(k2 − F1) − 2·(k1 − F0) + h·d·T0.
+  (Sim.*Deriv)(TBegin + H, YOut.data(), F2.data());
+  for (int I = 0; I < Nx; ++I)
+    K3[I] = F2[I] - E32 * (K2[I] - F1[I]) - 2.0 * (K1[I] - F0[I]) + H * D * T0[I];
+  if (!solveW(K3)) return; // keep y1, no error estimate
+  // Embedded error: err = (h/6)·(k1 − 2·k2 + k3).
+  for (int I = 0; I < Nx; ++I)
+    Err[I] = (H / 6.0) * (K1[I] - 2.0 * K2[I] + K3[I]);
+}
 } // namespace
 
 double MflowLinkSim::stepMajor() {
@@ -3156,11 +3246,18 @@ double MflowLinkSim::stepMajor() {
   std::vector<double> K1(Nx), K2(Nx), K3(Nx), K4(Nx), Yt(Nx), Y1(Nx);
   if (Nx > 0) {
     if (Implicit_) {
-      // §17.5 #3 — BDF1 fixed-step implicit Backward Euler for
-      // stiff systems. No step-size adaptation in this MVP; the
-      // user picks `settings.solver.maxStep`.
-      bdf1Step(*this, &MflowLinkSim::derivative, T_, H, Y_, Y1,
-               EffectiveRelTol_, EffectiveAbsTol_);
+      // §17.5 #3 / mflow-variable-step-stiff-solvers — fixed-step
+      // implicit stiff lane. `ode15s` runs BDF1 (Backward Euler via
+      // Newton); `ode23s` runs the modified Rosenbrock (2)3. The user
+      // picks the step via `settings.solver.maxStep` (variable-step
+      // stiff control lands with the BDF slice).
+      if (StiffMethod_ == StiffMethod::ROSENBROCK) {
+        std::vector<double> Err(Nx, 0.0);
+        rosenbrockStep(*this, &MflowLinkSim::derivative, T_, H, Y_, Y1, Err);
+      } else {
+        bdf1Step(*this, &MflowLinkSim::derivative, T_, H, Y_, Y1,
+                 EffectiveRelTol_, EffectiveAbsTol_);
+      }
       Y_ = std::move(Y1);
     } else if (AdaptiveSolver_) {
       // Item-2 / mflow-variable-step-stiff-solvers — embedded adaptive

@@ -285,6 +285,21 @@ SB_T2=$(printf '%s\n' "$SB" | awk -F, 'NR>1 && $1+0==2.0 {print $3-$2; exit}')
 check "stiff plant tracks drive at t=2.0" \
   "awk 'BEGIN{exit !(($SB_T2)^2 < 1e-2)}'" ""
 
+#--- ode23s modified Rosenbrock stiff solver (mflow-variable-step-stiff-solvers)
+# Same stiff plant 1/(0.0001·s+1) driven by 100·cos(t), now integrated with
+# ode23s at fixed h=0.1. Before this slice ode23s fell through to RK4, which at
+# h·|λ|=1000 (>> the 2.78 explicit stability bound) would explode. The
+# linearly-implicit Rosenbrock method is L-stable and tracks the drive.
+RS="$("$MATLABC" -simulate "$EX/ode23s_stiff.mflow")"
+RS_HEAD=$(printf '%s\n' "$RS" | head -1)
+check "ode23s_stiff header" "[[ '$RS_HEAD' == 't,drive,plant,scope' ]]" ""
+RS_T05=$(printf '%s\n' "$RS" | awk -F, 'NR>1 && $1+0==0.5 {print $3-$2; exit}')
+RS_T2=$(printf '%s\n' "$RS" | awk -F, 'NR>1 && $1+0==2.0 {print $3-$2; exit}')
+RS_MAX=$(printf '%s\n' "$RS" | awk -F, 'NR>1{v=$3<0?-$3:$3; if(v>m)m=v} END{print m}')
+check "ode23s stiff tracks drive @t=0.5" "awk 'BEGIN{exit !(($RS_T05)^2 < 1e-2)}'" "Rosenbrock must track the stiff plant"
+check "ode23s stiff tracks drive @t=2.0" "awk 'BEGIN{exit !(($RS_T2)^2 < 1e-2)}'" ""
+check "ode23s stiff stays bounded"       "awk 'BEGIN{exit !($RS_MAX < 200)}'" "RK4 fall-through would blow up (|hλ|=1000); Rosenbrock stays L-stable"
+
 #--- ode23 native Bogacki-Shampine 3(2) (mflow-variable-step-stiff-solvers) -
 # y' = -y, y(0)=1 (integrator with -1 feedback) integrated with the native
 # ode23 pair → y(2) must converge to e^-2 = 0.13533528. A regression to the
