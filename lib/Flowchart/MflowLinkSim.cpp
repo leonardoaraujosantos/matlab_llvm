@@ -659,6 +659,7 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
   TransportBuf_.assign(N, {});
   Lookup1DCache_.assign(N, {});
   Lookup2DCache_.assign(N, {});
+  LookupNDCache_.assign(N, {});
   NoiseSeed_.assign(N, 0);
   DigitalLatch_.assign(N, 0.0);
   HdlMem_.assign(N, {});
@@ -799,6 +800,27 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
                                 Lookup2DCache_[I].Z.size() ==
                                   Lookup2DCache_[I].X.size() *
                                   Lookup2DCache_[I].Y.size();
+    } else if (B.Kind == "signal_lookup_nd") {
+      // N-D table: `breakpoints1..breakpointsN` (one per dimension, space/comma
+      // separated) + a flat row-major `tableData` (dim 0 outermost). N is the
+      // number of breakpoints params present (≤ 6).
+      auto &C = LookupNDCache_[I];
+      for (int d = 1; d <= 6; ++d) {
+        auto *S = paramS(B, ("breakpoints" + std::to_string(d)).c_str());
+        if (!S) break;
+        std::vector<double> Ax; int r = 0, c = 0;
+        parseSimMatrix(*S, Ax, r, c);
+        if (Ax.empty()) break;
+        C.Axes.push_back(std::move(Ax));
+      }
+      if (auto *T = paramS(B, "tableData")) {
+        std::vector<double> Z; int r = 0, c = 0;
+        parseSimMatrix(*T, Z, r, c);
+        C.Z = std::move(Z);
+      }
+      size_t Prod = C.Axes.empty() ? 0 : 1;
+      for (auto &Ax : C.Axes) Prod *= Ax.size();
+      C.Valid = !C.Axes.empty() && Prod > 0 && Prod == C.Z.size();
     } else if (B.Kind == "signal_transport_delay") {
       TransportBuf_[I].Delay =
           MflowLinkSim::paramD(B, "delay", 0.0);
@@ -2497,6 +2519,48 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
         double Z0 = Z00 + FX * (Z10 - Z00);
         double Z1 = Z01 + FX * (Z11 - Z01);
         Out_[I] = Z0 + FY * (Z1 - Z0);
+      }
+    } else if (K == "signal_lookup_nd") {
+      // N-D multilinear interpolation: per-axis clamp → (Lo, Frac), then blend
+      // the 2^N table corners. Inputs in1..inN, table row-major (dim 0 outer).
+      const auto &C = LookupNDCache_[I];
+      if (!C.Valid) {
+        Out_[I] = 0.0;
+      } else {
+        int N = static_cast<int>(C.Axes.size());
+        std::vector<size_t> Lo(N, 0);
+        std::vector<double> Frac(N, 0.0);
+        for (int d = 0; d < N; ++d) {
+          double X = inputOf(I, ("in" + std::to_string(d + 1)).c_str());
+          const auto &Bp = C.Axes[d];
+          if (Bp.size() < 2 || X <= Bp.front()) {
+            Lo[d] = 0; Frac[d] = 0.0;
+          } else if (X >= Bp.back()) {
+            Lo[d] = Bp.size() - 2; Frac[d] = 1.0;
+          } else {
+            auto It = std::upper_bound(Bp.begin(), Bp.end(), X);
+            Lo[d] = static_cast<size_t>(It - Bp.begin()) - 1;
+            Frac[d] = (X - Bp[Lo[d]]) / (Bp[Lo[d] + 1] - Bp[Lo[d]]);
+          }
+        }
+        std::vector<size_t> Stride(N, 1);
+        for (int d = N - 2; d >= 0; --d)
+          Stride[d] = Stride[d + 1] * C.Axes[d + 1].size();
+        double Acc = 0.0;
+        for (int Corner = 0; Corner < (1 << N); ++Corner) {
+          double W = 1.0;
+          size_t Idx = 0;
+          bool Ok = true;
+          for (int d = 0; d < N; ++d) {
+            int Bit = (Corner >> d) & 1;
+            W *= Bit ? Frac[d] : (1.0 - Frac[d]);
+            size_t Ax = Lo[d] + Bit;
+            if (Ax >= C.Axes[d].size()) { Ok = false; break; }
+            Idx += Ax * Stride[d];
+          }
+          if (Ok && Idx < C.Z.size()) Acc += W * C.Z[Idx];
+        }
+        Out_[I] = Acc;
       }
     } else if (K == "signal_zero_pole") {
       // Same evaluator as signal_transfer_fcn — the constructor
