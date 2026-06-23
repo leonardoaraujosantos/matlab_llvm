@@ -94,7 +94,7 @@ for name in lowpass pid_tracking multirate saturation_zc enabled_subsystem \
             color_space image_blocks nd_reshape nd_color_image \
             hdl_registers hdl_jk_sr hdl_memory hdl_half_adder \
             hdl_full_adder hdl_shift_register hdl_freq_divider \
-            workspace_io; do
+            workspace_io color_image_filter; do
   run_one "$name"
 done
 

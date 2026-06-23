@@ -214,8 +214,8 @@ and a scope on it renders `[row,col]`-indexed columns (`sBox[2,2]`, …).
 
 | Block | Params | Notes |
 |---|---|---|
-| `signal_image_source` | `rows`, `cols`, `data` | Constant grayscale image source. `data` is the row-major pixel list (any layout; flattened). Lowering rejects a `data` whose pixel count ≠ `rows·cols` |
-| `signal_image_filter` | `kernel` or `type` | 2-D correlation, zero-padded borders, output shape = input. `type`: `box` / `gaussian3` / `sobelx` / `sobely`, or an explicit `kernel` matrix literal |
+| `signal_image_source` | `rows`, `cols`, `channels`, `data` | Constant image source. `data` is the row-major pixel list (interleaved when `channels > 1`); lowering rejects a `data` whose count ≠ `rows·cols·channels`. `channels > 1` makes it a rank-3 colour signal `[rows,cols,channels]` |
+| `signal_image_filter` | `kernel` or `type` | 2-D correlation, zero-padded borders, output shape = input. For a rank-3 colour input the kernel is applied **independently per channel** (no cross-channel bleed). `type`: `box` / `gaussian3` / `sobelx` / `sobely`, or an explicit `kernel` matrix literal |
 | `signal_threshold` | `level: 0.5` | Per-pixel binarize: `1` where pixel `> level`, else `0`; shape preserved |
 | `signal_color_space` | `mode: "rgb2gray"` | RGB↔grayscale over interleaved triples. `rgb2gray`: `0.299·R + 0.587·G + 0.114·B` (Rec.601 luma, width 3W→W); `gray2rgb`: replicate to R=G=B (W→3W) |
 
@@ -226,10 +226,11 @@ response (`4`); a 2×2 ramp **thresholds** at 0.5 to `[0 1; 0 1]`. `color_space.
 red `[1 0 0]` → `0.299`, green → `0.587`; `gray2rgb` of `0.5` → `[0.5 0.5 0.5]`.
 
 `signal_color_space` operates on interleaved RGB triples (3:1 / 1:3 width via
-the inference pass). The remaining color-**image** integration — a `channels`
-param on `signal_image_source` and per-channel `signal_image_filter` so a 2-D
-color image carries its channel count in the shape — is the residual follow-on
-(OpenSpec `mflow-2d-image-signals` group 6).
+the inference pass). Full colour-**image** integration is complete: a `channels`
+param on `signal_image_source` makes the image a rank-3 `[rows,cols,channels]`
+signal (OpenSpec `mflow-nd-signals`), and `signal_image_filter` applies its
+kernel independently per channel, so a colour image carries its channel count in
+the shape end-to-end (interpreter and compiled C++ alike).
 
 > **Image blocks are a simulation target, not a synthesis target.** Unlike the
 > HDL register family, the image blocks (`image_source`/`image_filter`/
