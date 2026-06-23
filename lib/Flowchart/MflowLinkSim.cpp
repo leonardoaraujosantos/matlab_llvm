@@ -3805,9 +3805,26 @@ void MflowLinkSim::logSample() {
   }
 }
 
+// RFC 4180 field encoding: a field that contains a comma, a double-quote,
+// or a line break must be wrapped in double-quotes, with any embedded quote
+// doubled. N-D / image column names carry comma-separated subscripts
+// (`base[i,j]`), so without this the header is not parseable as CSV — a
+// consumer that splits on `,` mis-counts fields (#392). Scalar / 1-D names
+// (`base`, `base[k]`) have no comma and pass through unquoted.
+static std::string csvField(const std::string &S) {
+  if (S.find_first_of(",\"\n\r") == std::string::npos) return S;
+  std::string Out = "\"";
+  for (char C : S) {
+    if (C == '"') Out += "\"\"";
+    else Out += C;
+  }
+  Out += '"';
+  return Out;
+}
+
 void MflowLinkSim::writeCsv(std::ostream &OS) const {
   OS << "t";
-  for (auto &N : LogNames_) OS << "," << N;
+  for (auto &N : LogNames_) OS << "," << csvField(N);
   OS << "\n";
   size_t Rows = LogColumns_.empty() ? 0 : LogColumns_.front().size();
   OS.setf(std::ios::scientific);
