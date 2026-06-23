@@ -932,6 +932,17 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
   AdaptiveSolver_ = (M_.Solver.Type != "fixed_step") &&
                     (M_.Solver.Algorithm == "ode45" ||
                      M_.Solver.Algorithm == "ode23");
+  // mflow-variable-step-stiff-solvers — `ode23` runs the native
+  // Bogacki-Shampine 3(2) pair (embedded 2nd-order estimate); `ode45`
+  // runs Dormand-Prince 5(4) (embedded 4th-order). The controller
+  // exponent is keyed off the estimate's order via AdaptiveErrOrder_.
+  if (M_.Solver.Algorithm == "ode23") {
+    AdaptiveMethod_ = AdaptiveMethod::BS32;
+    AdaptiveErrOrder_ = 2;
+  } else {
+    AdaptiveMethod_ = AdaptiveMethod::DOPRI5;
+    AdaptiveErrOrder_ = 4;
+  }
   Implicit_ = (M_.Solver.Algorithm == "ode15s");
   CurrentAdaptiveH_ = StepSize_;
 
@@ -2825,11 +2836,11 @@ void MflowLinkSim::derivative(double T, const double *State, double *Deriv) {
 //===----------------------------------------------------------------------===//
 // Classic RK4 fixed-step integrator.
 //
-// Picked over Dormand-Prince for Tier C because it's the smallest
-// thing that gives the demos sensible answers; the existing matlab_*
-// ode45 builtins can be plumbed in once `-emit-mflowlink-cpp` (Tier G)
-// lands. The user-facing `solver.algorithm` field is passed through
-// the IR untouched so the choice surfaces in `--dry-run` output.
+// The default for `fixed_step` models and the last-resort fallback when an
+// adaptive step fails to converge. The variable-step lane uses the embedded
+// pairs below (Dormand-Prince 5(4) for `ode45`, Bogacki-Shampine 3(2) for
+// `ode23`) and the implicit BDF1 lane handles `ode15s`. The user-facing
+// `solver.algorithm` selects among them and surfaces in `--dry-run` output.
 //===----------------------------------------------------------------------===//
 
 // Take a single RK4 substep of size `H` from time `TBegin` with the
@@ -2943,9 +2954,59 @@ void dopri5Step(MflowLinkSim &Sim,
 }
 
 //===-----------------------------------------------------------------===//
+// mflow-variable-step-stiff-solvers — Bogacki-Shampine 3(2) adaptive
+// integrator (the standard `ode23` tableau). Returns the 3rd-order
+// solution in `YOut` and the embedded 2nd-order error in `Err`. FSAL:
+// stage 4 is evaluated at `YOut` (and would seed the next step's k1).
+// See Bogacki & Shampine (1989); the same pair MATLAB's `ode23` uses.
+//===-----------------------------------------------------------------===//
+
+struct BS32Workspace {
+  std::vector<double> K1, K2, K3, K4, Yt;
+};
+
+void bs32Step(MflowLinkSim &Sim,
+              void (MflowLinkSim::*Deriv)(double, const double *, double *),
+              double TBegin, double H,
+              const std::vector<double> &YIn,
+              std::vector<double> &YOut,
+              std::vector<double> &Err,
+              BS32Workspace &W) {
+  const size_t Nx = YIn.size();
+  if (W.K1.size() != Nx) {
+    W.K1.assign(Nx, 0.0); W.K2.assign(Nx, 0.0);
+    W.K3.assign(Nx, 0.0); W.K4.assign(Nx, 0.0); W.Yt.assign(Nx, 0.0);
+  }
+  // Stage 1: k1 = f(t, y).
+  (Sim.*Deriv)(TBegin, YIn.data(), W.K1.data());
+  // Stage 2: t + h/2, y + h·(1/2)·k1.
+  for (size_t I = 0; I < Nx; ++I) W.Yt[I] = YIn[I] + H * 0.5 * W.K1[I];
+  (Sim.*Deriv)(TBegin + 0.5 * H, W.Yt.data(), W.K2.data());
+  // Stage 3: t + 3h/4, y + h·(3/4)·k2.
+  for (size_t I = 0; I < Nx; ++I) W.Yt[I] = YIn[I] + H * 0.75 * W.K2[I];
+  (Sim.*Deriv)(TBegin + 0.75 * H, W.Yt.data(), W.K3.data());
+  // 3rd-order solution: y_{n+1} = y + h·(2/9 k1 + 1/3 k2 + 4/9 k3).
+  for (size_t I = 0; I < Nx; ++I)
+    YOut[I] = YIn[I] + H * ((2.0 / 9.0) * W.K1[I]
+                            + (1.0 / 3.0) * W.K2[I]
+                            + (4.0 / 9.0) * W.K3[I]);
+  // Stage 4 (FSAL): k4 = f(t + h, y_{n+1}).
+  (Sim.*Deriv)(TBegin + H, YOut.data(), W.K4.data());
+  // Embedded 2nd-order estimate via the coefficient differences
+  // (3rd-order b − 2nd-order b̂): −5/72 k1 + 1/12 k2 + 1/9 k3 − 1/8 k4.
+  Err.assign(Nx, 0.0);
+  for (size_t I = 0; I < Nx; ++I)
+    Err[I] = H * ((-5.0 / 72.0) * W.K1[I]
+                  + (1.0 / 12.0) * W.K2[I]
+                  + (1.0 / 9.0)  * W.K3[I]
+                  - (1.0 / 8.0)  * W.K4[I]);
+}
+
+//===-----------------------------------------------------------------===//
 // §17.5 #3 — Implicit Backward Euler (BDF1) substep for stiff
-// systems. Solves `y_new = y_old + h · f(t_old + h, y_new)` via
-// fixed-point iteration, starting from an explicit-Euler predictor.
+// systems. Solves `y_new = y_old + h · f(t_old + h, y_new)` via a
+// Newton iteration with a forward-difference Jacobian and a dense LU
+// solve, starting from an explicit-Euler predictor.
 //
 // L-stable: the test equation `y' = λ·y` with `Re(λ) → -∞` gives
 // `y_new = y_old / (1 - h·λ)` → 0 — the right behaviour for stiff
@@ -2953,9 +3014,11 @@ void dopri5Step(MflowLinkSim &Sim,
 // has no stability bound, so the user can pick a step size matched
 // to accuracy rather than stability.
 //
-// MVP caveat: fixed-point iteration converges only when
-// `h · |∂f/∂y| < 1`. True stiff stability needs Newton with a
-// Jacobian (or quasi-Newton). Documented in §17.5.
+// This is a true Newton iteration (not fixed-point): each step forms
+// `J = I − h·∂f/∂y` by forward-difference and solves `J·Δ = G` via the
+// dense LU below. Current caveats (scoped in OpenSpec change
+// mflow-variable-step-stiff-solvers): order 1 only, fixed step, and the
+// Jacobian is recomputed every Newton iteration rather than amortised.
 //===-----------------------------------------------------------===//
 
 // Tiny dense LU + back-substitute for the Newton update. Returns
@@ -3100,19 +3163,24 @@ double MflowLinkSim::stepMajor() {
                EffectiveRelTol_, EffectiveAbsTol_);
       Y_ = std::move(Y1);
     } else if (AdaptiveSolver_) {
-      // Item-2 — Dormand-Prince RK4(5) with PI step-size control.
-      // Try the full window `H`; if the embedded error estimate
-      // exceeds tolerance, shrink and retry. Each accepted step
-      // updates `CurrentAdaptiveH_` so the next major step starts
-      // from a reasonable size. The maxStep cap (`StepSize_`) is
+      // Item-2 / mflow-variable-step-stiff-solvers — embedded adaptive
+      // step control. `ode45` runs Dormand-Prince 5(4); `ode23` runs the
+      // native Bogacki-Shampine 3(2). Try the full window `H`; if the
+      // embedded error estimate exceeds tolerance, shrink and retry. Each
+      // accepted step updates `CurrentAdaptiveH_` so the next major step
+      // starts from a reasonable size. The maxStep cap (`StepSize_`) is
       // respected: the chosen step never exceeds it.
       static thread_local DOPRI5Workspace WS;
+      static thread_local BS32Workspace WS23;
       std::vector<double> Err(Nx, 0.0);
       double TLocal = T_;
       double TEnd   = T_ + H;
       double HCur   = std::min(CurrentAdaptiveH_, H);
       const double RelTol = EffectiveRelTol_;
       const double AbsTol = EffectiveAbsTol_;
+      // Step-size exponent keyed off the embedded estimate's order:
+      // 1/(order+1). DOPRI5 → 0.2, BS32 → 1/3.
+      const double Expo = 1.0 / (AdaptiveErrOrder_ + 1.0);
       const int MaxRetries = 32;
       while (TLocal < TEnd - 1e-15) {
         double HTry = std::min(HCur, TEnd - TLocal);
@@ -3120,8 +3188,12 @@ double MflowLinkSim::stepMajor() {
         int Retry = 0;
         bool Accepted = false;
         while (!Accepted && Retry++ < MaxRetries) {
-          dopri5Step(*this, &MflowLinkSim::derivative,
-                     TLocal, HTry, Y_, Y1, Err, WS);
+          if (AdaptiveMethod_ == AdaptiveMethod::BS32)
+            bs32Step(*this, &MflowLinkSim::derivative,
+                     TLocal, HTry, Y_, Y1, Err, WS23);
+          else
+            dopri5Step(*this, &MflowLinkSim::derivative,
+                       TLocal, HTry, Y_, Y1, Err, WS);
           // Norm: max over elements of |err_i| / (atol + rtol·|y_i|).
           double Norm = 0.0;
           for (size_t I = 0; I < Nx; ++I) {
@@ -3133,17 +3205,16 @@ double MflowLinkSim::stepMajor() {
           }
           if (Norm <= 1.0) {
             Accepted = true;
-            // PI-control: grow step on success, capped at the
-            // configured maxStep.
+            // Grow step on success, capped at the configured maxStep.
             double Factor = (Norm > 1e-12)
-                              ? 0.9 * std::pow(Norm, -0.2)
+                              ? 0.9 * std::pow(Norm, -Expo)
                               : 5.0;
             if (Factor > 5.0) Factor = 5.0;
             HCur = std::min(HTry * Factor, StepSize_);
           } else {
             // Reject + shrink. Lower bound keeps us from
             // infinite-looping on a hard discontinuity.
-            double Factor = 0.9 * std::pow(Norm, -0.2);
+            double Factor = 0.9 * std::pow(Norm, -Expo);
             if (Factor < 0.1) Factor = 0.1;
             HTry = HTry * Factor;
             if (HTry < 1e-15) break;

@@ -446,6 +446,13 @@ private:
   // an adaptive one (ode45 / ode23). Fixed-step mode falls back to
   // classic RK4 at `StepSize_`.
   bool   AdaptiveSolver_ = false;
+  // mflow-variable-step-stiff-solvers — which embedded explicit pair the
+  // adaptive lane runs: Dormand-Prince 5(4) for `ode45`, Bogacki-Shampine
+  // 3(2) for `ode23`. The error estimate's lower order drives the step
+  // controller's exponent (1/(order+1)): DOPRI5 → 4, BS32 → 2.
+  enum class AdaptiveMethod { DOPRI5, BS32 };
+  AdaptiveMethod AdaptiveMethod_ = AdaptiveMethod::DOPRI5;
+  int    AdaptiveErrOrder_ = 4;
   // §17.5 #3 — implicit BDF1 lane for stiff systems. Gated on
   // `settings.solver.algorithm == "ode15s"`. Fixed-step, uses
   // `StepSize_`. L-stable, so steps can be much larger than
