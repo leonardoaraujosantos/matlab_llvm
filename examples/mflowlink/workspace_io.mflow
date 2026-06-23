@@ -1,0 +1,13 @@
+{ "schema": "matforge.flowchart", "version": "0.1.0", "entry": "ws_test",
+  "settings": { "kind": "signal_flow", "solver": { "type": "fixed_step", "algorithm": "ode4", "startTime": 0.0, "stopTime": 2.0, "maxStep": "0.5" } },
+  "flows": [{ "id": "f", "kind": "function", "name": "ws_test", "signature": { "inputs": [], "outputs": [] },
+    "nodes": [
+      { "id": "fw", "kind": "signal_from_workspace", "data": { "params": { "data": "0 0; 1 10; 2 20" } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "tw", "kind": "signal_to_workspace", "data": { "params": { "variableName": "simout" } }, "ports": { "in": [{"id": "in"}], "out": [] } },
+      { "id": "fz", "kind": "signal_from_workspace", "data": { "params": { "data": "0 1; 1 5; 2 9", "interpolation": "zoh" } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "tz", "kind": "signal_to_workspace", "data": { "params": { "variableName": "held" } }, "ports": { "in": [{"id": "in"}], "out": [] } }
+    ],
+    "edges": [
+      { "id": "e0", "kind": "data", "from": {"node": "fw", "port": "out"}, "to": {"node": "tw", "port": "in"} },
+      { "id": "e1", "kind": "data", "from": {"node": "fz", "port": "out"}, "to": {"node": "tz", "port": "in"} }
+    ] }] }

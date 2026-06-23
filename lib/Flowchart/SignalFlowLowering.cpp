@@ -77,6 +77,11 @@ const std::map<std::string, KindInfo> &kindTable() {
     add("signal_display",      {true, true, false, false, false, FIM});
     add("signal_to_workspace", {true, true, false, false, false, FIM});
     add("signal_terminator",   {true, true, false, false, false, FIM});
+    // From Workspace — replays an inline time-series `data` ([t v; …]) as a
+    // source, linearly interpolated (or held) at the current sim time. The
+    // mflowLink equivalent of Simulink's From Workspace (the data rides in the
+    // .mflow rather than a live MATLAB workspace).
+    add("signal_from_workspace", {true, true, false, false, false, CONT});
     // Continuous.
     add("signal_integrator",   {true, true, false, true,  false, CONT});
     add("signal_derivative",   {true, true, false, false, false, CONT});
@@ -280,7 +285,6 @@ const std::map<std::string, KindInfo> &kindTable() {
     // virtual-wire lowering pass, and the N-d generalisation after
     // lookup_1d / 2d are solid). See `docs/mflowlink_blocks.md`.
     for (const char *Name : {
-             "signal_from_workspace",
              "signal_if_action", "signal_switch_case_action",
              "signal_lookup_nd",
              "signal_custom"}) { // NOTE: signal_custom remains

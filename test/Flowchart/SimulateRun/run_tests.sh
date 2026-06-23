@@ -499,9 +499,11 @@ check "signal_constant supported" \
 # A reserved kind is flagged unsupported.
 check "signal_custom reserved" \
   "printf '%s' \"\$LK\" | grep -q '\"kind\": \"signal_custom\", \"supported\": false'" ""
-# Exactly the five reserved kinds report supported:false.
+# Exactly the four reserved kinds report supported:false (signal_if_action,
+# signal_switch_case_action, signal_lookup_nd, signal_custom). From Workspace
+# is now supported (inline time-series source).
 LK_RES=$(printf '%s\n' "$LK" | grep -c '"supported": false')
-check "exactly 5 reserved kinds" "[[ '$LK_RES' == '5' ]]" ""
+check "exactly 4 reserved kinds" "[[ '$LK_RES' == '4' ]]" ""
 
 #--- #345: state_space vector x0 + per-output C --------------------------
 # Undamped oscillator A=[0 1;-1 0], x0=[2;0], C=[1 0;0 1]: analytic solution
@@ -849,6 +851,21 @@ CS_X3=$(printf '%s\n' "$CS" | tail -1 | awk -F, '{print $6}')  # 0.5
 check "color_space header"   "[[ '$CS_HEAD' == 't,sg[1],sg[2],sr[1],sr[2],sr[3]' ]]" "rgb2gray collapses 3→1, gray2rgb expands 1→3 (widths via inference)"
 check "rgb2gray luma"        "awk 'BEGIN{exit !(($CS_R-0.299)^2<1e-9 && ($CS_G-0.587)^2<1e-9)}'" "red→0.299, green→0.587 (Rec.601 luma weights)"
 check "gray2rgb replicate"   "awk 'BEGIN{exit !(($CS_X1-0.5)^2<1e-9 && ($CS_X3-0.5)^2<1e-9)}'" "gray2rgb replicates the gray value across R,G,B"
+
+#--- From Workspace / To Workspace -----------------------------------------
+# signal_from_workspace replays an inline time-series ([t v; …]): linear
+# interpolation (simout: 0,5,10,15,20 over t=0..2) or zero-order hold (held:
+# 1 then 5 at t=1 then 9 at t=2). signal_to_workspace logs each as a named CSV
+# column. Columns: t, simout (linear), held (zoh).
+WS="$("$MATLABC" -simulate "$EX/workspace_io.mflow")"
+WS_HEAD=$(printf '%s\n' "$WS" | head -1)
+WS_LIN_MID=$(printf '%s\n' "$WS" | awk -F, '$1>0.49 && $1<0.51{print $2; exit}')  # t=0.5 → 5
+WS_LIN_END=$(printf '%s\n' "$WS" | tail -1 | awk -F, '{print $2}')                # t=2 → 20
+WS_ZOH_BEFORE=$(printf '%s\n' "$WS" | awk -F, '$1>0.49 && $1<0.51{print $3; exit}') # t=0.5 → 1 (held)
+WS_ZOH_AFTER=$(printf '%s\n' "$WS" | awk -F, '$1>0.99 && $1<1.01{print $3; exit}')  # t=1 → 5 (stepped)
+check "workspace header"     "[[ '$WS_HEAD' == 't,simout,held' ]]" "to_workspace names the CSV column after variableName"
+check "from_workspace linear" "awk 'BEGIN{exit !(($WS_LIN_MID-5)^2<1e-9 && ($WS_LIN_END-20)^2<1e-9)}'" "linear interpolation of the inline time-series at t=0.5 (5) and t=2 (20)"
+check "from_workspace zoh"    "awk 'BEGIN{exit !(($WS_ZOH_BEFORE-1)^2<1e-9 && ($WS_ZOH_AFTER-5)^2<1e-9)}'" "zero-order hold holds 1 until t=1, then steps to 5"
 
 #--- mflow-nd-signals: N-D wire signals (up to 6-D) ----------------------
 # A width-24 frame reshaped to [2,3,4] flows as a rank-3 signal: the scope
