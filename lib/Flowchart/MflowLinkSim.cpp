@@ -1820,13 +1820,19 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
         }
         Out_[I] = VecOut_[I].empty() ? 0.0 : VecOut_[I].front();
       } else {
-        // filter / threshold: read the input image + its (rows, cols) shape.
-        int Rows = 1, Cols = 1;
+        // filter / threshold: read the input image + its (rows, cols[, channels])
+        // shape. A rank-3 input is an interleaved colour image — channels run
+        // innermost: pixel (r,c,ch) lives at flat ((r*Cols + c)*Ch + ch).
+        int Rows = 1, Cols = 1, Ch = 1;
         std::vector<double> Img;
         if (!Inputs_[I].empty()) {
           size_t Src = Inputs_[I].front().SrcBlock;
-          Rows = OutRows_[Src] > 0 ? OutRows_[Src] : 1;
-          Cols = OutCols_[Src] > 0 ? OutCols_[Src] : OutWidth_[Src];
+          const std::vector<int> &Sh = OutShape_[Src];
+          if (Sh.size() >= 3) { Rows = Sh[0]; Cols = Sh[1]; Ch = Sh[2]; }
+          else {
+            Rows = OutRows_[Src] > 0 ? OutRows_[Src] : 1;
+            Cols = OutCols_[Src] > 0 ? OutCols_[Src] : OutWidth_[Src];
+          }
           Img.assign(OutWidth_[Src], 0.0);
           if (OutWidth_[Src] > 1)
             for (int e = 0; e < OutWidth_[Src] && e < (int)VecOut_[Src].size(); ++e)
@@ -1834,13 +1840,15 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
           else if (!Img.empty())
             Img[0] = Out_[Src];
         }
-        int W = Rows * Cols;
+        int W = Rows * Cols * Ch;
         VecOut_[I].assign(W, 0.0);
         if (K == "signal_threshold") {
+          // Element-wise over the whole (possibly multi-channel) buffer.
           double L = paramD(B, "level", 0.5);
           for (int e = 0; e < W && e < (int)Img.size(); ++e)
             VecOut_[I][e] = (Img[e] > L) ? 1.0 : 0.0;
-        } else { // signal_image_filter — 2-D correlation, zero-padded borders
+        } else { // signal_image_filter — 2-D correlation, zero-padded borders,
+                 // applied independently per channel for colour images.
           std::vector<double> Ker; int Kr = 0, Kc = 0;
           if (const std::string *KS = paramS(B, "kernel"))
             parseSimMatrix(*KS, Ker, Kr, Kc);
@@ -1849,17 +1857,18 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
             namedKernel(T ? *T : "box", Ker, Kr, Kc);
           }
           int ar = Kr / 2, ac = Kc / 2; // kernel anchor (center)
-          for (int r = 0; r < Rows; ++r)
-            for (int c = 0; c < Cols; ++c) {
-              double acc = 0.0;
-              for (int i = 0; i < Kr; ++i)
-                for (int j = 0; j < Kc; ++j) {
-                  int rr = r + i - ar, cc = c + j - ac;
-                  if (rr < 0 || rr >= Rows || cc < 0 || cc >= Cols) continue;
-                  acc += Img[rr * Cols + cc] * Ker[i * Kc + j];
-                }
-              VecOut_[I][r * Cols + c] = acc;
-            }
+          for (int ch = 0; ch < Ch; ++ch)
+            for (int r = 0; r < Rows; ++r)
+              for (int c = 0; c < Cols; ++c) {
+                double acc = 0.0;
+                for (int i = 0; i < Kr; ++i)
+                  for (int j = 0; j < Kc; ++j) {
+                    int rr = r + i - ar, cc = c + j - ac;
+                    if (rr < 0 || rr >= Rows || cc < 0 || cc >= Cols) continue;
+                    acc += Img[(rr * Cols + cc) * Ch + ch] * Ker[i * Kc + j];
+                  }
+                VecOut_[I][(r * Cols + c) * Ch + ch] = acc;
+              }
         }
         Out_[I] = VecOut_[I].empty() ? 0.0 : VecOut_[I].front();
       }

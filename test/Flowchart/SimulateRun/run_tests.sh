@@ -900,6 +900,21 @@ check "nd color rank-3 shape" "grep -q 's\[1,1,1\]' <<< '$NC_HEAD' && grep -q 's
 check "nd color width 12"     "awk 'BEGIN{exit !($NC_NCOL==12)}'" "2×2×3 color image = 12 interleaved elements"
 check "nd color pixel data"   "awk 'BEGIN{exit !(($NC_R-1)^2<1e-9 && $NC_G^2<1e-9)}'" "first pixel is red [1,0,0]"
 
+#--- mflow-nd-signals: per-channel image_filter on a colour image ----------
+# A 1×3×3 image with one red impulse (R=9 at the middle pixel, G=B=0) is blurred
+# with a horizontal [1 1 1] box kernel. The filter must run *independently per
+# channel*: the red channel spreads to [9 9 9] while green/blue stay 0. A flat
+# 2-D filter (the pre-fix behaviour) would smear the red value across adjacent
+# channel slots, contaminating the neighbouring pixels' G/B. Interleaved output
+# must be 9 0 0  9 0 0  9 0 0.
+CF="$("$MATLABC" -simulate "$EX/color_image_filter.mflow")"
+CF_NCOL=$(printf '%s\n' "$CF" | tail -1 | awk -F, '{print NF-1}')
+# sum of all R slots (cols 2,5,8 → $2,$5,$8) and all G/B slots.
+CF_RSUM=$(printf '%s\n' "$CF" | tail -1 | awk -F, '{print $2+$5+$8}')
+CF_GBSUM=$(printf '%s\n' "$CF" | tail -1 | awk -F, '{print $3+$4+$6+$7+$9+$10}')
+check "color filter width 9"   "awk 'BEGIN{exit !($CF_NCOL==9)}'" "1×3×3 colour image keeps 9 interleaved elements"
+check "color filter per-chan"  "awk 'BEGIN{exit !(($CF_RSUM-27)^2<1e-9 && $CF_GBSUM^2<1e-9)}'" "box blur spreads the red channel to [9 9 9] (sum 27) without bleeding into G/B"
+
 #--- #343: HDL sequential blocks — D flip-flop / T flip-flop / counter -----
 # A 1 Hz pulse clock drives a D-FF (D=1), a free-running T-FF, and an up
 # counter over 5 s. Each updates once per clock posedge (once per major step,
