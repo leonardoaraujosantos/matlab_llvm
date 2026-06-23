@@ -458,6 +458,12 @@ private:
   // `StepSize_`. L-stable, so steps can be much larger than
   // DOPRI5's stability bound on stiff problems.
   bool   Implicit_ = false;
+  // mflow-variable-step-stiff-solvers — which implicit method the stiff
+  // lane runs: Backward Euler (BDF1, `ode15s`) via Newton, or the modified
+  // Rosenbrock (2)3 (`ode23s`) one-step linearly-implicit method. Both are
+  // fixed-step in the current slice.
+  enum class StiffMethod { BDF1, ROSENBROCK };
+  StiffMethod StiffMethod_ = StiffMethod::BDF1;
   double CurrentAdaptiveH_ = 0.01;
   // §17.5 #7 — effective tolerances after applying per-flow
   // solver overrides. Equal to `M_.Solver.{Rel,Abs}Tol` when no

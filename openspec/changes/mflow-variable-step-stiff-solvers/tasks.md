@@ -31,9 +31,13 @@ Land incrementally; each slice is independently testable and BDF1/RK4 remain the
       default stays forward-difference.
 
 ## 5. Rosenbrock / TR family
-- [ ] Port the runtime Rosenbrock `ode23s` against the `MflowLinkSim` Deriv/Jacobian callbacks.
-- [ ] Add `ode23t` (trapezoidal) and `ode23tb` (TR-BDF2) on the same Jacobian + `solveDense`.
-- [ ] Recognise the three algorithm names in `Loader.h`; remove the RK4 fall-through.
+- [x] `ode23s` modified Rosenbrock (2)3 (`rosenbrockStep`) against the `MflowLinkSim` Deriv
+      callback: `W = I − h·d·J` (FD Jacobian) + `∂f/∂t` term, three back-substitutions via
+      `solveDense`, embedded error estimate. `StiffMethod_` enum dispatches BDF1 vs Rosenbrock.
+- [x] `Loader` already passes `ode23s` through; wiring it removes its RK4 fall-through.
+      Regression `ode23s_stiff.mflow` (stiff plant at fixed h=0.1 RK4 would explode) + emit-parity.
+- [ ] Add `ode23t` (trapezoidal) and `ode23tb` (TR-BDF2) on the same Newton + `solveDense`
+      machinery (follow-up slice); remove their RK4 fall-through.
 
 ## 6. Mass matrix / index-1 DAE
 - [ ] Generalise the implicit residual to `M·(y − y_old) − h·f`, Jacobian `M − h·∂f/∂y`.
