@@ -974,12 +974,24 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
   for (size_t I = 0; I < N; ++I) {
     const auto &B = M_.Blocks[I];
     bool Implicit = B.Kind == "signal_scope" ||
+                    B.Kind == "signal_scope3d" ||
                     B.Kind == "signal_display" ||
                     B.Kind == "signal_to_workspace";
     if (!B.LogSignal && !Implicit) continue;
     std::string Name = B.Id;
     if (B.Kind == "signal_to_workspace") {
       if (auto *V = paramS(B, "variableName")) Name = *V;
+    }
+    // 3-D scope — one column per axis, labelled `<id>[x]/[y]/[z]`, so a
+    // trajectory viewer can render the (x, y, z) path.
+    if (B.Kind == "signal_scope3d") {
+      static const char *Axes[3] = {"x", "y", "z"};
+      for (int E = 0; E < 3; ++E) {
+        LogBlocks_.push_back(I);
+        LogElements_.push_back(E);
+        LogNames_.push_back(Name + "[" + Axes[E] + "]");
+      }
+      continue;
     }
     int W = OutWidth_[I];
     if (W <= 1) {
@@ -1636,6 +1648,15 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       if (HasRef) Rr = inputOf(I, "r");
       else Rr = R_def;
       Out_[I] = Gain * (Rr - Ym);
+    } else if (K == "signal_scope3d") {
+      // 3-D trajectory scope — gather the x/y/z input ports into a width-3
+      // sample. The logging pass names the columns `<id>[x]/[y]/[z]` so a
+      // 3-D path viewer can plot the trajectory.
+      VecOut_[I].assign(3, 0.0);
+      VecOut_[I][0] = inputOf(I, "x");
+      VecOut_[I][1] = inputOf(I, "y");
+      VecOut_[I][2] = inputOf(I, "z");
+      Out_[I] = VecOut_[I][0];
     } else if (K == "signal_scope" || K == "signal_display" ||
                K == "signal_to_workspace" || K == "signal_terminator") {
       if (OutWidth_[I] > 1) {

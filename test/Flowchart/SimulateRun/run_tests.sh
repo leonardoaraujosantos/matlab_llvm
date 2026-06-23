@@ -1093,21 +1093,27 @@ check "inverted pendulum balances" "awk 'BEGIN{exit !(($IP_END)^2 < (1e-2)^2)}'"
 check "inverted pendulum never topples" "awk 'BEGIN{exit !($IP_MAX < 0.5)}'" "stays in the small-angle regime (no run-away)"
 
 # Quadrotor cascade PID: outer position PID → tilt cmd → inner attitude PID →
-# 6-DOF-style plant; altitude PID. Both x and z track a step to 1.0 m.
-# Columns: t, xth(theta), xpos, x_sc(ref+pos), zpos, z_sc.
+# 6-DOF-style plant; altitude PID. Full 3-DOF: x→1.0, y→1.5, z→1.0. A
+# signal_scope3d logs the (x,y,z) path — columns: t, traj[x], traj[y], traj[z].
 QP="$("$MATLABC" -simulate "$ROOT/examples/quadrotor/mflowlink/quadrotor_pid.mflow")"
-QP_X=$(printf '%s\n' "$QP" | tail -1 | awk -F, '{print $3}')
-QP_Z=$(printf '%s\n' "$QP" | tail -1 | awk -F, '{print $5}')
-check "quadrotor PID x→1" "awk 'BEGIN{exit !(($QP_X-1.0)^2 < (5e-2)^2)}'" "cascade PID tracks the x setpoint"
-check "quadrotor PID z→1" "awk 'BEGIN{exit !(($QP_Z-1.0)^2 < (5e-2)^2)}'" "altitude PID tracks the z setpoint"
+QP_HEAD=$(printf '%s\n' "$QP" | head -1)
+QP_X=$(printf '%s\n' "$QP" | tail -1 | awk -F, '{print $2}')
+QP_Y=$(printf '%s\n' "$QP" | tail -1 | awk -F, '{print $3}')
+QP_Z=$(printf '%s\n' "$QP" | tail -1 | awk -F, '{print $4}')
+check "quadrotor PID 3D scope header" "[[ '$QP_HEAD' == 't,traj[x],traj[y],traj[z]' ]]" "signal_scope3d logs an [x]/[y]/[z] trajectory group"
+check "quadrotor PID x→1.0" "awk 'BEGIN{exit !(($QP_X-1.0)^2 < (5e-2)^2)}'" "cascade PID tracks the x setpoint"
+check "quadrotor PID y→1.5" "awk 'BEGIN{exit !(($QP_Y-1.5)^2 < (5e-2)^2)}'" "lateral (roll) PID tracks the y setpoint"
+check "quadrotor PID z→1.0" "awk 'BEGIN{exit !(($QP_Z-1.0)^2 < (5e-2)^2)}'" "altitude PID tracks the z setpoint"
 
-# Quadrotor MPC: outer signal_mpc_move (with velocity-lead damping) → attitude
-# PID inner; altitude PID. x tracks the step with no overshoot, z to 1.0 m.
+# Quadrotor MPC: outer signal_mpc_move (velocity-lead damping) → attitude PID;
+# altitude PID. Full 3-DOF, overshoot-free: x→1.0, y→1.5, z→1.0.
 QM="$("$MATLABC" -simulate "$ROOT/examples/quadrotor/mflowlink/quadrotor_mpc.mflow")"
-QM_X=$(printf '%s\n' "$QM" | tail -1 | awk -F, '{print $3}')
-QM_Z=$(printf '%s\n' "$QM" | tail -1 | awk -F, '{print $5}')
-check "quadrotor MPC x→1" "awk 'BEGIN{exit !(($QM_X-1.0)^2 < (5e-2)^2)}'" "MPC outer loop tracks the x setpoint"
-check "quadrotor MPC z→1" "awk 'BEGIN{exit !(($QM_Z-1.0)^2 < (5e-2)^2)}'" "altitude PID tracks the z setpoint"
+QM_X=$(printf '%s\n' "$QM" | tail -1 | awk -F, '{print $2}')
+QM_Y=$(printf '%s\n' "$QM" | tail -1 | awk -F, '{print $3}')
+QM_Z=$(printf '%s\n' "$QM" | tail -1 | awk -F, '{print $4}')
+check "quadrotor MPC x→1.0" "awk 'BEGIN{exit !(($QM_X-1.0)^2 < (5e-2)^2)}'" "MPC outer loop tracks the x setpoint"
+check "quadrotor MPC y→1.5" "awk 'BEGIN{exit !(($QM_Y-1.5)^2 < (5e-2)^2)}'" "MPC outer loop tracks the lateral y setpoint"
+check "quadrotor MPC z→1.0" "awk 'BEGIN{exit !(($QM_Z-1.0)^2 < (5e-2)^2)}'" "altitude PID tracks the z setpoint"
 
 echo "----"
 echo "passed: $pass    failed: $fail"

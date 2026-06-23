@@ -191,6 +191,7 @@ skip_scope() {
     hdl/*)        return 0 ;;  # SV / cocotb modules + testbenches + synth wrappers
     mflow/*)      return 0 ;;  # custom-block fragments, run via .mflow tooling
     mflowlink/*)  return 0 ;;  # cross-dialect fragments, run via mflowlink_run
+    */mflowlink/*) return 0 ;;  # mflowLink companion scripts (e.g. trajectory plotters)
     stateflow/*)  return 0 ;;  # state-chart fragments
     *_hdl.m)      return 0 ;;  # HDL-targeted file outside hdl/
   esac
