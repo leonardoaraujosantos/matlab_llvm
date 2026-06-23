@@ -696,7 +696,7 @@ expect that aren't on the current roadmap at all.
 | **Complex numbers** | Native complex-valued signals | ○ Real `double` only |
 | **Fixed-point arithmetic** | Q-format with overflow handling, FxP-aware codegen | ○ Floating-point only |
 | **Variable-size signals** | Array sizes change at runtime; max-size declared at design time | ○ Fixed at construction |
-| **Stiff / implicit solvers** | `ode15s`, `ode23t`, `ode23tb`, fixed-step `ode4` / `ode5` / Heun | ◑ DOPRI5 (`ode45`) + native **`ode23`** (Bogacki–Shampine 3(2)) + RK4 + the full fixed-step stiff suite: **`ode15s`** (BDF1, Newton), **`ode23s`** (modified Rosenbrock), **`ode23t`** (trapezoidal, non-dissipative), **`ode23tb`** (TR-BDF2). No named method falls through to RK4. Remaining: variable-order/variable-step BDF + mass-matrix DAE + dense output, scoped in OpenSpec `mflow-variable-step-stiff-solvers` |
+| **Stiff / implicit solvers** | `ode15s`, `ode23t`, `ode23tb`, fixed-step `ode4` / `ode5` / Heun | ◑ DOPRI5 (`ode45`) + native **`ode23`** (Bogacki–Shampine 3(2)) + RK4 + the full stiff suite: **`ode15s`** (BDF1, Newton — **adaptive** under `variable_step` via step-doubling, fixed otherwise), **`ode23s`** (modified Rosenbrock), **`ode23t`** (trapezoidal, non-dissipative), **`ode23tb`** (TR-BDF2). No named method falls through to RK4. Remaining: variable-**order** BDF (2–5) + mass-matrix DAE + dense output, scoped in OpenSpec `mflow-variable-step-stiff-solvers` |
 | **Frame-based processing** | Process N samples per tick (DSP convention) | ○ One sample per tick |
 
 #### 17.4.2 Authoring features Simulink users expect
@@ -913,7 +913,7 @@ what already ships, not greenfield rewrites:
 
 | Change | Pillar | Closes | Starting reality |
 |---|---|---|---|
-| `mflow-variable-step-stiff-solvers` | Variable-step / stiff solvers | §17.4.1 stiff row, §17.2 BDF row | **shipped:** `ode45` (DOPRI5), native `ode23` (Bogacki–Shampine 3(2)), and the full fixed-step stiff suite `ode15s` (BDF1) / `ode23s` (Rosenbrock) / `ode23t` (trapezoidal) / `ode23tb` (TR-BDF2), + the coupled-multi-state implicit fix (#398). **remaining:** variable-order/variable-step BDF1–5, Jacobian reuse + analytic hook, mass-matrix/index-1 DAE, dense output + `Refine` |
+| `mflow-variable-step-stiff-solvers` | Variable-step / stiff solvers | §17.4.1 stiff row, §17.2 BDF row | **shipped:** `ode45` (DOPRI5), native `ode23` (Bogacki–Shampine 3(2)), the stiff suite `ode15s` (BDF1 — **adaptive** under variable_step) / `ode23s` (Rosenbrock) / `ode23t` (trapezoidal) / `ode23tb` (TR-BDF2), + the coupled-multi-state implicit fix (#398). **remaining:** variable-**order** BDF (2–5), Jacobian reuse + analytic hook, mass-matrix/index-1 DAE, dense output + `Refine` |
 | `mflow-embedded-rt-codegen` | Code generation (Embedded Coder) | §17.5 #12 | Flat AOT C/C++/Python/TS/SV subsystem + whole-diagram emit already ships (Tiers 1–7); adds the real-time wrapper — `model_initialize`/`model_step`/`model_terminate` over a static struct, multirate task scheduling, static/MISRA C profile, whole-diagram SystemVerilog, packaged build bundle |
 
 Both run the same evaluator/emitter in the interpreter and the
