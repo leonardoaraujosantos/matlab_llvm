@@ -49,3 +49,11 @@ produce the file; open it in a browser to play.
   counterpart of `examples/mflowlink/3d/orbit_cube.mflow`).
 - **moving_vehicle.m** — a box "vehicle" driving forward over a ground plane
   (the sim3d moving-vehicle demo with primitive shapes).
+
+## Applied: 3-D control demos
+
+[`examples/control/3d/`](../control/3d/README.md) uses this same `sim3d` surface
+to animate **inverted-pendulum** controllers — cart-pole and double inverted
+pendulum, each stabilized by PID, LQR, and pole placement. Those programs build
+a parented kinematic chain (cart → hub → link) and drive it from a nonlinear
+plant, so they double as a Control System Toolbox tour with a moving picture.

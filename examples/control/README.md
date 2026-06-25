@@ -51,6 +51,15 @@ second-order, `systune`/`looptune`/`hinfstruct`, Robust/SysID/MPC
 toolbox bridges), see
 [`../../docs/control_toolbox_roadmap.md`](../../docs/control_toolbox_roadmap.md).
 
+## 3-D animated demos
+
+The [`3d/`](3d/README.md) subdirectory applies these primitives (`lqr`,
+`place`, `ctrb`, `obsv`, `ss`) to the canonical **inverted-pendulum** plants —
+cart-pole and double inverted pendulum — and animates each stabilized run in
+3-D through the [`sim3d`](../sim3d/README.md) command-line API. Two plants ×
+three controllers (PID, LQR, pole placement), each exporting a self-contained
+Babylon.js HTML player.
+
 ## Notes
 
 - These are demonstration programs, not regression tests. The
