@@ -15,7 +15,7 @@ recorded scene + transform timeline.
 Tier 4 (viewer-side Havok/Ammo physics), Tier 5 (deterministic co-sim feedback —
 `cosim` actors + `signal_collision3d`), and Tier 6 (virtual sensors — depth/semantic/lidar/rgb
 via a C++ raycaster, as N-D signals) are implemented and gated (full flowchart ctest +
-288 SimulateRun checks green). The OpenSpec change is
+298 SimulateRun checks green). The OpenSpec change is
 `openspec/changes/mflow-3d-animation/` (proposal / design / tasks / spec). This doc is the
 tiered companion, in the style of `verilog_a_plan.md` and `mflow_link_roadmap.md`.
 
@@ -142,7 +142,7 @@ renders, so no browser or GPU is required.
 
 Unreal Engine, RoadRunner scene import, photorealistic/PBR lighting, weather & particle
 effects (rain/snow/smoke/fog), packaged-executable scenes, GPU/DirectX dependency, a browser in
-the test path, STL/FBX import, skeletal/bone animation, and large-scale actor instancing. These
+the test path, FBX import, skeletal/bone animation, and large-scale actor instancing. These
 are the parts of Sim3D that are inseparable from the game engine or out of scope for a
 deterministic, self-contained, headless-testable backend; revisit individually if a concrete
 demand appears.
