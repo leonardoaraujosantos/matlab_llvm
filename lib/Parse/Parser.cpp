@@ -1069,6 +1069,16 @@ static bool isDspSysObjClass(std::string_view Pkg, std::string_view Field) {
   return false;
 }
 
+// Fold `sim3d.World` / `sim3d.Actor` / `sim3d.export` to the flat names
+// `sim3d_World` / `sim3d_Actor` / `sim3d_export` (Simulink-3D-Animation
+// command-line surface — sim3d-matlab-api). Same package-fold convention as
+// `dsp.*` above; the classdefs + packaged function live in
+// runtime/toolbox/sim3d/. A member not in this set keeps normal field access.
+static bool isSim3dMember(std::string_view Pkg, std::string_view Field) {
+  if (Pkg != "sim3d") return false;
+  return Field == "World" || Field == "Actor" || Field == "export";
+}
+
 Expr *Parser::parsePostfix(Expr *LHS) {
   while (true) {
     if (at(TokenKind::l_paren)) {
@@ -1115,6 +1125,22 @@ Expr *Parser::parsePostfix(Expr *LHS) {
           if (isDspSysObjClass(BN->Name, cur().Text)) {
             std::string Flat = std::string(BN->Name) + "_" +
                                std::string(cur().Text);
+            ++Idx;  // consume the field identifier
+            auto *N = Ctx.make<NameExpr>();
+            N->Name = Ctx.intern(Flat);
+            N->Range.Begin = LHS->Range.Begin;
+            N->Range.End = cur().Loc;
+            LHS = N;
+            continue;
+          }
+          // sim3d package: constructors fold to the prelude classdef names
+          // (sim3d.World -> sim3d_World, sim3d.Actor -> sim3d_Actor); the free
+          // function sim3d.export folds straight to the runtime builtin
+          // matlab_sim3d_export so no prelude wrapper function is needed.
+          if (isSim3dMember(BN->Name, cur().Text)) {
+            std::string Flat = cur().Text == "export"
+                                   ? "matlab_sim3d_export"
+                                   : "sim3d_" + std::string(cur().Text);
             ++Idx;  // consume the field identifier
             auto *N = Ctx.make<NameExpr>();
             N->Name = Ctx.intern(Flat);

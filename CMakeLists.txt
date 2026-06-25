@@ -385,6 +385,10 @@ add_library(MatlabRuntime STATIC
     runtime/toolbox/stateflow/runtime_mstateflow.cpp
     runtime/gpu/runtime_gpu.cpp
     runtime/toolbox/gpu/runtime_gpu_helpers.cpp
+    # Simulink 3D Animation — command-line sim3d.* surface. Shares the Babylon
+    # document writer (include/matlab/Flowchart/BabylonDocument.h) with the
+    # block-diagram emitter, so MatlabRuntime also needs the compiler include dir.
+    runtime/toolbox/sim3d/runtime_sim3d.cpp
     # #50 Phase 3 — Symbolic Math Toolbox dlopen stub.  Always
     # compiled into MatlabRuntime; on first sym call the stub
     # dlopens libmatlab_sym.dylib (built when MATLAB_LLVM_WITH_SYM=ON).
@@ -393,6 +397,7 @@ add_library(MatlabRuntime STATIC
     # link at all.
     runtime/toolbox/sym/runtime_sym_stub.cpp)
 target_include_directories(MatlabRuntime PUBLIC ${CMAKE_SOURCE_DIR}/runtime)
+target_include_directories(MatlabRuntime PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(MatlabRuntime PUBLIC m ${CMAKE_DL_LIBS})
 # -ffunction-sections + -fdata-sections give the linker per-symbol
 # granularity so external callers' dead-strip pass can drop unused

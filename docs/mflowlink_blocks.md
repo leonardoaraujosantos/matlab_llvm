@@ -309,6 +309,11 @@ with `matlabc -emit-mflowlink-babylon model.mflow -o scene.html`. Plan:
 `docs/mflowlink_3d_animation_roadmap.md`; spec:
 `openspec/changes/mflow-3d-animation/`.
 
+> **Command-line counterpart.** The same 3-D viewer is reachable from plain
+> MATLAB code (no `.mflow`) via the `sim3d` package — `sim3d.World`,
+> `sim3d.Actor`, `add`/`open`/`run`/`close`, `sim3d.export` — in the REPL or a
+> script. See [sim3d_matlab_api.md](sim3d_matlab_api.md) and `examples/sim3d/`.
+
 **Conventions.** Coordinate frame is right-handed, **Z-up, metres**; rotation is
 roll/pitch/yaw about X/Y/Z in **radians**. Two physics layers are kept distinct:
 viewer-side Havok/Ammo (Tier 4) is **visualization-only** — excluded from every

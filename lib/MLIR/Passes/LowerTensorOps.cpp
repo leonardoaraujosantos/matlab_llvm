@@ -6498,6 +6498,25 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"matlab_dsp_reset",       "matlab_dsp_reset",       PtrTy, {PtrTy}},
         {"matlab_dsp_init_state",  "matlab_dsp_init_state",  PtrTy, {PtrTy}},
         {"matlab_dsp_get_state",   "matlab_dsp_get_state",   PtrTy, {PtrTy}},
+        /* ===== Simulink 3D Animation — sim3d.* command-line surface =====
+         * The classdef method body forwards the receiver `obj` (PtrTy); setters
+         * also pass a 1x3 matrix (PtrTy), run() a scalar dt (F64). Getters
+         * return a 1x3 matrix; lifecycle calls return the object pointer. */
+        {"matlab_sim3d_world_new",     "matlab_sim3d_world_new",     PtrTy, {PtrTy}},
+        {"matlab_sim3d_actor_new",     "matlab_sim3d_actor_new",     PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_sim3d_set_translation","matlab_sim3d_set_translation",PtrTy,{PtrTy, PtrTy}},
+        {"matlab_sim3d_set_rotation",  "matlab_sim3d_set_rotation",  PtrTy, {PtrTy, PtrTy}},
+        {"matlab_sim3d_set_scale",     "matlab_sim3d_set_scale",     PtrTy, {PtrTy, PtrTy}},
+        {"matlab_sim3d_set_color",     "matlab_sim3d_set_color",     PtrTy, {PtrTy, PtrTy}},
+        {"matlab_sim3d_set_size",      "matlab_sim3d_set_size",      PtrTy, {PtrTy, PtrTy}},
+        {"matlab_sim3d_get_translation","matlab_sim3d_get_translation",PtrTy,{PtrTy}},
+        {"matlab_sim3d_get_rotation",  "matlab_sim3d_get_rotation",  PtrTy, {PtrTy}},
+        {"matlab_sim3d_get_scale",     "matlab_sim3d_get_scale",     PtrTy, {PtrTy}},
+        {"matlab_sim3d_add",           "matlab_sim3d_add",           PtrTy, {PtrTy, PtrTy}},
+        {"matlab_sim3d_open",          "matlab_sim3d_open",          PtrTy, {PtrTy}},
+        {"matlab_sim3d_run",           "matlab_sim3d_run",           PtrTy, {PtrTy, F64}},
+        {"matlab_sim3d_close",         "matlab_sim3d_close",         PtrTy, {PtrTy}},
+        {"matlab_sim3d_export",        "matlab_sim3d_export",        PtrTy, {PtrTy, PtrTy}},
         /* Tier-3 — adaptive filters. */
         {"matlab_dsp_lms_step",    "matlab_dsp_lms_step",    PtrTy, {PtrTy, PtrTy, PtrTy}},
         {"matlab_dsp_rls_step",    "matlab_dsp_rls_step",    PtrTy, {PtrTy, PtrTy, PtrTy}},

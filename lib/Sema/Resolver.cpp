@@ -432,6 +432,17 @@ void Resolver::registerBuiltins() {
     /* Tier-1 — filter-object step + lifecycle. */
     "matlab_dsp_iir_step", "matlab_dsp_sos_step", "matlab_dsp_delay_step",
     "matlab_dsp_reset", "matlab_dsp_init_state", "matlab_dsp_get_state",
+    /* ===== Simulink 3D Animation — command-line sim3d.* surface ===== *
+     * Runtime entries the sim3d_World / sim3d_Actor classdef bodies forward
+     * `obj` into (runtime/toolbox/sim3d/runtime_sim3d.cpp). World/actor
+     * lifecycle + transform setters/getters + keyframe recording + export. */
+    "matlab_sim3d_world_new", "matlab_sim3d_actor_new",
+    "matlab_sim3d_set_translation", "matlab_sim3d_set_rotation",
+    "matlab_sim3d_set_scale", "matlab_sim3d_set_color", "matlab_sim3d_set_size",
+    "matlab_sim3d_get_translation", "matlab_sim3d_get_rotation",
+    "matlab_sim3d_get_scale",
+    "matlab_sim3d_add", "matlab_sim3d_open", "matlab_sim3d_run",
+    "matlab_sim3d_close", "matlab_sim3d_export",
     /* Tier-2 — filter design (function-form, user-facing). */
     "firpm", "firpmord", "firls", "kaiserord",
     "iirnotch", "iirpeak", "iircomb", "designfilt",

@@ -2631,7 +2631,7 @@ static std::string buildReplPrelude(const std::string &Src, bool ScanCwd) {
     "comm", "rf", "optim", "mpc", "ident", "gads", "pde", "prop", "sym",
     "stateflow", "antenna", "control", "stats", "images", "curvefit",
     "dsp", "gpu", "finance", "econ", "fusion", "robotics", "navigation",
-    "dlnet", "rl", "bioinfo",
+    "dlnet", "rl", "bioinfo", "sim3d",
   };
   std::vector<std::string> Files;
   auto add = [&](const std::string &Leaf) {
@@ -3166,6 +3166,13 @@ static std::string buildReplPrelude(const std::string &Src, bool ScanCwd) {
     {false, "dsp_NotchPeakFilter", "dsp_classdefs.m"},
     {false, "dsp_LowpassFilter",   "dsp_classdefs.m"},
     {false, "dsp_HighpassFilter",  "dsp_classdefs.m"},
+    /* Simulink 3D Animation — command-line sim3d.* surface (dotted + flat). */
+    {false, "sim3d.World",  "sim3d_classdefs.m"},
+    {false, "sim3d.Actor",  "sim3d_classdefs.m"},
+    {false, "sim3d.export", "sim3d_classdefs.m"},
+    {false, "sim3d_World",  "sim3d_classdefs.m"},
+    {false, "sim3d_Actor",  "sim3d_classdefs.m"},
+    {false, "sim3d_export", "sim3d_classdefs.m"},
     /* DSP HDL Toolbox — Tier-7/8 simulation surface. */
     {false, "dsphdl.FIRFilter",    "dsphdl_classdefs.m"},
     {false, "dsphdl.BiquadFilter", "dsphdl_classdefs.m"},
@@ -12584,6 +12591,8 @@ int main(int Argc, char **Argv) {
       "dsphdl.FIRFilter", "dsphdl.BiquadFilter",
       "dsphdl.SineWave", "dsphdl.NCO",
       "dsphdl.FIRDecimator", "dsphdl.CICDecimator",
+      /* Simulink 3D Animation — command-line sim3d.* surface. */
+      "sim3d.World", "sim3d.Actor", "sim3d.export",
       "arx", "ar", "armax", "oe", "bj",
       "iv4", "delayest", "compare", "predict", "resid", "goodnessOfFit",
       /* GPU Coder host-side carriers — see gpu_classdefs.m. */
@@ -12844,6 +12853,9 @@ int main(int Argc, char **Argv) {
     /* DSP HDL Toolbox umbrella — any `dsphdl.*` package class. */
     if (ClsName.starts_with("dsphdl."))
       return "dsphdl_classdefs.m";
+    /* Simulink 3D Animation umbrella — any `sim3d.*` member. */
+    if (ClsName.starts_with("sim3d."))
+      return "sim3d_classdefs.m";
     /* GPU Coder host-side carriers — single umbrella file holding
      * gpuArray + coder_gpuConfig classdefs and gather/existsOnGPU/
      * gpuDevice free functions.  See docs/gpu_coder_roadmap.md T1.4. */
@@ -13047,7 +13059,7 @@ int main(int Argc, char **Argv) {
       "comm", "rf", "optim", "mpc", "ident", "gads", "pde", "prop", "sym",
       "stateflow", "antenna", "control", "stats", "images", "curvefit",
       "dsp", "gpu", "finance", "econ", "fusion", "robotics", "navigation",
-      "dlnet", "rl", "bioinfo",
+      "dlnet", "rl", "bioinfo", "sim3d",
     };
     std::vector<std::string> Cands;
     for (const char *Tb : kToolboxDirs) {
