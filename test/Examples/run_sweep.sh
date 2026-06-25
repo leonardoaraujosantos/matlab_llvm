@@ -102,6 +102,7 @@ RUNTIME_SRCS=(
   "$ROOT/runtime/toolbox/stateflow/runtime_mstateflow.cpp"
   "$ROOT/runtime/gpu/runtime_gpu.cpp"
   "$ROOT/runtime/toolbox/gpu/runtime_gpu_helpers.cpp"
+  "$ROOT/runtime/toolbox/sim3d/runtime_sim3d.cpp"
 )
 
 WORK="$(mktemp -d -t mlc-sweep.XXXXXX)"
@@ -111,7 +112,7 @@ echo "==> Compiling runtime objects (once)…"
 RUNTIME_OBJS=()
 for src in "${RUNTIME_SRCS[@]}"; do
   obj="$WORK/$(basename "${src%.cpp}").o"
-  if ! "$CXX" $CXXSTD -DMATLAB_LLVM_WITH_PLOT=1 -I"$ROOT/runtime" -c "$src" -o "$obj" 2>"$WORK/cc.err"; then
+  if ! "$CXX" $CXXSTD -DMATLAB_LLVM_WITH_PLOT=1 -I"$ROOT/runtime" -I"$ROOT/include" -c "$src" -o "$obj" 2>"$WORK/cc.err"; then
     echo "FATAL: failed to compile runtime TU $src" >&2
     cat "$WORK/cc.err" >&2
     exit 2
