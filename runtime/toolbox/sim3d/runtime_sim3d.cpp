@@ -68,6 +68,9 @@ struct Actor {
   double t[3] = {0, 0, 0};
   double r[3] = {0, 0, 0};
   double s[3] = {1, 1, 1};
+  // Optional parent actor (handle pointer); the child's recorded transform is
+  // then its LOCAL frame, composed with the parent via the viewer scene graph.
+  matlab_obj *parent = nullptr;
   // Recorded keyframes: nine components [tx,ty,tz,rx,ry,rz,sx,sy,sz] per run().
   std::vector<std::array<double, 9>> keys;
 };
@@ -172,6 +175,13 @@ void matlab_sim3d_set_size(void *actor_v, matlab_mat *v) {
   readVec(v, actorOf(reinterpret_cast<matlab_obj *>(actor_v)).size, 3, def);
 }
 
+// a.setParent(p): attach actor under parent p (child transform is local).
+void matlab_sim3d_set_parent(void *actor_v, void *parent_v) {
+  if (!actor_v) return;
+  actorOf(reinterpret_cast<matlab_obj *>(actor_v)).parent =
+      reinterpret_cast<matlab_obj *>(parent_v);
+}
+
 // Getters return the stored transform as a 1x3 row (get.Translation etc.).
 matlab_mat *matlab_sim3d_get_translation(void *actor_v) {
   matlab_mat *m = mat_alloc(1, 3);
@@ -268,6 +278,13 @@ void matlab_sim3d_export(void *world_v, void *path_v) {
     Actors << ",\"color\":"; arr(Actors, A.color, 3);
     Actors << ",\"emissive\":"; arr(Actors, A.emissive, 3);
     Actors << ",\"opacity\":" << A.opacity;
+    // Parent (by id) — the viewer composes the child under it via the scene
+    // graph, so the child's recorded transform is its local frame.
+    if (A.parent) {
+      auto PIt = g_actors.find(A.parent);
+      if (PIt != g_actors.end())
+        Actors << ",\"parent\":" << jsonStr(PIt->second.id);
+    }
     Actors << ",\"keys\":[";
     for (size_t R = 0; R < A.keys.size(); ++R) {
       Actors << (R ? "," : "") << "[";

@@ -75,5 +75,8 @@ classdef sim3d_Actor < handle
         function v = get.Scale(obj)
             v = matlab_sim3d_get_scale(obj);
         end
+        function setParent(obj, p)
+            matlab_sim3d_set_parent(obj, p);
+        end
     end
 end

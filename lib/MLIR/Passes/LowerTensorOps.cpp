@@ -6512,6 +6512,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"matlab_sim3d_get_translation","matlab_sim3d_get_translation",PtrTy,{PtrTy}},
         {"matlab_sim3d_get_rotation",  "matlab_sim3d_get_rotation",  PtrTy, {PtrTy}},
         {"matlab_sim3d_get_scale",     "matlab_sim3d_get_scale",     PtrTy, {PtrTy}},
+        {"matlab_sim3d_set_parent",    "matlab_sim3d_set_parent",    PtrTy, {PtrTy, PtrTy}},
         {"matlab_sim3d_add",           "matlab_sim3d_add",           PtrTy, {PtrTy, PtrTy}},
         {"matlab_sim3d_open",          "matlab_sim3d_open",          PtrTy, {PtrTy}},
         {"matlab_sim3d_run",           "matlab_sim3d_run",           PtrTy, {PtrTy, F64}},
