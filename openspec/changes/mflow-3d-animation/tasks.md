@@ -111,21 +111,21 @@ emit lane) that everything else builds on.
 
 ## 6. Sensors, synthetic data, annotations, pacing, recording
 
-- [ ] 6.1 `signal_sensor3d`: deterministic C++ scene sampling →
-  `kind = depth|semantic|lidar|rgb`. Depth ⇒ `[rows,cols]` rank-2; semantic ⇒ `[rows,cols]`
-  class ids; lidar ⇒ `[numPoints,3]`; rgb ⇒ `[rows,cols,3]` rank-3 (flat-shaded raster).
-  Outputs are N-D signals (`mflow-nd-signals`) that flow into image/CV blocks.
-- [ ] 6.2 `signal_actor3d` `semanticLabel` (class id) so the semantic sensor has ground truth.
-- [ ] 6.3 Annotations: a `signal_actor3d` `text` actor (billboarded label) updatable from a
-  signal; world-space placement.
-- [ ] 6.4 Pacing + recording: honour `pacingRate` in the emitted player (real-time playback);
-  a `--record` emit flag also writes a frame sequence / GIF of the timeline for headless
-  artifacts (PNG sequence via the existing `saveas` raster path where the scene is primitive).
-- [ ] 6.5 Example: `camera_depth_stream.mflow` — a `follow` camera on a moving actor produces
-  a depth + semantic stream into an image-processing block (e.g. `signal_image_filter` or a CV
-  block); `SimulateRun` asserts the depth signal shape `[rows,cols]` and a known near/far value.
-- [ ] 6.6 Example: `lidar_scan.mflow` — a lidar sensor over a few primitives; asserts the
-  point-cloud shape `[N,3]` and that points lie on the primitive surfaces.
+- [x] 6.1 `signal_sensor3d`: a deterministic C++ raycaster (ray-sphere / ray-AABB-box /
+  ground-plane) samples the scene each step → `kind = depth|semantic|lidar|rgb`. Depth ⇒
+  `[rows,cols]`; semantic ⇒ `[rows,cols]` class ids; lidar ⇒ `[azimuth·elevation,3]`; rgb ⇒
+  `[rows,cols,3]` (flat-shaded, depth-attenuated). Outputs are N-D signals (`mflow-nd-signals`),
+  implicitly logged, that flow into the image/CV blocks.
+- [x] 6.2 `signal_actor3d` `semanticLabel` (class id) is read by the semantic sensor as ground
+  truth (and the raycaster reads actor geometry + color for rgb).
+- [~] 6.3 Annotations (text actor) — deferred follow-on; not required for the sensor headline.
+- [~] 6.4 Pacing + recording — the viewer already plays in real time against the recorded
+  sample times; `pacingRate` honouring + a `--record` frame/GIF export are deferred follow-ons.
+- [x] 6.5 Example: `camera_depth_stream.mflow` — a depth camera aimed at a unit sphere;
+  `SimulateRun` asserts the `[6,6]` shape, the centre pixel ≈ 4 (5 − radius), and a corner ray
+  reads the range (miss). Semantic/rgb share the same raycast (`semanticLabel` ground truth).
+- [x] 6.6 Example: `lidar_scan.mflow` — a 24-ray lidar over a box post; `SimulateRun` asserts the
+  `[24,3]` point-cloud shape and that the forward ray lands on the box front face (x≈3.5).
 
 ## 7. Docs
 

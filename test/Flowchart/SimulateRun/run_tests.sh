@@ -1264,6 +1264,28 @@ check "collision fires when bodies meet" "awk 'BEGIN{exit !(($CW_T-3.0)^2 < (0.2
 CW_T0=$(printf '%s\n' "$CW" | awk -F, 'NR==1{for(i=1;i<=NF;i++)if($i=="collide")c=i} NR>1 && $1>=1.0 && $1<=1.01 {print $c; exit}')
 check "no collision before contact" "awk 'BEGIN{exit !($CW_T0 < 0.5)}'" ""
 
+# Tier 6 — virtual sensors. camera_depth_stream: a 6×6 depth camera at x=5 aimed
+# at a unit sphere at the origin; the centre pixels read ≈4 (5 − radius) and a
+# corner ray misses (reads the range). lidar_scan: a 24-ray lidar; the forward
+# ray hits a box's front face at x=3.5. N-D column names carry commas, so parse
+# with python (awk -F, would split inside the quoted header fields).
+DEPTH_OK=$("$MATLABC" -simulate "$EX/3d/camera_depth_stream.mflow" | python3 -c '
+import csv,sys
+r=list(csv.reader(sys.stdin)); d=dict(zip(r[0],r[1]))
+ncol=sum(1 for h in r[0] if h.startswith("cam["))
+center=float(d.get("cam[3,3]","0")); corner=float(d.get("cam[1,1]","0"))
+print("ok" if (ncol==36 and abs(center-4.0)<0.3 and corner>=19.0) else "bad", round(center,2), round(corner,2))
+')
+check "depth sensor [6,6] + geometry" "[[ '$DEPTH_OK' == ok* ]]" "center≈4 (5−r), corner=range; got: $DEPTH_OK"
+LIDAR_OK=$("$MATLABC" -simulate "$EX/3d/lidar_scan.mflow" | python3 -c '
+import csv,sys
+r=list(csv.reader(sys.stdin)); d=dict(zip(r[0],r[1]))
+ncol=sum(1 for h in r[0] if h.startswith("lidar["))
+x=float(d.get("lidar[1,1]","0")); y=float(d.get("lidar[1,2]","0"))
+print("ok" if (ncol==72 and abs(x-3.5)<0.2 and abs(y)<0.2) else "bad", round(x,2), round(y,2))
+')
+check "lidar [24,3] point cloud on surface" "[[ '$LIDAR_OK' == ok* ]]" "forward ray hits box front x≈3.5; got: $LIDAR_OK"
+
 # At most one signal_world3d per model — a second is a sourced error.
 TW=$(mktemp /tmp/twoworld.XXXX.mflow)
 sed 's/"id": "world"/"id": "world"/' "$EX/3d/orbit_cube.mflow" > "$TW"

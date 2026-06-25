@@ -25,8 +25,8 @@ One example per tier feature, so every feature has a test model:
 | 4 | `ball_ramp.mflow` ✅ | sphere on an inclined plane (restitution bounce) |
 | 5 | `bounce_cosim.mflow` ✅ | deterministic C++ co-sim; analytic bounce golden |
 | 5 | `cart_wall_bump.mflow` ✅ | cosim cart + `signal_collision3d` → collision feedback signal |
-| 6 | `camera_depth_stream.mflow` | depth + semantic sensor → image/CV block (N-D signals) |
-| 6 | `lidar_scan.mflow` | lidar point cloud `[N,3]` over primitives |
+| 6 | `camera_depth_stream.mflow` ✅ | depth sensor (raycast) → N-D `[6,6]` signal |
+| 6 | `lidar_scan.mflow` ✅ | lidar point cloud `[24,3]` over a box post |
 
 ✅ = concrete fixture written; others are enumerated in the change's `tasks.md` and authored
 as their tier is implemented.

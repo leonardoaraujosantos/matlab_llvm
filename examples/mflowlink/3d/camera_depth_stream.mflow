@@ -1,0 +1,20 @@
+{
+  "entry" : "camera_depth_stream",
+  "flows" : [
+    {
+      "edges" : [],
+      "id" : "flow_depth",
+      "kind" : "program",
+      "name" : "camera_depth_stream",
+      "nodes" : [
+        { "id" : "world", "kind" : "signal_world3d", "data" : { "params" : { "viewpoint" : "6,6,4", "showGround" : true, "output" : "camera_depth_stream.html" } }, "ports" : { "in" : [], "out" : [] } },
+        { "id" : "ball", "kind" : "signal_actor3d", "data" : { "params" : { "name" : "ball", "shape" : "sphere", "radius" : 1.0, "translation" : "0,0,1", "semanticLabel" : 7, "color" : "0.9,0.4,0.2" } }, "ports" : { "in" : [] } },
+        { "id" : "cam", "kind" : "signal_sensor3d", "data" : { "log_signal" : true, "params" : { "kind" : "depth", "rows" : 6, "cols" : 6, "fov" : 0.9, "position" : "5,0,1", "target" : "0,0,1", "range" : 20, "ground" : 0 } }, "ports" : { "in" : [], "out" : [ { "id" : "out" } ] } }
+      ],
+      "signature" : { "inputs" : [], "outputs" : [] }
+    }
+  ],
+  "schema" : "matforge.flowchart",
+  "settings" : { "kind" : "signal_flow", "solver" : { "type" : "fixed_step", "algorithm" : "ode4", "startTime" : 0, "stopTime" : 1, "stepSize" : 0.1, "zeroCrossing" : false } },
+  "version" : "0.1.0"
+}

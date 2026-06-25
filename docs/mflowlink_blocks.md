@@ -325,6 +325,7 @@ Shipped blocks (Tiers 1–2):
 | `signal_light3d` | ✓ | `type: "directional"` (`directional`/`point`/`spot`), `color: "1,1,1"`, `intensity: 0.8`, `position: "0,0,10"`, `direction: "-0.5,-0.5,-1"` | Static light config (no ports). The viewer adds a dim hemispheric fill plus each configured light. Signal-driven intensity/pose is a follow-on. |
 | `signal_camera3d` | ✓ | `mode: "static"` (`static`/`follow`), `position: "8,8,6"`, `target: "0,0,0"`, `follow: "<actorName>"`, `fov: 0.8` | Static viewpoint or follow-actor camera (no ports). First camera in the model wins. |
 | `signal_collision3d` | ✓ | `radiusA: 0.5`, `radiusB: 0.5`, `stiffness: 100` | Tier-5 collision/contact event. Input ports `poseA`/`poseB` (read xyz from two actors' outputs); emits the collision boolean on `out` and a penalty contact force on the `force` port — a controller wired from `out` reacts to the collision. Loop-breaker. |
+| `signal_sensor3d` | ✓ | `kind: "depth"` (`depth`/`semantic`/`lidar`/`rgb`), `rows: 8`, `cols: 8`, `fov: 1.0`, `position: "0,0,3"`, `target: "0,0,0"`, `range: 50`, `azimuth: 16`, `elevation: 1`, `ground: 1` | Tier-6 virtual sensor. A deterministic C++ raycaster casts rays from the pose over the primitive scene (sphere / box / ground plane) each step → an N-D signal: `depth`/`semantic` as `[rows,cols]`, `rgb` as `[rows,cols,3]`, `lidar` as `[azimuth·elevation,3]` (reuses `mflow-nd-signals`). Implicitly logged; feeds the image-processing / computer-vision blocks. Loop-breaker. |
 
 **Co-sim actors (Tier 5).** A `signal_actor3d` with `cosim: true` becomes a
 deterministic rigid body: it owns 6 continuous states `[x,y,z,vx,vy,vz]`
@@ -337,8 +338,8 @@ Its recorded transform carries the physics pose (position in `[tx,ty,tz]`), so a
 path is authoritative and golden-stable (free-fall is RK4-exact) — the viewer's
 Havok (Tier 4) is only the visual.
 
-Reserved for later tiers (round-trip through the loader, rejected at lowering
-until shipped): `signal_sensor3d`.
+All six tiers of the `signal_*3d` family are shipped (world, actor with
+primitive/glTF/URDF/co-sim, light, camera, collision, sensor).
 
 **Emit lane.** `-emit-mflowlink-babylon` runs the simulation, then writes one
 HTML document with the scene-graph + keyframe timeline + viewer logic embedded

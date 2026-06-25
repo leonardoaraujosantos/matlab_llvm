@@ -79,6 +79,7 @@ signal_running_stats
 signal_saturation
 signal_scope
 signal_scope3d
+signal_sensor3d
 signal_shift_register
 signal_sine
 signal_spectrum

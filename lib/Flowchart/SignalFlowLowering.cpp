@@ -100,6 +100,10 @@ const std::map<std::string, KindInfo> &kindTable() {
     // output comes from positions, not a same-step algebraic feedthrough), so
     // it can feed a controller without forming an algebraic loop.
     add("signal_collision3d",  {true, true, false, true, false, FIM});
+    // mflow-3d-animation (Tier 6) — virtual sensor. Casts rays from a pose over
+    // the primitive scene each step → an N-D signal (depth/semantic [r,c],
+    // rgb [r,c,3], lidar [N,3]) that feeds the image/CV blocks. Loop-breaker.
+    add("signal_sensor3d",     {true, true, false, true, false, FIM});
     // From Workspace — replays an inline time-series `data` ([t v; …]) as a
     // source, linearly interpolated (or held) at the current sim time. The
     // mflowLink equivalent of Simulink's From Workspace (the data rides in the
@@ -1230,6 +1234,28 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
       B.OutShape = {B.OutWidth};
       B.OutRows = 1;
       B.OutCols = B.OutWidth;
+    } else if (N.Kind == "signal_sensor3d") {
+      // mflow-3d-animation (Tier 6) — N-D sensor signal sized from params.
+      // depth/semantic: [rows, cols]; rgb: [rows, cols, 3]; lidar: [points, 3].
+      std::string Kind = N.getParam("kind") ? *N.getParam("kind") : "depth";
+      if (Kind == "lidar") {
+        int Az = N.getParam("azimuth") ? std::atoi(N.getParam("azimuth")->c_str()) : 16;
+        int El = N.getParam("elevation") ? std::atoi(N.getParam("elevation")->c_str()) : 1;
+        if (Az < 1) Az = 1;
+        if (El < 1) El = 1;
+        B.OutShape = {Az * El, 3};
+      } else {
+        int R = N.getParam("rows") ? std::atoi(N.getParam("rows")->c_str()) : 8;
+        int C = N.getParam("cols") ? std::atoi(N.getParam("cols")->c_str()) : 8;
+        if (R < 1) R = 1;
+        if (C < 1) C = 1;
+        if (Kind == "rgb") B.OutShape = {R, C, 3};
+        else B.OutShape = {R, C};
+      }
+      B.OutWidth = 1;
+      for (int d : B.OutShape) B.OutWidth *= d;
+      B.OutRows = B.OutShape[0];
+      B.OutCols = B.OutWidth / B.OutShape[0];
     } else if (N.Kind == "signal_world3d" || N.Kind == "signal_light3d" ||
                N.Kind == "signal_camera3d" || N.Kind == "signal_collision3d") {
       // Scene config / collision event — scalar output (collision3d emits the

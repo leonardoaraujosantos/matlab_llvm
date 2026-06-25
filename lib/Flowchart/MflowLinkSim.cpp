@@ -1003,6 +1003,7 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
     bool Implicit = B.Kind == "signal_scope" ||
                     B.Kind == "signal_scope3d" ||
                     B.Kind == "signal_actor3d" ||
+                    B.Kind == "signal_sensor3d" ||
                     B.Kind == "signal_display" ||
                     B.Kind == "signal_to_workspace";
     if (!B.LogSignal && !Implicit) continue;
@@ -1763,6 +1764,147 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       bool Hit = Pen > 0.0;
       Out_[I] = Hit ? 1.0 : 0.0;
       PortOut_[I]["force"] = Hit ? paramD(B, "stiffness", 100.0) * Pen : 0.0;
+    } else if (K == "signal_sensor3d") {
+      // mflow-3d-animation (Tier 6) — virtual sensor. Cast rays from the sensor
+      // pose over the primitive scene (sphere / box / ground plane) each step;
+      // fill the N-D output (depth/semantic [r,c], rgb [r,c,3], lidar [N,3]).
+      // Deterministic geometry → golden-stable, feeds the image/CV blocks.
+      struct Prim {
+        int kind; // 0 sphere, 1 box, 2 ground-plane
+        double c[3], r, h[3], label, col[3];
+      };
+      std::vector<Prim> Scene;
+      double GroundZ = paramD(B, "groundZ", 0.0);
+      bool HasGround = paramD(B, "ground", 1.0) > 0.5;
+      for (size_t J = 0; J < M_.Blocks.size(); ++J) {
+        const auto &AB = M_.Blocks[J];
+        if (AB.Kind != "signal_actor3d") continue;
+        Prim P{};
+        // Position: the actor's current transform (VecOut 0..2) or its static
+        // translation param.
+        if (VecOut_[J].size() >= 3) {
+          P.c[0] = VecOut_[J][0]; P.c[1] = VecOut_[J][1]; P.c[2] = VecOut_[J][2];
+        } else {
+          double t[3] = {0, 0, 0};
+          parseVec3Param(AB, "translation", t);
+          P.c[0] = t[0]; P.c[1] = t[1]; P.c[2] = t[2];
+        }
+        std::string Sh = paramS(AB, "shape") ? *paramS(AB, "shape") : "box";
+        if (Sh == "sphere") { P.kind = 0; P.r = paramD(AB, "radius", 0.5); }
+        else {
+          P.kind = 1;
+          double sz[3] = {1, 1, 1};
+          parseVec3Param(AB, "size", sz);
+          P.h[0] = sz[0] / 2; P.h[1] = sz[1] / 2; P.h[2] = sz[2] / 2;
+        }
+        P.label = paramD(AB, "semanticLabel", 1.0);
+        double col[3] = {0.6, 0.6, 0.6};
+        parseVec3Param(AB, "color", col);
+        P.col[0] = col[0]; P.col[1] = col[1]; P.col[2] = col[2];
+        Scene.push_back(P);
+      }
+      auto castRay = [&](const double o[3], const double d[3], double &t,
+                         int &hitPrim) {
+        t = paramD(B, "range", 50.0);
+        hitPrim = -1;
+        for (size_t pi = 0; pi < Scene.size(); ++pi) {
+          const Prim &P = Scene[pi];
+          double th = -1.0;
+          if (P.kind == 0) { // sphere
+            double oc[3] = {o[0] - P.c[0], o[1] - P.c[1], o[2] - P.c[2]};
+            double b = oc[0]*d[0]+oc[1]*d[1]+oc[2]*d[2];
+            double cc = oc[0]*oc[0]+oc[1]*oc[1]+oc[2]*oc[2] - P.r*P.r;
+            double disc = b*b - cc;
+            if (disc >= 0) { double s = std::sqrt(disc); th = -b - s; if (th < 0) th = -b + s; }
+          } else { // AABB box (slab test)
+            double tmin = -1e30, tmax = 1e30;
+            bool ok = true;
+            for (int a = 0; a < 3 && ok; ++a) {
+              double lo = P.c[a]-P.h[a], hi = P.c[a]+P.h[a];
+              if (std::fabs(d[a]) < 1e-12) { if (o[a] < lo || o[a] > hi) ok = false; }
+              else {
+                double t1 = (lo-o[a])/d[a], t2 = (hi-o[a])/d[a];
+                if (t1 > t2) std::swap(t1, t2);
+                tmin = std::max(tmin, t1); tmax = std::min(tmax, t2);
+                if (tmin > tmax) ok = false;
+              }
+            }
+            if (ok && tmax > 0) th = tmin > 0 ? tmin : tmax;
+          }
+          if (th > 1e-6 && th < t) { t = th; hitPrim = (int)pi; }
+        }
+        if (HasGround && std::fabs(d[2]) > 1e-12) {
+          double tg = (GroundZ - o[2]) / d[2];
+          if (tg > 1e-6 && tg < t) { t = tg; hitPrim = -2; } // -2 = ground
+        }
+      };
+      double Pos[3] = {0, 0, 3}, Tgt[3] = {0, 0, 0};
+      parseVec3Param(B, "position", Pos);
+      parseVec3Param(B, "target", Tgt);
+      double fwd[3] = {Tgt[0]-Pos[0], Tgt[1]-Pos[1], Tgt[2]-Pos[2]};
+      double fl = std::sqrt(fwd[0]*fwd[0]+fwd[1]*fwd[1]+fwd[2]*fwd[2]);
+      if (fl < 1e-9) { fwd[0]=1; fwd[1]=0; fwd[2]=0; fl=1; }
+      for (int a=0;a<3;a++) fwd[a]/=fl;
+      double up0[3] = {0, 0, 1};
+      double right[3] = {fwd[1]*up0[2]-fwd[2]*up0[1], fwd[2]*up0[0]-fwd[0]*up0[2], fwd[0]*up0[1]-fwd[1]*up0[0]};
+      double rl = std::sqrt(right[0]*right[0]+right[1]*right[1]+right[2]*right[2]);
+      if (rl < 1e-9) { right[0]=1; right[1]=0; right[2]=0; rl=1; }
+      for (int a=0;a<3;a++) right[a]/=rl;
+      double up[3] = {right[1]*fwd[2]-right[2]*fwd[1], right[2]*fwd[0]-right[0]*fwd[2], right[0]*fwd[1]-right[1]*fwd[0]};
+      std::string Kind = paramS(B, "kind") ? *paramS(B, "kind") : "depth";
+      double Range = paramD(B, "range", 50.0);
+      const std::vector<int> &Sh = M_.Blocks[I].OutShape;
+      VecOut_[I].assign(OutWidth_[I], 0.0);
+      if (Kind == "lidar") {
+        int Az = Sh.size() >= 1 ? Sh[0] : 16; // points = Sh[0]
+        int El = std::max(1, (int)paramD(B, "elevation", 1.0));
+        int AzN = Az / El; if (AzN < 1) AzN = 1;
+        double ElSpan = paramD(B, "elevationSpan", 0.5);
+        int p = 0;
+        for (int e = 0; e < El && p < Az; ++e) {
+          double pitch = (El == 1) ? 0.0 : (-ElSpan/2 + ElSpan*e/(El-1));
+          for (int a = 0; a < AzN && p < Az; ++a, ++p) {
+            double ang = 2.0*M_PI*a/AzN;
+            double d[3];
+            for (int k=0;k<3;k++) d[k] = std::cos(ang)*fwd[k] + std::sin(ang)*right[k] + std::sin(pitch)*up[k];
+            double dl = std::sqrt(d[0]*d[0]+d[1]*d[1]+d[2]*d[2]);
+            for (int k=0;k<3;k++) d[k]/=dl;
+            double t; int hp; castRay(Pos, d, t, hp);
+            VecOut_[I][p*3+0] = Pos[0]+t*d[0];
+            VecOut_[I][p*3+1] = Pos[1]+t*d[1];
+            VecOut_[I][p*3+2] = Pos[2]+t*d[2];
+          }
+        }
+      } else {
+        int R = Sh.size() >= 1 ? Sh[0] : 8;
+        int C = Sh.size() >= 2 ? Sh[1] : 8;
+        double tanF = std::tan(0.5 * paramD(B, "fov", 1.0));
+        double aspect = (double)C / (double)R;
+        for (int i = 0; i < R; ++i) {
+          double v = (1.0 - 2.0*(i+0.5)/R) * tanF;
+          for (int j = 0; j < C; ++j) {
+            double u = (2.0*(j+0.5)/C - 1.0) * tanF * aspect;
+            double d[3];
+            for (int k=0;k<3;k++) d[k] = fwd[k] + u*right[k] + v*up[k];
+            double dl = std::sqrt(d[0]*d[0]+d[1]*d[1]+d[2]*d[2]);
+            for (int k=0;k<3;k++) d[k]/=dl;
+            double t; int hp; castRay(Pos, d, t, hp);
+            if (Kind == "semantic") {
+              VecOut_[I][i*C+j] = (hp >= 0) ? Scene[hp].label : 0.0;
+            } else if (Kind == "rgb") {
+              double col[3] = {0.1, 0.1, 0.12}; // background
+              if (hp >= 0) { col[0]=Scene[hp].col[0]; col[1]=Scene[hp].col[1]; col[2]=Scene[hp].col[2]; }
+              else if (hp == -2) { col[0]=col[1]=col[2]=0.25; }
+              // shade by inverse depth for a little relief
+              double shade = (hp != -1) ? std::max(0.3, 1.0 - t/Range) : 1.0;
+              for (int k=0;k<3;k++) VecOut_[I][(i*C+j)*3+k] = col[k]*shade;
+            } else { // depth
+              VecOut_[I][i*C+j] = t;
+            }
+          }
+        }
+      }
+      Out_[I] = VecOut_[I].empty() ? 0.0 : VecOut_[I][0];
     } else if (K == "signal_actor3d" && B.ContStateCount == 6) {
       // mflow-3d-animation Tier 5 — co-sim actor. Its 6 states [x,y,z, vx,vy,vz]
       // are integrated under gravity; the recorded transform carries the pose
