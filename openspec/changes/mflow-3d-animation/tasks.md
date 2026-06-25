@@ -98,8 +98,7 @@ emit lane gained `--babylon-inline` (network-free engine vendoring).
   reproducible / platform-independent (a true golden, unlike Tier-4 viewer physics).
 - [x] 5.2 Co-sim actor exposes its physics state: the recorded transform carries the pose
   (position in `[tx,ty,tz]`, read by collision3d / controllers) and `x`/`y`/`z`/`vx`/`vy`/`vz`/
-  `contact` are named scalar ports. (Full 6-vector `pose`/`velocity` ports are a follow-on —
-  the single-`VecOut_` model carries the transform; named scalars cover the rest.)
+  `contact` are named scalar ports. Rotational dynamics (free spin from `angularVelocity`) + pairwise sphere-sphere elastic collision response shipped in the depth batch. (Contact torque + box-box response + full 6-vector ports remain follow-ons.)
 - [x] 5.3 `signal_collision3d` event block: input ports `poseA`/`poseB` (xyz of two actors);
   emits a collision boolean on `out` + a penalty contact `force`. Loop-breaker, so it can feed
   a controller without an algebraic loop.

@@ -26,6 +26,7 @@ One example per tier feature, so every feature has a test model:
 | 4 | `ball_ramp.mflow` ✅ | sphere on an inclined plane (restitution bounce) |
 | 5 | `bounce_cosim.mflow` ✅ | deterministic C++ co-sim; analytic bounce golden |
 | 5 | `cart_wall_bump.mflow` ✅ | cosim cart + `signal_collision3d` → collision feedback signal |
+| 5 | `two_ball_collision.mflow` ✅ | elastic momentum exchange + free rotation |
 | 6 | `camera_depth_stream.mflow` ✅ | depth sensor (raycast) → N-D `[6,6]` signal |
 | 6 | `lidar_scan.mflow` ✅ | lidar point cloud `[24,3]` over a box post |
 

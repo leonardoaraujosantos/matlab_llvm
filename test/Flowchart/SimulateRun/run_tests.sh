@@ -1312,6 +1312,22 @@ INL_CDN=$(grep -c 'cdn.babylonjs.com' "$INL_F")
 check "--babylon-inline omits the CDN" "[[ $INL_CDN -eq 0 ]]" "engine bundle inlined"
 rm -f "$INL_F" "$FAKE"
 
+# Tier 5 rigid-body depth — two_ball_collision: two equal-mass spheres in a
+# head-on elastic (e=1) collision exchange velocities (each reverses); body b
+# also free-spins from its angularVelocity (b[rz] = 3·t).
+TB="$("$MATLABC" -simulate "$EX/3d/two_ball_collision.mflow")"
+TB_RES=$(printf '%s\n' "$TB" | python3 -c '
+import csv,sys
+r=list(csv.reader(sys.stdin)); H=r[0]
+ax=H.index("a[tx]"); bx=H.index("b[tx]")
+a0,a1=float(r[1][ax]),float(r[-1][ax]); b0,b1=float(r[1][bx]),float(r[-1][bx])
+# elastic head-on swap: a (started -3 moving +x) ends moving -x (a1<a0); b opposite
+print("ok" if (a1 < a0 and b1 > b0) else "bad", round(a1,1), round(b1,1))
+')
+check "elastic collision exchanges momentum" "[[ '$TB_RES' == ok* ]]" "head-on e=1 swap; got: $TB_RES"
+TB_RZ=$(printf '%s\n' "$TB" | awk -F, 'NR==1{for(i=1;i<=NF;i++)if($i=="b[rz]")z=i} NR>1 && $1>=0.999 && $1<=1.005 {print $z; exit}')
+check "cosim actor free-spins" "awk 'BEGIN{exit !(($TB_RZ-3.0)^2 < (1e-1)^2)}'" "angularVelocity integrates to orientation"
+
 # At most one signal_world3d per model — a second is a sourced error.
 TW=$(mktemp /tmp/twoworld.XXXX.mflow)
 sed 's/"id": "world"/"id": "world"/' "$EX/3d/orbit_cube.mflow" > "$TW"

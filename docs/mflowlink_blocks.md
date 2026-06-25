@@ -328,15 +328,21 @@ Shipped blocks (Tiers 1–2):
 | `signal_sensor3d` | ✓ | `kind: "depth"` (`depth`/`semantic`/`lidar`/`rgb`), `rows: 8`, `cols: 8`, `fov: 1.0`, `position: "0,0,3"`, `target: "0,0,0"`, `range: 50`, `azimuth: 16`, `elevation: 1`, `ground: 1` | Tier-6 virtual sensor. A deterministic C++ raycaster casts rays from the pose over the primitive scene (sphere / box / ground plane) each step → an N-D signal: `depth`/`semantic` as `[rows,cols]`, `rgb` as `[rows,cols,3]`, `lidar` as `[azimuth·elevation,3]` (reuses `mflow-nd-signals`). Implicitly logged; feeds the image-processing / computer-vision blocks. Loop-breaker. |
 
 **Co-sim actors (Tier 5).** A `signal_actor3d` with `cosim: true` becomes a
-deterministic rigid body: it owns 6 continuous states `[x,y,z,vx,vy,vz]`
-integrated under the world gravity by the existing RK4, seeded from `translation`
-+ `velocity` params, with a ground restitution bounce (`restitution`, `groundZ`,
-and the collision half-extent from `radius`/`size`) resolved once per major step.
-Its recorded transform carries the physics pose (position in `[tx,ty,tz]`), so a
-`signal_collision3d` or controller reads the position from the actor's output;
-`x`/`y`/`z`/`vx`/`vy`/`vz`/`contact` are also exposed as named scalar ports. This
-path is authoritative and golden-stable (free-fall is RK4-exact) — the viewer's
-Havok (Tier 4) is only the visual.
+deterministic rigid body: it owns 12 continuous states
+`[x,y,z, vx,vy,vz, roll,pitch,yaw, wx,wy,wz]` integrated by the existing RK4 —
+translation under the world gravity, free rotation (constant angular momentum)
+seeded from `velocity`/`rotation`/`angularVelocity` params. Per major step,
+`resolveCosimContacts()` applies a ground restitution bounce (`restitution`,
+`groundZ`, collision half-extent from `radius`/`size`) **and** pairwise
+sphere-sphere elastic collision (impulse along the line of centres, momentum
+exchanged by `mass`, with de-penetration). Its recorded transform carries the
+physics pose (position `[tx,ty,tz]` + orientation `[rx,ry,rz]`), so a
+`signal_collision3d` or controller reads it from the actor's output;
+`x`/`y`/`z`/`vx`/`vy`/`vz`/`wx`/`wy`/`wz`/`contact` are also named scalar ports.
+Authoritative and golden-stable (free-fall RK4-exact; equal-mass head-on e=1
+collision swaps velocities) — the viewer's Havok (Tier 4) is only the visual.
+*Follow-ons: contact-induced torque (off-centre hits don't yet impart spin) and
+box-box collision response.*
 
 All six tiers of the `signal_*3d` family are shipped (world, actor with
 primitive/glTF/URDF/co-sim, light, camera, collision, sensor).

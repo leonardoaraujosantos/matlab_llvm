@@ -1281,10 +1281,12 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
     // State counts + loop-breaker classification.
     B.IsLoopBreaker = KI->LoopBreakerAlways;
     if (N.Kind == "signal_actor3d" && N.getParam("cosim") != nullptr) {
-      // mflow-3d-animation Tier 5 — a co-sim actor owns 6 continuous states
-      // [x,y,z, vx,vy,vz] integrated under gravity. Its pose/velocity outputs
-      // come from state (not direct feedthrough), so it breaks algebraic loops.
-      B.ContStateCount = 6;
+      // mflow-3d-animation Tier 5 — a co-sim actor owns 12 continuous states
+      // [x,y,z, vx,vy,vz, roll,pitch,yaw, wx,wy,wz]: translation under gravity
+      // (+ contact) and free rotation (constant angular momentum, seeded from
+      // `angularVelocity`). Its pose comes from state (not direct feedthrough),
+      // so it breaks algebraic loops.
+      B.ContStateCount = 12;
       B.IsLoopBreaker = true;
     } else if (N.Kind == "signal_integrator") {
       B.ContStateCount = 1;

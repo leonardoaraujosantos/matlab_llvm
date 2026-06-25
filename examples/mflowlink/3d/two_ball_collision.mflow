@@ -1,0 +1,15 @@
+{
+  "entry" : "two_ball_collision",
+  "flows" : [
+    { "edges" : [], "id" : "flow_2b", "kind" : "program", "name" : "two_ball_collision",
+      "nodes" : [
+        { "id" : "world", "kind" : "signal_world3d", "data" : { "params" : { "gravity" : "0,0,0", "viewpoint" : "8,8,4", "showGround" : true, "output" : "two_ball_collision.html" } }, "ports" : { "in" : [], "out" : [] } },
+        { "id" : "a", "kind" : "signal_actor3d", "data" : { "params" : { "name" : "a", "shape" : "sphere", "radius" : 0.5, "cosim" : true, "translation" : "-3,0,1", "velocity" : "2,0,0", "mass" : 1.0, "restitution" : 1.0, "color" : "0.9,0.3,0.3" } }, "ports" : { "in" : [] } },
+        { "id" : "b", "kind" : "signal_actor3d", "data" : { "params" : { "name" : "b", "shape" : "sphere", "radius" : 0.5, "cosim" : true, "translation" : "3,0,1", "velocity" : "-2,0,0", "mass" : 1.0, "restitution" : 1.0, "angularVelocity" : "0,0,3", "color" : "0.3,0.3,0.9" } }, "ports" : { "in" : [] } }
+      ],
+      "signature" : { "inputs" : [], "outputs" : [] } }
+  ],
+  "schema" : "matforge.flowchart",
+  "settings" : { "kind" : "signal_flow", "solver" : { "type" : "fixed_step", "algorithm" : "ode4", "startTime" : 0, "stopTime" : 4, "stepSize" : 0.005, "zeroCrossing" : false } },
+  "version" : "0.1.0"
+}

@@ -1130,14 +1130,22 @@ void MflowLinkSim::reset() {
 
   for (size_t I = 0; I < M_.Blocks.size(); ++I) {
     const auto &B = M_.Blocks[I];
-    if (B.Kind == "signal_actor3d" && B.ContStateCount == 6) {
-      // Co-sim actor — seed [x,y,z] from `translation` and [vx,vy,vz] from
-      // `velocity` (both "x,y,z" params; default rest at origin).
+    if (B.Kind == "signal_actor3d" && B.ContStateCount == 12) {
+      // Co-sim actor — seed position/velocity from `translation`/`velocity`,
+      // orientation from `rotation` (rpy), and angular velocity from
+      // `angularVelocity` (all "x,y,z" params; default rest at origin).
       size_t Off = StateOffset_[I];
-      double p[3] = {0, 0, 0}, v[3] = {0, 0, 0};
+      double p[3] = {0, 0, 0}, v[3] = {0, 0, 0}, a[3] = {0, 0, 0}, w[3] = {0, 0, 0};
       parseVec3Param(B, "translation", p);
       parseVec3Param(B, "velocity", v);
-      for (int J = 0; J < 3; ++J) { Y_[Off + J] = p[J]; Y_[Off + 3 + J] = v[J]; }
+      parseVec3Param(B, "rotation", a);
+      parseVec3Param(B, "angularVelocity", w);
+      for (int J = 0; J < 3; ++J) {
+        Y_[Off + J] = p[J];
+        Y_[Off + 3 + J] = v[J];
+        Y_[Off + 6 + J] = a[J];
+        Y_[Off + 9 + J] = w[J];
+      }
     } else if (B.Kind == "signal_integrator") {
       Y_[StateOffset_[I]] = paramD(B, "initialCondition", 0.0);
     } else if (B.Kind == "signal_pid") {
@@ -1905,36 +1913,37 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
         }
       }
       Out_[I] = VecOut_[I].empty() ? 0.0 : VecOut_[I][0];
-    } else if (K == "signal_actor3d" && B.ContStateCount == 6) {
-      // mflow-3d-animation Tier 5 — co-sim actor. Its 6 states [x,y,z, vx,vy,vz]
-      // are integrated under gravity; the recorded transform carries the pose
-      // (position in elements 0..2), so a signal_collision3d / controller reads
-      // the position from this actor's output. velocity / ground-contact are
-      // exposed as named scalar ports. Contact (restitution bounce) is resolved
-      // post-step in resolveCosimContacts().
+    } else if (K == "signal_actor3d" && B.ContStateCount == 12) {
+      // mflow-3d-animation Tier 5 — co-sim actor. 12 states
+      // [x,y,z, vx,vy,vz, roll,pitch,yaw, wx,wy,wz]: translation integrated under
+      // gravity (+ post-step contact), free rotation (constant angular momentum).
+      // The recorded transform carries the pose (position 0..2, orientation 3..5),
+      // so a signal_collision3d / controller reads it from this actor's output;
+      // velocity / angular velocity / ground-contact are named scalar ports.
       size_t Off = StateOffset_[I];
       double Sc[3] = {1, 1, 1};
       parseVec3Param(B, "scale", Sc);
       VecOut_[I].assign(9, 0.0);
-      VecOut_[I][0] = State[Off + 0];
-      VecOut_[I][1] = State[Off + 1];
-      VecOut_[I][2] = State[Off + 2];
-      VecOut_[I][6] = Sc[0]; VecOut_[I][7] = Sc[1]; VecOut_[I][8] = Sc[2];
+      for (int E = 0; E < 3; ++E) {
+        VecOut_[I][E] = State[Off + E];         // translation
+        VecOut_[I][3 + E] = State[Off + 6 + E]; // rotation (roll/pitch/yaw)
+        VecOut_[I][6 + E] = Sc[E];              // scale
+      }
       Out_[I] = State[Off + 0];
-      PortOut_[I]["x"] = State[Off + 0];
-      PortOut_[I]["y"] = State[Off + 1];
-      PortOut_[I]["z"] = State[Off + 2];
-      PortOut_[I]["vx"] = State[Off + 3];
-      PortOut_[I]["vy"] = State[Off + 4];
-      PortOut_[I]["vz"] = State[Off + 5];
+      static const char *Nm[6] = {"x", "y", "z", "vx", "vy", "vz"};
+      for (int E = 0; E < 3; ++E) PortOut_[I][Nm[E]] = State[Off + E];
+      for (int E = 0; E < 3; ++E) PortOut_[I][Nm[3 + E]] = State[Off + 3 + E];
+      PortOut_[I]["wx"] = State[Off + 9];
+      PortOut_[I]["wy"] = State[Off + 10];
+      PortOut_[I]["wz"] = State[Off + 11];
       PortOut_[I]["contact"] = CosimContact_[I];
       if (Deriv) {
-        Deriv[Off + 0] = State[Off + 3];
-        Deriv[Off + 1] = State[Off + 4];
-        Deriv[Off + 2] = State[Off + 5];
-        Deriv[Off + 3] = Gravity_[0];
-        Deriv[Off + 4] = Gravity_[1];
-        Deriv[Off + 5] = Gravity_[2];
+        for (int E = 0; E < 3; ++E) {
+          Deriv[Off + E] = State[Off + 3 + E];     // dpos/dt = vel
+          Deriv[Off + 3 + E] = Gravity_[E];        // dvel/dt = gravity
+          Deriv[Off + 6 + E] = State[Off + 9 + E]; // dangle/dt = angvel
+          Deriv[Off + 9 + E] = 0.0;                // free rotation (no torque)
+        }
       }
     } else if (K == "signal_actor3d") {
       // mflow-3d-animation — gather the actor's transform into a width-9
@@ -4519,28 +4528,74 @@ void MflowLinkSim::runToCompletion() {
 // instant is resolved here. Sets the per-block contact flag for the `contact`
 // output. Authoritative + golden-stable (design D3).
 void MflowLinkSim::resolveCosimContacts() {
+  // Gather the co-sim actors once (index, state offset, collision radius, mass).
+  struct Body { size_t I, Off; double r, mass; bool sphere; };
+  std::vector<Body> Bodies;
   for (size_t I = 0; I < M_.Blocks.size(); ++I) {
     const auto &B = M_.Blocks[I];
-    if (B.Kind != "signal_actor3d" || B.ContStateCount != 6) continue;
-    size_t Off = StateOffset_[I];
-    double Z = Y_[Off + 2], Vz = Y_[Off + 5];
-    // Floor offset = the actor's collision half-extent below its centre.
+    if (B.Kind != "signal_actor3d" || B.ContStateCount != 12) continue;
     double R = paramD(B, "radius", 0.5);
+    bool Sphere = true;
     if (const std::string *Sh = paramS(B, "shape")) {
       if (*Sh == "box") {
         double Sz[3] = {1, 1, 1};
         parseVec3Param(B, "size", Sz);
         R = Sz[2] / 2.0;
+        Sphere = false;
       }
     }
-    double Floor = paramD(B, "groundZ", 0.0) + R;
+    Bodies.push_back({I, StateOffset_[I], R, paramD(B, "mass", 1.0), Sphere});
+    CosimContact_[I] = 0.0;
+  }
+  // Ground-plane restitution bounce (vertical).
+  for (const auto &b : Bodies) {
+    const auto &B = M_.Blocks[b.I];
+    double Z = Y_[b.Off + 2], Vz = Y_[b.Off + 5];
+    double Floor = paramD(B, "groundZ", 0.0) + b.r;
     double Rest = paramD(B, "restitution", 0.5);
     if (Z < Floor && Vz < 0.0) {
-      Y_[Off + 2] = Floor;
-      Y_[Off + 5] = -Rest * Vz;
-      CosimContact_[I] = 1.0;
-    } else {
-      CosimContact_[I] = 0.0;
+      Y_[b.Off + 2] = Floor;
+      Y_[b.Off + 5] = -Rest * Vz;
+      CosimContact_[b.I] = 1.0;
+    }
+  }
+  // Pairwise sphere-sphere collision: impulse along the line of centres with
+  // the combined restitution, exchanging linear momentum by mass. Only spheres
+  // (the analytic case); box-box is a follow-on. A zero/negative mass is
+  // treated as immovable (infinite mass).
+  for (size_t a = 0; a < Bodies.size(); ++a) {
+    for (size_t c = a + 1; c < Bodies.size(); ++c) {
+      const Body &A = Bodies[a], &C = Bodies[c];
+      if (!A.sphere || !C.sphere) continue;
+      double n[3];
+      for (int k = 0; k < 3; ++k) n[k] = Y_[A.Off + k] - Y_[C.Off + k];
+      double d = std::sqrt(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]);
+      double sumR = A.r + C.r;
+      if (d >= sumR || d < 1e-9) continue;
+      for (int k = 0; k < 3; ++k) n[k] /= d; // unit normal A←C
+      // Relative velocity along the normal.
+      double rv = 0.0;
+      for (int k = 0; k < 3; ++k) rv += (Y_[A.Off+3+k] - Y_[C.Off+3+k]) * n[k];
+      if (rv >= 0.0) continue; // separating already
+      double invA = A.mass > 0 ? 1.0 / A.mass : 0.0;
+      double invC = C.mass > 0 ? 1.0 / C.mass : 0.0;
+      if (invA + invC < 1e-12) continue;
+      const auto &BA = M_.Blocks[A.I];
+      const auto &BC = M_.Blocks[C.I];
+      double e = 0.5 * (paramD(BA, "restitution", 0.5) + paramD(BC, "restitution", 0.5));
+      double j = -(1.0 + e) * rv / (invA + invC);
+      for (int k = 0; k < 3; ++k) {
+        Y_[A.Off + 3 + k] += j * invA * n[k];
+        Y_[C.Off + 3 + k] -= j * invC * n[k];
+      }
+      // Positional de-penetration so they don't stick.
+      double pen = sumR - d;
+      for (int k = 0; k < 3; ++k) {
+        Y_[A.Off + k] += n[k] * pen * (invA / (invA + invC));
+        Y_[C.Off + k] -= n[k] * pen * (invC / (invA + invC));
+      }
+      CosimContact_[A.I] = 1.0;
+      CosimContact_[C.I] = 1.0;
     }
   }
 }
