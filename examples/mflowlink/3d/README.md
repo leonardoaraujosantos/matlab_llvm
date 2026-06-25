@@ -22,7 +22,7 @@ One example per tier feature, so every feature has a test model:
 | 3 | `gltf_drone.mflow` ✅ | glTF/GLB mesh import (inline `assets/drone.gltf`) + chase camera |
 | 3 | `urdf_arm_trace.mflow` | URDF actor → parented link chain, joints from a signal |
 | 4 | `falling_stack.mflow` ✅ | viewer-side Havok physics (visual gravity + box collisions) |
-| 4 | `ball_ramp.mflow` | sphere on an inclined plane (restitution bounce) |
+| 4 | `ball_ramp.mflow` ✅ | sphere on an inclined plane (restitution bounce) |
 | 5 | `bounce_cosim.mflow` | deterministic C++ co-sim; analytic bounce golden |
 | 5 | `cart_wall_bump.mflow` | PID cart + `signal_collision3d` → controller reacts to a wall |
 | 6 | `camera_depth_stream.mflow` | depth + semantic sensor → image/CV block (N-D signals) |

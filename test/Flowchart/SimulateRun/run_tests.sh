@@ -1153,9 +1153,25 @@ FS_HTML_F=$(mktemp /tmp/fs.XXXX.html)
 "$MATLABC" -emit-mflowlink-babylon "$EX/3d/falling_stack.mflow" -o "$FS_HTML_F"
 FS_PHYS=$(grep -c '"physics":true' "$FS_HTML_F")
 FS_ACTORS=$(grep -c '"shape":' "$FS_HTML_F")
+FS_HAVOK=$(grep -c 'HavokPhysics_umd.js' "$FS_HTML_F")
+FS_AGG=$(grep -c 'PhysicsAggregate' "$FS_HTML_F")
 check "falling_stack emits physics world" "[[ $FS_PHYS -ge 1 ]]" ""
 check "falling_stack has 4 actors" "[[ $FS_ACTORS -eq 4 ]]" "ground + 3 boxes"
+check "falling_stack loads Havok engine" "[[ $FS_HAVOK -eq 1 ]]" "Tier-4 viewer physics"
+check "falling_stack seeds physics bodies" "[[ $FS_AGG -ge 1 ]]" "PhysicsAggregate per body"
 rm -f "$FS_HTML_F"
+# A non-physics scene must NOT pull the Havok WASM (no needless network/WASM).
+OC2_F=$(mktemp /tmp/oc2.XXXX.html)
+"$MATLABC" -emit-mflowlink-babylon "$EX/3d/orbit_cube.mflow" -o "$OC2_F"
+OC2_HAVOK=$(grep -c 'HavokPhysics_umd.js' "$OC2_F")
+check "non-physics scene omits Havok" "[[ $OC2_HAVOK -eq 0 ]]" ""
+rm -f "$OC2_F"
+# ball_ramp: a sphere on an inclined plane under gravity (restitution bounce).
+BR_F=$(mktemp /tmp/br.XXXX.html)
+"$MATLABC" -emit-mflowlink-babylon "$EX/3d/ball_ramp.mflow" -o "$BR_F"
+BR_PHYS=$(grep -c 'enablePhysics' "$BR_F")
+check "ball_ramp enables physics" "[[ $BR_PHYS -ge 1 ]]" ""
+rm -f "$BR_F"
 
 # Tier 2 — hierarchy + lights + cameras + materials. articulated_arm: a 3-link
 # chain (base→link1→link2→link3), each joint rotation driven by a sine, with a

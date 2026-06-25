@@ -71,19 +71,20 @@ emit lane) that everything else builds on.
 
 ## 4. Viewer-side Havok/Ammo physics (visual gravity + collisions)
 
-- [ ] 4.1 `signal_world3d.physics = true` + per-actor `physics = true`, `mass`, `friction`,
-  `restitution`, `collisionShape = box|sphere|convexHull|mesh`. Emit these into the scene so
-  the viewer seeds Havok rigid bodies (initial pose/velocity from the model) and integrates
-  under the world gravity, resolving collisions for rendering.
-- [ ] 4.2 `engine = "havok" | "ammo"` selects the viewer physics backend behind one viewer
-  interface; both inlined builds available; default Havok.
-- [ ] 4.3 Document explicitly (params + roadmap + emit-test comment) that tier-4 physics is
+- [x] 4.1 `signal_world3d.physics = true` + per-actor `physics = true`, `mass`, `friction`,
+  `restitution`, `collisionShape = box|sphere|convexHull|mesh`. The viewer seeds rigid bodies
+  (initial pose from the recorded keyframe, in Babylon world frame) via `PhysicsAggregate` and
+  integrates under the mapped world gravity; physics actors are excluded from the timeline
+  animation. The Havok WASM is loaded only for physics scenes.
+- [x] 4.2 `engine = "havok" | "ammo"` selects the viewer physics backend (HavokPlugin /
+  AmmoJSPlugin) behind one async-init path; default Havok.
+- [x] 4.3 Documented (params doc + roadmap + the emit JS comment) that Tier-4 physics is
   **visualization-only** — its result never re-enters the model and is excluded from goldens.
-- [ ] 4.4 Example: `falling_stack.mflow` — a stack of boxes + a ground plane, `physics = true`,
-  no transform inputs ⇒ they fall and settle in the viewer. Emit test asserts physics bodies
-  + mass/restitution are present in the scene JSON (no rendering assertion).
-- [ ] 4.5 Example: `ball_ramp.mflow` — a sphere dropped onto an inclined plane (restitution
-  bounce). Same structural emit assertions.
+- [x] 4.4 Example: `falling_stack.mflow` — a stack of boxes + ground, `physics = true`, no
+  transform inputs. Emit test asserts the Havok engine + `PhysicsAggregate` bodies are present
+  (no rendering assertion); a non-physics scene must omit the Havok WASM.
+- [x] 4.5 Example: `ball_ramp.mflow` — a sphere dropped onto an inclined plane (restitution
+  bounce). Emit test asserts physics is enabled.
 
 ## 5. Lock-step co-simulation feedback (deterministic C++ physics → signals)
 

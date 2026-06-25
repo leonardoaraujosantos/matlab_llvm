@@ -1,0 +1,30 @@
+{
+  "entry" : "ball_ramp",
+  "flows" : [
+    {
+      "edges" : [],
+      "id" : "flow_ramp",
+      "kind" : "program",
+      "name" : "ball_ramp",
+      "nodes" : [
+        { "id" : "world", "kind" : "signal_world3d", "data" : { "params" : { "gravity" : "0,0,-9.81", "viewpoint" : "9,9,5", "engine" : "havok", "physics" : true, "showGround" : true, "output" : "ball_ramp.html" } }, "ports" : { "in" : [], "out" : [] } },
+        { "id" : "ramp", "kind" : "signal_actor3d", "data" : { "params" : { "name" : "ramp", "shape" : "box", "size" : "6,4,0.3", "translation" : "0,0,1.5", "rotation" : "0,0.5,0", "color" : "0.5,0.45,0.4", "physics" : true, "mass" : 0.0, "collisionShape" : "box", "friction" : 0.6, "restitution" : 0.2 } }, "ports" : { "in" : [] } },
+        { "id" : "ball", "kind" : "signal_actor3d", "data" : { "params" : { "name" : "ball", "shape" : "sphere", "radius" : 0.4, "translation" : "-1.5,0,4.0", "color" : "0.9,0.5,0.2", "physics" : true, "mass" : 1.0, "collisionShape" : "sphere", "friction" : 0.4, "restitution" : 0.6 } }, "ports" : { "in" : [] } }
+      ],
+      "signature" : { "inputs" : [], "outputs" : [] }
+    }
+  ],
+  "schema" : "matforge.flowchart",
+  "settings" : {
+    "kind" : "signal_flow",
+    "solver" : {
+      "type" : "fixed_step",
+      "algorithm" : "ode4",
+      "startTime" : 0,
+      "stopTime" : 5,
+      "stepSize" : 0.01,
+      "zeroCrossing" : false
+    }
+  },
+  "version" : "0.1.0"
+}

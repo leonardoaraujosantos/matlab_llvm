@@ -307,6 +307,16 @@ bool emitMflowLinkBabylon(const MflowLinkModel &M, const MflowLinkSim &Sim,
   OS << Scene.str() << "\n</script>\n";
   OS << "<script src=\"" << Cdn << "/babylon.js\"></script>\n";
   OS << "<script src=\"" << Cdn << "/loaders/babylonjs.loaders.min.js\"></script>\n";
+  // Viewer-side physics engine (Tier 4) — only when the world enables physics.
+  bool WorldPhysics = paramBool(*World, "physics", false);
+  std::string Engine = paramOr(*World, "engine", "havok");
+  if (WorldPhysics) {
+    if (Engine == "ammo")
+      OS << "<script src=\"https://cdn.jsdelivr.net/npm/ammo.js@0.0.10/builds/"
+            "ammo.js\"></script>\n";
+    else
+      OS << "<script src=\"" << Cdn << "/havok/HavokPhysics_umd.js\"></script>\n";
+  }
   OS << "<script>\n";
   OS << R"JS(
 const DATA = JSON.parse(document.getElementById('scene').textContent);
@@ -342,13 +352,19 @@ for (const L of (DATA.lights || [])) {
   light.parent = root;
 }
 
+const PHYS = !!DATA.world.physics; // viewer-side Havok/Ammo (visualization only)
+let groundMesh = null;
 if (DATA.world.showGround) {
-  const g = BABYLON.MeshBuilder.CreateGround('ground', {width:40, height:40}, scene);
-  g.parent = root; g.rotation.x = Math.PI/2; // ground lies in model XY plane
+  groundMesh = BABYLON.MeshBuilder.CreateGround('ground', {width:40, height:40}, scene);
   const gm = new BABYLON.StandardMaterial('gm', scene);
-  gm.diffuseColor = new BABYLON.Color3(0.18,0.19,0.22); g.material = gm;
+  gm.diffuseColor = new BABYLON.Color3(0.18,0.19,0.22); groundMesh.material = gm;
+  // Without physics, parent to the Z-up root and lay it in the model XY plane.
+  // With physics, keep Babylon's native Y-up ground so rigid bodies rest on it.
+  if (!PHYS) { groundMesh.parent = root; groundMesh.rotation.x = Math.PI/2; }
 }
 if (DATA.world.showAxes) new BABYLON.AxesViewer(scene, 2);
+// Map a model (Z-up) vector to Babylon (Y-up) world coords.
+function toBabylon(p){ return new BABYLON.Vector3(p[0], p[2], p[1]); }
 
 function mkColor(c){ return new BABYLON.Color3(c[0], c[1], c[2]); }
 function buildMesh(a){
@@ -385,6 +401,23 @@ for (const a of DATA.actors) {
   m.rotationQuaternion = BABYLON.Quaternion.Identity();
   meshByKey[a.id] = m; if (a.name) meshByKey[a.name] = m;
 }
+
+// Tier 4 — viewer physics. Physics actors live in Babylon world frame (not the
+// Z-up root) so the engine integrates them directly; they are excluded from the
+// recorded-timeline animation (physics is visualization-only, never a golden).
+const physicsActors = [];
+const physicsSet = new Set();
+if (PHYS) {
+  for (const a of DATA.actors) {
+    if (!a.physics) continue;
+    const m = meshByKey[a.id];
+    m.parent = null;
+    const k0 = (a.keys && a.keys[0]) || [0,0,0,0,0,0,1,1,1];
+    m.position = toBabylon([k0[0], k0[1], k0[2]]);
+    m.scaling.set(k0[6], k0[7], k0[8]);
+    physicsActors.push(a); physicsSet.add(a.id);
+  }
+}
 // Resolve parenting by parent NAME (or id); children compose via the scene
 // graph, so a child's recorded transform is its local frame.
 for (const a of DATA.actors) {
@@ -411,8 +444,9 @@ const N = DATA.times.length;
 function applyFrame(i){
   i = Math.max(0, Math.min(N-1, i|0));
   for (const a of DATA.actors) {
+    if (physicsSet.has(a.id)) continue; // physics-driven in the viewer
     const k = a.keys[i]; if (!k) continue;
-    const m = meshById[a.id];
+    const m = meshByKey[a.id];
     m.position.set(k[0], k[1], k[2]);
     m.rotationQuaternion = BABYLON.Quaternion.RotationYawPitchRoll(k[5], k[4], k[3]);
     m.scaling.set(k[6], k[7], k[8]);
@@ -429,6 +463,34 @@ scrub.max = String(Math.max(0, N-1));
 const playBtn = document.getElementById('play');
 playBtn.onclick = () => { playing = !playing; playBtn.textContent = playing ? 'Pause' : 'Play'; };
 scrub.oninput = () => { playing = false; playBtn.textContent='Play'; frame = +scrub.value; applyFrame(frame); };
+
+// Tier 4 — initialize the viewer physics engine (async WASM) and seed bodies.
+// Visualization-only: results never re-enter the model (design D3).
+async function initPhysics(){
+  if (!PHYS) return;
+  let plugin = null;
+  try {
+    if (DATA.world.engine === 'ammo' && typeof Ammo !== 'undefined') {
+      const ammo = await Ammo(); plugin = new BABYLON.AmmoJSPlugin(true, ammo);
+    } else if (typeof HavokPhysics !== 'undefined') {
+      const hk = await HavokPhysics(); plugin = new BABYLON.HavokPlugin(true, hk);
+    }
+  } catch (e) { console.warn('physics init failed:', e); }
+  if (!plugin) return;
+  const g = DATA.world.gravity || [0,0,-9.81];
+  scene.enablePhysics(toBabylon(g), plugin);
+  const ST = BABYLON.PhysicsShapeType;
+  for (const a of physicsActors) {
+    const m = meshByKey[a.id];
+    const t = (a.collisionShape === 'sphere') ? ST.SPHERE
+            : (a.collisionShape === 'mesh' || a.collisionShape === 'convexHull') ? ST.CONVEX_HULL
+            : ST.BOX;
+    new BABYLON.PhysicsAggregate(m, t,
+      {mass: a.mass||0, restitution: a.restitution||0, friction: (a.friction!==undefined?a.friction:0.5)}, scene);
+  }
+  if (groundMesh) new BABYLON.PhysicsAggregate(groundMesh, ST.BOX, {mass:0, friction:0.8, restitution:0.1}, scene);
+}
+initPhysics();
 
 applyFrame(0);
 let last = performance.now();
