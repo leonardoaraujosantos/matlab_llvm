@@ -440,7 +440,7 @@ void Resolver::registerBuiltins() {
     "matlab_sim3d_set_translation", "matlab_sim3d_set_rotation",
     "matlab_sim3d_set_scale", "matlab_sim3d_set_color", "matlab_sim3d_set_size",
     "matlab_sim3d_get_translation", "matlab_sim3d_get_rotation",
-    "matlab_sim3d_get_scale",
+    "matlab_sim3d_get_scale", "matlab_sim3d_set_parent",
     "matlab_sim3d_add", "matlab_sim3d_open", "matlab_sim3d_run",
     "matlab_sim3d_close", "matlab_sim3d_export",
     /* Tier-2 — filter design (function-form, user-facing). */
