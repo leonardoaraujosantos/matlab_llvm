@@ -8,6 +8,7 @@
 #include "matlab/Flowchart/MflowLinkModel.h"
 #include "matlab/Flowchart/MflowLinkSim.h"
 
+#include <fstream>
 #include <map>
 #include <ostream>
 #include <sstream>
@@ -66,6 +67,46 @@ std::string vecJson(const MflBlock &B, const char *Key, const char *Fallback) {
   return OS.str();
 }
 
+// Read a binary file fully into `Out`. Returns false if it cannot be opened.
+bool readFile(const std::string &Path, std::string &Out) {
+  std::ifstream In(Path, std::ios::binary);
+  if (!In) return false;
+  std::ostringstream SS;
+  SS << In.rdbuf();
+  Out = SS.str();
+  return true;
+}
+
+std::string base64(const std::string &In) {
+  static const char *T =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  std::string Out;
+  Out.reserve(((In.size() + 2) / 3) * 4);
+  size_t I = 0;
+  for (; I + 2 < In.size(); I += 3) {
+    unsigned N = (unsigned char)In[I] << 16 | (unsigned char)In[I + 1] << 8 |
+                 (unsigned char)In[I + 2];
+    Out += T[(N >> 18) & 63]; Out += T[(N >> 12) & 63];
+    Out += T[(N >> 6) & 63];  Out += T[N & 63];
+  }
+  if (I < In.size()) {
+    unsigned N = (unsigned char)In[I] << 16;
+    if (I + 1 < In.size()) N |= (unsigned char)In[I + 1] << 8;
+    Out += T[(N >> 18) & 63];
+    Out += T[(N >> 12) & 63];
+    Out += (I + 1 < In.size()) ? T[(N >> 6) & 63] : '=';
+    Out += '=';
+  }
+  return Out;
+}
+
+// glTF/GLB mesh → an inline `data:` URL. The extension picks the MIME so
+// Babylon's loader plugin is selected correctly for the data URL.
+std::string meshDataUrl(const std::string &Bytes, const std::string &Ext) {
+  std::string Mime = (Ext == ".glb") ? "model/gltf-binary" : "model/gltf+json";
+  return "data:" + Mime + ";base64," + base64(Bytes);
+}
+
 std::string jsonStr(const std::string &S) {
   std::string Out = "\"";
   for (char C : S) {
@@ -113,6 +154,7 @@ bool emitMflowLinkBabylon(const MflowLinkModel &M, const MflowLinkSim &Sim,
                                  "rz", "sx", "sy", "sz"};
   std::ostringstream Actors;
   size_t ActorCount = 0;
+  std::string MeshErr;
   for (const auto &B : M.Blocks) {
     if (B.Kind != "signal_actor3d") continue;
     if (ActorCount) Actors << ",\n";
@@ -127,6 +169,25 @@ bool emitMflowLinkBabylon(const MflowLinkModel &M, const MflowLinkSim &Sim,
     Actors << ",\"color\":" << vecJson(B, "color", "[0.6,0.6,0.6]");
     Actors << ",\"emissive\":" << vecJson(B, "emissive", "[0,0,0]");
     Actors << ",\"opacity\":" << paramNum(B, "opacity", 1.0);
+    // glTF/GLB mesh import — embed the asset inline as a data URL (Tier 3).
+    if (const std::string *MeshP = param(B, "mesh")) {
+      std::string Rel = *MeshP;
+      std::string Ext;
+      auto Dot = Rel.rfind('.');
+      if (Dot != std::string::npos) Ext = Rel.substr(Dot);
+      std::string Path = (!Opts.ModelDir.empty() && !Rel.empty() &&
+                          Rel.front() != '/')
+                             ? Opts.ModelDir + "/" + Rel
+                             : Rel;
+      std::string Bytes;
+      if (!readFile(Path, Bytes)) {
+        MeshErr = "signal_actor3d \"" + B.Id + "\": cannot read mesh \"" + Rel +
+                  "\" (resolved to " + Path + ")";
+        break;
+      }
+      Actors << ",\"mesh\":" << jsonStr(meshDataUrl(Bytes, Ext));
+      Actors << ",\"meshExt\":" << jsonStr(Ext.empty() ? ".glb" : Ext);
+    }
     if (const std::string *P = param(B, "parent"))
       Actors << ",\"parent\":" << jsonStr(*P);
     // Tier-4 (viewer physics) hints — emitted now so the scene contract is
@@ -157,6 +218,7 @@ bool emitMflowLinkBabylon(const MflowLinkModel &M, const MflowLinkSim &Sim,
     Actors << "]}";
     ++ActorCount;
   }
+  if (!MeshErr.empty()) { Err = MeshErr; return false; }
 
   // Lights (Tier 2) — static config blocks read by the viewer.
   std::ostringstream Lights;
@@ -302,14 +364,24 @@ function buildMesh(a){
   }
 }
 
-const meshByKey = {}; // both id and name resolve to the mesh
+const meshByKey = {}; // both id and name resolve to the animated node
 for (const a of DATA.actors) {
-  const m = buildMesh(a);
-  const mat = new BABYLON.StandardMaterial(a.id+'_m', scene);
-  mat.diffuseColor = mkColor(a.color || [0.6,0.6,0.6]);
-  if (a.emissive) mat.emissiveColor = mkColor(a.emissive);
-  if (a.opacity !== undefined && a.opacity < 1) mat.alpha = a.opacity;
-  m.material = mat;
+  let m;
+  if (a.mesh) {
+    // glTF/GLB import (Tier 3): animate a TransformNode; the loaded geometry
+    // is parented to it once it streams in from the inline data URL.
+    m = new BABYLON.TransformNode(a.id, scene);
+    BABYLON.SceneLoader.ImportMesh('', '', a.mesh, scene, (meshes) => {
+      for (const mm of meshes) if (!mm.parent) mm.parent = m;
+    }, null, null, a.meshExt || '.glb');
+  } else {
+    m = buildMesh(a);
+    const mat = new BABYLON.StandardMaterial(a.id+'_m', scene);
+    mat.diffuseColor = mkColor(a.color || [0.6,0.6,0.6]);
+    if (a.emissive) mat.emissiveColor = mkColor(a.emissive);
+    if (a.opacity !== undefined && a.opacity < 1) mat.alpha = a.opacity;
+    m.material = mat;
+  }
   m.rotationQuaternion = BABYLON.Quaternion.Identity();
   meshByKey[a.id] = m; if (a.name) meshByKey[a.name] = m;
 }

@@ -1172,6 +1172,25 @@ check "arm has a follow camera" "[[ $AA_FOLLOW -eq 1 ]]" "signal_camera3d mode=f
 check "arm has a 3-link parent chain" "[[ $AA_PARENTS -eq 3 ]]" "link1/link2/link3 each parented"
 rm -f "$AA_HTML_F"
 
+# Tier 3 — glTF/GLB mesh import. gltf_drone: a drone body (inline glTF) follows a
+# Lissajous trajectory with a chase camera. The emitter must embed the mesh as a
+# data URL; a missing mesh file is a sourced error.
+GD_HTML_F=$(mktemp /tmp/gd.XXXX.html)
+"$MATLABC" -emit-mflowlink-babylon "$EX/3d/gltf_drone.mflow" -o "$GD_HTML_F"
+GD_MESH=$(grep -c '"mesh":"data:model/gltf' "$GD_HTML_F")
+GD_TIMES=$(grep -o '"times":\[[^]]*\]' "$GD_HTML_F" | tr ',' '\n' | grep -c '[0-9]')
+GD_ROWS=$("$MATLABC" -simulate "$EX/3d/gltf_drone.mflow" | tail -n +2 | wc -l | tr -d ' ')
+check "gltf actor embeds an inline mesh" "[[ $GD_MESH -eq 1 ]]" "glTF embedded as a data URL"
+check "gltf timeline matches sim steps" "awk 'BEGIN{exit !($GD_TIMES==$GD_ROWS)}'" ""
+rm -f "$GD_HTML_F"
+# A mesh path that does not resolve is a sourced error.
+BADM=$(mktemp /tmp/badmesh.XXXX.mflow)
+sed 's#assets/drone.gltf#assets/does_not_exist.gltf#' "$EX/3d/gltf_drone.mflow" > "$BADM"
+if "$MATLABC" -emit-mflowlink-babylon "$BADM" -o /dev/null >/dev/null 2>&1; then
+  fail=$((fail+1)); echo "FAIL  missing mesh file rejected"
+else pass=$((pass+1)); fi
+rm -f "$BADM"
+
 # Parent hierarchy guards: an unknown parent and a cycle are both sourced errors.
 UNK=$(mktemp /tmp/unkparent.XXXX.mflow)
 sed 's/"parent" : "base"/"parent" : "ghost"/' "$EX/3d/articulated_arm.mflow" > "$UNK"

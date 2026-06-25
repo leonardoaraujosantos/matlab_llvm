@@ -12171,6 +12171,12 @@ int main(int Argc, char **Argv) {
 
     matlab::flowchart::BabylonEmitOptions BOpts;
     if (!Opts.BabylonCdn.empty()) BOpts.CdnBase = Opts.BabylonCdn;
+    // Resolve a relative actor `mesh` (glTF/GLB) against the .mflow's directory.
+    {
+      auto Slash = Opts.InputPath.find_last_of("/\\");
+      if (Slash != std::string::npos)
+        BOpts.ModelDir = Opts.InputPath.substr(0, Slash);
+    }
 
     std::string Err;
     if (!Opts.OutDir.empty()) {

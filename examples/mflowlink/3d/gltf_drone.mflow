@@ -1,0 +1,40 @@
+{
+  "entry" : "gltf_drone",
+  "flows" : [
+    {
+      "edges" : [
+        { "id" : "ex", "kind" : "data", "from" : { "node" : "px", "port" : "out" }, "to" : { "node" : "pos", "port" : "in1" } },
+        { "id" : "ey", "kind" : "data", "from" : { "node" : "py", "port" : "out" }, "to" : { "node" : "pos", "port" : "in2" } },
+        { "id" : "ez", "kind" : "data", "from" : { "node" : "pz", "port" : "out" }, "to" : { "node" : "pos", "port" : "in3" } },
+        { "id" : "ep", "kind" : "data", "from" : { "node" : "pos", "port" : "out" }, "to" : { "node" : "drone", "port" : "translation" } }
+      ],
+      "id" : "flow_drone",
+      "kind" : "program",
+      "name" : "gltf_drone",
+      "nodes" : [
+        { "id" : "world", "kind" : "signal_world3d", "data" : { "params" : { "viewpoint" : "10,10,6", "showGround" : true, "showAxes" : false, "output" : "gltf_drone.html" } }, "ports" : { "in" : [], "out" : [] } },
+        { "id" : "sun", "kind" : "signal_light3d", "data" : { "params" : { "type" : "directional", "direction" : "-0.3,-0.6,-1", "intensity" : 1.0 } }, "ports" : { "in" : [], "out" : [] } },
+        { "id" : "cam", "kind" : "signal_camera3d", "data" : { "params" : { "mode" : "follow", "follow" : "drone" } }, "ports" : { "in" : [], "out" : [] } },
+        { "id" : "px", "kind" : "signal_sine", "data" : { "log_signal" : true, "params" : { "amplitude" : 4.0, "frequency" : 0.7, "phase" : 0.0 } }, "ports" : { "in" : [], "out" : [ { "id" : "out" } ] } },
+        { "id" : "py", "kind" : "signal_sine", "data" : { "log_signal" : true, "params" : { "amplitude" : 4.0, "frequency" : 0.7, "phase" : 1.5707963267948966 } }, "ports" : { "in" : [], "out" : [ { "id" : "out" } ] } },
+        { "id" : "pz", "kind" : "signal_sine", "data" : { "params" : { "amplitude" : 0.8, "frequency" : 1.4, "phase" : 0.0, "bias" : 2.5 } }, "ports" : { "in" : [], "out" : [ { "id" : "out" } ] } },
+        { "id" : "pos", "kind" : "signal_mux", "data" : { "params" : {} }, "ports" : { "in" : [ { "id" : "in1" }, { "id" : "in2" }, { "id" : "in3" } ], "out" : [ { "id" : "out" } ] } },
+        { "id" : "drone", "kind" : "signal_actor3d", "data" : { "params" : { "name" : "drone", "mesh" : "assets/drone.gltf", "scale" : "1.5,1.5,0.6", "color" : "0.2,0.7,1.0" } }, "ports" : { "in" : [ { "id" : "translation" } ] } }
+      ],
+      "signature" : { "inputs" : [], "outputs" : [] }
+    }
+  ],
+  "schema" : "matforge.flowchart",
+  "settings" : {
+    "kind" : "signal_flow",
+    "solver" : {
+      "type" : "fixed_step",
+      "algorithm" : "ode4",
+      "startTime" : 0,
+      "stopTime" : 9,
+      "stepSize" : 0.02,
+      "zeroCrossing" : false
+    }
+  },
+  "version" : "0.1.0"
+}

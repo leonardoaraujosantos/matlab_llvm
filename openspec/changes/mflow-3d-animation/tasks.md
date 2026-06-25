@@ -55,16 +55,19 @@ emit lane) that everything else builds on.
 
 ## 3. Mesh import — glTF/GLB + URDF (reuse robotics toolbox)
 
-- [ ] 3.1 `signal_actor3d` `mesh = "<file.glb|.gltf>"`: load/validate the mesh, embed it in
-  the emitted scene (Babylon native loader); transforms drive it exactly as a primitive.
-- [ ] 3.2 `signal_actor3d` `urdf = "<file.urdf>"`: parse via the shipped robotics toolbox
-  (`rigidBodyTree`/`loadrobot`), and drive each link's transform from a `jointAngles` input
-  port through `getTransform` FK — so the URDF visual matches the robotics goldens (D5/risk).
-- [ ] 3.3 Example: `gltf_drone.mflow` — a glTF drone body driven by a trajectory; asserts the
-  mesh is embedded and the timeline length matches.
-- [ ] 3.4 Example: `urdf_arm_trace.mflow` — `loadrobot` arm; joint signals from an IK/`sine`
-  source; `SimulateRun` asserts end-effector pose == `getTransform`, and the emitted scene has
-  one node per link.
+- [x] 3.1 `signal_actor3d` `mesh = "<file.glb|.gltf>"`: read + validate (missing ⇒ sourced
+  error), embed inline as a base64 `data:` URL resolved against the .mflow dir; the viewer
+  loads it with `SceneLoader.ImportMesh` and transforms drive it exactly as a primitive.
+- [ ] 3.2 `signal_actor3d` `urdf = "<file.urdf>"`: parse the URDF link/joint tree at emit time
+  and emit it as a parented actor chain with per-joint axis metadata; the viewer composes FK
+  from a `jointAngles` signal via the scene graph (no robotics-runtime linkage into the sim —
+  avoids the MPC-block dependency-chain problem; FK matches `getTransform` by construction).
+- [x] 3.3 Example: `gltf_drone.mflow` — a glTF drone body on a Lissajous trajectory with a
+  chase camera (also subsumes the deferred Tier-2.6 flythrough); `SimulateRun` asserts the
+  mesh is embedded inline and the timeline length matches the sim step count. Fixture
+  `assets/drone.gltf` (minimal embedded-buffer glTF 2.0 box).
+- [ ] 3.4 Example: `urdf_arm_trace.mflow` — a URDF arm; joint signals from an IK/`sine` source;
+  `SimulateRun` asserts the emitted scene has one node per link.
 
 ## 4. Viewer-side Havok/Ammo physics (visual gravity + collisions)
 
