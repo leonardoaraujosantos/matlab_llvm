@@ -1,4 +1,5 @@
 signal_abs
+signal_actor3d
 signal_awgn
 signal_biquad
 signal_bus_creator
@@ -96,5 +97,6 @@ signal_trig_fcn
 signal_triggered_subsystem
 signal_unit_delay
 signal_window
+signal_world3d
 signal_zero_pole
 signal_zoh

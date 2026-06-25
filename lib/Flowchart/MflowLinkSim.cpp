@@ -81,6 +81,33 @@ const std::string *paramS(const MflBlock &B, const char *Key) {
   return It == B.Params.end() ? nullptr : &It->second;
 }
 
+// mflow-3d-animation — parse a `"x,y,z"` (or space/`;`-separated) vector param
+// into `Out[0..2]`. Missing param leaves `Out` untouched (so the caller's
+// default survives). Fewer than three values fill from the front; extras are
+// ignored. Brackets are tolerated.
+void parseVec3Param(const MflBlock &B, const char *Key, double Out[3]) {
+  const std::string *S = paramS(B, Key);
+  if (!S) return;
+  int N = 0;
+  std::string Tok;
+  std::string Str = *S;
+  Str.push_back(',');
+  for (char C : Str) {
+    if (C == ',' || C == ' ' || C == '\t' || C == ';' || C == '[' ||
+        C == ']') {
+      if (!Tok.empty()) {
+        if (N < 3) {
+          try { Out[N] = std::stod(Tok); } catch (...) {}
+          ++N;
+        }
+        Tok.clear();
+      }
+    } else {
+      Tok.push_back(C);
+    }
+  }
+}
+
 } // namespace
 
 //===----------------------------------------------------------------------===//
@@ -975,6 +1002,7 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
     const auto &B = M_.Blocks[I];
     bool Implicit = B.Kind == "signal_scope" ||
                     B.Kind == "signal_scope3d" ||
+                    B.Kind == "signal_actor3d" ||
                     B.Kind == "signal_display" ||
                     B.Kind == "signal_to_workspace";
     if (!B.LogSignal && !Implicit) continue;
@@ -990,6 +1018,19 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
         LogBlocks_.push_back(I);
         LogElements_.push_back(E);
         LogNames_.push_back(Name + "[" + Axes[E] + "]");
+      }
+      continue;
+    }
+    // mflow-3d-animation — actor transform timeline: nine columns
+    // `<id>[tx,ty,tz,rx,ry,rz,sx,sy,sz]` that the Babylon emit lane reads as
+    // the per-step animation keyframes (translation, roll/pitch/yaw, scale).
+    if (B.Kind == "signal_actor3d") {
+      static const char *Comp[9] = {"tx", "ty", "tz", "rx", "ry",
+                                    "rz", "sx", "sy", "sz"};
+      for (int E = 0; E < 9; ++E) {
+        LogBlocks_.push_back(I);
+        LogElements_.push_back(E);
+        LogNames_.push_back(Name + "[" + Comp[E] + "]");
       }
       continue;
     }
@@ -1267,6 +1308,26 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
     for (auto &P : Inputs_[I])
       if (P.DstPort == Port) V += edgeValue(P);
     return V;
+  };
+  // mflow-3d-animation — read element `Elem` of a (possibly vector) input
+  // port. A width-1 source broadcasts its scalar to element 0 only; a vector
+  // source (e.g. a Mux feeding a width-3 translation port) is read from its
+  // VecOut_ slice. Returns NaN when the port has no edge, so the caller can
+  // distinguish "unconnected" from "connected to 0".
+  auto vecInput = [&](size_t I, const char *Port, int Elem) -> double {
+    for (auto &P : Inputs_[I]) {
+      if (P.DstPort != Port) continue;
+      size_t S = P.SrcBlock;
+      if (OutWidth_[S] > 1 && Elem < (int)VecOut_[S].size())
+        return VecOut_[S][Elem];
+      return Elem == 0 ? edgeValue(P) : 0.0;
+    }
+    return std::numeric_limits<double>::quiet_NaN();
+  };
+  auto portConnected = [&](size_t I, const char *Port) -> bool {
+    for (auto &P : Inputs_[I])
+      if (P.DstPort == Port) return true;
+    return false;
   };
 
   for (size_t Pos = 0; Pos < M_.ExecOrder.size(); ++Pos) {
@@ -1648,6 +1709,29 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       if (HasRef) Rr = inputOf(I, "r");
       else Rr = R_def;
       Out_[I] = Gain * (Rr - Ym);
+    } else if (K == "signal_world3d") {
+      // mflow-3d-animation — scene config. No ports, no output; the emit lane
+      // reads its params directly from the model. Nothing to evaluate.
+      Out_[I] = 0.0;
+    } else if (K == "signal_actor3d") {
+      // mflow-3d-animation — gather the actor's transform into a width-9
+      // sample [tx,ty,tz, rx,ry,rz (roll/pitch/yaw rad), sx,sy,sz]. Static
+      // param defaults (translation/rotation/scale "x,y,z") are overridden
+      // element-wise by any connected port; scale defaults to 1.
+      double Tf[9] = {0, 0, 0, 0, 0, 0, 1, 1, 1};
+      parseVec3Param(B, "translation", &Tf[0]);
+      parseVec3Param(B, "rotation", &Tf[3]);
+      parseVec3Param(B, "scale", &Tf[6]);
+      const char *Ports[3] = {"translation", "rotation", "scale"};
+      for (int G = 0; G < 3; ++G) {
+        if (!portConnected(I, Ports[G])) continue;
+        for (int E = 0; E < 3; ++E) {
+          double V = vecInput(I, Ports[G], E);
+          if (!std::isnan(V)) Tf[G * 3 + E] = V;
+        }
+      }
+      VecOut_[I].assign(Tf, Tf + 9);
+      Out_[I] = Tf[0];
     } else if (K == "signal_scope3d") {
       // 3-D trajectory scope — gather the x/y/z input ports into a width-3
       // sample. The logging pass names the columns `<id>[x]/[y]/[z]` so a

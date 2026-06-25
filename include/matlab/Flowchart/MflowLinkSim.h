@@ -164,6 +164,16 @@ public:
   // Returns { logged-block-id → current output value }.
   std::vector<std::pair<std::string, double>> currentLoggedOutputs() const;
 
+  // mflow-3d-animation — read-only access to the recorded log after
+  // runToCompletion(), so the `-emit-mflowlink-babylon` lane can pull each
+  // actor's per-step transform timeline. `logColumnNames()` is parallel to
+  // `logColumns()`; each column is the per-sample (t, value) series. An actor
+  // contributes nine consecutive columns named `<id>[tx..sz]`.
+  const std::vector<std::string> &logColumnNames() const { return LogNames_; }
+  const std::vector<std::vector<LogSample>> &logColumns() const {
+    return LogColumns_;
+  }
+
   // #354 — source-line breakpoints inside a MATLAB Function block. Arm a set of
   // 1-based body lines on a `signal_matlab_fcn` block; when the interpreter
   // reaches one during a step, it records the hit, which the simulate-DAP polls

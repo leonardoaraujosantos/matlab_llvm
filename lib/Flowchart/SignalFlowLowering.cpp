@@ -80,6 +80,15 @@ const std::map<std::string, KindInfo> &kindTable() {
     add("signal_display",      {true, true, false, false, false, FIM});
     add("signal_to_workspace", {true, true, false, false, false, FIM});
     add("signal_terminator",   {true, true, false, false, false, FIM});
+    // mflow-3d-animation (Tier 1) — 3-D scene blocks. `signal_world3d` is the
+    // singleton scene config (gravity / viewpoint / engine / output); it has no
+    // ports and emits nothing. `signal_actor3d` is a kinematic sink: its
+    // translation/rotation/scale input ports are gathered into a width-9
+    // transform sample logged as `<id>[tx..sz]`, which the
+    // `-emit-mflowlink-babylon` lane reads as the per-step animation timeline.
+    // Both ride the continuous step (FixedInMinor), like a scope.
+    add("signal_world3d",      {true, true, false, false, false, FIM});
+    add("signal_actor3d",      {true, true, false, false, false, FIM});
     // From Workspace — replays an inline time-series `data` ([t v; …]) as a
     // source, linearly interpolated (or held) at the current sim time. The
     // mflowLink equivalent of Simulink's From Workspace (the data rides in the
@@ -874,12 +883,23 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
   M.Snapshot = Doc.Settings.Snapshot.value_or(SnapshotConfig{});
 
   // Build the block list.
+  // mflow-3d-animation — at most one scene `signal_world3d` per model.
+  const Node *FirstWorld3d = nullptr;
   for (auto &FN : Flat->Nodes) {
     const Node &N = *FN.Src;
     const KindInfo *KI = lookupKind(N.Kind);
     if (!KI || !KI->Known) {
       Diag.error(N.Loc, "unknown signal-flow block kind \"" + N.Kind + "\"");
       return std::nullopt;
+    }
+    if (N.Kind == "signal_world3d") {
+      if (FirstWorld3d) {
+        Diag.error(N.Loc, "a signal-flow model may declare at most one "
+                          "signal_world3d scene; \"" +
+                              FN.Id + "\" is a second one");
+        return std::nullopt;
+      }
+      FirstWorld3d = &N;
     }
     if (KI->Composite) {
       // signal_subsystem is replaced during flattening; inport/outport
@@ -1187,6 +1207,19 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
       B.OutShape = {3};
       B.OutRows = 1;
       B.OutCols = 3;
+    } else if (N.Kind == "signal_actor3d") {
+      // mflow-3d-animation — gather translation(3)/rotation(3)/scale(3) into a
+      // width-9 transform sample, logged as `<id>[tx,ty,tz,rx,ry,rz,sx,sy,sz]`.
+      B.OutWidth = 9;
+      B.OutShape = {9};
+      B.OutRows = 1;
+      B.OutCols = 9;
+    } else if (N.Kind == "signal_world3d") {
+      // Scene config — no ports, no log, no downstream. A nominal width-1
+      // keeps width inference from leaving it at the inherit sentinel.
+      B.OutWidth = 1;
+      B.OutRows = 1;
+      B.OutCols = 1;
     } else {
       // For most blocks, the output width inherits from the input
       // width when this block has a data input. The width-inference

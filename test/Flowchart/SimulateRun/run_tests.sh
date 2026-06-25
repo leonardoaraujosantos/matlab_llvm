@@ -1115,6 +1115,64 @@ check "quadrotor MPC x→1.0" "awk 'BEGIN{exit !(($QM_X-1.0)^2 < (5e-2)^2)}'" "M
 check "quadrotor MPC y→1.5" "awk 'BEGIN{exit !(($QM_Y-1.5)^2 < (5e-2)^2)}'" "MPC outer loop tracks the lateral y setpoint"
 check "quadrotor MPC z→1.0" "awk 'BEGIN{exit !(($QM_Z-1.0)^2 < (5e-2)^2)}'" "altitude PID tracks the z setpoint"
 
+# mflow-3d-animation (Tier 1) — signal_world3d + kinematic signal_actor3d.
+# orbit_cube: a sine/cosine pair drives a box's X/Y translation in a circle of
+# radius 3; tz held at 1. The actor logs a 9-component transform group
+# `cube[tx..sz]`; a signal_scope3d logs the same path. Then the
+# `-emit-mflowlink-babylon` lane must produce a valid HTML player whose embedded
+# scene has one actor and a timeline as long as the simulated step count.
+OC="$("$MATLABC" -simulate "$EX/3d/orbit_cube.mflow")"
+OC_HEAD=$(printf '%s\n' "$OC" | head -1)
+OC_ROWS=$(printf '%s\n' "$OC" | tail -n +2 | wc -l | tr -d ' ')
+check "actor3d transform columns" \
+  "[[ '$OC_HEAD' == *'cube[tx],cube[ty],cube[tz],cube[rx],cube[ry],cube[rz],cube[sx],cube[sy],cube[sz]'* ]]" \
+  "signal_actor3d logs a width-9 [tx..sz] transform group"
+# cube[tx] = 3·sin(t), cube[ty] = 3·cos(t). At t≈π/2 the box is near (3,0,1).
+OC_TX=$(printf '%s\n' "$OC" | awk -F, 'NR>1 && $1>=1.56 && $1<=1.58 {print $4; exit}')
+OC_TZ=$(printf '%s\n' "$OC" | awk -F, 'NR>1 && $1>=1.56 && $1<=1.58 {print $6; exit}')
+check "actor3d orbit tx≈3 at t=π/2" "awk 'BEGIN{exit !(($OC_TX-3.0)^2 < (5e-2)^2)}'" "sine drives translation X"
+check "actor3d tz held at 1"        "awk 'BEGIN{exit !(($OC_TZ-1.0)^2 < (1e-6)^2)}'" "constant z translation"
+# Emit to files, then probe with grep counts (embedding the full HTML in an
+# eval'd test expression breaks — the inlined viewer JS carries quotes/backticks).
+OC_HTML_F=$(mktemp /tmp/oc.XXXX.html)
+"$MATLABC" -emit-mflowlink-babylon "$EX/3d/orbit_cube.mflow" -o "$OC_HTML_F"
+OC_DOCTYPE=$(head -1 "$OC_HTML_F")
+OC_ACTORS=$(grep -c '"name":"cube"' "$OC_HTML_F")
+OC_HASBJS=$(grep -c 'babylon.js' "$OC_HTML_F")
+OC_TIMES=$(grep -o '"times":\[[^]]*\]' "$OC_HTML_F" | tr ',' '\n' | grep -c '[0-9]')
+check "babylon emit is an HTML doc" "[[ '$OC_DOCTYPE' == '<!doctype html>'* ]]" ""
+check "babylon emit has one actor"  "[[ $OC_ACTORS -eq 1 ]]" ""
+check "babylon emit references Babylon engine" "[[ $OC_HASBJS -ge 1 ]]" ""
+check "babylon timeline matches sim steps" "awk 'BEGIN{exit !($OC_TIMES==$OC_ROWS)}'" "one keyframe per recorded major step"
+rm -f "$OC_HTML_F"
+
+# falling_stack: viewer-physics scene (Tier 4 hint surface). Static actors with
+# no transform inputs; the emitter must mark them as physics bodies. Tier-4
+# dynamics are visualization-only, so we assert structure, not motion.
+FS_HTML_F=$(mktemp /tmp/fs.XXXX.html)
+"$MATLABC" -emit-mflowlink-babylon "$EX/3d/falling_stack.mflow" -o "$FS_HTML_F"
+FS_PHYS=$(grep -c '"physics":true' "$FS_HTML_F")
+FS_ACTORS=$(grep -c '"shape":' "$FS_HTML_F")
+check "falling_stack emits physics world" "[[ $FS_PHYS -ge 1 ]]" ""
+check "falling_stack has 4 actors" "[[ $FS_ACTORS -eq 4 ]]" "ground + 3 boxes"
+rm -f "$FS_HTML_F"
+
+# At most one signal_world3d per model — a second is a sourced error.
+TW=$(mktemp /tmp/twoworld.XXXX.mflow)
+sed 's/"id": "world"/"id": "world"/' "$EX/3d/orbit_cube.mflow" > "$TW"
+python3 - "$TW" <<'PYEOF'
+import json,sys
+p=sys.argv[1]; m=json.load(open(p))
+m['flows'][0]['nodes'].append({"id":"world2","kind":"signal_world3d","data":{"params":{}},"ports":{"in":[],"out":[]}})
+json.dump(m,open(p,'w'))
+PYEOF
+if "$MATLABC" -simulate "$TW" --dry-run >/dev/null 2>&1; then
+  fail=$((fail+1)); echo "FAIL  two signal_world3d blocks rejected"
+else
+  pass=$((pass+1))
+fi
+rm -f "$TW"
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 exit $(( fail > 0 ? 1 : 0 ))

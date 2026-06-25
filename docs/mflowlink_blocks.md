@@ -301,6 +301,39 @@ as a rank-3 signal (`s[1,1,1] … s[2,3,4]`), the 24 values passing through unch
 `nd_color_image.mflow`: an `image_source rows=2 cols=2 channels=3` is a width-12
 `[2,2,3]` color signal.
 
+## 3-D animation (Babylon.js + Havok) — `mflow-3d-animation`
+
+The open-stack analogue of Simulink 3D Animation: a 3-D scene whose actors are
+driven by model signals, played by a self-contained Babylon.js viewer emitted
+with `matlabc -emit-mflowlink-babylon model.mflow -o scene.html`. Plan:
+`docs/mflowlink_3d_animation_roadmap.md`; spec:
+`openspec/changes/mflow-3d-animation/`.
+
+**Conventions.** Coordinate frame is right-handed, **Z-up, metres**; rotation is
+roll/pitch/yaw about X/Y/Z in **radians**. Two physics layers are kept distinct:
+viewer-side Havok/Ammo (Tier 4) is **visualization-only** — excluded from every
+golden — while the lock-step co-sim path (Tier 5) is the deterministic,
+golden-tested source of truth. `params` are camelCase (vector params accept
+`"x,y,z"`).
+
+Tier-1 blocks (shipped):
+
+| Kind | Tier-C | Params | Notes |
+|---|---|---|---|
+| `signal_world3d` | ✓ | `gravity: "0,0,-9.81"`, `viewpoint: "8,8,6"`, `engine: "havok"`, `physics: false`, `showGround: true`, `showAxes: true`, `background: "0.07,0.08,0.1"`, `output: ""` | Singleton scene config — at most one per model (a second is a sourced error). No ports; the emit lane reads its params. |
+| `signal_actor3d` | ✓ | `name`, `shape: "box"` (`box`/`sphere`/`cylinder`/`cone`/`capsule`/`plane`), `size: "1,1,1"`, `radius: 0.5`, `height: 1.0`, `color: "0.6,0.6,0.6"`, `translation`/`rotation`/`scale` (static defaults), `physics`/`mass`/`friction`/`restitution`/`collisionShape` (Tier-4 viewer hints) | Kinematic actor. Input ports `translation`(3), `rotation`(3, rpy rad), `scale`(3) override the static param defaults element-wise; unconnected ⇒ identity (scale 1). Logs a width-9 group `<id>[tx,ty,tz,rx,ry,rz,sx,sy,sz]` — the per-step animation timeline the Babylon lane reads. |
+
+Reserved for later tiers (round-trip through the loader, rejected at lowering
+until shipped): `signal_light3d`, `signal_camera3d`, `signal_sensor3d`,
+`signal_collision3d`.
+
+**Emit lane.** `-emit-mflowlink-babylon` runs the simulation, then writes one
+HTML document with the scene-graph + keyframe timeline + viewer logic embedded
+inline; the Babylon/Havok engine is referenced from a pinned CDN by default
+(`--babylon-cdn <url>` overrides the host). Output goes to stdout, or to the
+`-o <file>` path. CI validates the document structurally (actor/timeline
+counts) — it never renders, so no browser/GPU is needed.
+
 ## Math
 
 | Kind | Tier-C | Params | Notes |
