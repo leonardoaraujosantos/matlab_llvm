@@ -237,18 +237,31 @@ bool TensorLowering::retypeMatrixSlots() {
 
   for (Operation *Alloc : Allocs) {
     /* Only retype when every user is load/store AND every store's value
-     * is already ptr-typed. A partial retype (rewriting loads but not
-     * stores, or vice versa) would split the slot between old matlab.alloc
-     * and new llvm.alloca, desynchronizing loads from subsequent stores.
-     * We'd rather wait another iteration until the literal rewrite and
-     * builtin rewrite have produced ptr-typed values everywhere. */
+     * is already ptr-typed OR a tensor (which this pass always lowers to a
+     * ptr). A partial retype (rewriting loads but not stores, or vice versa)
+     * would split the slot between old matlab.alloc and new llvm.alloca,
+     * desynchronizing loads from subsequent stores — but the promotion loop
+     * below rewrites *both*, so that risk does not apply here.
+     *
+     * Accepting a tensor-typed store value breaks a deadlock that blocks
+     * loop-carried matrix accumulation (`X = X + dt*k`): the store value is
+     * the `matlab.add` result, which stays `tensor` because rewriteBinaryOps
+     * only lowers ptr/f64 operands — and its `X` operand stays `tensor`
+     * because the slot is not promoted, because the store value is not ptr.
+     * Promoting now turns the loads into `llvm.load`->ptr; rewriteBinaryOps
+     * (next in this same fixpoint iteration) then sees ptr operands and
+     * lowers the op to a ptr result, so the transiently-tensor `llvm.store`
+     * operand becomes ptr before module verification. A non-ptr, non-tensor
+     * store value (a bare f64 stored into a matrix slot) is genuinely
+     * polymorphic and still blocks promotion. */
     bool AllCanRetype = true;
     for (OpOperand &Use : Alloc->getResult(0).getUses()) {
       Operation *U = Use.getOwner();
       if (isMatlabOp(U, "matlab.load") && U->getNumOperands() == 1) continue;
       if (isMatlabOp(U, "matlab.store") && U->getNumOperands() == 2 &&
           U->getOperand(1) == Alloc->getResult(0)) {
-        if (U->getOperand(0).getType() != PtrTy) {
+        Type StoreValTy = U->getOperand(0).getType();
+        if (StoreValTy != PtrTy && !isTensorLike(StoreValTy)) {
           AllCanRetype = false; break;
         }
         continue;

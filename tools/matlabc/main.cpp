@@ -14789,7 +14789,12 @@ int main(int Argc, char **Argv) {
           // The same per-element __subscript_store sites the SV
           // path consumes are also rewritten — without it, those
           // ops would survive untranslated into the emitter.
-          mlirgen::runHWUnrollFor(M);
+          // KeepSpillStore: this is a software-emit path (no synthesis
+          // alloca constraint), so retain the loop-var spill store with the
+          // per-iteration constant — otherwise a loop counter read through a
+          // wrapper (e.g. `fprintf('step %g', k)`) prints the stale initial
+          // value in unrolled constant-range loops.
+          mlirgen::runHWUnrollFor(M, /*KeepSpillStore=*/true);
           mlirgen::runLowerPersistentFiArrays(M);
           mlirgen::runRefineSlotTypes(M);
           mlirgen::runLowerScalarSlots(M);

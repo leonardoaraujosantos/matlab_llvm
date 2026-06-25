@@ -603,7 +603,12 @@ bool runRefineIfConds(mlir::ModuleOp M);
 /// bounds aren't compile-time constants — those stay as
 /// scf.while and the SV emitter renders them as Phase-2
 /// unrolled `for` loops at synth time. Returns true.
-bool runHWUnrollFor(mlir::ModuleOp M);
+/// KeepSpillStore: when true (the C/cpp/python/ts emit path), the loop
+/// induction-variable spill store is cloned with the per-iteration constant
+/// instead of being dropped, so every use of the loop variable in the
+/// unrolled body reads the correct value (HW synth path leaves it false so
+/// no f64 slot survives).
+bool runHWUnrollFor(mlir::ModuleOp M, bool KeepSpillStore = false);
 
 /// Phase 5.6 Stage F — persistent fi-array lowering.
 ///

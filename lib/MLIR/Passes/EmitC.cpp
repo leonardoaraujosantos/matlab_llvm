@@ -656,6 +656,7 @@ bool Emitter::canInline(mlir::Operation &Op) {
   if (User->getBlock() != Op.getBlock()) return false;
 
   if (isa<arith::AddFOp, arith::SubFOp, arith::MulFOp, arith::DivFOp,
+          arith::NegFOp,
           arith::AddIOp, arith::SubIOp, arith::MulIOp,
           arith::AndIOp, arith::OrIOp,  arith::XOrIOp,
           arith::CmpFOp, arith::CmpIOp, arith::SelectOp,
@@ -839,6 +840,12 @@ bool Emitter::buildInlineExpr(mlir::Operation &Op, std::string &Expr) {
          + exprFor(Op.getOperand(1)) + ")";
     return true;
   };
+  // Unary floating-point negation (`-x`) — arith.negf, emitted by the
+  // frontend for a unary minus on a scalar (e.g. `-u`, `[...; -u]`).
+  if (isa<arith::NegFOp>(Op)) {
+    Expr = "(-" + exprFor(Op.getOperand(0)) + ")";
+    return true;
+  }
   if (isa<arith::AddFOp>(Op)) return bin("+");
   if (isa<arith::SubFOp>(Op)) return bin("-");
   if (isa<arith::MulFOp>(Op)) return bin("*");
@@ -2034,9 +2041,17 @@ bool Emitter::tryRewriteAsMatrixCall(llvm::StringRef Callee,
     if (Callee == "matlab_det")    { Out = opnd0 + ".det()"; return true; }
   }
   if (!isMatrixReturningRuntimeFn(Callee)) return false;
-  // Helpers: pretty operand spelling without superfluous outer parens.
+  // Operand spelling for use INSIDE an operator / method expression. We must
+  // NOT drop the outer parens here: an operand that is itself a compound
+  // sub-expression (e.g. `(k1 + k2)`) needs its parens to preserve precedence
+  // when it becomes the operand of a higher-precedence operator (`s * (k1+k2)`)
+  // or a method receiver (`(k1+k2).sum()`). `exprFor` already parenthesizes
+  // compound binary results and leaves atomic operands (vars/constants/calls)
+  // bare, so this adds parens only where they are semantically required.
+  // (Dropping outer parens is only safe on the top-level statement value,
+  // which the callers of tryRewriteAsMatrixCall handle themselves.)
   auto opnd = [&](unsigned i) {
-    return dropOuterParens(this->exprFor(Operands[i]));
+    return this->exprFor(Operands[i]);
   };
   auto bin = [&](llvm::StringRef Op) -> std::string {
     return "(" + opnd(0) + " " + Op.str() + " " + opnd(1) + ")";
