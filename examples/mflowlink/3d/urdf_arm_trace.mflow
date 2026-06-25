@@ -1,0 +1,37 @@
+{
+  "entry" : "urdf_arm_trace",
+  "flows" : [
+    {
+      "edges" : [
+        { "id" : "eq1", "kind" : "data", "from" : { "node" : "q1", "port" : "out" }, "to" : { "node" : "q", "port" : "in1" } },
+        { "id" : "eq2", "kind" : "data", "from" : { "node" : "q2", "port" : "out" }, "to" : { "node" : "q", "port" : "in2" } },
+        { "id" : "eqa", "kind" : "data", "from" : { "node" : "q", "port" : "out" }, "to" : { "node" : "arm", "port" : "jointAngles" } }
+      ],
+      "id" : "flow_urdf",
+      "kind" : "program",
+      "name" : "urdf_arm_trace",
+      "nodes" : [
+        { "id" : "world", "kind" : "signal_world3d", "data" : { "params" : { "viewpoint" : "5,5,4", "showGround" : true, "showAxes" : true, "output" : "urdf_arm_trace.html" } }, "ports" : { "in" : [], "out" : [] } },
+        { "id" : "sun", "kind" : "signal_light3d", "data" : { "params" : { "type" : "directional", "direction" : "-0.4,-0.5,-1", "intensity" : 0.9 } }, "ports" : { "in" : [], "out" : [] } },
+        { "id" : "q1", "kind" : "signal_sine", "data" : { "log_signal" : true, "params" : { "amplitude" : 1.2, "frequency" : 0.6, "phase" : 0.0 } }, "ports" : { "in" : [], "out" : [ { "id" : "out" } ] } },
+        { "id" : "q2", "kind" : "signal_sine", "data" : { "log_signal" : true, "params" : { "amplitude" : 1.5, "frequency" : 1.1, "phase" : 0.7 } }, "ports" : { "in" : [], "out" : [ { "id" : "out" } ] } },
+        { "id" : "q", "kind" : "signal_mux", "data" : { "params" : {} }, "ports" : { "in" : [ { "id" : "in1" }, { "id" : "in2" } ], "out" : [ { "id" : "out" } ] } },
+        { "id" : "arm", "kind" : "signal_actor3d", "data" : { "params" : { "name" : "arm", "urdf" : "assets/arm2.urdf", "color" : "0.4,0.55,0.85" } }, "ports" : { "in" : [ { "id" : "jointAngles" } ] } }
+      ],
+      "signature" : { "inputs" : [], "outputs" : [] }
+    }
+  ],
+  "schema" : "matforge.flowchart",
+  "settings" : {
+    "kind" : "signal_flow",
+    "solver" : {
+      "type" : "fixed_step",
+      "algorithm" : "ode4",
+      "startTime" : 0,
+      "stopTime" : 8,
+      "stepSize" : 0.02,
+      "zeroCrossing" : false
+    }
+  },
+  "version" : "0.1.0"
+}

@@ -107,6 +107,159 @@ std::string meshDataUrl(const std::string &Bytes, const std::string &Ext) {
   return "data:" + Mime + ";base64," + base64(Bytes);
 }
 
+//===----------------------------------------------------------------------===//
+// Minimal URDF parser (Tier 3b). Handles the common subset: <link> with one
+// <visual> (<geometry> box/cylinder/sphere + optional <origin>), and <joint>
+// (type, <parent>, <child>, <origin>, <axis>). Mesh geometry and multiple
+// visuals are out of scope — a link with no parsed primitive renders as a small
+// box placeholder. Good enough to articulate a robot from its joint signals via
+// the viewer scene graph; FK matches the URDF kinematics by construction.
+//===----------------------------------------------------------------------===//
+
+struct UrdfGeom {
+  std::string type = "box"; // box | cylinder | sphere
+  double box[3] = {0.1, 0.1, 0.1};
+  double radius = 0.05, length = 0.1;
+  double vorigin[6] = {0, 0, 0, 0, 0, 0}; // xyz + rpy
+};
+struct UrdfLink { std::string name; UrdfGeom geom; };
+struct UrdfJoint {
+  std::string name, type, parent, child;
+  double origin[6] = {0, 0, 0, 0, 0, 0};
+  double axis[3] = {0, 0, 1};
+};
+struct UrdfModel {
+  std::vector<UrdfLink> links;
+  std::vector<UrdfJoint> joints;
+};
+
+// Extract attribute `Name` from a tag-text region [Beg, End).
+std::string xmlAttr(const std::string &S, size_t Beg, size_t End,
+                    const std::string &Name) {
+  std::string Key = Name + "=";
+  size_t P = S.find(Key, Beg);
+  if (P == std::string::npos || P >= End) return "";
+  P += Key.size();
+  if (P >= S.size() || (S[P] != '"' && S[P] != '\'')) return "";
+  char Q = S[P++];
+  size_t E = S.find(Q, P);
+  if (E == std::string::npos || E > End) return "";
+  return S.substr(P, E - P);
+}
+
+void parseTriple(const std::string &S, double *Out, int N) {
+  std::string Tok;
+  int I = 0;
+  std::string Str = S;
+  Str.push_back(' ');
+  for (char C : Str) {
+    if (C == ' ' || C == '\t' || C == ',') {
+      if (!Tok.empty()) {
+        if (I < N) { try { Out[I] = std::stod(Tok); } catch (...) {} ++I; }
+        Tok.clear();
+      }
+    } else Tok.push_back(C);
+  }
+}
+
+// Find the inner extent of the element starting at `<Tag` from `From`; returns
+// the open-tag end and sets CloseAt to the matching `</Tag>` (or the self-close
+// `/>`), or npos when not found.
+size_t findElement(const std::string &S, const std::string &Tag, size_t From,
+                   size_t &OpenEnd, size_t &CloseAt) {
+  size_t Open = S.find("<" + Tag, From);
+  if (Open == std::string::npos) return std::string::npos;
+  OpenEnd = S.find('>', Open);
+  if (OpenEnd == std::string::npos) return std::string::npos;
+  if (OpenEnd > 0 && S[OpenEnd - 1] == '/') { CloseAt = Open; return Open; }
+  CloseAt = S.find("</" + Tag, OpenEnd);
+  return Open;
+}
+
+void parseOrigin(const std::string &S, size_t Beg, size_t End, double *Out6) {
+  size_t OE, CA;
+  size_t O = findElement(S.substr(0, End), "origin", Beg, OE, CA);
+  if (O == std::string::npos || O >= End) return;
+  std::string xyz = xmlAttr(S, O, OE, "xyz");
+  std::string rpy = xmlAttr(S, O, OE, "rpy");
+  if (!xyz.empty()) parseTriple(xyz, Out6, 3);
+  if (!rpy.empty()) parseTriple(rpy, Out6 + 3, 3);
+}
+
+bool parseUrdf(const std::string &S, UrdfModel &M) {
+  // Links.
+  size_t Pos = 0;
+  while (true) {
+    size_t OE, CA;
+    size_t O = findElement(S, "link", Pos, OE, CA);
+    if (O == std::string::npos) break;
+    size_t Inner = (CA == O) ? OE : CA; // self-closing vs container
+    UrdfLink L;
+    L.name = xmlAttr(S, O, OE, "name");
+    // First <visual>'s geometry + origin (within this link's extent).
+    size_t VOE, VCA;
+    size_t V = findElement(S, "visual", OE, VOE, VCA);
+    if (V != std::string::npos && V < Inner) {
+      size_t VEnd = (VCA == V) ? VOE : VCA;
+      parseOrigin(S, VOE, VEnd, L.geom.vorigin);
+      size_t GOE, GCA;
+      size_t G = findElement(S, "geometry", VOE, GOE, GCA);
+      if (G != std::string::npos && G < VEnd) {
+        size_t GEnd = (GCA == G) ? GOE : GCA;
+        size_t boe, boc;
+        if (findElement(S, "box", GOE, boe, boc) < GEnd) {
+          L.geom.type = "box";
+          parseTriple(xmlAttr(S, S.find("<box", GOE), boe, "size"), L.geom.box, 3);
+        } else {
+          size_t coe, coc;
+          if (findElement(S, "cylinder", GOE, coe, coc) < GEnd) {
+            L.geom.type = "cylinder";
+            size_t cp = S.find("<cylinder", GOE);
+            L.geom.radius = std::atof(xmlAttr(S, cp, coe, "radius").c_str());
+            L.geom.length = std::atof(xmlAttr(S, cp, coe, "length").c_str());
+          } else {
+            size_t soe, soc;
+            if (findElement(S, "sphere", GOE, soe, soc) < GEnd) {
+              L.geom.type = "sphere";
+              size_t sp = S.find("<sphere", GOE);
+              L.geom.radius = std::atof(xmlAttr(S, sp, soe, "radius").c_str());
+            }
+          }
+        }
+      }
+    }
+    M.links.push_back(L);
+    Pos = (CA == O) ? OE + 1 : CA + 6;
+  }
+  // Joints.
+  Pos = 0;
+  while (true) {
+    size_t OE, CA;
+    size_t O = findElement(S, "joint", Pos, OE, CA);
+    if (O == std::string::npos) break;
+    size_t Inner = (CA == O) ? OE : CA;
+    UrdfJoint J;
+    J.name = xmlAttr(S, O, OE, "name");
+    J.type = xmlAttr(S, O, OE, "type");
+    size_t poe, pca;
+    size_t P = findElement(S, "parent", OE, poe, pca);
+    if (P != std::string::npos && P < Inner) J.parent = xmlAttr(S, P, poe, "link");
+    size_t coe, cca;
+    size_t C = findElement(S, "child", OE, coe, cca);
+    if (C != std::string::npos && C < Inner) J.child = xmlAttr(S, C, coe, "link");
+    parseOrigin(S, OE, Inner, J.origin);
+    size_t aoe, aca;
+    size_t A = findElement(S, "axis", OE, aoe, aca);
+    if (A != std::string::npos && A < Inner) {
+      std::string ax = xmlAttr(S, A, aoe, "xyz");
+      if (!ax.empty()) parseTriple(ax, J.axis, 3);
+    }
+    M.joints.push_back(J);
+    Pos = (CA == O) ? OE + 1 : CA + 7;
+  }
+  return !M.links.empty();
+}
+
 std::string jsonStr(const std::string &S) {
   std::string Out = "\"";
   for (char C : S) {
@@ -188,6 +341,52 @@ bool emitMflowLinkBabylon(const MflowLinkModel &M, const MflowLinkSim &Sim,
       Actors << ",\"mesh\":" << jsonStr(meshDataUrl(Bytes, Ext));
       Actors << ",\"meshExt\":" << jsonStr(Ext.empty() ? ".glb" : Ext);
     }
+    // URDF import (Tier 3b): parse the link/joint tree and emit it; the viewer
+    // builds one node per link and rotates each joint by jointAngles[qIndex].
+    if (const std::string *UrdfP = param(B, "urdf")) {
+      std::string Path = (!Opts.ModelDir.empty() && !UrdfP->empty() &&
+                          UrdfP->front() != '/')
+                             ? Opts.ModelDir + "/" + *UrdfP
+                             : *UrdfP;
+      std::string Xml;
+      UrdfModel U;
+      if (!readFile(Path, Xml) || !parseUrdf(Xml, U)) {
+        MeshErr = "signal_actor3d \"" + B.Id + "\": cannot read/parse URDF \"" +
+                  *UrdfP + "\" (resolved to " + Path + ")";
+        break;
+      }
+      auto arr6 = [](std::ostringstream &O, const double *V, int N) {
+        O << "[";
+        for (int i = 0; i < N; ++i) O << (i ? "," : "") << V[i];
+        O << "]";
+      };
+      Actors << ",\"urdf\":{\"links\":[";
+      for (size_t li = 0; li < U.links.size(); ++li) {
+        const auto &L = U.links[li];
+        Actors << (li ? "," : "") << "{\"name\":" << jsonStr(L.name)
+               << ",\"geom\":" << jsonStr(L.geom.type)
+               << ",\"box\":"; arr6(Actors, L.geom.box, 3);
+        Actors << ",\"radius\":" << L.geom.radius
+               << ",\"length\":" << L.geom.length << ",\"vorigin\":";
+        arr6(Actors, L.geom.vorigin, 6);
+        Actors << "}";
+      }
+      Actors << "],\"joints\":[";
+      int QIdx = 0;
+      for (size_t ji = 0; ji < U.joints.size(); ++ji) {
+        const auto &J = U.joints[ji];
+        bool Movable = J.type != "fixed";
+        Actors << (ji ? "," : "") << "{\"name\":" << jsonStr(J.name)
+               << ",\"type\":" << jsonStr(J.type)
+               << ",\"parent\":" << jsonStr(J.parent)
+               << ",\"child\":" << jsonStr(J.child) << ",\"origin\":";
+        arr6(Actors, J.origin, 6);
+        Actors << ",\"axis\":"; arr6(Actors, J.axis, 3);
+        Actors << ",\"q\":" << (Movable && QIdx < 12 ? QIdx : -1) << "}";
+        if (Movable && QIdx < 12) ++QIdx;
+      }
+      Actors << "]}";
+    }
     if (const std::string *P = param(B, "parent"))
       Actors << ",\"parent\":" << jsonStr(*P);
     // Tier-4 (viewer physics) hints — emitted now so the scene contract is
@@ -202,15 +401,27 @@ bool emitMflowLinkBabylon(const MflowLinkModel &M, const MflowLinkSim &Sim,
     }
     // Keyframes: nine components per recorded time. Falls back to the static
     // identity/param transform when the actor produced no log columns.
+    // Column refs: 9 transform (scale defaults to 1) + any joint angles q1..qN.
+    std::vector<long> Ref;
+    std::vector<double> Def;
+    for (int C = 0; C < 9; ++C) {
+      auto It = ColIdx.find(B.Id + "[" + Comp[C] + "]");
+      Ref.push_back(It != ColIdx.end() ? (long)It->second : -1);
+      Def.push_back(C >= 6 ? 1.0 : 0.0);
+    }
+    for (int Q = 1; Q <= 12; ++Q) {
+      auto It = ColIdx.find(B.Id + "[q" + std::to_string(Q) + "]");
+      if (It == ColIdx.end()) break;
+      Ref.push_back((long)It->second);
+      Def.push_back(0.0);
+    }
     Actors << ",\"keys\":[";
     size_t Rows = Times.size();
     for (size_t R = 0; R < Rows; ++R) {
       Actors << (R ? "," : "") << "[";
-      for (int C = 0; C < 9; ++C) {
-        auto It = ColIdx.find(B.Id + "[" + Comp[C] + "]");
-        double V = (C >= 6) ? 1.0 : 0.0; // scale defaults to 1
-        if (It != ColIdx.end() && R < Cols[It->second].size())
-          V = Cols[It->second][R].Value;
+      for (size_t C = 0; C < Ref.size(); ++C) {
+        double V = Def[C];
+        if (Ref[C] >= 0 && R < Cols[Ref[C]].size()) V = Cols[Ref[C]][R].Value;
         Actors << (C ? "," : "") << V;
       }
       Actors << "]";
@@ -380,10 +591,48 @@ function buildMesh(a){
   }
 }
 
+// URDF rigging (Tier 3b): build one node per link, attach via joints, and
+// return the movable joints so applyFrame can rotate them from jointAngles.
+function buildUrdf(a, baseNode){
+  const nodes = {};
+  for (const L of a.urdf.links) {
+    const n = new BABYLON.TransformNode(a.id+'_'+L.name, scene);
+    let vis;
+    if (L.geom === 'cylinder') vis = BABYLON.MeshBuilder.CreateCylinder(n.name+'_v',{diameter:2*L.radius,height:L.length},scene);
+    else if (L.geom === 'sphere') vis = BABYLON.MeshBuilder.CreateSphere(n.name+'_v',{diameter:2*L.radius},scene);
+    else { const b=L.box||[0.1,0.1,0.1]; vis = BABYLON.MeshBuilder.CreateBox(n.name+'_v',{width:b[0],height:b[1],depth:b[2]},scene); }
+    vis.parent = n;
+    const vo = L.vorigin||[0,0,0,0,0,0];
+    vis.position.set(vo[0],vo[1],vo[2]);
+    vis.rotationQuaternion = BABYLON.Quaternion.RotationYawPitchRoll(vo[5],vo[4],vo[3]);
+    const mat = new BABYLON.StandardMaterial(n.name+'_m', scene);
+    mat.diffuseColor = mkColor(a.color || [0.7,0.7,0.78]); vis.material = mat;
+    nodes[L.name] = n;
+  }
+  const roots = new Set(Object.keys(nodes));
+  const joints = [];
+  for (const J of a.urdf.joints) {
+    const cn = nodes[J.child], pn = nodes[J.parent];
+    if (!cn || !pn) continue;
+    cn.parent = pn;
+    cn.position.set(J.origin[0],J.origin[1],J.origin[2]);
+    const baseQ = BABYLON.Quaternion.RotationYawPitchRoll(J.origin[5],J.origin[4],J.origin[3]);
+    cn.rotationQuaternion = baseQ.clone();
+    roots.delete(J.child);
+    if (J.q >= 0) joints.push({node:cn, axis:new BABYLON.Vector3(J.axis[0],J.axis[1],J.axis[2]), q:J.q, base:baseQ});
+  }
+  for (const r of roots) nodes[r].parent = baseNode;
+  return joints;
+}
+const urdfRigs = {}; // actor id -> [movable joints]
+
 const meshByKey = {}; // both id and name resolve to the animated node
 for (const a of DATA.actors) {
   let m;
-  if (a.mesh) {
+  if (a.urdf) {
+    m = new BABYLON.TransformNode(a.id, scene);
+    urdfRigs[a.id] = buildUrdf(a, m);
+  } else if (a.mesh) {
     // glTF/GLB import (Tier 3): animate a TransformNode; the loaded geometry
     // is parented to it once it streams in from the inline data URL.
     m = new BABYLON.TransformNode(a.id, scene);
@@ -450,6 +699,12 @@ function applyFrame(i){
     m.position.set(k[0], k[1], k[2]);
     m.rotationQuaternion = BABYLON.Quaternion.RotationYawPitchRoll(k[5], k[4], k[3]);
     m.scaling.set(k[6], k[7], k[8]);
+    // URDF joints: rotate each movable joint about its axis by jointAngles[q].
+    const rig = urdfRigs[a.id];
+    if (rig) for (const J of rig) {
+      const ang = k[9 + J.q] || 0;
+      J.node.rotationQuaternion = J.base.multiply(BABYLON.Quaternion.RotationAxis(J.axis, ang));
+    }
   }
   if (followMesh) camera.setTarget(followMesh.getAbsolutePosition());
   const tEl = document.getElementById('t');

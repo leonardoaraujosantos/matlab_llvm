@@ -20,7 +20,7 @@ One example per tier feature, so every feature has a test model:
 | 2 | `articulated_arm.mflow` ✅ | parent/child hierarchy; directional light; follow camera; materials |
 | 2 | `quadrotor_flythrough.mflow` | reuse quadrotor pose signals; chase cam (lands with Tier-3 glTF body) |
 | 3 | `gltf_drone.mflow` ✅ | glTF/GLB mesh import (inline `assets/drone.gltf`) + chase camera |
-| 3 | `urdf_arm_trace.mflow` | URDF actor → parented link chain, joints from a signal |
+| 3 | `urdf_arm_trace.mflow` ✅ | URDF (`assets/arm2.urdf`) → link tree, joints from a signal |
 | 4 | `falling_stack.mflow` ✅ | viewer-side Havok physics (visual gravity + box collisions) |
 | 4 | `ball_ramp.mflow` ✅ | sphere on an inclined plane (restitution bounce) |
 | 5 | `bounce_cosim.mflow` | deterministic C++ co-sim; analytic bounce golden |

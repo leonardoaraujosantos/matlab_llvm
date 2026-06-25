@@ -1207,6 +1207,30 @@ if "$MATLABC" -emit-mflowlink-babylon "$BADM" -o /dev/null >/dev/null 2>&1; then
 else pass=$((pass+1)); fi
 rm -f "$BADM"
 
+# Tier 3b — URDF import. urdf_arm_trace: a 2-DOF arm whose joints are driven by
+# two sines through a `jointAngles` port; the emitter parses the URDF link/joint
+# tree and the actor logs the joint angles (`arm[q1]`, `arm[q2]`).
+UA="$("$MATLABC" -simulate "$EX/3d/urdf_arm_trace.mflow")"
+UA_HEAD=$(printf '%s\n' "$UA" | head -1)
+check "urdf actor logs joint angles" "[[ '$UA_HEAD' == *'arm[q1]'*'arm[q2]'* ]]" "jointAngles → q columns"
+# q1 = 1.2·sin(0.6·t); at t≈2.0 → 1.1184.
+UA_Q1=$(printf '%s\n' "$UA" | awk -F, 'NR==1{for(i=1;i<=NF;i++) if($i=="arm[q1]") c=i} NR>1 && $1>=1.99 && $1<=2.01 {print $c; exit}')
+check "urdf joint angle tracks its signal" "awk 'BEGIN{exit !(($UA_Q1-1.1184)^2 < (1e-2)^2)}'" "q1 = 1.2·sin(0.6·t)"
+UA_HTML_F=$(mktemp /tmp/ua.XXXX.html)
+"$MATLABC" -emit-mflowlink-babylon "$EX/3d/urdf_arm_trace.mflow" -o "$UA_HTML_F"
+UA_LINKS=$(grep -o '"geom":' "$UA_HTML_F" | wc -l | tr -d ' ')
+UA_JOINTS=$(grep -o '"type":"revolute"' "$UA_HTML_F" | wc -l | tr -d ' ')
+check "urdf scene has 3 links" "[[ $UA_LINKS -eq 3 ]]" "base + link1 + link2"
+check "urdf scene has 2 revolute joints" "[[ $UA_JOINTS -eq 2 ]]" ""
+rm -f "$UA_HTML_F"
+# A URDF path that does not resolve is a sourced error.
+BADU=$(mktemp /tmp/badurdf.XXXX.mflow)
+sed 's#assets/arm2.urdf#assets/nope.urdf#' "$EX/3d/urdf_arm_trace.mflow" > "$BADU"
+if "$MATLABC" -emit-mflowlink-babylon "$BADU" -o /dev/null >/dev/null 2>&1; then
+  fail=$((fail+1)); echo "FAIL  missing URDF file rejected"
+else pass=$((pass+1)); fi
+rm -f "$BADU"
+
 # Parent hierarchy guards: an unknown parent and a cycle are both sourced errors.
 UNK=$(mktemp /tmp/unkparent.XXXX.mflow)
 sed 's/"parent" : "base"/"parent" : "ghost"/' "$EX/3d/articulated_arm.mflow" > "$UNK"

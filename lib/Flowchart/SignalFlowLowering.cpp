@@ -1216,10 +1216,15 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
     } else if (N.Kind == "signal_actor3d") {
       // mflow-3d-animation — gather translation(3)/rotation(3)/scale(3) into a
       // width-9 transform sample, logged as `<id>[tx,ty,tz,rx,ry,rz,sx,sy,sz]`.
-      B.OutWidth = 9;
-      B.OutShape = {9};
+      // A URDF actor (Tier 3b) additionally carries up to 12 joint angles
+      // (`<id>[q1..q12]`) gathered from its `jointAngles` port, so the viewer
+      // can articulate the link tree; the joint cap keeps the width fixed
+      // (no URDF parse at lowering time).
+      bool IsUrdf = N.getParam("urdf") != nullptr;
+      B.OutWidth = IsUrdf ? 9 + 12 : 9;
+      B.OutShape = {B.OutWidth};
       B.OutRows = 1;
-      B.OutCols = 9;
+      B.OutCols = B.OutWidth;
     } else if (N.Kind == "signal_world3d" || N.Kind == "signal_light3d" ||
                N.Kind == "signal_camera3d") {
       // Scene config — no ports, no log, no downstream. A nominal width-1

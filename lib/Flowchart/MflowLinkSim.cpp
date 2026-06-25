@@ -1032,6 +1032,14 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
         LogElements_.push_back(E);
         LogNames_.push_back(Name + "[" + Comp[E] + "]");
       }
+      // URDF actor (Tier 3b) — additionally log up to 12 joint angles.
+      if (OutWidth_[I] > 9) {
+        for (int Q = 0; Q < OutWidth_[I] - 9; ++Q) {
+          LogBlocks_.push_back(I);
+          LogElements_.push_back(9 + Q);
+          LogNames_.push_back(Name + "[q" + std::to_string(Q + 1) + "]");
+        }
+      }
       continue;
     }
     int W = OutWidth_[I];
@@ -1731,7 +1739,17 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
           if (!std::isnan(V)) Tf[G * 3 + E] = V;
         }
       }
-      VecOut_[I].assign(Tf, Tf + 9);
+      int W = OutWidth_[I] > 9 ? OutWidth_[I] : 9;
+      VecOut_[I].assign(W, 0.0);
+      for (int E = 0; E < 9; ++E) VecOut_[I][E] = Tf[E];
+      // URDF actor (Tier 3b) — gather up to (W-9) joint angles from the
+      // `jointAngles` vector port into the trailing slots.
+      if (W > 9 && portConnected(I, "jointAngles")) {
+        for (int Q = 0; Q < W - 9; ++Q) {
+          double V = vecInput(I, "jointAngles", Q);
+          VecOut_[I][9 + Q] = std::isnan(V) ? 0.0 : V;
+        }
+      }
       Out_[I] = Tf[0];
     } else if (K == "signal_scope3d") {
       // 3-D trajectory scope — gather the x/y/z input ports into a width-3
