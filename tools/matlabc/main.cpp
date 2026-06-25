@@ -247,6 +247,9 @@ struct Options {
   /* mflow-3d-animation — base CDN host for the Babylon engine in the
    * `-emit-mflowlink-babylon` HTML. Overridable via `--babylon-cdn <url>`. */
   std::string BabylonCdn;
+  /* mflow-3d-animation — optional babylon.js bundle to inline (`--babylon-inline
+   * <path>`) for a fully network-free, self-contained HTML artifact. */
+  std::string BabylonInline;
   /* Additional input files. When multiple `.m` files are passed, the
    * driver concatenates their contents in CLI order — the first file
    * (kept in InputPath for backward compat with single-file modes) is
@@ -453,6 +456,13 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
         return false;
       }
       Opts.BabylonCdn = Argv[I];
+    }
+    else if (A == "--babylon-inline") {
+      if (++I >= Argc) {
+        std::cerr << "--babylon-inline requires a babylon.js bundle path\n";
+        return false;
+      }
+      Opts.BabylonInline = Argv[I];
     }
     else if (A == "-emit-cocotb")
       Opts.Mode = Options::Mode::EmitCocotb;
@@ -12171,6 +12181,7 @@ int main(int Argc, char **Argv) {
 
     matlab::flowchart::BabylonEmitOptions BOpts;
     if (!Opts.BabylonCdn.empty()) BOpts.CdnBase = Opts.BabylonCdn;
+    if (!Opts.BabylonInline.empty()) BOpts.InlineEnginePath = Opts.BabylonInline;
     // Resolve a relative actor `mesh` (glTF/GLB) against the .mflow's directory.
     {
       auto Slash = Opts.InputPath.find_last_of("/\\");

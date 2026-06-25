@@ -34,6 +34,10 @@ struct BabylonEmitOptions {
   // Directory of the source .mflow, used to resolve a `signal_actor3d` relative
   // `mesh` path (glTF/GLB) for embedding. Empty ⇒ resolve against the CWD.
   std::string ModelDir;
+  // Optional path to a Babylon engine bundle (babylon.js). When set, its
+  // contents are inlined into the HTML (`--babylon-inline`) for a fully
+  // network-free, self-contained artifact instead of the default CDN <script>.
+  std::string InlineEnginePath;
   // Tier-6 placeholder — when set, the viewer auto-plays for headless capture.
   bool Record = false;
 };

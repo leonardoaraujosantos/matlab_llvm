@@ -49,9 +49,10 @@ emit lane) that everything else builds on.
   asserts the emitted scene has the 3-link parent chain, the light, and the follow camera.
   (World-pose composition is the viewer's scene-graph job per design D2; the analytic FK
   golden moves to the URDF actor in Tier 3, which calls the robotics `getTransform`.)
-- [~] 2.6 Example: `quadrotor_flythrough.mflow` — reuse the quadrotor demo's pose signals to
-  drive a body actor + chase camera. Deferred to land with the Tier-3 mesh import so the body
-  is a glTF drone rather than a primitive (avoids a throwaway primitive-only version).
+- [x] 2.6 Example: `quadrotor_flythrough.mflow` — a quadrotor body with 4 parented, spinning
+  rotor children and a follow camera (added in the polish batch).
+Mesh import (Tier 3) also gained STL/OBJ (`stl_marker.mflow` + `assets/marker.stl`) and the
+emit lane gained `--babylon-inline` (network-free engine vendoring).
 
 ## 3. Mesh import — glTF/GLB + URDF (reuse robotics toolbox)
 

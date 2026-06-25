@@ -1,0 +1,42 @@
+{
+  "entry" : "quadrotor_flythrough",
+  "flows" : [
+    {
+      "edges" : [
+        { "id" : "epx", "kind" : "data", "from" : { "node" : "px", "port" : "out" }, "to" : { "node" : "bodypos", "port" : "in1" } },
+        { "id" : "epy", "kind" : "data", "from" : { "node" : "py", "port" : "out" }, "to" : { "node" : "bodypos", "port" : "in2" } },
+        { "id" : "epz", "kind" : "data", "from" : { "node" : "pz", "port" : "out" }, "to" : { "node" : "bodypos", "port" : "in3" } },
+        { "id" : "ebp", "kind" : "data", "from" : { "node" : "bodypos", "port" : "out" }, "to" : { "node" : "body", "port" : "translation" } },
+        { "id" : "es3", "kind" : "data", "from" : { "node" : "spin", "port" : "out" }, "to" : { "node" : "smux", "port" : "in3" } },
+        { "id" : "es1", "kind" : "data", "from" : { "node" : "zero", "port" : "out" }, "to" : { "node" : "smux", "port" : "in1" } },
+        { "id" : "es2", "kind" : "data", "from" : { "node" : "zero", "port" : "out" }, "to" : { "node" : "smux", "port" : "in2" } },
+        { "id" : "er1", "kind" : "data", "from" : { "node" : "smux", "port" : "out" }, "to" : { "node" : "rotor1", "port" : "rotation" } },
+        { "id" : "er2", "kind" : "data", "from" : { "node" : "smux", "port" : "out" }, "to" : { "node" : "rotor2", "port" : "rotation" } },
+        { "id" : "er3", "kind" : "data", "from" : { "node" : "smux", "port" : "out" }, "to" : { "node" : "rotor3", "port" : "rotation" } },
+        { "id" : "er4", "kind" : "data", "from" : { "node" : "smux", "port" : "out" }, "to" : { "node" : "rotor4", "port" : "rotation" } }
+      ],
+      "id" : "flow_quad", "kind" : "program", "name" : "quadrotor_flythrough",
+      "nodes" : [
+        { "id" : "world", "kind" : "signal_world3d", "data" : { "params" : { "viewpoint" : "10,10,6", "showGround" : true, "output" : "quadrotor_flythrough.html" } }, "ports" : { "in" : [], "out" : [] } },
+        { "id" : "sun", "kind" : "signal_light3d", "data" : { "params" : { "type" : "directional", "direction" : "-0.3,-0.5,-1", "intensity" : 1.0 } }, "ports" : { "in" : [], "out" : [] } },
+        { "id" : "cam", "kind" : "signal_camera3d", "data" : { "params" : { "mode" : "follow", "follow" : "body" } }, "ports" : { "in" : [], "out" : [] } },
+        { "id" : "px", "kind" : "signal_sine", "data" : { "params" : { "amplitude" : 4.0, "frequency" : 0.6, "phase" : 0.0 } }, "ports" : { "in" : [], "out" : [ { "id" : "out" } ] } },
+        { "id" : "py", "kind" : "signal_sine", "data" : { "params" : { "amplitude" : 4.0, "frequency" : 0.6, "phase" : 1.5707963 } }, "ports" : { "in" : [], "out" : [ { "id" : "out" } ] } },
+        { "id" : "pz", "kind" : "signal_sine", "data" : { "params" : { "amplitude" : 0.6, "frequency" : 1.2, "bias" : 2.5 } }, "ports" : { "in" : [], "out" : [ { "id" : "out" } ] } },
+        { "id" : "bodypos", "kind" : "signal_mux", "data" : { "params" : {} }, "ports" : { "in" : [ { "id" : "in1" }, { "id" : "in2" }, { "id" : "in3" } ], "out" : [ { "id" : "out" } ] } },
+        { "id" : "zero", "kind" : "signal_constant", "data" : { "params" : { "value" : 0.0 } }, "ports" : { "in" : [], "out" : [ { "id" : "out" } ] } },
+        { "id" : "spin", "kind" : "signal_ramp", "data" : { "params" : { "slope" : 25.0 } }, "ports" : { "in" : [], "out" : [ { "id" : "out" } ] } },
+        { "id" : "smux", "kind" : "signal_mux", "data" : { "params" : {} }, "ports" : { "in" : [ { "id" : "in1" }, { "id" : "in2" }, { "id" : "in3" } ], "out" : [ { "id" : "out" } ] } },
+        { "id" : "body", "kind" : "signal_actor3d", "data" : { "params" : { "name" : "body", "shape" : "box", "size" : "1.2,1.2,0.3", "color" : "0.25,0.5,0.9" } }, "ports" : { "in" : [ { "id" : "translation" } ] } },
+        { "id" : "rotor1", "kind" : "signal_actor3d", "data" : { "params" : { "name" : "rotor1", "parent" : "body", "shape" : "cylinder", "radius" : 0.5, "height" : 0.06, "translation" : "0.7,0.7,0.2", "color" : "0.15,0.15,0.18" } }, "ports" : { "in" : [ { "id" : "rotation" } ] } },
+        { "id" : "rotor2", "kind" : "signal_actor3d", "data" : { "params" : { "name" : "rotor2", "parent" : "body", "shape" : "cylinder", "radius" : 0.5, "height" : 0.06, "translation" : "-0.7,0.7,0.2", "color" : "0.15,0.15,0.18" } }, "ports" : { "in" : [ { "id" : "rotation" } ] } },
+        { "id" : "rotor3", "kind" : "signal_actor3d", "data" : { "params" : { "name" : "rotor3", "parent" : "body", "shape" : "cylinder", "radius" : 0.5, "height" : 0.06, "translation" : "0.7,-0.7,0.2", "color" : "0.15,0.15,0.18" } }, "ports" : { "in" : [ { "id" : "rotation" } ] } },
+        { "id" : "rotor4", "kind" : "signal_actor3d", "data" : { "params" : { "name" : "rotor4", "parent" : "body", "shape" : "cylinder", "radius" : 0.5, "height" : 0.06, "translation" : "-0.7,-0.7,0.2", "color" : "0.15,0.15,0.18" } }, "ports" : { "in" : [ { "id" : "rotation" } ] } }
+      ],
+      "signature" : { "inputs" : [], "outputs" : [] }
+    }
+  ],
+  "schema" : "matforge.flowchart",
+  "settings" : { "kind" : "signal_flow", "solver" : { "type" : "fixed_step", "algorithm" : "ode4", "startTime" : 0, "stopTime" : 10, "stepSize" : 0.02, "zeroCrossing" : false } },
+  "version" : "0.1.0"
+}

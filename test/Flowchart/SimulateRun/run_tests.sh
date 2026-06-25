@@ -1286,6 +1286,32 @@ print("ok" if (ncol==72 and abs(x-3.5)<0.2 and abs(y)<0.2) else "bad", round(x,2
 ')
 check "lidar [24,3] point cloud on surface" "[[ '$LIDAR_OK' == ok* ]]" "forward ray hits box front x≈3.5; got: $LIDAR_OK"
 
+# Follow-on polish — spin_top (ramp → yaw), quadrotor_flythrough (body + 4
+# parented rotors + follow cam), STL import, --babylon-inline, pacingRate.
+ST="$("$MATLABC" -simulate "$EX/3d/spin_top.mflow")"
+# yaw rz = 2π·t; at t=1 → 6.283.
+ST_RZ=$(printf '%s\n' "$ST" | awk -F, 'NR==1{for(i=1;i<=NF;i++)if($i=="top[rz]")z=i} NR>1 && $1>=0.99 && $1<=1.01 {print $z; exit}')
+check "spin_top yaw ramps" "awk 'BEGIN{exit !(($ST_RZ-6.283)^2 < (1e-1)^2)}'" "ramp drives rotation rz"
+QF_F=$(mktemp /tmp/qf.XXXX.html)
+"$MATLABC" -emit-mflowlink-babylon "$EX/3d/quadrotor_flythrough.mflow" -o "$QF_F"
+QF_ACTORS=$(grep -c '"shape":' "$QF_F")
+QF_ROTORS=$(grep -o '"parent":"body"' "$QF_F" | wc -l | tr -d ' ')
+check "quadrotor has body + 4 rotors" "[[ $QF_ACTORS -eq 5 ]]" ""
+check "quadrotor rotors parented to body" "[[ $QF_ROTORS -eq 4 ]]" ""
+rm -f "$QF_F"
+ST_F=$(mktemp /tmp/stl.XXXX.html)
+"$MATLABC" -emit-mflowlink-babylon "$EX/3d/stl_marker.mflow" -o "$ST_F"
+ST_STL=$(grep -c 'data:model/stl' "$ST_F")
+check "STL mesh embedded inline" "[[ $ST_STL -eq 1 ]]" "binary STL → data URL"
+rm -f "$ST_F"
+# --babylon-inline produces a network-free artifact (no CDN <script src>).
+INL_F=$(mktemp /tmp/inl.XXXX.html); FAKE=$(mktemp /tmp/fakebjs.XXXX.js)
+printf 'window.__BJS__=1;\n' > "$FAKE"
+"$MATLABC" -emit-mflowlink-babylon "$EX/3d/spin_top.mflow" --babylon-inline "$FAKE" -o "$INL_F"
+INL_CDN=$(grep -c 'cdn.babylonjs.com' "$INL_F")
+check "--babylon-inline omits the CDN" "[[ $INL_CDN -eq 0 ]]" "engine bundle inlined"
+rm -f "$INL_F" "$FAKE"
+
 # At most one signal_world3d per model — a second is a sourced error.
 TW=$(mktemp /tmp/twoworld.XXXX.mflow)
 sed 's/"id": "world"/"id": "world"/' "$EX/3d/orbit_cube.mflow" > "$TW"

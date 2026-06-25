@@ -1,0 +1,14 @@
+{
+  "entry" : "stl_marker",
+  "flows" : [
+    { "edges" : [], "id" : "flow_stl", "kind" : "program", "name" : "stl_marker",
+      "nodes" : [
+        { "id" : "world", "kind" : "signal_world3d", "data" : { "params" : { "viewpoint" : "4,4,3", "showGround" : true, "output" : "stl_marker.html" } }, "ports" : { "in" : [], "out" : [] } },
+        { "id" : "mk", "kind" : "signal_actor3d", "data" : { "params" : { "name" : "mk", "mesh" : "assets/marker.stl", "translation" : "0,0,1", "color" : "0.3,0.8,0.5" } }, "ports" : { "in" : [] } }
+      ],
+      "signature" : { "inputs" : [], "outputs" : [] } }
+  ],
+  "schema" : "matforge.flowchart",
+  "settings" : { "kind" : "signal_flow", "solver" : { "type" : "fixed_step", "algorithm" : "ode4", "startTime" : 0, "stopTime" : 1, "stepSize" : 0.1, "zeroCrossing" : false } },
+  "version" : "0.1.0"
+}

@@ -16,9 +16,10 @@ One example per tier feature, so every feature has a test model:
 | Tier | Example | Exercises |
 |---|---|---|
 | 1 | `orbit_cube.mflow` ✅ | world + kinematic primitive actor; sine/cos → translation; scope3d + emit |
-| 1 | `spin_top.mflow` | ramp → yaw rotation |
+| 1 | `spin_top.mflow` ✅ | ramp → yaw rotation |
 | 2 | `articulated_arm.mflow` ✅ | parent/child hierarchy; directional light; follow camera; materials |
-| 2 | `quadrotor_flythrough.mflow` | reuse quadrotor pose signals; chase cam (lands with Tier-3 glTF body) |
+| 2 | `quadrotor_flythrough.mflow` ✅ | body + 4 parented spinning rotors; follow cam |
+| 3 | `stl_marker.mflow` ✅ | STL mesh import (binary `assets/marker.stl`) |
 | 3 | `gltf_drone.mflow` ✅ | glTF/GLB mesh import (inline `assets/drone.gltf`) + chase camera |
 | 3 | `urdf_arm_trace.mflow` ✅ | URDF (`assets/arm2.urdf`) → link tree, joints from a signal |
 | 4 | `falling_stack.mflow` ✅ | viewer-side Havok physics (visual gravity + box collisions) |

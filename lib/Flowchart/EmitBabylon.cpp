@@ -103,7 +103,12 @@ std::string base64(const std::string &In) {
 // glTF/GLB mesh → an inline `data:` URL. The extension picks the MIME so
 // Babylon's loader plugin is selected correctly for the data URL.
 std::string meshDataUrl(const std::string &Bytes, const std::string &Ext) {
-  std::string Mime = (Ext == ".glb") ? "model/gltf-binary" : "model/gltf+json";
+  std::string Mime;
+  if (Ext == ".glb") Mime = "model/gltf-binary";
+  else if (Ext == ".gltf") Mime = "model/gltf+json";
+  else if (Ext == ".stl") Mime = "model/stl";
+  else if (Ext == ".obj") Mime = "model/obj";
+  else Mime = "application/octet-stream";
   return "data:" + Mime + ";base64," + base64(Bytes);
 }
 
@@ -478,6 +483,7 @@ bool emitMflowLinkBabylon(const MflowLinkModel &M, const MflowLinkSim &Sim,
   Scene << ",\"showAxes\":"
         << (paramBool(*World, "showAxes", true) ? "true" : "false");
   Scene << ",\"background\":" << vecJson(*World, "background", "[0.07,0.08,0.1]");
+  Scene << ",\"pacingRate\":" << paramNum(*World, "pacingRate", 1.0);
   Scene << "},\n";
   Scene << "  \"times\":[";
   for (size_t I = 0; I < Times.size(); ++I)
@@ -516,8 +522,19 @@ bool emitMflowLinkBabylon(const MflowLinkModel &M, const MflowLinkSim &Sim,
         "<span id=\"t\">t = 0.000</span></div>\n";
   OS << "<script id=\"scene\" type=\"application/json\">\n";
   OS << Scene.str() << "\n</script>\n";
-  OS << "<script src=\"" << Cdn << "/babylon.js\"></script>\n";
-  OS << "<script src=\"" << Cdn << "/loaders/babylonjs.loaders.min.js\"></script>\n";
+  // Engine: inline a user-provided bundle (`--babylon-inline`) for a fully
+  // network-free artifact, else reference the pinned CDN.
+  if (!Opts.InlineEnginePath.empty()) {
+    std::string Engine;
+    if (!readFile(Opts.InlineEnginePath, Engine)) {
+      Err = "--babylon-inline: cannot read engine bundle " + Opts.InlineEnginePath;
+      return false;
+    }
+    OS << "<script>\n" << Engine << "\n</script>\n";
+  } else {
+    OS << "<script src=\"" << Cdn << "/babylon.js\"></script>\n";
+    OS << "<script src=\"" << Cdn << "/loaders/babylonjs.loaders.min.js\"></script>\n";
+  }
   // Viewer-side physics engine (Tier 4) — only when the world enables physics.
   bool WorldPhysics = paramBool(*World, "physics", false);
   std::string Engine = paramOr(*World, "engine", "havok");
@@ -752,7 +769,7 @@ let last = performance.now();
 engine.runRenderLoop(() => {
   const now = performance.now(), dt = (now-last)/1000; last = now;
   if (playing && N > 1) {
-    acc += dt;
+    acc += dt * (DATA.world.pacingRate || 1);
     const span = (DATA.times[N-1]-DATA.times[0]) || (N*0.02);
     const tNow = DATA.times[0] + ((acc % span));
     let i = 0; while (i < N-1 && DATA.times[i+1] <= tNow) i++;
