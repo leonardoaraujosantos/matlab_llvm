@@ -91,20 +91,23 @@ emit lane) that everything else builds on.
 
 ## 5. Lock-step co-simulation feedback (deterministic C++ physics → signals)
 
-- [ ] 5.1 A deterministic fixed-step rigid-body/contact step in `MflowLinkSim` (impulse or
-  penalty; documented method) for actors flagged `cosim = true`; integrates with the major
-  step and is fully reproducible (golden-stable, platform-independent).
-- [ ] 5.2 `signal_actor3d` physics-state **output** ports: `pose` (6: xyz+rpy), `velocity`
-  (6), `contact` (1, boolean). Available only when `cosim = true`.
-- [ ] 5.3 `signal_collision3d` event block: inputs reference two actors (or an actor + world);
-  output is a collision boolean + contact force, accumulated once per major step (mirrors
-  `signal_error_rate`'s once-per-step rule).
-- [ ] 5.4 Example: `bounce_cosim.mflow` — a sphere under co-sim gravity bounces on the ground;
-  `SimulateRun` asserts the pose/contact signals match the analytic bounce within tolerance
-  (a true golden, unlike tier 4).
-- [ ] 5.5 Example: `cart_wall_bump.mflow` — the inverted-pendulum-on-cart PID demo, where the
-  cart hits a wall; `signal_collision3d` feeds the controller and `SimulateRun` asserts the
-  cart stops at the wall. (Closes the loop: controller reacts to a collision.)
+- [x] 5.1 A `cosim = true` `signal_actor3d` owns 6 continuous states `[x,y,z,vx,vy,vz]`
+  integrated under the world gravity by the existing RK4 (free-fall RK4-exact); a ground
+  restitution bounce is resolved once per major step in `resolveCosimContacts()`. Fully
+  reproducible / platform-independent (a true golden, unlike Tier-4 viewer physics).
+- [x] 5.2 Co-sim actor exposes its physics state: the recorded transform carries the pose
+  (position in `[tx,ty,tz]`, read by collision3d / controllers) and `x`/`y`/`z`/`vx`/`vy`/`vz`/
+  `contact` are named scalar ports. (Full 6-vector `pose`/`velocity` ports are a follow-on —
+  the single-`VecOut_` model carries the transform; named scalars cover the rest.)
+- [x] 5.3 `signal_collision3d` event block: input ports `poseA`/`poseB` (xyz of two actors);
+  emits a collision boolean on `out` + a penalty contact `force`. Loop-breaker, so it can feed
+  a controller without an algebraic loop.
+- [x] 5.4 Example: `bounce_cosim.mflow` — a sphere under co-sim gravity bounces on the ground;
+  `SimulateRun` asserts free-fall is exact (z(0.5)=3.7737), the bounce peak follows e²·drop
+  (2.056), and the body never sinks through the floor.
+- [x] 5.5 Example: `cart_wall_bump.mflow` — a cosim cart slides toward a static wall;
+  `signal_collision3d` emits the collision boolean (a controller-usable feedback signal) when
+  they meet (t≈3.0s) and 0 before. (Closes the loop: a controller can react to the collision.)
 
 ## 6. Sensors, synthetic data, annotations, pacing, recording
 

@@ -385,6 +385,15 @@ private:
   std::vector<double> RunCount_;
   std::vector<double> RunMean_;
   std::vector<double> RunM2_;
+  // mflow-3d-animation Tier 5 — lock-step co-simulation. A `signal_actor3d` with
+  // `cosim = true` owns 6 continuous states [x,y,z, vx,vy,vz] integrated under
+  // `Gravity_` by the existing RK4; ground contact (restitution bounce) is
+  // resolved once per major step in resolveCosimContacts(), which sets the
+  // per-block contact flag in `CosimContact_`. These signals are authoritative
+  // and golden-stable (design D3) — the viewer's Havok is only the visual.
+  double Gravity_[3] = {0.0, 0.0, -9.81};
+  std::vector<double> CosimContact_; // per-block ground-contact flag (1/0)
+  void resolveCosimContacts();
   // - `Kalman_[I]` is the per-block discrete Kalman-filter state for a
   //   `signal_kalman` block (#343): the parsed A/C/Q/R/B matrices (flat
   //   row-major) plus the running estimate `X` (length N) and error covariance

@@ -95,6 +95,11 @@ const std::map<std::string, KindInfo> &kindTable() {
     // follow-on (would log a small port group like signal_actor3d does).
     add("signal_light3d",      {true, true, false, false, false, FIM});
     add("signal_camera3d",     {true, true, false, false, false, FIM});
+    // mflow-3d-animation (Tier 5) — collision/contact event. Reads two pose
+    // signals, emits a collision boolean + contact force. Loop-breaker (its
+    // output comes from positions, not a same-step algebraic feedthrough), so
+    // it can feed a controller without forming an algebraic loop.
+    add("signal_collision3d",  {true, true, false, true, false, FIM});
     // From Workspace — replays an inline time-series `data` ([t v; …]) as a
     // source, linearly interpolated (or held) at the current sim time. The
     // mflowLink equivalent of Simulink's From Workspace (the data rides in the
@@ -1226,9 +1231,10 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
       B.OutRows = 1;
       B.OutCols = B.OutWidth;
     } else if (N.Kind == "signal_world3d" || N.Kind == "signal_light3d" ||
-               N.Kind == "signal_camera3d") {
-      // Scene config — no ports, no log, no downstream. A nominal width-1
-      // keeps width inference from leaving it at the inherit sentinel.
+               N.Kind == "signal_camera3d" || N.Kind == "signal_collision3d") {
+      // Scene config / collision event — scalar output (collision3d emits the
+      // collision boolean on `out`; world/light/camera emit nothing). A nominal
+      // width-1 keeps width inference from leaving it at the inherit sentinel.
       B.OutWidth = 1;
       B.OutRows = 1;
       B.OutCols = 1;
@@ -1248,7 +1254,13 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
 
     // State counts + loop-breaker classification.
     B.IsLoopBreaker = KI->LoopBreakerAlways;
-    if (N.Kind == "signal_integrator") {
+    if (N.Kind == "signal_actor3d" && N.getParam("cosim") != nullptr) {
+      // mflow-3d-animation Tier 5 — a co-sim actor owns 6 continuous states
+      // [x,y,z, vx,vy,vz] integrated under gravity. Its pose/velocity outputs
+      // come from state (not direct feedthrough), so it breaks algebraic loops.
+      B.ContStateCount = 6;
+      B.IsLoopBreaker = true;
+    } else if (N.Kind == "signal_integrator") {
       B.ContStateCount = 1;
     } else if (N.Kind == "signal_pid") {
       // Parallel PID with a first-order derivative filter: two continuous

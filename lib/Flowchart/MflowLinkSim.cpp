@@ -1113,9 +1113,31 @@ void MflowLinkSim::reset() {
   BlockCursor_ = 0;
   ZCQueue_.clear();
 
+  // mflow-3d-animation Tier 5 — parse the world gravity once + size the per-block
+  // co-sim contact flags.
+  Gravity_[0] = 0.0; Gravity_[1] = 0.0; Gravity_[2] = -9.81;
+  CosimContact_.assign(M_.Blocks.size(), 0.0);
+  for (const auto &B : M_.Blocks) {
+    if (B.Kind != "signal_world3d") continue;
+    if (const std::string *G = paramS(B, "gravity")) {
+      double g[3] = {0.0, 0.0, -9.81};
+      parseVec3Param(B, "gravity", g);
+      Gravity_[0] = g[0]; Gravity_[1] = g[1]; Gravity_[2] = g[2];
+    }
+    break;
+  }
+
   for (size_t I = 0; I < M_.Blocks.size(); ++I) {
     const auto &B = M_.Blocks[I];
-    if (B.Kind == "signal_integrator") {
+    if (B.Kind == "signal_actor3d" && B.ContStateCount == 6) {
+      // Co-sim actor — seed [x,y,z] from `translation` and [vx,vy,vz] from
+      // `velocity` (both "x,y,z" params; default rest at origin).
+      size_t Off = StateOffset_[I];
+      double p[3] = {0, 0, 0}, v[3] = {0, 0, 0};
+      parseVec3Param(B, "translation", p);
+      parseVec3Param(B, "velocity", v);
+      for (int J = 0; J < 3; ++J) { Y_[Off + J] = p[J]; Y_[Off + 3 + J] = v[J]; }
+    } else if (B.Kind == "signal_integrator") {
       Y_[StateOffset_[I]] = paramD(B, "initialCondition", 0.0);
     } else if (B.Kind == "signal_pid") {
       size_t Off = StateOffset_[I];
@@ -1722,6 +1744,56 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       // mflow-3d-animation — scene config (world / light / camera). No ports,
       // no output; the emit lane reads their params directly. Nothing to eval.
       Out_[I] = 0.0;
+    } else if (K == "signal_collision3d") {
+      // mflow-3d-animation Tier 5 — collision/contact event. Reads two pose
+      // signals (`poseA`/`poseB`, xyz from each actor's output), and emits the
+      // collision boolean on `out` plus a penalty contact force on the `force`
+      // port. A controller wired from `out` can react to the collision.
+      double A[3] = {0, 0, 0}, Bp[3] = {0, 0, 0};
+      for (int E = 0; E < 3; ++E) {
+        double va = vecInput(I, "poseA", E);
+        if (!std::isnan(va)) A[E] = va;
+        double vb = vecInput(I, "poseB", E);
+        if (!std::isnan(vb)) Bp[E] = vb;
+      }
+      double dx = A[0] - Bp[0], dy = A[1] - Bp[1], dz = A[2] - Bp[2];
+      double Dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+      double Rsum = paramD(B, "radiusA", 0.5) + paramD(B, "radiusB", 0.5);
+      double Pen = Rsum - Dist;
+      bool Hit = Pen > 0.0;
+      Out_[I] = Hit ? 1.0 : 0.0;
+      PortOut_[I]["force"] = Hit ? paramD(B, "stiffness", 100.0) * Pen : 0.0;
+    } else if (K == "signal_actor3d" && B.ContStateCount == 6) {
+      // mflow-3d-animation Tier 5 — co-sim actor. Its 6 states [x,y,z, vx,vy,vz]
+      // are integrated under gravity; the recorded transform carries the pose
+      // (position in elements 0..2), so a signal_collision3d / controller reads
+      // the position from this actor's output. velocity / ground-contact are
+      // exposed as named scalar ports. Contact (restitution bounce) is resolved
+      // post-step in resolveCosimContacts().
+      size_t Off = StateOffset_[I];
+      double Sc[3] = {1, 1, 1};
+      parseVec3Param(B, "scale", Sc);
+      VecOut_[I].assign(9, 0.0);
+      VecOut_[I][0] = State[Off + 0];
+      VecOut_[I][1] = State[Off + 1];
+      VecOut_[I][2] = State[Off + 2];
+      VecOut_[I][6] = Sc[0]; VecOut_[I][7] = Sc[1]; VecOut_[I][8] = Sc[2];
+      Out_[I] = State[Off + 0];
+      PortOut_[I]["x"] = State[Off + 0];
+      PortOut_[I]["y"] = State[Off + 1];
+      PortOut_[I]["z"] = State[Off + 2];
+      PortOut_[I]["vx"] = State[Off + 3];
+      PortOut_[I]["vy"] = State[Off + 4];
+      PortOut_[I]["vz"] = State[Off + 5];
+      PortOut_[I]["contact"] = CosimContact_[I];
+      if (Deriv) {
+        Deriv[Off + 0] = State[Off + 3];
+        Deriv[Off + 1] = State[Off + 4];
+        Deriv[Off + 2] = State[Off + 5];
+        Deriv[Off + 3] = Gravity_[0];
+        Deriv[Off + 4] = Gravity_[1];
+        Deriv[Off + 5] = Gravity_[2];
+      }
     } else if (K == "signal_actor3d") {
       // mflow-3d-animation — gather the actor's transform into a width-9
       // sample [tx,ty,tz, rx,ry,rz (roll/pitch/yaw rad), sx,sy,sz]. Static
@@ -3969,6 +4041,10 @@ double MflowLinkSim::stepMajor() {
   // Refresh outputs once more so the reset-into-state propagates
   // visibly into the post-step Out_ slot (the integrator's output
   // equals its state).
+  // mflow-3d-animation Tier 5 — resolve co-sim ground contacts on the
+  // just-integrated state before the final output refresh, so the clamped
+  // pose + contact flag appear in this step's logged sample.
+  resolveCosimContacts();
   evalAll(T_, Y_.data(), nullptr);
   // Tier F carve-out — snapshot the just-finished outputs as the
   // *previous* values for the next step's edge-trigger detection.
@@ -4292,6 +4368,40 @@ void MflowLinkSim::runToCompletion() {
 //===----------------------------------------------------------------------===//
 // Log + CSV
 //===----------------------------------------------------------------------===//
+
+// mflow-3d-animation Tier 5 — resolve co-sim ground contacts once per major
+// step. A deterministic restitution bounce: when a co-sim actor has sunk below
+// the floor (groundZ + its collision half-extent) while moving down, clamp it to
+// the floor and reflect the vertical velocity by the restitution coefficient.
+// Free-fall stays exact (RK4 integrates the quadratic exactly); only the bounce
+// instant is resolved here. Sets the per-block contact flag for the `contact`
+// output. Authoritative + golden-stable (design D3).
+void MflowLinkSim::resolveCosimContacts() {
+  for (size_t I = 0; I < M_.Blocks.size(); ++I) {
+    const auto &B = M_.Blocks[I];
+    if (B.Kind != "signal_actor3d" || B.ContStateCount != 6) continue;
+    size_t Off = StateOffset_[I];
+    double Z = Y_[Off + 2], Vz = Y_[Off + 5];
+    // Floor offset = the actor's collision half-extent below its centre.
+    double R = paramD(B, "radius", 0.5);
+    if (const std::string *Sh = paramS(B, "shape")) {
+      if (*Sh == "box") {
+        double Sz[3] = {1, 1, 1};
+        parseVec3Param(B, "size", Sz);
+        R = Sz[2] / 2.0;
+      }
+    }
+    double Floor = paramD(B, "groundZ", 0.0) + R;
+    double Rest = paramD(B, "restitution", 0.5);
+    if (Z < Floor && Vz < 0.0) {
+      Y_[Off + 2] = Floor;
+      Y_[Off + 5] = -Rest * Vz;
+      CosimContact_[I] = 1.0;
+    } else {
+      CosimContact_[I] = 0.0;
+    }
+  }
+}
 
 void MflowLinkSim::logSample() {
   for (size_t Ci = 0; Ci < LogBlocks_.size(); ++Ci) {

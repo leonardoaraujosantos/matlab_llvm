@@ -324,9 +324,21 @@ Shipped blocks (Tiers 1–2):
 | `signal_actor3d` | ✓ | `name`, `shape: "box"` (`box`/`sphere`/`cylinder`/`cone`/`capsule`/`plane`), `mesh: "<file.glb\|.gltf>"`, `size: "1,1,1"`, `radius: 0.5`, `height: 1.0`, `color`, `emissive: "0,0,0"`, `opacity: 1.0`, `parent`, `translation`/`rotation`/`scale` (static defaults), `physics`/`mass`/`friction`/`restitution`/`collisionShape` (Tier-4 viewer hints) | Kinematic actor. Input ports `translation`(3), `rotation`(3, rpy rad), `scale`(3) override the static param defaults element-wise; unconnected ⇒ identity (scale 1). `mesh` imports a glTF/GLB (resolved against the .mflow dir, embedded inline as a data URL; a missing file is a sourced error) and replaces the primitive `shape`. `urdf: "<file.urdf>"` imports a robot: the link/joint tree is parsed at emit time and the viewer articulates each movable joint from a `jointAngles` input port (width = joint count, ≤ 12) — so the actor additionally logs `<id>[q1..q12]` and FK matches the URDF kinematics by construction (no robotics-runtime linkage). `parent` names another actor — the child's recorded transform is its **local** frame, composed with the parent via the viewer scene graph (the parent chain must be acyclic and resolve to existing actors, else a sourced error). Logs a width-9 group `<id>[tx,ty,tz,rx,ry,rz,sx,sy,sz]`. |
 | `signal_light3d` | ✓ | `type: "directional"` (`directional`/`point`/`spot`), `color: "1,1,1"`, `intensity: 0.8`, `position: "0,0,10"`, `direction: "-0.5,-0.5,-1"` | Static light config (no ports). The viewer adds a dim hemispheric fill plus each configured light. Signal-driven intensity/pose is a follow-on. |
 | `signal_camera3d` | ✓ | `mode: "static"` (`static`/`follow`), `position: "8,8,6"`, `target: "0,0,0"`, `follow: "<actorName>"`, `fov: 0.8` | Static viewpoint or follow-actor camera (no ports). First camera in the model wins. |
+| `signal_collision3d` | ✓ | `radiusA: 0.5`, `radiusB: 0.5`, `stiffness: 100` | Tier-5 collision/contact event. Input ports `poseA`/`poseB` (read xyz from two actors' outputs); emits the collision boolean on `out` and a penalty contact force on the `force` port — a controller wired from `out` reacts to the collision. Loop-breaker. |
+
+**Co-sim actors (Tier 5).** A `signal_actor3d` with `cosim: true` becomes a
+deterministic rigid body: it owns 6 continuous states `[x,y,z,vx,vy,vz]`
+integrated under the world gravity by the existing RK4, seeded from `translation`
++ `velocity` params, with a ground restitution bounce (`restitution`, `groundZ`,
+and the collision half-extent from `radius`/`size`) resolved once per major step.
+Its recorded transform carries the physics pose (position in `[tx,ty,tz]`), so a
+`signal_collision3d` or controller reads the position from the actor's output;
+`x`/`y`/`z`/`vx`/`vy`/`vz`/`contact` are also exposed as named scalar ports. This
+path is authoritative and golden-stable (free-fall is RK4-exact) — the viewer's
+Havok (Tier 4) is only the visual.
 
 Reserved for later tiers (round-trip through the loader, rejected at lowering
-until shipped): `signal_sensor3d`, `signal_collision3d`.
+until shipped): `signal_sensor3d`.
 
 **Emit lane.** `-emit-mflowlink-babylon` runs the simulation, then writes one
 HTML document with the scene-graph + keyframe timeline + viewer logic embedded

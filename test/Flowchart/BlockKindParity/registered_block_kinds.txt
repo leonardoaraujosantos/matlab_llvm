@@ -7,6 +7,7 @@ signal_bus_selector
 signal_camera3d
 signal_chirp
 signal_clock
+signal_collision3d
 signal_color_space
 signal_compare_to_constant
 signal_compare_to_zero

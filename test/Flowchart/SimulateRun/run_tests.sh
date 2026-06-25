@@ -1239,6 +1239,31 @@ if "$MATLABC" -simulate "$UNK" --dry-run >/dev/null 2>&1; then
 else pass=$((pass+1)); fi
 rm -f "$UNK"
 
+# Tier 5 — lock-step co-simulation. bounce_cosim: a cosim sphere (6-state
+# gravity dynamics) free-falls from z=5 and bounces on the ground with
+# restitution 0.6. Free-fall is RK4-exact; the bounce peak follows e²·height.
+BC="$("$MATLABC" -simulate "$EX/3d/bounce_cosim.mflow")"
+# Free-fall: z(0.5) = 5 − ½·9.81·0.25 = 3.7737.
+BC_Z05=$(printf '%s\n' "$BC" | awk -F, 'NR==1{for(i=1;i<=NF;i++)if($i=="ball[tz]")z=i} NR>1 && $1>=0.499 && $1<=0.501 {print $z; exit}')
+check "cosim free-fall is exact" "awk 'BEGIN{exit !(($BC_Z05-3.7737)^2 < (1e-2)^2)}'" "RK4 integrates gravity exactly"
+# Floor = radius 0.4; post-bounce peak ≈ 0.4 + 0.6²·(5−0.4) = 2.056.
+BC_PEAK=$(printf '%s\n' "$BC" | awk -F, 'NR==1{for(i=1;i<=NF;i++)if($i=="ball[tz]")z=i;next} $1>1.0{if($z>m)m=$z} END{print m}')
+check "cosim restitution bounce" "awk 'BEGIN{exit !(($BC_PEAK-2.056)^2 < (3e-2)^2)}'" "bounce peak = floor + e²·drop"
+BC_MIN=$(printf '%s\n' "$BC" | awk -F, 'NR==1{for(i=1;i<=NF;i++)if($i=="ball[tz]")z=i;next} {if(m==""||$z<m)m=$z} END{print m}')
+check "cosim never sinks through floor" "awk 'BEGIN{exit !($BC_MIN >= 0.39)}'" "ground contact clamps to the floor"
+
+# cart_wall_bump: a cosim cart slides toward a static wall; signal_collision3d
+# emits a collision boolean (a controller-usable feedback signal) when they meet.
+CW="$("$MATLABC" -simulate "$EX/3d/cart_wall_bump.mflow")"
+CW_HEAD=$(printf '%s\n' "$CW" | head -1)
+check "collision3d logs a scalar" "[[ '$CW_HEAD' == *',collide'* ]]" "scalar collision output"
+# Cart from x=−3 at 1.5 m/s; collision when gap < rA+rB = 1.5 ⇒ x≈1.5, t≈3.0s.
+CW_T=$(printf '%s\n' "$CW" | awk -F, 'NR==1{for(i=1;i<=NF;i++)if($i=="collide")c=i} NR>1 && $c>0.5 {print $1; exit}')
+check "collision fires when bodies meet" "awk 'BEGIN{exit !(($CW_T-3.0)^2 < (0.2)^2)}'" "collision3d detects the contact"
+# Before contact the collision signal is 0.
+CW_T0=$(printf '%s\n' "$CW" | awk -F, 'NR==1{for(i=1;i<=NF;i++)if($i=="collide")c=i} NR>1 && $1>=1.0 && $1<=1.01 {print $c; exit}')
+check "no collision before contact" "awk 'BEGIN{exit !($CW_T0 < 0.5)}'" ""
+
 # At most one signal_world3d per model — a second is a sourced error.
 TW=$(mktemp /tmp/twoworld.XXXX.mflow)
 sed 's/"id": "world"/"id": "world"/' "$EX/3d/orbit_cube.mflow" > "$TW"

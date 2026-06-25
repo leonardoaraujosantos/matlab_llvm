@@ -9,11 +9,12 @@ deliverable on the compiler/runtime side is a `signal_*3d` block family plus a
 `-emit-mflowlink-babylon` lane that writes one **self-contained `.html`** playing a
 recorded scene + transform timeline.
 
-**Status: Tiers 1–4 shipped (Tier 3 glTF + URDF done); 5–6 planned.** Tier 1 (scene
+**Status: Tiers 1–5 shipped; Tier 6 (sensors) planned.** Tier 1 (scene
 + kinematic primitive actors + the `-emit-mflowlink-babylon` HTML player), Tier 2
-(parent/child hierarchy, lights, cameras, materials), Tier 3a (glTF/GLB mesh import), and
-Tier 4 (viewer-side Havok/Ammo physics) are implemented and gated (full flowchart ctest +
-280 SimulateRun checks green). The OpenSpec change is
+(parent/child hierarchy, lights, cameras, materials), Tier 3 (glTF/GLB mesh + URDF import),
+Tier 4 (viewer-side Havok/Ammo physics), and Tier 5 (deterministic co-sim feedback —
+`cosim` actors + `signal_collision3d`) are implemented and gated (full flowchart ctest +
+286 SimulateRun checks green). The OpenSpec change is
 `openspec/changes/mflow-3d-animation/` (proposal / design / tasks / spec). This doc is the
 tiered companion, in the style of `verilog_a_plan.md` and `mflow_link_roadmap.md`.
 

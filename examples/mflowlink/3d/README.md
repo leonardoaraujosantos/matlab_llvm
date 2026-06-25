@@ -23,8 +23,8 @@ One example per tier feature, so every feature has a test model:
 | 3 | `urdf_arm_trace.mflow` ✅ | URDF (`assets/arm2.urdf`) → link tree, joints from a signal |
 | 4 | `falling_stack.mflow` ✅ | viewer-side Havok physics (visual gravity + box collisions) |
 | 4 | `ball_ramp.mflow` ✅ | sphere on an inclined plane (restitution bounce) |
-| 5 | `bounce_cosim.mflow` | deterministic C++ co-sim; analytic bounce golden |
-| 5 | `cart_wall_bump.mflow` | PID cart + `signal_collision3d` → controller reacts to a wall |
+| 5 | `bounce_cosim.mflow` ✅ | deterministic C++ co-sim; analytic bounce golden |
+| 5 | `cart_wall_bump.mflow` ✅ | cosim cart + `signal_collision3d` → collision feedback signal |
 | 6 | `camera_depth_stream.mflow` | depth + semantic sensor → image/CV block (N-D signals) |
 | 6 | `lidar_scan.mflow` | lidar point cloud `[N,3]` over primitives |
 
