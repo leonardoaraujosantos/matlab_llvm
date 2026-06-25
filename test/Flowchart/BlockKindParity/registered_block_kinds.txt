@@ -1,10 +1,13 @@
 signal_abs
+signal_actor3d
 signal_awgn
 signal_biquad
 signal_bus_creator
 signal_bus_selector
+signal_camera3d
 signal_chirp
 signal_clock
+signal_collision3d
 signal_color_space
 signal_compare_to_constant
 signal_compare_to_zero
@@ -39,6 +42,7 @@ signal_inport
 signal_integrator
 signal_jkff
 signal_kalman
+signal_light3d
 signal_logical
 signal_lookup_1d
 signal_lookup_2d
@@ -75,6 +79,7 @@ signal_running_stats
 signal_saturation
 signal_scope
 signal_scope3d
+signal_sensor3d
 signal_shift_register
 signal_sine
 signal_spectrum
@@ -96,5 +101,6 @@ signal_trig_fcn
 signal_triggered_subsystem
 signal_unit_delay
 signal_window
+signal_world3d
 signal_zero_pole
 signal_zoh

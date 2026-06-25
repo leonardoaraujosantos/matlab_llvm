@@ -226,6 +226,7 @@ add_library(MatlabFlowchart STATIC
   lib/Flowchart/SignalFlowLowering.cpp
   lib/Flowchart/SubsystemToMatlab.cpp
   lib/Flowchart/MflowLinkSim.cpp
+  lib/Flowchart/EmitBabylon.cpp
 )
 target_link_libraries(MatlabFlowchart PUBLIC MatlabParse MatlabBasic)
 

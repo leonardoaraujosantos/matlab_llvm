@@ -301,6 +301,60 @@ as a rank-3 signal (`s[1,1,1] … s[2,3,4]`), the 24 values passing through unch
 `nd_color_image.mflow`: an `image_source rows=2 cols=2 channels=3` is a width-12
 `[2,2,3]` color signal.
 
+## 3-D animation (Babylon.js + Havok) — `mflow-3d-animation`
+
+The open-stack analogue of Simulink 3D Animation: a 3-D scene whose actors are
+driven by model signals, played by a self-contained Babylon.js viewer emitted
+with `matlabc -emit-mflowlink-babylon model.mflow -o scene.html`. Plan:
+`docs/mflowlink_3d_animation_roadmap.md`; spec:
+`openspec/changes/mflow-3d-animation/`.
+
+**Conventions.** Coordinate frame is right-handed, **Z-up, metres**; rotation is
+roll/pitch/yaw about X/Y/Z in **radians**. Two physics layers are kept distinct:
+viewer-side Havok/Ammo (Tier 4) is **visualization-only** — excluded from every
+golden — while the lock-step co-sim path (Tier 5) is the deterministic,
+golden-tested source of truth. `params` are camelCase (vector params accept
+`"x,y,z"`).
+
+Shipped blocks (Tiers 1–2):
+
+| Kind | Tier-C | Params | Notes |
+|---|---|---|---|
+| `signal_world3d` | ✓ | `gravity: "0,0,-9.81"`, `viewpoint: "8,8,6"`, `engine: "havok"`, `physics: false`, `showGround: true`, `showAxes: true`, `background: "0.07,0.08,0.1"`, `pacingRate: 1.0`, `output: ""` | Singleton scene config — at most one per model (a second is a sourced error). No ports; the emit lane reads its params. `pacingRate` scales the viewer's real-time playback speed. |
+| `signal_actor3d` | ✓ | `name`, `shape: "box"` (`box`/`sphere`/`cylinder`/`cone`/`capsule`/`plane`), `mesh: "<file.glb\|.gltf>"`, `size: "1,1,1"`, `radius: 0.5`, `height: 1.0`, `color`, `emissive: "0,0,0"`, `opacity: 1.0`, `parent`, `translation`/`rotation`/`scale` (static defaults), `physics`/`mass`/`friction`/`restitution`/`collisionShape` (Tier-4 viewer hints) | Kinematic actor. Input ports `translation`(3), `rotation`(3, rpy rad), `scale`(3) override the static param defaults element-wise; unconnected ⇒ identity (scale 1). `mesh` imports a glTF/GLB/**STL**/OBJ (resolved against the .mflow dir, embedded inline as a data URL; a missing file is a sourced error) and replaces the primitive `shape`. `text: "<label>"` makes a billboarded text-annotation actor (DynamicTexture label that always faces the camera). `urdf: "<file.urdf>"` imports a robot: the link/joint tree is parsed at emit time and the viewer articulates each movable joint from a `jointAngles` input port (width = joint count, ≤ 12) — so the actor additionally logs `<id>[q1..q12]` and FK matches the URDF kinematics by construction (no robotics-runtime linkage). `parent` names another actor — the child's recorded transform is its **local** frame, composed with the parent via the viewer scene graph (the parent chain must be acyclic and resolve to existing actors, else a sourced error). Logs a width-9 group `<id>[tx,ty,tz,rx,ry,rz,sx,sy,sz]`. |
+| `signal_light3d` | ✓ | `type: "directional"` (`directional`/`point`/`spot`), `color: "1,1,1"`, `intensity: 0.8`, `position: "0,0,10"`, `direction: "-0.5,-0.5,-1"` | Static light config (no ports). The viewer adds a dim hemispheric fill plus each configured light. Signal-driven intensity/pose is a follow-on. |
+| `signal_camera3d` | ✓ | `mode: "static"` (`static`/`follow`), `position: "8,8,6"`, `target: "0,0,0"`, `follow: "<actorName>"`, `fov: 0.8` | Static viewpoint or follow-actor camera (no ports). First camera in the model wins. |
+| `signal_collision3d` | ✓ | `radiusA: 0.5`, `radiusB: 0.5`, `stiffness: 100` | Tier-5 collision/contact event. Input ports `poseA`/`poseB` (read xyz from two actors' outputs); emits the collision boolean on `out` and a penalty contact force on the `force` port — a controller wired from `out` reacts to the collision. Loop-breaker. |
+| `signal_sensor3d` | ✓ | `kind: "depth"` (`depth`/`semantic`/`lidar`/`rgb`), `rows: 8`, `cols: 8`, `fov: 1.0`, `position: "0,0,3"`, `target: "0,0,0"`, `range: 50`, `azimuth: 16`, `elevation: 1`, `ground: 1`, `follow: "<actorName>"`, `offset: "-6,0,3"`, `noise: 0`, `seed: 1` | Tier-6 virtual sensor. A deterministic C++ raycaster casts rays from the pose over the primitive scene (sphere / **cylinder**(/cone/capsule) / box / ground plane) each step → an N-D signal: `depth`/`semantic` as `[rows,cols]`, `rgb` as `[rows,cols,3]`, `lidar` as `[azimuth·elevation,3]` (reuses `mflow-nd-signals`). `follow` mounts the sensor on an actor (it tracks the actor's pose; `target` becomes a relative look direction); `noise` adds seeded Gaussian range/depth noise. Implicitly logged; feeds the image-processing / computer-vision blocks. Loop-breaker. |
+
+**Co-sim actors (Tier 5).** A `signal_actor3d` with `cosim: true` becomes a
+deterministic rigid body: it owns 12 continuous states
+`[x,y,z, vx,vy,vz, roll,pitch,yaw, wx,wy,wz]` integrated by the existing RK4 —
+translation under the world gravity, free rotation (constant angular momentum)
+seeded from `velocity`/`rotation`/`angularVelocity` params. Per major step,
+`resolveCosimContacts()` applies a ground restitution bounce (`restitution`,
+`groundZ`, collision half-extent from `radius`/`size`) **and** pairwise
+sphere-sphere elastic collision (impulse along the line of centres, momentum
+exchanged by `mass`, with de-penetration). Its recorded transform carries the
+physics pose (position `[tx,ty,tz]` + orientation `[rx,ry,rz]`), so a
+`signal_collision3d` or controller reads it from the actor's output;
+`x`/`y`/`z`/`vx`/`vy`/`vz`/`wx`/`wy`/`wz`/`contact` are also named scalar ports.
+Authoritative and golden-stable (free-fall RK4-exact; equal-mass head-on e=1
+collision swaps velocities) — the viewer's Havok (Tier 4) is only the visual.
+*Follow-ons: contact-induced torque (off-centre hits don't yet impart spin) and
+box-box collision response.*
+
+All six tiers of the `signal_*3d` family are shipped (world, actor with
+primitive/glTF/URDF/co-sim, light, camera, collision, sensor).
+
+**Emit lane.** `-emit-mflowlink-babylon` runs the simulation, then writes one
+HTML document with the scene-graph + keyframe timeline + viewer logic embedded
+inline; the Babylon/Havok engine is referenced from a pinned CDN by default
+(`--babylon-cdn <url>` overrides the host; `--babylon-inline <babylon.js>` inlines
+a local bundle for a fully network-free artifact). Output goes to stdout, or to
+the `-o <file>` path. CI validates the document structurally (actor/timeline
+counts) — it never renders, so no browser/GPU is needed.
+
 ## Math
 
 | Kind | Tier-C | Params | Notes |

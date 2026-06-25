@@ -7,6 +7,7 @@
 #include "matlab/Flowchart/GraphToAST.h"
 #include "matlab/Flowchart/SubsystemToMatlab.h"
 #include "matlab/Flowchart/Loader.h"
+#include "matlab/Flowchart/EmitBabylon.h"
 #include "matlab/Flowchart/MflowLinkModel.h"
 #include "matlab/Flowchart/MflowLinkSim.h"
 #include "matlab/StateChart/Interpreter.h"
@@ -181,7 +182,7 @@ struct Options {
                     EmitHardwareReport, EmitCocotb,
                     EmitCuda, EmitMetal, EmitOpenCL,
                     DumpFlow, DumpChart, EmitMatlab, EmitMflow,
-                    EmitMflowLinkCpp, EmitTrace,
+                    EmitMflowLinkCpp, EmitMflowLinkBabylon, EmitTrace,
                     Check, Repl, Format, Dap, Simulate };
   Mode Mode = Mode::Check;
   bool Opt = false;
@@ -243,6 +244,12 @@ struct Options {
    * (-emit-{cuda,metal,opencl} -o <dir>). Empty => the default
    * <stem>_<target> next to the input. */
   std::string OutDir;
+  /* mflow-3d-animation — base CDN host for the Babylon engine in the
+   * `-emit-mflowlink-babylon` HTML. Overridable via `--babylon-cdn <url>`. */
+  std::string BabylonCdn;
+  /* mflow-3d-animation — optional babylon.js bundle to inline (`--babylon-inline
+   * <path>`) for a fully network-free, self-contained HTML artifact. */
+  std::string BabylonInline;
   /* Additional input files. When multiple `.m` files are passed, the
    * driver concatenates their contents in CLI order — the first file
    * (kept in InputPath for backward compat with single-file modes) is
@@ -441,6 +448,22 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
       Opts.Mode = Options::Mode::EmitMflow;
     else if (A == "-emit-mflowlink-cpp" || A == "-emit-signal-flow-cpp")
       Opts.Mode = Options::Mode::EmitMflowLinkCpp;
+    else if (A == "-emit-mflowlink-babylon" || A == "-emit-signal-flow-3d")
+      Opts.Mode = Options::Mode::EmitMflowLinkBabylon;
+    else if (A == "--babylon-cdn") {
+      if (++I >= Argc) {
+        std::cerr << "--babylon-cdn requires a URL argument\n";
+        return false;
+      }
+      Opts.BabylonCdn = Argv[I];
+    }
+    else if (A == "--babylon-inline") {
+      if (++I >= Argc) {
+        std::cerr << "--babylon-inline requires a babylon.js bundle path\n";
+        return false;
+      }
+      Opts.BabylonInline = Argv[I];
+    }
     else if (A == "-emit-cocotb")
       Opts.Mode = Options::Mode::EmitCocotb;
     else if (A.size() > 16 && A.substr(0, 16) == "-cocotb-vectors=") {
@@ -12130,6 +12153,59 @@ int main(int Argc, char **Argv) {
         "  Sim.writeCsv(std::cout);\n"
         "  return 0;\n"
         "}\n";
+    return 0;
+  }
+
+  /* mflow-3d-animation — `matlabc -emit-mflowlink-babylon model.mflow` runs the
+   * signal-flow simulation, then emits a self-contained Babylon.js HTML player
+   * (scene-graph + per-step transform timeline) to stdout, or to the `-o`
+   * path. See include/matlab/Flowchart/EmitBabylon.h. */
+  if (Opts.Mode == Options::Mode::EmitMflowLinkBabylon) {
+    SourceManager FlowSM;
+    DiagnosticEngine FlowDiag(FlowSM);
+    auto Doc = matlab::flowchart::loadMflowFromPath(FlowSM, Opts.InputPath,
+                                                    FlowDiag);
+    if (!Doc) { FlowDiag.printAll(); return 1; }
+    if (!Doc->isSignalFlow()) {
+      std::cerr << Opts.InputPath
+                << ": -emit-mflowlink-babylon requires a signal-flow .mflow "
+                   "(settings.kind == \"signal_flow\")\n";
+      return 1;
+    }
+    auto Model = matlab::flowchart::lowerSignalFlow(*Doc, FlowDiag);
+    FlowDiag.printAll();
+    if (!Model) return 1;
+
+    matlab::flowchart::MflowLinkSim Sim(*Model);
+    Sim.runToCompletion();
+
+    matlab::flowchart::BabylonEmitOptions BOpts;
+    if (!Opts.BabylonCdn.empty()) BOpts.CdnBase = Opts.BabylonCdn;
+    if (!Opts.BabylonInline.empty()) BOpts.InlineEnginePath = Opts.BabylonInline;
+    // Resolve a relative actor `mesh` (glTF/GLB) against the .mflow's directory.
+    {
+      auto Slash = Opts.InputPath.find_last_of("/\\");
+      if (Slash != std::string::npos)
+        BOpts.ModelDir = Opts.InputPath.substr(0, Slash);
+    }
+
+    std::string Err;
+    if (!Opts.OutDir.empty()) {
+      std::ofstream Out(Opts.OutDir, std::ios::binary);
+      if (!Out) {
+        std::cerr << Opts.OutDir << ": cannot open output file\n";
+        return 1;
+      }
+      if (!matlab::flowchart::emitMflowLinkBabylon(*Model, Sim, Out, Err,
+                                                   BOpts)) {
+        std::cerr << Err << "\n";
+        return 1;
+      }
+    } else if (!matlab::flowchart::emitMflowLinkBabylon(*Model, Sim, std::cout,
+                                                        Err, BOpts)) {
+      std::cerr << Err << "\n";
+      return 1;
+    }
     return 0;
   }
 

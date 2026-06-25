@@ -1115,6 +1115,261 @@ check "quadrotor MPC x→1.0" "awk 'BEGIN{exit !(($QM_X-1.0)^2 < (5e-2)^2)}'" "M
 check "quadrotor MPC y→1.5" "awk 'BEGIN{exit !(($QM_Y-1.5)^2 < (5e-2)^2)}'" "MPC outer loop tracks the lateral y setpoint"
 check "quadrotor MPC z→1.0" "awk 'BEGIN{exit !(($QM_Z-1.0)^2 < (5e-2)^2)}'" "altitude PID tracks the z setpoint"
 
+# mflow-3d-animation (Tier 1) — signal_world3d + kinematic signal_actor3d.
+# orbit_cube: a sine/cosine pair drives a box's X/Y translation in a circle of
+# radius 3; tz held at 1. The actor logs a 9-component transform group
+# `cube[tx..sz]`; a signal_scope3d logs the same path. Then the
+# `-emit-mflowlink-babylon` lane must produce a valid HTML player whose embedded
+# scene has one actor and a timeline as long as the simulated step count.
+OC="$("$MATLABC" -simulate "$EX/3d/orbit_cube.mflow")"
+OC_HEAD=$(printf '%s\n' "$OC" | head -1)
+OC_ROWS=$(printf '%s\n' "$OC" | tail -n +2 | wc -l | tr -d ' ')
+check "actor3d transform columns" \
+  "[[ '$OC_HEAD' == *'cube[tx],cube[ty],cube[tz],cube[rx],cube[ry],cube[rz],cube[sx],cube[sy],cube[sz]'* ]]" \
+  "signal_actor3d logs a width-9 [tx..sz] transform group"
+# cube[tx] = 3·sin(t), cube[ty] = 3·cos(t). At t≈π/2 the box is near (3,0,1).
+OC_TX=$(printf '%s\n' "$OC" | awk -F, 'NR>1 && $1>=1.56 && $1<=1.58 {print $4; exit}')
+OC_TZ=$(printf '%s\n' "$OC" | awk -F, 'NR>1 && $1>=1.56 && $1<=1.58 {print $6; exit}')
+check "actor3d orbit tx≈3 at t=π/2" "awk 'BEGIN{exit !(($OC_TX-3.0)^2 < (5e-2)^2)}'" "sine drives translation X"
+check "actor3d tz held at 1"        "awk 'BEGIN{exit !(($OC_TZ-1.0)^2 < (1e-6)^2)}'" "constant z translation"
+# Emit to files, then probe with grep counts (embedding the full HTML in an
+# eval'd test expression breaks — the inlined viewer JS carries quotes/backticks).
+OC_HTML_F=$(mktemp /tmp/oc.XXXX.html)
+"$MATLABC" -emit-mflowlink-babylon "$EX/3d/orbit_cube.mflow" -o "$OC_HTML_F"
+OC_DOCTYPE=$(head -1 "$OC_HTML_F")
+OC_ACTORS=$(grep -c '"name":"cube"' "$OC_HTML_F")
+OC_HASBJS=$(grep -c 'babylon.js' "$OC_HTML_F")
+OC_TIMES=$(grep -o '"times":\[[^]]*\]' "$OC_HTML_F" | tr ',' '\n' | grep -c '[0-9]')
+check "babylon emit is an HTML doc" "[[ '$OC_DOCTYPE' == '<!doctype html>'* ]]" ""
+check "babylon emit has one actor"  "[[ $OC_ACTORS -eq 1 ]]" ""
+check "babylon emit references Babylon engine" "[[ $OC_HASBJS -ge 1 ]]" ""
+check "babylon timeline matches sim steps" "awk 'BEGIN{exit !($OC_TIMES==$OC_ROWS)}'" "one keyframe per recorded major step"
+rm -f "$OC_HTML_F"
+
+# falling_stack: viewer-physics scene (Tier 4 hint surface). Static actors with
+# no transform inputs; the emitter must mark them as physics bodies. Tier-4
+# dynamics are visualization-only, so we assert structure, not motion.
+FS_HTML_F=$(mktemp /tmp/fs.XXXX.html)
+"$MATLABC" -emit-mflowlink-babylon "$EX/3d/falling_stack.mflow" -o "$FS_HTML_F"
+FS_PHYS=$(grep -c '"physics":true' "$FS_HTML_F")
+FS_ACTORS=$(grep -c '"shape":' "$FS_HTML_F")
+FS_HAVOK=$(grep -c 'HavokPhysics_umd.js' "$FS_HTML_F")
+FS_AGG=$(grep -c 'PhysicsAggregate' "$FS_HTML_F")
+check "falling_stack emits physics world" "[[ $FS_PHYS -ge 1 ]]" ""
+check "falling_stack has 4 actors" "[[ $FS_ACTORS -eq 4 ]]" "ground + 3 boxes"
+check "falling_stack loads Havok engine" "[[ $FS_HAVOK -eq 1 ]]" "Tier-4 viewer physics"
+check "falling_stack seeds physics bodies" "[[ $FS_AGG -ge 1 ]]" "PhysicsAggregate per body"
+rm -f "$FS_HTML_F"
+# A non-physics scene must NOT pull the Havok WASM (no needless network/WASM).
+OC2_F=$(mktemp /tmp/oc2.XXXX.html)
+"$MATLABC" -emit-mflowlink-babylon "$EX/3d/orbit_cube.mflow" -o "$OC2_F"
+OC2_HAVOK=$(grep -c 'HavokPhysics_umd.js' "$OC2_F")
+check "non-physics scene omits Havok" "[[ $OC2_HAVOK -eq 0 ]]" ""
+rm -f "$OC2_F"
+# ball_ramp: a sphere on an inclined plane under gravity (restitution bounce).
+BR_F=$(mktemp /tmp/br.XXXX.html)
+"$MATLABC" -emit-mflowlink-babylon "$EX/3d/ball_ramp.mflow" -o "$BR_F"
+BR_PHYS=$(grep -c 'enablePhysics' "$BR_F")
+check "ball_ramp enables physics" "[[ $BR_PHYS -ge 1 ]]" ""
+rm -f "$BR_F"
+
+# Tier 2 — hierarchy + lights + cameras + materials. articulated_arm: a 3-link
+# chain (base→link1→link2→link3), each joint rotation driven by a sine, with a
+# directional signal_light3d and a follow signal_camera3d on the tip link.
+AA_HTML_F=$(mktemp /tmp/aa.XXXX.html)
+"$MATLABC" -emit-mflowlink-babylon "$EX/3d/articulated_arm.mflow" -o "$AA_HTML_F"
+AA_ACTORS=$(grep -c '"shape":' "$AA_HTML_F")
+AA_LIGHTS=$(grep -o '"lights":\[[^]]*\]' "$AA_HTML_F" | grep -c '"type"')
+AA_FOLLOW=$(grep -c '"mode":"follow"' "$AA_HTML_F")
+AA_PARENTS=$(grep -o '"parent":' "$AA_HTML_F" | wc -l | tr -d ' ')
+check "arm has 4 actors" "[[ $AA_ACTORS -eq 4 ]]" "base + 3 links"
+check "arm has a directional light" "[[ $AA_LIGHTS -ge 1 ]]" "signal_light3d emitted"
+check "arm has a follow camera" "[[ $AA_FOLLOW -eq 1 ]]" "signal_camera3d mode=follow"
+check "arm has a 3-link parent chain" "[[ $AA_PARENTS -eq 3 ]]" "link1/link2/link3 each parented"
+rm -f "$AA_HTML_F"
+
+# Tier 3 — glTF/GLB mesh import. gltf_drone: a drone body (inline glTF) follows a
+# Lissajous trajectory with a chase camera. The emitter must embed the mesh as a
+# data URL; a missing mesh file is a sourced error.
+GD_HTML_F=$(mktemp /tmp/gd.XXXX.html)
+"$MATLABC" -emit-mflowlink-babylon "$EX/3d/gltf_drone.mflow" -o "$GD_HTML_F"
+GD_MESH=$(grep -c '"mesh":"data:model/gltf' "$GD_HTML_F")
+GD_TIMES=$(grep -o '"times":\[[^]]*\]' "$GD_HTML_F" | tr ',' '\n' | grep -c '[0-9]')
+GD_ROWS=$("$MATLABC" -simulate "$EX/3d/gltf_drone.mflow" | tail -n +2 | wc -l | tr -d ' ')
+check "gltf actor embeds an inline mesh" "[[ $GD_MESH -eq 1 ]]" "glTF embedded as a data URL"
+check "gltf timeline matches sim steps" "awk 'BEGIN{exit !($GD_TIMES==$GD_ROWS)}'" ""
+rm -f "$GD_HTML_F"
+# A mesh path that does not resolve is a sourced error.
+BADM=$(mktemp /tmp/badmesh.XXXX.mflow)
+sed 's#assets/drone.gltf#assets/does_not_exist.gltf#' "$EX/3d/gltf_drone.mflow" > "$BADM"
+if "$MATLABC" -emit-mflowlink-babylon "$BADM" -o /dev/null >/dev/null 2>&1; then
+  fail=$((fail+1)); echo "FAIL  missing mesh file rejected"
+else pass=$((pass+1)); fi
+rm -f "$BADM"
+
+# Tier 3b — URDF import. urdf_arm_trace: a 2-DOF arm whose joints are driven by
+# two sines through a `jointAngles` port; the emitter parses the URDF link/joint
+# tree and the actor logs the joint angles (`arm[q1]`, `arm[q2]`).
+UA="$("$MATLABC" -simulate "$EX/3d/urdf_arm_trace.mflow")"
+UA_HEAD=$(printf '%s\n' "$UA" | head -1)
+check "urdf actor logs joint angles" "[[ '$UA_HEAD' == *'arm[q1]'*'arm[q2]'* ]]" "jointAngles → q columns"
+# q1 = 1.2·sin(0.6·t); at t≈2.0 → 1.1184.
+UA_Q1=$(printf '%s\n' "$UA" | awk -F, 'NR==1{for(i=1;i<=NF;i++) if($i=="arm[q1]") c=i} NR>1 && $1>=1.99 && $1<=2.01 {print $c; exit}')
+check "urdf joint angle tracks its signal" "awk 'BEGIN{exit !(($UA_Q1-1.1184)^2 < (1e-2)^2)}'" "q1 = 1.2·sin(0.6·t)"
+UA_HTML_F=$(mktemp /tmp/ua.XXXX.html)
+"$MATLABC" -emit-mflowlink-babylon "$EX/3d/urdf_arm_trace.mflow" -o "$UA_HTML_F"
+UA_LINKS=$(grep -o '"geom":' "$UA_HTML_F" | wc -l | tr -d ' ')
+UA_JOINTS=$(grep -o '"type":"revolute"' "$UA_HTML_F" | wc -l | tr -d ' ')
+check "urdf scene has 3 links" "[[ $UA_LINKS -eq 3 ]]" "base + link1 + link2"
+check "urdf scene has 2 revolute joints" "[[ $UA_JOINTS -eq 2 ]]" ""
+rm -f "$UA_HTML_F"
+# A URDF path that does not resolve is a sourced error.
+BADU=$(mktemp /tmp/badurdf.XXXX.mflow)
+sed 's#assets/arm2.urdf#assets/nope.urdf#' "$EX/3d/urdf_arm_trace.mflow" > "$BADU"
+if "$MATLABC" -emit-mflowlink-babylon "$BADU" -o /dev/null >/dev/null 2>&1; then
+  fail=$((fail+1)); echo "FAIL  missing URDF file rejected"
+else pass=$((pass+1)); fi
+rm -f "$BADU"
+
+# Parent hierarchy guards: an unknown parent and a cycle are both sourced errors.
+UNK=$(mktemp /tmp/unkparent.XXXX.mflow)
+sed 's/"parent" : "base"/"parent" : "ghost"/' "$EX/3d/articulated_arm.mflow" > "$UNK"
+if "$MATLABC" -simulate "$UNK" --dry-run >/dev/null 2>&1; then
+  fail=$((fail+1)); echo "FAIL  unknown actor parent rejected"
+else pass=$((pass+1)); fi
+rm -f "$UNK"
+
+# Tier 5 — lock-step co-simulation. bounce_cosim: a cosim sphere (6-state
+# gravity dynamics) free-falls from z=5 and bounces on the ground with
+# restitution 0.6. Free-fall is RK4-exact; the bounce peak follows e²·height.
+BC="$("$MATLABC" -simulate "$EX/3d/bounce_cosim.mflow")"
+# Free-fall: z(0.5) = 5 − ½·9.81·0.25 = 3.7737.
+BC_Z05=$(printf '%s\n' "$BC" | awk -F, 'NR==1{for(i=1;i<=NF;i++)if($i=="ball[tz]")z=i} NR>1 && $1>=0.499 && $1<=0.501 {print $z; exit}')
+check "cosim free-fall is exact" "awk 'BEGIN{exit !(($BC_Z05-3.7737)^2 < (1e-2)^2)}'" "RK4 integrates gravity exactly"
+# Floor = radius 0.4; post-bounce peak ≈ 0.4 + 0.6²·(5−0.4) = 2.056.
+BC_PEAK=$(printf '%s\n' "$BC" | awk -F, 'NR==1{for(i=1;i<=NF;i++)if($i=="ball[tz]")z=i;next} $1>1.0{if($z>m)m=$z} END{print m}')
+check "cosim restitution bounce" "awk 'BEGIN{exit !(($BC_PEAK-2.056)^2 < (3e-2)^2)}'" "bounce peak = floor + e²·drop"
+BC_MIN=$(printf '%s\n' "$BC" | awk -F, 'NR==1{for(i=1;i<=NF;i++)if($i=="ball[tz]")z=i;next} {if(m==""||$z<m)m=$z} END{print m}')
+check "cosim never sinks through floor" "awk 'BEGIN{exit !($BC_MIN >= 0.39)}'" "ground contact clamps to the floor"
+
+# cart_wall_bump: a cosim cart slides toward a static wall; signal_collision3d
+# emits a collision boolean (a controller-usable feedback signal) when they meet.
+CW="$("$MATLABC" -simulate "$EX/3d/cart_wall_bump.mflow")"
+CW_HEAD=$(printf '%s\n' "$CW" | head -1)
+check "collision3d logs a scalar" "[[ '$CW_HEAD' == *',collide'* ]]" "scalar collision output"
+# Cart from x=−3 at 1.5 m/s; collision when gap < rA+rB = 1.5 ⇒ x≈1.5, t≈3.0s.
+CW_T=$(printf '%s\n' "$CW" | awk -F, 'NR==1{for(i=1;i<=NF;i++)if($i=="collide")c=i} NR>1 && $c>0.5 {print $1; exit}')
+check "collision fires when bodies meet" "awk 'BEGIN{exit !(($CW_T-3.0)^2 < (0.2)^2)}'" "collision3d detects the contact"
+# Before contact the collision signal is 0.
+CW_T0=$(printf '%s\n' "$CW" | awk -F, 'NR==1{for(i=1;i<=NF;i++)if($i=="collide")c=i} NR>1 && $1>=1.0 && $1<=1.01 {print $c; exit}')
+check "no collision before contact" "awk 'BEGIN{exit !($CW_T0 < 0.5)}'" ""
+
+# Tier 6 — virtual sensors. camera_depth_stream: a 6×6 depth camera at x=5 aimed
+# at a unit sphere at the origin; the centre pixels read ≈4 (5 − radius) and a
+# corner ray misses (reads the range). lidar_scan: a 24-ray lidar; the forward
+# ray hits a box's front face at x=3.5. N-D column names carry commas, so parse
+# with python (awk -F, would split inside the quoted header fields).
+DEPTH_OK=$("$MATLABC" -simulate "$EX/3d/camera_depth_stream.mflow" | python3 -c '
+import csv,sys
+r=list(csv.reader(sys.stdin)); d=dict(zip(r[0],r[1]))
+ncol=sum(1 for h in r[0] if h.startswith("cam["))
+center=float(d.get("cam[3,3]","0")); corner=float(d.get("cam[1,1]","0"))
+print("ok" if (ncol==36 and abs(center-4.0)<0.3 and corner>=19.0) else "bad", round(center,2), round(corner,2))
+')
+check "depth sensor [6,6] + geometry" "[[ '$DEPTH_OK' == ok* ]]" "center≈4 (5−r), corner=range; got: $DEPTH_OK"
+LIDAR_OK=$("$MATLABC" -simulate "$EX/3d/lidar_scan.mflow" | python3 -c '
+import csv,sys
+r=list(csv.reader(sys.stdin)); d=dict(zip(r[0],r[1]))
+ncol=sum(1 for h in r[0] if h.startswith("lidar["))
+x=float(d.get("lidar[1,1]","0")); y=float(d.get("lidar[1,2]","0"))
+print("ok" if (ncol==72 and abs(x-3.5)<0.2 and abs(y)<0.2) else "bad", round(x,2), round(y,2))
+')
+check "lidar [24,3] point cloud on surface" "[[ '$LIDAR_OK' == ok* ]]" "forward ray hits box front x≈3.5; got: $LIDAR_OK"
+
+# Follow-on polish — spin_top (ramp → yaw), quadrotor_flythrough (body + 4
+# parented rotors + follow cam), STL import, --babylon-inline, pacingRate.
+ST="$("$MATLABC" -simulate "$EX/3d/spin_top.mflow")"
+# yaw rz = 2π·t; at t=1 → 6.283.
+ST_RZ=$(printf '%s\n' "$ST" | awk -F, 'NR==1{for(i=1;i<=NF;i++)if($i=="top[rz]")z=i} NR>1 && $1>=0.99 && $1<=1.01 {print $z; exit}')
+check "spin_top yaw ramps" "awk 'BEGIN{exit !(($ST_RZ-6.283)^2 < (1e-1)^2)}'" "ramp drives rotation rz"
+QF_F=$(mktemp /tmp/qf.XXXX.html)
+"$MATLABC" -emit-mflowlink-babylon "$EX/3d/quadrotor_flythrough.mflow" -o "$QF_F"
+QF_ACTORS=$(grep -c '"shape":' "$QF_F")
+QF_ROTORS=$(grep -o '"parent":"body"' "$QF_F" | wc -l | tr -d ' ')
+check "quadrotor has body + 4 rotors" "[[ $QF_ACTORS -eq 5 ]]" ""
+check "quadrotor rotors parented to body" "[[ $QF_ROTORS -eq 4 ]]" ""
+rm -f "$QF_F"
+ST_F=$(mktemp /tmp/stl.XXXX.html)
+"$MATLABC" -emit-mflowlink-babylon "$EX/3d/stl_marker.mflow" -o "$ST_F"
+ST_STL=$(grep -c 'data:model/stl' "$ST_F")
+check "STL mesh embedded inline" "[[ $ST_STL -eq 1 ]]" "binary STL → data URL"
+rm -f "$ST_F"
+# --babylon-inline produces a network-free artifact (no CDN <script src>).
+INL_F=$(mktemp /tmp/inl.XXXX.html); FAKE=$(mktemp /tmp/fakebjs.XXXX.js)
+printf 'window.__BJS__=1;\n' > "$FAKE"
+"$MATLABC" -emit-mflowlink-babylon "$EX/3d/spin_top.mflow" --babylon-inline "$FAKE" -o "$INL_F"
+INL_CDN=$(grep -c 'cdn.babylonjs.com' "$INL_F")
+check "--babylon-inline omits the CDN" "[[ $INL_CDN -eq 0 ]]" "engine bundle inlined"
+rm -f "$INL_F" "$FAKE"
+
+# Tier 5 rigid-body depth — two_ball_collision: two equal-mass spheres in a
+# head-on elastic (e=1) collision exchange velocities (each reverses); body b
+# also free-spins from its angularVelocity (b[rz] = 3·t).
+TB="$("$MATLABC" -simulate "$EX/3d/two_ball_collision.mflow")"
+TB_RES=$(printf '%s\n' "$TB" | python3 -c '
+import csv,sys
+r=list(csv.reader(sys.stdin)); H=r[0]
+ax=H.index("a[tx]"); bx=H.index("b[tx]")
+a0,a1=float(r[1][ax]),float(r[-1][ax]); b0,b1=float(r[1][bx]),float(r[-1][bx])
+# elastic head-on swap: a (started -3 moving +x) ends moving -x (a1<a0); b opposite
+print("ok" if (a1 < a0 and b1 > b0) else "bad", round(a1,1), round(b1,1))
+')
+check "elastic collision exchanges momentum" "[[ '$TB_RES' == ok* ]]" "head-on e=1 swap; got: $TB_RES"
+TB_RZ=$(printf '%s\n' "$TB" | awk -F, 'NR==1{for(i=1;i<=NF;i++)if($i=="b[rz]")z=i} NR>1 && $1>=0.999 && $1<=1.005 {print $z; exit}')
+check "cosim actor free-spins" "awk 'BEGIN{exit !(($TB_RZ-3.0)^2 < (1e-1)^2)}'" "angularVelocity integrates to orientation"
+
+# Tier 6 sensor depth — cylinder raycasting + measurement noise (depth_cylinder:
+# a 4×4 depth cam aimed at a cylinder tree at x=3, r=0.5 → centre ≈ 2.5 ± noise),
+# follow-actor sensor pose (sensor_follow_scan: the lidar origin tracks a rover
+# moving +x), and text-annotation actors.
+DC_OK=$("$MATLABC" -simulate "$EX/3d/depth_cylinder.mflow" | python3 -c '
+import csv,sys
+r=list(csv.reader(sys.stdin)); d=dict(zip(r[0],r[1]))
+ncol=sum(1 for h in r[0] if h.startswith("cam["))
+c=float(d.get("cam[2,2]","0"))
+print("ok" if (ncol==16 and abs(c-2.5)<0.25) else "bad", round(c,2))
+')
+check "cylinder raycast + noise depth" "[[ '$DC_OK' == ok* ]]" "centre ≈ 2.5 (3−r) ± noise; got: $DC_OK"
+SF_OK=$("$MATLABC" -simulate "$EX/3d/sensor_follow_scan.mflow" | python3 -c '
+import csv,sys
+r=list(csv.reader(sys.stdin)); H=r[0]
+ncol=sum(1 for h in H if h.startswith("lidar["))
+def cx(row): return sum(float(row[H.index("lidar[%d,1]"%p)]) for p in range(1,25))/24
+print("ok" if (ncol==72 and cx(r[-1])>cx(r[1])) else "bad")
+')
+check "follow-actor sensor tracks the actor" "[[ '$SF_OK' == ok* ]]" "scan origin moves +x with the rover; got: $SF_OK"
+TL_F=$(mktemp /tmp/tl.XXXX.html)
+"$MATLABC" -emit-mflowlink-babylon "$EX/3d/text_label.mflow" -o "$TL_F"
+TL_TXT=$(grep -c '"text":"target"' "$TL_F")
+check "text annotation actor emits" "[[ $TL_TXT -eq 1 ]]" "billboarded label"
+rm -f "$TL_F"
+
+# At most one signal_world3d per model — a second is a sourced error.
+TW=$(mktemp /tmp/twoworld.XXXX.mflow)
+sed 's/"id": "world"/"id": "world"/' "$EX/3d/orbit_cube.mflow" > "$TW"
+python3 - "$TW" <<'PYEOF'
+import json,sys
+p=sys.argv[1]; m=json.load(open(p))
+m['flows'][0]['nodes'].append({"id":"world2","kind":"signal_world3d","data":{"params":{}},"ports":{"in":[],"out":[]}})
+json.dump(m,open(p,'w'))
+PYEOF
+if "$MATLABC" -simulate "$TW" --dry-run >/dev/null 2>&1; then
+  fail=$((fail+1)); echo "FAIL  two signal_world3d blocks rejected"
+else
+  pass=$((pass+1))
+fi
+rm -f "$TW"
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 exit $(( fail > 0 ? 1 : 0 ))

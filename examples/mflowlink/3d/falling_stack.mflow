@@ -1,0 +1,57 @@
+{
+  "entry" : "falling_stack",
+  "flows" : [
+    {
+      "edges" : [],
+      "id" : "flow_stack",
+      "kind" : "program",
+      "name" : "falling_stack",
+      "nodes" : [
+        {
+          "id" : "world",
+          "kind" : "signal_world3d",
+          "data" : { "params" : { "gravity" : "0,0,-9.81", "viewpoint" : "10,10,5", "engine" : "havok", "physics" : true, "showGround" : true, "output" : "falling_stack.html" } },
+          "ports" : { "in" : [], "out" : [] }
+        },
+        {
+          "id" : "ground",
+          "kind" : "signal_actor3d",
+          "data" : { "params" : { "name" : "ground", "shape" : "plane", "size" : "20,20", "color" : "0.6,0.6,0.6", "physics" : true, "mass" : 0.0, "collisionShape" : "box", "friction" : 0.8, "restitution" : 0.1 } },
+          "ports" : { "in" : [], "out" : [] }
+        },
+        {
+          "id" : "box1",
+          "kind" : "signal_actor3d",
+          "data" : { "params" : { "name" : "box1", "shape" : "box", "size" : "1,1,1", "translation" : "0,0,1", "color" : "0.9,0.3,0.3", "physics" : true, "mass" : 1.0, "collisionShape" : "box", "friction" : 0.5, "restitution" : 0.3 } },
+          "ports" : { "in" : [], "out" : [] }
+        },
+        {
+          "id" : "box2",
+          "kind" : "signal_actor3d",
+          "data" : { "params" : { "name" : "box2", "shape" : "box", "size" : "1,1,1", "translation" : "0.15,0,2.2", "color" : "0.3,0.9,0.3", "physics" : true, "mass" : 1.0, "collisionShape" : "box", "friction" : 0.5, "restitution" : 0.3 } },
+          "ports" : { "in" : [], "out" : [] }
+        },
+        {
+          "id" : "box3",
+          "kind" : "signal_actor3d",
+          "data" : { "params" : { "name" : "box3", "shape" : "box", "size" : "1,1,1", "translation" : "-0.1,0.1,3.4", "color" : "0.3,0.3,0.9", "physics" : true, "mass" : 1.0, "collisionShape" : "box", "friction" : 0.5, "restitution" : 0.3 } },
+          "ports" : { "in" : [], "out" : [] }
+        }
+      ],
+      "signature" : { "inputs" : [], "outputs" : [] }
+    }
+  ],
+  "schema" : "matforge.flowchart",
+  "settings" : {
+    "kind" : "signal_flow",
+    "solver" : {
+      "type" : "fixed_step",
+      "algorithm" : "ode4",
+      "startTime" : 0,
+      "stopTime" : 4,
+      "stepSize" : 0.01,
+      "zeroCrossing" : false
+    }
+  },
+  "version" : "0.1.0"
+}

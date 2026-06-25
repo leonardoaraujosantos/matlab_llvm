@@ -81,6 +81,33 @@ const std::string *paramS(const MflBlock &B, const char *Key) {
   return It == B.Params.end() ? nullptr : &It->second;
 }
 
+// mflow-3d-animation — parse a `"x,y,z"` (or space/`;`-separated) vector param
+// into `Out[0..2]`. Missing param leaves `Out` untouched (so the caller's
+// default survives). Fewer than three values fill from the front; extras are
+// ignored. Brackets are tolerated.
+void parseVec3Param(const MflBlock &B, const char *Key, double Out[3]) {
+  const std::string *S = paramS(B, Key);
+  if (!S) return;
+  int N = 0;
+  std::string Tok;
+  std::string Str = *S;
+  Str.push_back(',');
+  for (char C : Str) {
+    if (C == ',' || C == ' ' || C == '\t' || C == ';' || C == '[' ||
+        C == ']') {
+      if (!Tok.empty()) {
+        if (N < 3) {
+          try { Out[N] = std::stod(Tok); } catch (...) {}
+          ++N;
+        }
+        Tok.clear();
+      }
+    } else {
+      Tok.push_back(C);
+    }
+  }
+}
+
 } // namespace
 
 //===----------------------------------------------------------------------===//
@@ -975,6 +1002,8 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
     const auto &B = M_.Blocks[I];
     bool Implicit = B.Kind == "signal_scope" ||
                     B.Kind == "signal_scope3d" ||
+                    B.Kind == "signal_actor3d" ||
+                    B.Kind == "signal_sensor3d" ||
                     B.Kind == "signal_display" ||
                     B.Kind == "signal_to_workspace";
     if (!B.LogSignal && !Implicit) continue;
@@ -990,6 +1019,27 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
         LogBlocks_.push_back(I);
         LogElements_.push_back(E);
         LogNames_.push_back(Name + "[" + Axes[E] + "]");
+      }
+      continue;
+    }
+    // mflow-3d-animation — actor transform timeline: nine columns
+    // `<id>[tx,ty,tz,rx,ry,rz,sx,sy,sz]` that the Babylon emit lane reads as
+    // the per-step animation keyframes (translation, roll/pitch/yaw, scale).
+    if (B.Kind == "signal_actor3d") {
+      static const char *Comp[9] = {"tx", "ty", "tz", "rx", "ry",
+                                    "rz", "sx", "sy", "sz"};
+      for (int E = 0; E < 9; ++E) {
+        LogBlocks_.push_back(I);
+        LogElements_.push_back(E);
+        LogNames_.push_back(Name + "[" + Comp[E] + "]");
+      }
+      // URDF actor (Tier 3b) — additionally log up to 12 joint angles.
+      if (OutWidth_[I] > 9) {
+        for (int Q = 0; Q < OutWidth_[I] - 9; ++Q) {
+          LogBlocks_.push_back(I);
+          LogElements_.push_back(9 + Q);
+          LogNames_.push_back(Name + "[q" + std::to_string(Q + 1) + "]");
+        }
       }
       continue;
     }
@@ -1064,9 +1114,39 @@ void MflowLinkSim::reset() {
   BlockCursor_ = 0;
   ZCQueue_.clear();
 
+  // mflow-3d-animation Tier 5 — parse the world gravity once + size the per-block
+  // co-sim contact flags.
+  Gravity_[0] = 0.0; Gravity_[1] = 0.0; Gravity_[2] = -9.81;
+  CosimContact_.assign(M_.Blocks.size(), 0.0);
+  for (const auto &B : M_.Blocks) {
+    if (B.Kind != "signal_world3d") continue;
+    if (const std::string *G = paramS(B, "gravity")) {
+      double g[3] = {0.0, 0.0, -9.81};
+      parseVec3Param(B, "gravity", g);
+      Gravity_[0] = g[0]; Gravity_[1] = g[1]; Gravity_[2] = g[2];
+    }
+    break;
+  }
+
   for (size_t I = 0; I < M_.Blocks.size(); ++I) {
     const auto &B = M_.Blocks[I];
-    if (B.Kind == "signal_integrator") {
+    if (B.Kind == "signal_actor3d" && B.ContStateCount == 12) {
+      // Co-sim actor — seed position/velocity from `translation`/`velocity`,
+      // orientation from `rotation` (rpy), and angular velocity from
+      // `angularVelocity` (all "x,y,z" params; default rest at origin).
+      size_t Off = StateOffset_[I];
+      double p[3] = {0, 0, 0}, v[3] = {0, 0, 0}, a[3] = {0, 0, 0}, w[3] = {0, 0, 0};
+      parseVec3Param(B, "translation", p);
+      parseVec3Param(B, "velocity", v);
+      parseVec3Param(B, "rotation", a);
+      parseVec3Param(B, "angularVelocity", w);
+      for (int J = 0; J < 3; ++J) {
+        Y_[Off + J] = p[J];
+        Y_[Off + 3 + J] = v[J];
+        Y_[Off + 6 + J] = a[J];
+        Y_[Off + 9 + J] = w[J];
+      }
+    } else if (B.Kind == "signal_integrator") {
       Y_[StateOffset_[I]] = paramD(B, "initialCondition", 0.0);
     } else if (B.Kind == "signal_pid") {
       size_t Off = StateOffset_[I];
@@ -1180,10 +1260,12 @@ void MflowLinkSim::reset() {
       // read.
       TransportBuf_[I].Samples.push_back(
           {M_.Solver.StartTime, TransportBuf_[I].InitialOutput});
-    } else if (B.Kind == "signal_noise" || B.Kind == "signal_awgn") {
+    } else if (B.Kind == "signal_noise" || B.Kind == "signal_awgn" ||
+               B.Kind == "signal_sensor3d") {
       // Per-block xorshift seed. The default seed makes the same
       // model reproducible across runs; users can override via
-      // `params.seed`. signal_awgn (#343) shares the same RNG state.
+      // `params.seed`. signal_awgn (#343) shares the same RNG state;
+      // signal_sensor3d (Tier 6) uses it for optional measurement noise.
       uint64_t Seed =
           static_cast<uint64_t>(paramD(B, "seed", 1.0));
       if (Seed == 0) Seed = 0xC0FFEE12345678ABULL;
@@ -1267,6 +1349,26 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
     for (auto &P : Inputs_[I])
       if (P.DstPort == Port) V += edgeValue(P);
     return V;
+  };
+  // mflow-3d-animation — read element `Elem` of a (possibly vector) input
+  // port. A width-1 source broadcasts its scalar to element 0 only; a vector
+  // source (e.g. a Mux feeding a width-3 translation port) is read from its
+  // VecOut_ slice. Returns NaN when the port has no edge, so the caller can
+  // distinguish "unconnected" from "connected to 0".
+  auto vecInput = [&](size_t I, const char *Port, int Elem) -> double {
+    for (auto &P : Inputs_[I]) {
+      if (P.DstPort != Port) continue;
+      size_t S = P.SrcBlock;
+      if (OutWidth_[S] > 1 && Elem < (int)VecOut_[S].size())
+        return VecOut_[S][Elem];
+      return Elem == 0 ? edgeValue(P) : 0.0;
+    }
+    return std::numeric_limits<double>::quiet_NaN();
+  };
+  auto portConnected = [&](size_t I, const char *Port) -> bool {
+    for (auto &P : Inputs_[I])
+      if (P.DstPort == Port) return true;
+    return false;
   };
 
   for (size_t Pos = 0; Pos < M_.ExecOrder.size(); ++Pos) {
@@ -1648,6 +1750,291 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       if (HasRef) Rr = inputOf(I, "r");
       else Rr = R_def;
       Out_[I] = Gain * (Rr - Ym);
+    } else if (K == "signal_world3d" || K == "signal_light3d" ||
+               K == "signal_camera3d") {
+      // mflow-3d-animation — scene config (world / light / camera). No ports,
+      // no output; the emit lane reads their params directly. Nothing to eval.
+      Out_[I] = 0.0;
+    } else if (K == "signal_collision3d") {
+      // mflow-3d-animation Tier 5 — collision/contact event. Reads two pose
+      // signals (`poseA`/`poseB`, xyz from each actor's output), and emits the
+      // collision boolean on `out` plus a penalty contact force on the `force`
+      // port. A controller wired from `out` can react to the collision.
+      double A[3] = {0, 0, 0}, Bp[3] = {0, 0, 0};
+      for (int E = 0; E < 3; ++E) {
+        double va = vecInput(I, "poseA", E);
+        if (!std::isnan(va)) A[E] = va;
+        double vb = vecInput(I, "poseB", E);
+        if (!std::isnan(vb)) Bp[E] = vb;
+      }
+      double dx = A[0] - Bp[0], dy = A[1] - Bp[1], dz = A[2] - Bp[2];
+      double Dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+      double Rsum = paramD(B, "radiusA", 0.5) + paramD(B, "radiusB", 0.5);
+      double Pen = Rsum - Dist;
+      bool Hit = Pen > 0.0;
+      Out_[I] = Hit ? 1.0 : 0.0;
+      PortOut_[I]["force"] = Hit ? paramD(B, "stiffness", 100.0) * Pen : 0.0;
+    } else if (K == "signal_sensor3d") {
+      // mflow-3d-animation (Tier 6) — virtual sensor. Cast rays from the sensor
+      // pose over the primitive scene (sphere / box / ground plane) each step;
+      // fill the N-D output (depth/semantic [r,c], rgb [r,c,3], lidar [N,3]).
+      // Deterministic geometry → golden-stable, feeds the image/CV blocks.
+      struct Prim {
+        int kind; // 0 sphere, 1 box, 2 ground-plane
+        double c[3], r, h[3], label, col[3];
+      };
+      std::vector<Prim> Scene;
+      double GroundZ = paramD(B, "groundZ", 0.0);
+      bool HasGround = paramD(B, "ground", 1.0) > 0.5;
+      for (size_t J = 0; J < M_.Blocks.size(); ++J) {
+        const auto &AB = M_.Blocks[J];
+        if (AB.Kind != "signal_actor3d") continue;
+        Prim P{};
+        // Position: the actor's current transform (VecOut 0..2) or its static
+        // translation param.
+        if (VecOut_[J].size() >= 3) {
+          P.c[0] = VecOut_[J][0]; P.c[1] = VecOut_[J][1]; P.c[2] = VecOut_[J][2];
+        } else {
+          double t[3] = {0, 0, 0};
+          parseVec3Param(AB, "translation", t);
+          P.c[0] = t[0]; P.c[1] = t[1]; P.c[2] = t[2];
+        }
+        std::string Sh = paramS(AB, "shape") ? *paramS(AB, "shape") : "box";
+        if (Sh == "sphere") { P.kind = 0; P.r = paramD(AB, "radius", 0.5); }
+        else if (Sh == "cylinder" || Sh == "cone" || Sh == "capsule") {
+          // Vertical finite cylinder (cone/capsule approximated as such).
+          P.kind = 3;
+          P.r = paramD(AB, "radius", 0.5);
+          P.h[2] = paramD(AB, "height", 1.0) / 2.0;
+        } else {
+          P.kind = 1;
+          double sz[3] = {1, 1, 1};
+          parseVec3Param(AB, "size", sz);
+          P.h[0] = sz[0] / 2; P.h[1] = sz[1] / 2; P.h[2] = sz[2] / 2;
+        }
+        P.label = paramD(AB, "semanticLabel", 1.0);
+        double col[3] = {0.6, 0.6, 0.6};
+        parseVec3Param(AB, "color", col);
+        P.col[0] = col[0]; P.col[1] = col[1]; P.col[2] = col[2];
+        Scene.push_back(P);
+      }
+      auto castRay = [&](const double o[3], const double d[3], double &t,
+                         int &hitPrim) {
+        t = paramD(B, "range", 50.0);
+        hitPrim = -1;
+        for (size_t pi = 0; pi < Scene.size(); ++pi) {
+          const Prim &P = Scene[pi];
+          double th = -1.0;
+          if (P.kind == 0) { // sphere
+            double oc[3] = {o[0] - P.c[0], o[1] - P.c[1], o[2] - P.c[2]};
+            double b = oc[0]*d[0]+oc[1]*d[1]+oc[2]*d[2];
+            double cc = oc[0]*oc[0]+oc[1]*oc[1]+oc[2]*oc[2] - P.r*P.r;
+            double disc = b*b - cc;
+            if (disc >= 0) { double s = std::sqrt(disc); th = -b - s; if (th < 0) th = -b + s; }
+          } else if (P.kind == 3) { // vertical finite cylinder (walls)
+            double ox = o[0]-P.c[0], oy = o[1]-P.c[1];
+            double A = d[0]*d[0]+d[1]*d[1];
+            if (A > 1e-12) {
+              double Bq = 2*(ox*d[0]+oy*d[1]);
+              double Cq = ox*ox+oy*oy - P.r*P.r;
+              double disc = Bq*Bq - 4*A*Cq;
+              if (disc >= 0) {
+                double s = std::sqrt(disc);
+                double t1 = (-Bq - s)/(2*A), t2 = (-Bq + s)/(2*A);
+                for (double tc : {t1, t2}) {
+                  if (tc <= 1e-6) continue;
+                  double zz = o[2] + tc*d[2];
+                  if (zz >= P.c[2]-P.h[2] && zz <= P.c[2]+P.h[2]) { th = tc; break; }
+                }
+              }
+            }
+          } else { // AABB box (slab test)
+            double tmin = -1e30, tmax = 1e30;
+            bool ok = true;
+            for (int a = 0; a < 3 && ok; ++a) {
+              double lo = P.c[a]-P.h[a], hi = P.c[a]+P.h[a];
+              if (std::fabs(d[a]) < 1e-12) { if (o[a] < lo || o[a] > hi) ok = false; }
+              else {
+                double t1 = (lo-o[a])/d[a], t2 = (hi-o[a])/d[a];
+                if (t1 > t2) std::swap(t1, t2);
+                tmin = std::max(tmin, t1); tmax = std::min(tmax, t2);
+                if (tmin > tmax) ok = false;
+              }
+            }
+            if (ok && tmax > 0) th = tmin > 0 ? tmin : tmax;
+          }
+          if (th > 1e-6 && th < t) { t = th; hitPrim = (int)pi; }
+        }
+        if (HasGround && std::fabs(d[2]) > 1e-12) {
+          double tg = (GroundZ - o[2]) / d[2];
+          if (tg > 1e-6 && tg < t) { t = tg; hitPrim = -2; } // -2 = ground
+        }
+      };
+      double Pos[3] = {0, 0, 3}, Tgt[3] = {0, 0, 0};
+      parseVec3Param(B, "position", Pos);
+      parseVec3Param(B, "target", Tgt);
+      // Follow-actor pose: track a named actor's current position; `offset`
+      // (default behind+above) places the sensor relative to it, and it aims
+      // at the actor. The sensor moves with the actor each step.
+      if (const std::string *Fol = paramS(B, "follow")) {
+        // `offset` places the sensor relative to the actor; the `target` param
+        // is the *relative* look direction from the actor (default forward +x).
+        double rel[3] = {1, 0, 0};
+        if (paramS(B, "target")) { rel[0]=Tgt[0]; rel[1]=Tgt[1]; rel[2]=Tgt[2]; }
+        for (size_t J = 0; J < M_.Blocks.size(); ++J) {
+          const auto &AB = M_.Blocks[J];
+          if (AB.Kind != "signal_actor3d") continue;
+          std::string Nm = paramS(AB, "name") ? *paramS(AB, "name") : AB.Id;
+          if (Nm != *Fol || VecOut_[J].size() < 3) continue;
+          double off[3] = {-6, 0, 3};
+          parseVec3Param(B, "offset", off);
+          for (int k = 0; k < 3; ++k) {
+            Pos[k] = VecOut_[J][k] + off[k];
+            Tgt[k] = VecOut_[J][k] + rel[k];
+          }
+          break;
+        }
+      }
+      // Per-sensor deterministic Gaussian noise (xorshift64 + Box-Muller),
+      // added to depth distances / lidar ranges when `noise` (stddev) > 0.
+      double Noise = paramD(B, "noise", 0.0);
+      uint64_t &NSeed = NoiseSeed_[I];
+      auto gaussN = [&]() -> double {
+        if (Noise <= 0.0) return 0.0;
+        auto nx = [&]() {
+          NSeed ^= NSeed << 13; NSeed ^= NSeed >> 7; NSeed ^= NSeed << 17;
+          return (NSeed >> 11) * (1.0 / 9007199254740992.0);
+        };
+        double u1 = nx(), u2 = nx();
+        if (u1 < 1e-12) u1 = 1e-12;
+        return Noise * std::sqrt(-2.0*std::log(u1)) * std::cos(2.0*M_PI*u2);
+      };
+      double fwd[3] = {Tgt[0]-Pos[0], Tgt[1]-Pos[1], Tgt[2]-Pos[2]};
+      double fl = std::sqrt(fwd[0]*fwd[0]+fwd[1]*fwd[1]+fwd[2]*fwd[2]);
+      if (fl < 1e-9) { fwd[0]=1; fwd[1]=0; fwd[2]=0; fl=1; }
+      for (int a=0;a<3;a++) fwd[a]/=fl;
+      double up0[3] = {0, 0, 1};
+      double right[3] = {fwd[1]*up0[2]-fwd[2]*up0[1], fwd[2]*up0[0]-fwd[0]*up0[2], fwd[0]*up0[1]-fwd[1]*up0[0]};
+      double rl = std::sqrt(right[0]*right[0]+right[1]*right[1]+right[2]*right[2]);
+      if (rl < 1e-9) { right[0]=1; right[1]=0; right[2]=0; rl=1; }
+      for (int a=0;a<3;a++) right[a]/=rl;
+      double up[3] = {right[1]*fwd[2]-right[2]*fwd[1], right[2]*fwd[0]-right[0]*fwd[2], right[0]*fwd[1]-right[1]*fwd[0]};
+      std::string Kind = paramS(B, "kind") ? *paramS(B, "kind") : "depth";
+      double Range = paramD(B, "range", 50.0);
+      const std::vector<int> &Sh = M_.Blocks[I].OutShape;
+      VecOut_[I].assign(OutWidth_[I], 0.0);
+      if (Kind == "lidar") {
+        int Az = Sh.size() >= 1 ? Sh[0] : 16; // points = Sh[0]
+        int El = std::max(1, (int)paramD(B, "elevation", 1.0));
+        int AzN = Az / El; if (AzN < 1) AzN = 1;
+        double ElSpan = paramD(B, "elevationSpan", 0.5);
+        int p = 0;
+        for (int e = 0; e < El && p < Az; ++e) {
+          double pitch = (El == 1) ? 0.0 : (-ElSpan/2 + ElSpan*e/(El-1));
+          for (int a = 0; a < AzN && p < Az; ++a, ++p) {
+            double ang = 2.0*M_PI*a/AzN;
+            double d[3];
+            for (int k=0;k<3;k++) d[k] = std::cos(ang)*fwd[k] + std::sin(ang)*right[k] + std::sin(pitch)*up[k];
+            double dl = std::sqrt(d[0]*d[0]+d[1]*d[1]+d[2]*d[2]);
+            for (int k=0;k<3;k++) d[k]/=dl;
+            double t; int hp; castRay(Pos, d, t, hp);
+            t += gaussN(); // range noise (stddev `noise`)
+            VecOut_[I][p*3+0] = Pos[0]+t*d[0];
+            VecOut_[I][p*3+1] = Pos[1]+t*d[1];
+            VecOut_[I][p*3+2] = Pos[2]+t*d[2];
+          }
+        }
+      } else {
+        int R = Sh.size() >= 1 ? Sh[0] : 8;
+        int C = Sh.size() >= 2 ? Sh[1] : 8;
+        double tanF = std::tan(0.5 * paramD(B, "fov", 1.0));
+        double aspect = (double)C / (double)R;
+        for (int i = 0; i < R; ++i) {
+          double v = (1.0 - 2.0*(i+0.5)/R) * tanF;
+          for (int j = 0; j < C; ++j) {
+            double u = (2.0*(j+0.5)/C - 1.0) * tanF * aspect;
+            double d[3];
+            for (int k=0;k<3;k++) d[k] = fwd[k] + u*right[k] + v*up[k];
+            double dl = std::sqrt(d[0]*d[0]+d[1]*d[1]+d[2]*d[2]);
+            for (int k=0;k<3;k++) d[k]/=dl;
+            double t; int hp; castRay(Pos, d, t, hp);
+            if (Kind == "semantic") {
+              VecOut_[I][i*C+j] = (hp >= 0) ? Scene[hp].label : 0.0;
+            } else if (Kind == "rgb") {
+              double col[3] = {0.1, 0.1, 0.12}; // background
+              if (hp >= 0) { col[0]=Scene[hp].col[0]; col[1]=Scene[hp].col[1]; col[2]=Scene[hp].col[2]; }
+              else if (hp == -2) { col[0]=col[1]=col[2]=0.25; }
+              // shade by inverse depth for a little relief
+              double shade = (hp != -1) ? std::max(0.3, 1.0 - t/Range) : 1.0;
+              for (int k=0;k<3;k++) VecOut_[I][(i*C+j)*3+k] = col[k]*shade;
+            } else { // depth
+              VecOut_[I][i*C+j] = t + gaussN(); // depth noise (stddev `noise`)
+            }
+          }
+        }
+      }
+      Out_[I] = VecOut_[I].empty() ? 0.0 : VecOut_[I][0];
+    } else if (K == "signal_actor3d" && B.ContStateCount == 12) {
+      // mflow-3d-animation Tier 5 — co-sim actor. 12 states
+      // [x,y,z, vx,vy,vz, roll,pitch,yaw, wx,wy,wz]: translation integrated under
+      // gravity (+ post-step contact), free rotation (constant angular momentum).
+      // The recorded transform carries the pose (position 0..2, orientation 3..5),
+      // so a signal_collision3d / controller reads it from this actor's output;
+      // velocity / angular velocity / ground-contact are named scalar ports.
+      size_t Off = StateOffset_[I];
+      double Sc[3] = {1, 1, 1};
+      parseVec3Param(B, "scale", Sc);
+      VecOut_[I].assign(9, 0.0);
+      for (int E = 0; E < 3; ++E) {
+        VecOut_[I][E] = State[Off + E];         // translation
+        VecOut_[I][3 + E] = State[Off + 6 + E]; // rotation (roll/pitch/yaw)
+        VecOut_[I][6 + E] = Sc[E];              // scale
+      }
+      Out_[I] = State[Off + 0];
+      static const char *Nm[6] = {"x", "y", "z", "vx", "vy", "vz"};
+      for (int E = 0; E < 3; ++E) PortOut_[I][Nm[E]] = State[Off + E];
+      for (int E = 0; E < 3; ++E) PortOut_[I][Nm[3 + E]] = State[Off + 3 + E];
+      PortOut_[I]["wx"] = State[Off + 9];
+      PortOut_[I]["wy"] = State[Off + 10];
+      PortOut_[I]["wz"] = State[Off + 11];
+      PortOut_[I]["contact"] = CosimContact_[I];
+      if (Deriv) {
+        for (int E = 0; E < 3; ++E) {
+          Deriv[Off + E] = State[Off + 3 + E];     // dpos/dt = vel
+          Deriv[Off + 3 + E] = Gravity_[E];        // dvel/dt = gravity
+          Deriv[Off + 6 + E] = State[Off + 9 + E]; // dangle/dt = angvel
+          Deriv[Off + 9 + E] = 0.0;                // free rotation (no torque)
+        }
+      }
+    } else if (K == "signal_actor3d") {
+      // mflow-3d-animation — gather the actor's transform into a width-9
+      // sample [tx,ty,tz, rx,ry,rz (roll/pitch/yaw rad), sx,sy,sz]. Static
+      // param defaults (translation/rotation/scale "x,y,z") are overridden
+      // element-wise by any connected port; scale defaults to 1.
+      double Tf[9] = {0, 0, 0, 0, 0, 0, 1, 1, 1};
+      parseVec3Param(B, "translation", &Tf[0]);
+      parseVec3Param(B, "rotation", &Tf[3]);
+      parseVec3Param(B, "scale", &Tf[6]);
+      const char *Ports[3] = {"translation", "rotation", "scale"};
+      for (int G = 0; G < 3; ++G) {
+        if (!portConnected(I, Ports[G])) continue;
+        for (int E = 0; E < 3; ++E) {
+          double V = vecInput(I, Ports[G], E);
+          if (!std::isnan(V)) Tf[G * 3 + E] = V;
+        }
+      }
+      int W = OutWidth_[I] > 9 ? OutWidth_[I] : 9;
+      VecOut_[I].assign(W, 0.0);
+      for (int E = 0; E < 9; ++E) VecOut_[I][E] = Tf[E];
+      // URDF actor (Tier 3b) — gather up to (W-9) joint angles from the
+      // `jointAngles` vector port into the trailing slots.
+      if (W > 9 && portConnected(I, "jointAngles")) {
+        for (int Q = 0; Q < W - 9; ++Q) {
+          double V = vecInput(I, "jointAngles", Q);
+          VecOut_[I][9 + Q] = std::isnan(V) ? 0.0 : V;
+        }
+      }
+      Out_[I] = Tf[0];
     } else if (K == "signal_scope3d") {
       // 3-D trajectory scope — gather the x/y/z input ports into a width-3
       // sample. The logging pass names the columns `<id>[x]/[y]/[z]` so a
@@ -3866,6 +4253,10 @@ double MflowLinkSim::stepMajor() {
   // Refresh outputs once more so the reset-into-state propagates
   // visibly into the post-step Out_ slot (the integrator's output
   // equals its state).
+  // mflow-3d-animation Tier 5 — resolve co-sim ground contacts on the
+  // just-integrated state before the final output refresh, so the clamped
+  // pose + contact flag appear in this step's logged sample.
+  resolveCosimContacts();
   evalAll(T_, Y_.data(), nullptr);
   // Tier F carve-out — snapshot the just-finished outputs as the
   // *previous* values for the next step's edge-trigger detection.
@@ -4189,6 +4580,86 @@ void MflowLinkSim::runToCompletion() {
 //===----------------------------------------------------------------------===//
 // Log + CSV
 //===----------------------------------------------------------------------===//
+
+// mflow-3d-animation Tier 5 — resolve co-sim ground contacts once per major
+// step. A deterministic restitution bounce: when a co-sim actor has sunk below
+// the floor (groundZ + its collision half-extent) while moving down, clamp it to
+// the floor and reflect the vertical velocity by the restitution coefficient.
+// Free-fall stays exact (RK4 integrates the quadratic exactly); only the bounce
+// instant is resolved here. Sets the per-block contact flag for the `contact`
+// output. Authoritative + golden-stable (design D3).
+void MflowLinkSim::resolveCosimContacts() {
+  // Gather the co-sim actors once (index, state offset, collision radius, mass).
+  struct Body { size_t I, Off; double r, mass; bool sphere; };
+  std::vector<Body> Bodies;
+  for (size_t I = 0; I < M_.Blocks.size(); ++I) {
+    const auto &B = M_.Blocks[I];
+    if (B.Kind != "signal_actor3d" || B.ContStateCount != 12) continue;
+    double R = paramD(B, "radius", 0.5);
+    bool Sphere = true;
+    if (const std::string *Sh = paramS(B, "shape")) {
+      if (*Sh == "box") {
+        double Sz[3] = {1, 1, 1};
+        parseVec3Param(B, "size", Sz);
+        R = Sz[2] / 2.0;
+        Sphere = false;
+      }
+    }
+    Bodies.push_back({I, StateOffset_[I], R, paramD(B, "mass", 1.0), Sphere});
+    CosimContact_[I] = 0.0;
+  }
+  // Ground-plane restitution bounce (vertical).
+  for (const auto &b : Bodies) {
+    const auto &B = M_.Blocks[b.I];
+    double Z = Y_[b.Off + 2], Vz = Y_[b.Off + 5];
+    double Floor = paramD(B, "groundZ", 0.0) + b.r;
+    double Rest = paramD(B, "restitution", 0.5);
+    if (Z < Floor && Vz < 0.0) {
+      Y_[b.Off + 2] = Floor;
+      Y_[b.Off + 5] = -Rest * Vz;
+      CosimContact_[b.I] = 1.0;
+    }
+  }
+  // Pairwise sphere-sphere collision: impulse along the line of centres with
+  // the combined restitution, exchanging linear momentum by mass. Only spheres
+  // (the analytic case); box-box is a follow-on. A zero/negative mass is
+  // treated as immovable (infinite mass).
+  for (size_t a = 0; a < Bodies.size(); ++a) {
+    for (size_t c = a + 1; c < Bodies.size(); ++c) {
+      const Body &A = Bodies[a], &C = Bodies[c];
+      if (!A.sphere || !C.sphere) continue;
+      double n[3];
+      for (int k = 0; k < 3; ++k) n[k] = Y_[A.Off + k] - Y_[C.Off + k];
+      double d = std::sqrt(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]);
+      double sumR = A.r + C.r;
+      if (d >= sumR || d < 1e-9) continue;
+      for (int k = 0; k < 3; ++k) n[k] /= d; // unit normal A←C
+      // Relative velocity along the normal.
+      double rv = 0.0;
+      for (int k = 0; k < 3; ++k) rv += (Y_[A.Off+3+k] - Y_[C.Off+3+k]) * n[k];
+      if (rv >= 0.0) continue; // separating already
+      double invA = A.mass > 0 ? 1.0 / A.mass : 0.0;
+      double invC = C.mass > 0 ? 1.0 / C.mass : 0.0;
+      if (invA + invC < 1e-12) continue;
+      const auto &BA = M_.Blocks[A.I];
+      const auto &BC = M_.Blocks[C.I];
+      double e = 0.5 * (paramD(BA, "restitution", 0.5) + paramD(BC, "restitution", 0.5));
+      double j = -(1.0 + e) * rv / (invA + invC);
+      for (int k = 0; k < 3; ++k) {
+        Y_[A.Off + 3 + k] += j * invA * n[k];
+        Y_[C.Off + 3 + k] -= j * invC * n[k];
+      }
+      // Positional de-penetration so they don't stick.
+      double pen = sumR - d;
+      for (int k = 0; k < 3; ++k) {
+        Y_[A.Off + k] += n[k] * pen * (invA / (invA + invC));
+        Y_[C.Off + k] -= n[k] * pen * (invC / (invA + invC));
+      }
+      CosimContact_[A.I] = 1.0;
+      CosimContact_[C.I] = 1.0;
+    }
+  }
+}
 
 void MflowLinkSim::logSample() {
   for (size_t Ci = 0; Ci < LogBlocks_.size(); ++Ci) {

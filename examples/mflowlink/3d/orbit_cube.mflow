@@ -1,0 +1,79 @@
+{
+  "entry" : "orbit_cube",
+  "flows" : [
+    {
+      "edges" : [
+        { "id" : "e_x", "kind" : "data", "from" : { "node" : "sin_x", "port" : "out" }, "to" : { "node" : "pos", "port" : "in1" } },
+        { "id" : "e_y", "kind" : "data", "from" : { "node" : "cos_y", "port" : "out" }, "to" : { "node" : "pos", "port" : "in2" } },
+        { "id" : "e_z", "kind" : "data", "from" : { "node" : "z0", "port" : "out" }, "to" : { "node" : "pos", "port" : "in3" } },
+        { "id" : "e_pos", "kind" : "data", "from" : { "node" : "pos", "port" : "out" }, "to" : { "node" : "cube", "port" : "translation" } },
+        { "id" : "e_sx", "kind" : "data", "from" : { "node" : "sin_x", "port" : "out" }, "to" : { "node" : "traj", "port" : "x" } },
+        { "id" : "e_sy", "kind" : "data", "from" : { "node" : "cos_y", "port" : "out" }, "to" : { "node" : "traj", "port" : "y" } },
+        { "id" : "e_sz", "kind" : "data", "from" : { "node" : "z0", "port" : "out" }, "to" : { "node" : "traj", "port" : "z" } }
+      ],
+      "id" : "flow_orbit",
+      "kind" : "program",
+      "name" : "orbit_cube",
+      "nodes" : [
+        {
+          "id" : "world",
+          "kind" : "signal_world3d",
+          "data" : { "params" : { "gravity" : "0,0,-9.81", "viewpoint" : "8,8,6", "engine" : "havok", "showGround" : true, "showAxes" : true, "output" : "orbit_cube.html" } },
+          "ports" : { "in" : [], "out" : [] }
+        },
+        {
+          "id" : "sin_x",
+          "kind" : "signal_sine",
+          "data" : { "log_signal" : true, "params" : { "amplitude" : 3.0, "frequency" : 1.0, "phase" : 0.0, "bias" : 0.0 } },
+          "ports" : { "in" : [], "out" : [ { "id" : "out" } ] }
+        },
+        {
+          "id" : "cos_y",
+          "kind" : "signal_sine",
+          "data" : { "log_signal" : true, "params" : { "amplitude" : 3.0, "frequency" : 1.0, "phase" : 1.5707963267948966, "bias" : 0.0 } },
+          "ports" : { "in" : [], "out" : [ { "id" : "out" } ] }
+        },
+        {
+          "id" : "z0",
+          "kind" : "signal_constant",
+          "data" : { "params" : { "value" : 1.0 } },
+          "ports" : { "in" : [], "out" : [ { "id" : "out" } ] }
+        },
+        {
+          "id" : "pos",
+          "kind" : "signal_mux",
+          "data" : { "params" : {} },
+          "ports" : { "in" : [ { "id" : "in1" }, { "id" : "in2" }, { "id" : "in3" } ], "out" : [ { "id" : "out" } ] }
+        },
+        {
+          "id" : "cube",
+          "kind" : "signal_actor3d",
+          "data" : { "params" : { "name" : "cube", "shape" : "box", "size" : "1,1,1", "color" : "0.2,0.6,1.0" } },
+          "ports" : { "in" : [ { "id" : "translation" }, { "id" : "rotation" }, { "id" : "scale" } ], "out" : [] }
+        },
+        {
+          "id" : "traj",
+          "kind" : "signal_scope3d",
+          "data" : { "params" : { "title" : "Cube orbit" } },
+          "ports" : { "in" : [ { "id" : "x" }, { "id" : "y" }, { "id" : "z" } ], "out" : [] }
+        }
+      ],
+      "signature" : { "inputs" : [], "outputs" : [] }
+    }
+  ],
+  "schema" : "matforge.flowchart",
+  "settings" : {
+    "kind" : "signal_flow",
+    "solver" : {
+      "type" : "variable_step",
+      "algorithm" : "ode45",
+      "startTime" : 0,
+      "stopTime" : 6.283185307179586,
+      "relTol" : 0.001,
+      "absTol" : 1e-06,
+      "zeroCrossing" : false,
+      "algebraicLoopMethod" : "trust_region"
+    }
+  },
+  "version" : "0.1.0"
+}

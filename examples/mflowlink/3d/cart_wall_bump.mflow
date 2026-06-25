@@ -1,0 +1,36 @@
+{
+  "entry" : "cart_wall_bump",
+  "flows" : [
+    {
+      "edges" : [
+        { "id" : "ea", "kind" : "data", "from" : { "node" : "cart", "port" : "out" }, "to" : { "node" : "collide", "port" : "poseA" } },
+        { "id" : "eb", "kind" : "data", "from" : { "node" : "wall", "port" : "out" }, "to" : { "node" : "collide", "port" : "poseB" } },
+        { "id" : "ec", "kind" : "data", "from" : { "node" : "collide", "port" : "out" }, "to" : { "node" : "hit", "port" : "in" } }
+      ],
+      "id" : "flow_cart",
+      "kind" : "program",
+      "name" : "cart_wall_bump",
+      "nodes" : [
+        { "id" : "world", "kind" : "signal_world3d", "data" : { "params" : { "gravity" : "0,0,0", "viewpoint" : "10,8,5", "showGround" : true, "output" : "cart_wall_bump.html" } }, "ports" : { "in" : [], "out" : [] } },
+        { "id" : "cart", "kind" : "signal_actor3d", "data" : { "params" : { "name" : "cart", "shape" : "box", "size" : "1,1,1", "cosim" : true, "translation" : "-3,0,0.5", "velocity" : "1.5,0,0", "color" : "0.3,0.6,0.9" } }, "ports" : { "in" : [], "out" : [ { "id" : "out" } ] } },
+        { "id" : "wall", "kind" : "signal_actor3d", "data" : { "params" : { "name" : "wall", "shape" : "box", "size" : "0.4,4,2", "translation" : "3,0,1", "color" : "0.6,0.3,0.3" } }, "ports" : { "in" : [], "out" : [ { "id" : "out" } ] } },
+        { "id" : "collide", "kind" : "signal_collision3d", "data" : { "log_signal" : true, "params" : { "radiusA" : 0.5, "radiusB" : 1.0 } }, "ports" : { "in" : [ { "id" : "poseA" }, { "id" : "poseB" } ], "out" : [ { "id" : "out" } ] } },
+        { "id" : "hit", "kind" : "signal_scope", "data" : { "params" : { "title" : "cart-wall collision" } }, "ports" : { "in" : [ { "id" : "in" } ], "out" : [] } }
+      ],
+      "signature" : { "inputs" : [], "outputs" : [] }
+    }
+  ],
+  "schema" : "matforge.flowchart",
+  "settings" : {
+    "kind" : "signal_flow",
+    "solver" : {
+      "type" : "fixed_step",
+      "algorithm" : "ode4",
+      "startTime" : 0,
+      "stopTime" : 4,
+      "stepSize" : 0.01,
+      "zeroCrossing" : false
+    }
+  },
+  "version" : "0.1.0"
+}

@@ -80,6 +80,30 @@ const std::map<std::string, KindInfo> &kindTable() {
     add("signal_display",      {true, true, false, false, false, FIM});
     add("signal_to_workspace", {true, true, false, false, false, FIM});
     add("signal_terminator",   {true, true, false, false, false, FIM});
+    // mflow-3d-animation (Tier 1) — 3-D scene blocks. `signal_world3d` is the
+    // singleton scene config (gravity / viewpoint / engine / output); it has no
+    // ports and emits nothing. `signal_actor3d` is a kinematic sink: its
+    // translation/rotation/scale input ports are gathered into a width-9
+    // transform sample logged as `<id>[tx..sz]`, which the
+    // `-emit-mflowlink-babylon` lane reads as the per-step animation timeline.
+    // Both ride the continuous step (FixedInMinor), like a scope.
+    add("signal_world3d",      {true, true, false, false, false, FIM});
+    add("signal_actor3d",      {true, true, false, false, false, FIM});
+    // mflow-3d-animation (Tier 2) — lights and cameras. Config blocks (no
+    // ports): the emit lane reads their static params and the viewer builds the
+    // matching Babylon light / camera. Signal-driven light/camera is a
+    // follow-on (would log a small port group like signal_actor3d does).
+    add("signal_light3d",      {true, true, false, false, false, FIM});
+    add("signal_camera3d",     {true, true, false, false, false, FIM});
+    // mflow-3d-animation (Tier 5) — collision/contact event. Reads two pose
+    // signals, emits a collision boolean + contact force. Loop-breaker (its
+    // output comes from positions, not a same-step algebraic feedthrough), so
+    // it can feed a controller without forming an algebraic loop.
+    add("signal_collision3d",  {true, true, false, true, false, FIM});
+    // mflow-3d-animation (Tier 6) — virtual sensor. Casts rays from a pose over
+    // the primitive scene each step → an N-D signal (depth/semantic [r,c],
+    // rgb [r,c,3], lidar [N,3]) that feeds the image/CV blocks. Loop-breaker.
+    add("signal_sensor3d",     {true, true, false, true, false, FIM});
     // From Workspace — replays an inline time-series `data` ([t v; …]) as a
     // source, linearly interpolated (or held) at the current sim time. The
     // mflowLink equivalent of Simulink's From Workspace (the data rides in the
@@ -874,12 +898,23 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
   M.Snapshot = Doc.Settings.Snapshot.value_or(SnapshotConfig{});
 
   // Build the block list.
+  // mflow-3d-animation — at most one scene `signal_world3d` per model.
+  const Node *FirstWorld3d = nullptr;
   for (auto &FN : Flat->Nodes) {
     const Node &N = *FN.Src;
     const KindInfo *KI = lookupKind(N.Kind);
     if (!KI || !KI->Known) {
       Diag.error(N.Loc, "unknown signal-flow block kind \"" + N.Kind + "\"");
       return std::nullopt;
+    }
+    if (N.Kind == "signal_world3d") {
+      if (FirstWorld3d) {
+        Diag.error(N.Loc, "a signal-flow model may declare at most one "
+                          "signal_world3d scene; \"" +
+                              FN.Id + "\" is a second one");
+        return std::nullopt;
+      }
+      FirstWorld3d = &N;
     }
     if (KI->Composite) {
       // signal_subsystem is replaced during flattening; inport/outport
@@ -1187,6 +1222,48 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
       B.OutShape = {3};
       B.OutRows = 1;
       B.OutCols = 3;
+    } else if (N.Kind == "signal_actor3d") {
+      // mflow-3d-animation — gather translation(3)/rotation(3)/scale(3) into a
+      // width-9 transform sample, logged as `<id>[tx,ty,tz,rx,ry,rz,sx,sy,sz]`.
+      // A URDF actor (Tier 3b) additionally carries up to 12 joint angles
+      // (`<id>[q1..q12]`) gathered from its `jointAngles` port, so the viewer
+      // can articulate the link tree; the joint cap keeps the width fixed
+      // (no URDF parse at lowering time).
+      bool IsUrdf = N.getParam("urdf") != nullptr;
+      B.OutWidth = IsUrdf ? 9 + 12 : 9;
+      B.OutShape = {B.OutWidth};
+      B.OutRows = 1;
+      B.OutCols = B.OutWidth;
+    } else if (N.Kind == "signal_sensor3d") {
+      // mflow-3d-animation (Tier 6) — N-D sensor signal sized from params.
+      // depth/semantic: [rows, cols]; rgb: [rows, cols, 3]; lidar: [points, 3].
+      std::string Kind = N.getParam("kind") ? *N.getParam("kind") : "depth";
+      if (Kind == "lidar") {
+        int Az = N.getParam("azimuth") ? std::atoi(N.getParam("azimuth")->c_str()) : 16;
+        int El = N.getParam("elevation") ? std::atoi(N.getParam("elevation")->c_str()) : 1;
+        if (Az < 1) Az = 1;
+        if (El < 1) El = 1;
+        B.OutShape = {Az * El, 3};
+      } else {
+        int R = N.getParam("rows") ? std::atoi(N.getParam("rows")->c_str()) : 8;
+        int C = N.getParam("cols") ? std::atoi(N.getParam("cols")->c_str()) : 8;
+        if (R < 1) R = 1;
+        if (C < 1) C = 1;
+        if (Kind == "rgb") B.OutShape = {R, C, 3};
+        else B.OutShape = {R, C};
+      }
+      B.OutWidth = 1;
+      for (int d : B.OutShape) B.OutWidth *= d;
+      B.OutRows = B.OutShape[0];
+      B.OutCols = B.OutWidth / B.OutShape[0];
+    } else if (N.Kind == "signal_world3d" || N.Kind == "signal_light3d" ||
+               N.Kind == "signal_camera3d" || N.Kind == "signal_collision3d") {
+      // Scene config / collision event — scalar output (collision3d emits the
+      // collision boolean on `out`; world/light/camera emit nothing). A nominal
+      // width-1 keeps width inference from leaving it at the inherit sentinel.
+      B.OutWidth = 1;
+      B.OutRows = 1;
+      B.OutCols = 1;
     } else {
       // For most blocks, the output width inherits from the input
       // width when this block has a data input. The width-inference
@@ -1203,7 +1280,15 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
 
     // State counts + loop-breaker classification.
     B.IsLoopBreaker = KI->LoopBreakerAlways;
-    if (N.Kind == "signal_integrator") {
+    if (N.Kind == "signal_actor3d" && N.getParam("cosim") != nullptr) {
+      // mflow-3d-animation Tier 5 — a co-sim actor owns 12 continuous states
+      // [x,y,z, vx,vy,vz, roll,pitch,yaw, wx,wy,wz]: translation under gravity
+      // (+ contact) and free rotation (constant angular momentum, seeded from
+      // `angularVelocity`). Its pose comes from state (not direct feedthrough),
+      // so it breaks algebraic loops.
+      B.ContStateCount = 12;
+      B.IsLoopBreaker = true;
+    } else if (N.Kind == "signal_integrator") {
       B.ContStateCount = 1;
     } else if (N.Kind == "signal_pid") {
       // Parallel PID with a first-order derivative filter: two continuous
@@ -1290,6 +1375,45 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
     if (KI->ZeroCrossing)
       M.ZeroCrossings.push_back({B.Id, B.Kind});
     M.Blocks.push_back(std::move(B));
+  }
+
+  // mflow-3d-animation (Tier 2) — validate the actor parent hierarchy: every
+  // `parent` must name an existing actor, and the parent chain must be acyclic
+  // (the viewer composes child∘parent transforms via scene-graph parenting, so
+  // a cycle would be an infinite transform loop).
+  {
+    std::map<std::string, const MflBlock *> ActorByName;
+    for (const auto &B : M.Blocks) {
+      if (B.Kind != "signal_actor3d") continue;
+      auto It = B.Params.find("name");
+      ActorByName[It != B.Params.end() ? It->second : B.Id] = &B;
+    }
+    for (const auto &B : M.Blocks) {
+      if (B.Kind != "signal_actor3d") continue;
+      auto PIt = B.Params.find("parent");
+      if (PIt == B.Params.end() || PIt->second.empty()) continue;
+      // Walk the parent chain; a revisited node (or > N hops) is a cycle.
+      std::set<const MflBlock *> Seen{&B};
+      const MflBlock *Cur = &B;
+      while (true) {
+        auto CP = Cur->Params.find("parent");
+        if (CP == Cur->Params.end() || CP->second.empty()) break;
+        auto Next = ActorByName.find(CP->second);
+        if (Next == ActorByName.end()) {
+          Diag.error(Cur->Loc, "signal_actor3d \"" + Cur->Id +
+                                   "\": parent \"" + CP->second +
+                                   "\" names no actor in the scene");
+          return std::nullopt;
+        }
+        if (!Seen.insert(Next->second).second) {
+          Diag.error(B.Loc, "signal_actor3d \"" + B.Id +
+                                "\": parent hierarchy has a cycle through \"" +
+                                CP->second + "\"");
+          return std::nullopt;
+        }
+        Cur = Next->second;
+      }
+    }
   }
 
   // Build the edge list.

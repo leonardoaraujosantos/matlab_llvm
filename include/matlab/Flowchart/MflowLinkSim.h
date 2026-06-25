@@ -164,6 +164,16 @@ public:
   // Returns { logged-block-id → current output value }.
   std::vector<std::pair<std::string, double>> currentLoggedOutputs() const;
 
+  // mflow-3d-animation — read-only access to the recorded log after
+  // runToCompletion(), so the `-emit-mflowlink-babylon` lane can pull each
+  // actor's per-step transform timeline. `logColumnNames()` is parallel to
+  // `logColumns()`; each column is the per-sample (t, value) series. An actor
+  // contributes nine consecutive columns named `<id>[tx..sz]`.
+  const std::vector<std::string> &logColumnNames() const { return LogNames_; }
+  const std::vector<std::vector<LogSample>> &logColumns() const {
+    return LogColumns_;
+  }
+
   // #354 — source-line breakpoints inside a MATLAB Function block. Arm a set of
   // 1-based body lines on a `signal_matlab_fcn` block; when the interpreter
   // reaches one during a step, it records the hit, which the simulate-DAP polls
@@ -375,6 +385,15 @@ private:
   std::vector<double> RunCount_;
   std::vector<double> RunMean_;
   std::vector<double> RunM2_;
+  // mflow-3d-animation Tier 5 — lock-step co-simulation. A `signal_actor3d` with
+  // `cosim = true` owns 6 continuous states [x,y,z, vx,vy,vz] integrated under
+  // `Gravity_` by the existing RK4; ground contact (restitution bounce) is
+  // resolved once per major step in resolveCosimContacts(), which sets the
+  // per-block contact flag in `CosimContact_`. These signals are authoritative
+  // and golden-stable (design D3) — the viewer's Havok is only the visual.
+  double Gravity_[3] = {0.0, 0.0, -9.81};
+  std::vector<double> CosimContact_; // per-block ground-contact flag (1/0)
+  void resolveCosimContacts();
   // - `Kalman_[I]` is the per-block discrete Kalman-filter state for a
   //   `signal_kalman` block (#343): the parsed A/C/Q/R/B matrices (flat
   //   row-major) plus the running estimate `X` (length N) and error covariance

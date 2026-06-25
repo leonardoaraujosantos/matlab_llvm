@@ -1,0 +1,29 @@
+{
+  "entry" : "bounce_cosim",
+  "flows" : [
+    {
+      "edges" : [],
+      "id" : "flow_bounce",
+      "kind" : "program",
+      "name" : "bounce_cosim",
+      "nodes" : [
+        { "id" : "world", "kind" : "signal_world3d", "data" : { "params" : { "gravity" : "0,0,-9.81", "viewpoint" : "8,8,4", "showGround" : true, "output" : "bounce_cosim.html" } }, "ports" : { "in" : [], "out" : [] } },
+        { "id" : "ball", "kind" : "signal_actor3d", "data" : { "params" : { "name" : "ball", "shape" : "sphere", "radius" : 0.4, "cosim" : true, "translation" : "0,0,5", "restitution" : 0.6, "color" : "0.9,0.5,0.2" } }, "ports" : { "in" : [] } }
+      ],
+      "signature" : { "inputs" : [], "outputs" : [] }
+    }
+  ],
+  "schema" : "matforge.flowchart",
+  "settings" : {
+    "kind" : "signal_flow",
+    "solver" : {
+      "type" : "fixed_step",
+      "algorithm" : "ode4",
+      "startTime" : 0,
+      "stopTime" : 4,
+      "stepSize" : 0.002,
+      "zeroCrossing" : false
+    }
+  },
+  "version" : "0.1.0"
+}

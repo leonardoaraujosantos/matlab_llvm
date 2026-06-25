@@ -54,3 +54,7 @@ examples/*/*/*
 # Python bytecode caches from the test harness scripts
 __pycache__/
 *.pyc
+
+# mflow-3d-animation example mesh fixtures (override the broad assets/ ignore)
+!examples/mflowlink/3d/assets/
+!examples/mflowlink/3d/assets/**
