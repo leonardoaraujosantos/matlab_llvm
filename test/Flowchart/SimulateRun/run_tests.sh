@@ -1328,6 +1328,32 @@ check "elastic collision exchanges momentum" "[[ '$TB_RES' == ok* ]]" "head-on e
 TB_RZ=$(printf '%s\n' "$TB" | awk -F, 'NR==1{for(i=1;i<=NF;i++)if($i=="b[rz]")z=i} NR>1 && $1>=0.999 && $1<=1.005 {print $z; exit}')
 check "cosim actor free-spins" "awk 'BEGIN{exit !(($TB_RZ-3.0)^2 < (1e-1)^2)}'" "angularVelocity integrates to orientation"
 
+# Tier 6 sensor depth — cylinder raycasting + measurement noise (depth_cylinder:
+# a 4×4 depth cam aimed at a cylinder tree at x=3, r=0.5 → centre ≈ 2.5 ± noise),
+# follow-actor sensor pose (sensor_follow_scan: the lidar origin tracks a rover
+# moving +x), and text-annotation actors.
+DC_OK=$("$MATLABC" -simulate "$EX/3d/depth_cylinder.mflow" | python3 -c '
+import csv,sys
+r=list(csv.reader(sys.stdin)); d=dict(zip(r[0],r[1]))
+ncol=sum(1 for h in r[0] if h.startswith("cam["))
+c=float(d.get("cam[2,2]","0"))
+print("ok" if (ncol==16 and abs(c-2.5)<0.25) else "bad", round(c,2))
+')
+check "cylinder raycast + noise depth" "[[ '$DC_OK' == ok* ]]" "centre ≈ 2.5 (3−r) ± noise; got: $DC_OK"
+SF_OK=$("$MATLABC" -simulate "$EX/3d/sensor_follow_scan.mflow" | python3 -c '
+import csv,sys
+r=list(csv.reader(sys.stdin)); H=r[0]
+ncol=sum(1 for h in H if h.startswith("lidar["))
+def cx(row): return sum(float(row[H.index("lidar[%d,1]"%p)]) for p in range(1,25))/24
+print("ok" if (ncol==72 and cx(r[-1])>cx(r[1])) else "bad")
+')
+check "follow-actor sensor tracks the actor" "[[ '$SF_OK' == ok* ]]" "scan origin moves +x with the rover; got: $SF_OK"
+TL_F=$(mktemp /tmp/tl.XXXX.html)
+"$MATLABC" -emit-mflowlink-babylon "$EX/3d/text_label.mflow" -o "$TL_F"
+TL_TXT=$(grep -c '"text":"target"' "$TL_F")
+check "text annotation actor emits" "[[ $TL_TXT -eq 1 ]]" "billboarded label"
+rm -f "$TL_F"
+
 # At most one signal_world3d per model — a second is a sourced error.
 TW=$(mktemp /tmp/twoworld.XXXX.mflow)
 sed 's/"id": "world"/"id": "world"/' "$EX/3d/orbit_cube.mflow" > "$TW"

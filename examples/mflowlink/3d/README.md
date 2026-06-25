@@ -29,6 +29,9 @@ One example per tier feature, so every feature has a test model:
 | 5 | `two_ball_collision.mflow` ✅ | elastic momentum exchange + free rotation |
 | 6 | `camera_depth_stream.mflow` ✅ | depth sensor (raycast) → N-D `[6,6]` signal |
 | 6 | `lidar_scan.mflow` ✅ | lidar point cloud `[24,3]` over a box post |
+| 6 | `depth_cylinder.mflow` ✅ | cylinder raycast + Gaussian depth noise |
+| 6 | `sensor_follow_scan.mflow` ✅ | follow-actor lidar (sensor mounted on a moving rover) |
+| 6 | `text_label.mflow` ✅ | billboarded text-annotation actor |
 
 ✅ = concrete fixture written; others are enumerated in the change's `tasks.md` and authored
 as their tier is implemented.

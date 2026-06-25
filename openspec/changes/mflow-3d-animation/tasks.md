@@ -118,9 +118,8 @@ emit lane gained `--babylon-inline` (network-free engine vendoring).
   implicitly logged, that flow into the image/CV blocks.
 - [x] 6.2 `signal_actor3d` `semanticLabel` (class id) is read by the semantic sensor as ground
   truth (and the raycaster reads actor geometry + color for rgb).
-- [~] 6.3 Annotations (text actor) — deferred follow-on; not required for the sensor headline.
-- [~] 6.4 Pacing + recording — the viewer already plays in real time against the recorded
-  sample times; `pacingRate` honouring + a `--record` frame/GIF export are deferred follow-ons.
+- [x] 6.3 Annotations: a `signal_actor3d` with a `text` param renders a billboarded DynamicTexture label (`text_label.mflow`).
+- [x] 6.4 Pacing: `signal_world3d.pacingRate` scales the viewer playback speed. (`--record` frame/GIF export remains a follow-on — the `rgb` sensor already captures per-step frame data as an N-D signal.)
 - [x] 6.5 Example: `camera_depth_stream.mflow` — a depth camera aimed at a unit sphere;
   `SimulateRun` asserts the `[6,6]` shape, the centre pixel ≈ 4 (5 − radius), and a corner ray
   reads the range (miss). Semantic/rgb share the same raycast (`semanticLabel` ground truth).

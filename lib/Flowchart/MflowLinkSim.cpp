@@ -1260,10 +1260,12 @@ void MflowLinkSim::reset() {
       // read.
       TransportBuf_[I].Samples.push_back(
           {M_.Solver.StartTime, TransportBuf_[I].InitialOutput});
-    } else if (B.Kind == "signal_noise" || B.Kind == "signal_awgn") {
+    } else if (B.Kind == "signal_noise" || B.Kind == "signal_awgn" ||
+               B.Kind == "signal_sensor3d") {
       // Per-block xorshift seed. The default seed makes the same
       // model reproducible across runs; users can override via
-      // `params.seed`. signal_awgn (#343) shares the same RNG state.
+      // `params.seed`. signal_awgn (#343) shares the same RNG state;
+      // signal_sensor3d (Tier 6) uses it for optional measurement noise.
       uint64_t Seed =
           static_cast<uint64_t>(paramD(B, "seed", 1.0));
       if (Seed == 0) Seed = 0xC0FFEE12345678ABULL;
@@ -1799,7 +1801,12 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
         }
         std::string Sh = paramS(AB, "shape") ? *paramS(AB, "shape") : "box";
         if (Sh == "sphere") { P.kind = 0; P.r = paramD(AB, "radius", 0.5); }
-        else {
+        else if (Sh == "cylinder" || Sh == "cone" || Sh == "capsule") {
+          // Vertical finite cylinder (cone/capsule approximated as such).
+          P.kind = 3;
+          P.r = paramD(AB, "radius", 0.5);
+          P.h[2] = paramD(AB, "height", 1.0) / 2.0;
+        } else {
           P.kind = 1;
           double sz[3] = {1, 1, 1};
           parseVec3Param(AB, "size", sz);
@@ -1824,6 +1831,23 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
             double cc = oc[0]*oc[0]+oc[1]*oc[1]+oc[2]*oc[2] - P.r*P.r;
             double disc = b*b - cc;
             if (disc >= 0) { double s = std::sqrt(disc); th = -b - s; if (th < 0) th = -b + s; }
+          } else if (P.kind == 3) { // vertical finite cylinder (walls)
+            double ox = o[0]-P.c[0], oy = o[1]-P.c[1];
+            double A = d[0]*d[0]+d[1]*d[1];
+            if (A > 1e-12) {
+              double Bq = 2*(ox*d[0]+oy*d[1]);
+              double Cq = ox*ox+oy*oy - P.r*P.r;
+              double disc = Bq*Bq - 4*A*Cq;
+              if (disc >= 0) {
+                double s = std::sqrt(disc);
+                double t1 = (-Bq - s)/(2*A), t2 = (-Bq + s)/(2*A);
+                for (double tc : {t1, t2}) {
+                  if (tc <= 1e-6) continue;
+                  double zz = o[2] + tc*d[2];
+                  if (zz >= P.c[2]-P.h[2] && zz <= P.c[2]+P.h[2]) { th = tc; break; }
+                }
+              }
+            }
           } else { // AABB box (slab test)
             double tmin = -1e30, tmax = 1e30;
             bool ok = true;
@@ -1849,6 +1873,42 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       double Pos[3] = {0, 0, 3}, Tgt[3] = {0, 0, 0};
       parseVec3Param(B, "position", Pos);
       parseVec3Param(B, "target", Tgt);
+      // Follow-actor pose: track a named actor's current position; `offset`
+      // (default behind+above) places the sensor relative to it, and it aims
+      // at the actor. The sensor moves with the actor each step.
+      if (const std::string *Fol = paramS(B, "follow")) {
+        // `offset` places the sensor relative to the actor; the `target` param
+        // is the *relative* look direction from the actor (default forward +x).
+        double rel[3] = {1, 0, 0};
+        if (paramS(B, "target")) { rel[0]=Tgt[0]; rel[1]=Tgt[1]; rel[2]=Tgt[2]; }
+        for (size_t J = 0; J < M_.Blocks.size(); ++J) {
+          const auto &AB = M_.Blocks[J];
+          if (AB.Kind != "signal_actor3d") continue;
+          std::string Nm = paramS(AB, "name") ? *paramS(AB, "name") : AB.Id;
+          if (Nm != *Fol || VecOut_[J].size() < 3) continue;
+          double off[3] = {-6, 0, 3};
+          parseVec3Param(B, "offset", off);
+          for (int k = 0; k < 3; ++k) {
+            Pos[k] = VecOut_[J][k] + off[k];
+            Tgt[k] = VecOut_[J][k] + rel[k];
+          }
+          break;
+        }
+      }
+      // Per-sensor deterministic Gaussian noise (xorshift64 + Box-Muller),
+      // added to depth distances / lidar ranges when `noise` (stddev) > 0.
+      double Noise = paramD(B, "noise", 0.0);
+      uint64_t &NSeed = NoiseSeed_[I];
+      auto gaussN = [&]() -> double {
+        if (Noise <= 0.0) return 0.0;
+        auto nx = [&]() {
+          NSeed ^= NSeed << 13; NSeed ^= NSeed >> 7; NSeed ^= NSeed << 17;
+          return (NSeed >> 11) * (1.0 / 9007199254740992.0);
+        };
+        double u1 = nx(), u2 = nx();
+        if (u1 < 1e-12) u1 = 1e-12;
+        return Noise * std::sqrt(-2.0*std::log(u1)) * std::cos(2.0*M_PI*u2);
+      };
       double fwd[3] = {Tgt[0]-Pos[0], Tgt[1]-Pos[1], Tgt[2]-Pos[2]};
       double fl = std::sqrt(fwd[0]*fwd[0]+fwd[1]*fwd[1]+fwd[2]*fwd[2]);
       if (fl < 1e-9) { fwd[0]=1; fwd[1]=0; fwd[2]=0; fl=1; }
@@ -1878,6 +1938,7 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
             double dl = std::sqrt(d[0]*d[0]+d[1]*d[1]+d[2]*d[2]);
             for (int k=0;k<3;k++) d[k]/=dl;
             double t; int hp; castRay(Pos, d, t, hp);
+            t += gaussN(); // range noise (stddev `noise`)
             VecOut_[I][p*3+0] = Pos[0]+t*d[0];
             VecOut_[I][p*3+1] = Pos[1]+t*d[1];
             VecOut_[I][p*3+2] = Pos[2]+t*d[2];
@@ -1907,7 +1968,7 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
               double shade = (hp != -1) ? std::max(0.3, 1.0 - t/Range) : 1.0;
               for (int k=0;k<3;k++) VecOut_[I][(i*C+j)*3+k] = col[k]*shade;
             } else { // depth
-              VecOut_[I][i*C+j] = t;
+              VecOut_[I][i*C+j] = t + gaussN(); // depth noise (stddev `noise`)
             }
           }
         }

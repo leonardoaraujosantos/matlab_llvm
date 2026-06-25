@@ -327,6 +327,9 @@ bool emitMflowLinkBabylon(const MflowLinkModel &M, const MflowLinkSim &Sim,
     Actors << ",\"color\":" << vecJson(B, "color", "[0.6,0.6,0.6]");
     Actors << ",\"emissive\":" << vecJson(B, "emissive", "[0,0,0]");
     Actors << ",\"opacity\":" << paramNum(B, "opacity", 1.0);
+    // Text annotation (Tier 6.3) — a billboarded label actor.
+    if (const std::string *Txt = param(B, "text"))
+      Actors << ",\"text\":" << jsonStr(*Txt);
     // glTF/GLB mesh import — embed the asset inline as a data URL (Tier 3).
     if (const std::string *MeshP = param(B, "mesh")) {
       std::string Rel = *MeshP;
@@ -646,7 +649,17 @@ const urdfRigs = {}; // actor id -> [movable joints]
 const meshByKey = {}; // both id and name resolve to the animated node
 for (const a of DATA.actors) {
   let m;
-  if (a.urdf) {
+  if (a.text !== undefined) {
+    // Billboarded text label (Tier 6.3) via a DynamicTexture on a plane.
+    m = BABYLON.MeshBuilder.CreatePlane(a.id, {width:3, height:0.9}, scene);
+    m.billboardMode = BABYLON.Mesh.BILLBOARDMODE_ALL;
+    const dt = new BABYLON.DynamicTexture(a.id+'_dt', {width:512, height:150}, scene, true);
+    dt.hasAlpha = true;
+    dt.drawText(a.text, null, 100, 'bold 80px sans-serif', '#ffffff', 'transparent', true);
+    const tm = new BABYLON.StandardMaterial(a.id+'_tm', scene);
+    tm.diffuseTexture = dt; tm.opacityTexture = dt; tm.emissiveColor = mkColor(a.color || [1,1,1]);
+    tm.backFaceCulling = false; m.material = tm;
+  } else if (a.urdf) {
     m = new BABYLON.TransformNode(a.id, scene);
     urdfRigs[a.id] = buildUrdf(a, m);
   } else if (a.mesh) {

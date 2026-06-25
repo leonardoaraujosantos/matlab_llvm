@@ -1,0 +1,15 @@
+{
+  "entry" : "depth_cylinder",
+  "flows" : [
+    { "edges" : [], "id" : "f", "kind" : "program", "name" : "depth_cylinder",
+      "nodes" : [
+        { "id" : "world", "kind" : "signal_world3d", "data" : { "params" : { "output" : "depth_cylinder.html" } }, "ports" : { "in" : [], "out" : [] } },
+        { "id" : "tree", "kind" : "signal_actor3d", "data" : { "params" : { "name" : "tree", "shape" : "cylinder", "radius" : 0.5, "height" : 4, "translation" : "3,0,1.5", "semanticLabel" : 5, "color" : "0.3,0.7,0.3" } }, "ports" : { "in" : [] } },
+        { "id" : "cam", "kind" : "signal_sensor3d", "data" : { "log_signal" : true, "params" : { "kind" : "depth", "rows" : 4, "cols" : 4, "fov" : 0.5, "position" : "0,0,1.5", "target" : "1,0,1.5", "range" : 20, "ground" : 0, "noise" : 0.05, "seed" : 3 } }, "ports" : { "in" : [], "out" : [ { "id" : "out" } ] } }
+      ],
+      "signature" : { "inputs" : [], "outputs" : [] } }
+  ],
+  "schema" : "matforge.flowchart",
+  "settings" : { "kind" : "signal_flow", "solver" : { "type" : "fixed_step", "algorithm" : "ode4", "startTime" : 0, "stopTime" : 0.3, "stepSize" : 0.1, "zeroCrossing" : false } },
+  "version" : "0.1.0"
+}

@@ -1,0 +1,28 @@
+{
+  "entry" : "sensor_follow_scan",
+  "flows" : [
+    {
+      "edges" : [
+        { "id" : "ex", "kind" : "data", "from" : { "node" : "px", "port" : "out" }, "to" : { "node" : "pos", "port" : "in1" } },
+        { "id" : "ey", "kind" : "data", "from" : { "node" : "zero", "port" : "out" }, "to" : { "node" : "pos", "port" : "in2" } },
+        { "id" : "ez", "kind" : "data", "from" : { "node" : "one", "port" : "out" }, "to" : { "node" : "pos", "port" : "in3" } },
+        { "id" : "ep", "kind" : "data", "from" : { "node" : "pos", "port" : "out" }, "to" : { "node" : "rover", "port" : "translation" } }
+      ],
+      "id" : "flow_sfs", "kind" : "program", "name" : "sensor_follow_scan",
+      "nodes" : [
+        { "id" : "world", "kind" : "signal_world3d", "data" : { "params" : { "viewpoint" : "8,8,5", "showGround" : true, "output" : "sensor_follow_scan.html" } }, "ports" : { "in" : [], "out" : [] } },
+        { "id" : "zero", "kind" : "signal_constant", "data" : { "params" : { "value" : 0.0 } }, "ports" : { "in" : [], "out" : [ { "id" : "out" } ] } },
+        { "id" : "one", "kind" : "signal_constant", "data" : { "params" : { "value" : 0.5 } }, "ports" : { "in" : [], "out" : [ { "id" : "out" } ] } },
+        { "id" : "px", "kind" : "signal_ramp", "data" : { "params" : { "slope" : 0.5, "initialOutput" : -3.0 } }, "ports" : { "in" : [], "out" : [ { "id" : "out" } ] } },
+        { "id" : "pos", "kind" : "signal_mux", "data" : { "params" : {} }, "ports" : { "in" : [ { "id" : "in1" }, { "id" : "in2" }, { "id" : "in3" } ], "out" : [ { "id" : "out" } ] } },
+        { "id" : "rover", "kind" : "signal_actor3d", "data" : { "params" : { "name" : "rover", "shape" : "box", "size" : "0.6,0.6,0.4", "color" : "0.2,0.6,0.9" } }, "ports" : { "in" : [ { "id" : "translation" } ] } },
+        { "id" : "tree", "kind" : "signal_actor3d", "data" : { "params" : { "name" : "tree", "shape" : "cylinder", "radius" : 0.5, "height" : 4, "translation" : "3,0,2", "semanticLabel" : 5, "color" : "0.3,0.6,0.3" } }, "ports" : { "in" : [] } },
+        { "id" : "lidar", "kind" : "signal_sensor3d", "data" : { "log_signal" : true, "params" : { "kind" : "lidar", "azimuth" : 24, "follow" : "rover", "offset" : "0,0,0.3", "target" : "1,0,0", "range" : 30, "ground" : 0, "noise" : 0.02, "seed" : 7 } }, "ports" : { "in" : [], "out" : [ { "id" : "out" } ] } }
+      ],
+      "signature" : { "inputs" : [], "outputs" : [] }
+    }
+  ],
+  "schema" : "matforge.flowchart",
+  "settings" : { "kind" : "signal_flow", "solver" : { "type" : "fixed_step", "algorithm" : "ode4", "startTime" : 0, "stopTime" : 6, "stepSize" : 0.05, "zeroCrossing" : false } },
+  "version" : "0.1.0"
+}
