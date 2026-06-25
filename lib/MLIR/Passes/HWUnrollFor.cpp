@@ -48,7 +48,7 @@ bool readF64Const(mlir::Value V, double &Out) {
   return false;
 }
 
-bool tryUnroll(mlir::scf::WhileOp W) {
+bool tryUnroll(mlir::scf::WhileOp W, bool KeepSpillStore) {
   HWForLoopInfo Info;
   if (!matchHWForLoop(W, Info)) {
     if (getenv("DEBUG_UNROLL"))
@@ -155,8 +155,22 @@ bool tryUnroll(mlir::scf::WhileOp W) {
         }
         if (OnlyYieldUser) continue;
       }
-      // Skip the iv-spill store entirely.
-      if (IvSpillStore && &Op == IvSpillStore) continue;
+      // The iv-spill store forwards the iv into a slot for later loads.
+      //  - HW synth path (KeepSpillStore=false): skip it so the f64 slot
+      //    dies with the loop and no non-synthesizable alloca survives;
+      //    the selective load-remap below feeds the per-iteration constant
+      //    to the recognized subscript loads.
+      //  - C/cpp/python/ts path (KeepSpillStore=true): clone it with the
+      //    iv->IvConst mapping so the slot holds the correct per-iteration
+      //    value for EVERY remaining load. The load-remap below only catches
+      //    direct `load(slot)` feeding subscripts; loads behind a wrapper
+      //    (e.g. `matlab_mat_scalar(k)` inside an fprintf) are missed and
+      //    would otherwise read the stale initial value — the cause of the
+      //    "loop counter prints 0" bug in unrolled constant-range loops.
+      if (IvSpillStore && &Op == IvSpillStore) {
+        if (KeepSpillStore) B.clone(Op, Mapping);
+        continue;
+      }
       // Replace iv-spill loads with the per-iteration IvConst.
       if (IvSpillSlot) {
         if (auto Ld = mlir::dyn_cast<mlir::LLVM::LoadOp>(&Op)) {
@@ -215,7 +229,7 @@ void foldConstFpToSi(mlir::ModuleOp M) {
   }
 }
 
-bool runHWUnrollFor(mlir::ModuleOp M) {
+bool runHWUnrollFor(mlir::ModuleOp M, bool KeepSpillStore) {
   llvm::SmallVector<mlir::scf::WhileOp, 4> Worklist;
   M.walk([&](mlir::scf::WhileOp W) { Worklist.push_back(W); });
   // Iterate until no new loops match — the unroller can expose
@@ -226,7 +240,7 @@ bool runHWUnrollFor(mlir::ModuleOp M) {
     Changed = false;
     llvm::SmallVector<mlir::scf::WhileOp, 4> Next;
     for (mlir::scf::WhileOp W : Worklist) {
-      if (tryUnroll(W)) Changed = true;
+      if (tryUnroll(W, KeepSpillStore)) Changed = true;
       else Next.push_back(W);
     }
     Worklist = std::move(Next);

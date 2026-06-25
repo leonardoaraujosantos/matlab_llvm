@@ -813,6 +813,19 @@ add_test(
   COMMAND ${CMAKE_SOURCE_DIR}/test/run_tests.sh $<TARGET_FILE:matlabc>
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test
 )
+# Differential compile-vs-interpret tests — a corpus of common language
+# constructs run through BOTH the interpreter (`-repl`) and the compiled
+# (`-emit-cpp` -> c++ -> run) lane, diffing stdout. The interpreter is the
+# reference (no hand-authored golden), so it is cheap to cover everyday
+# constructs — the gap that let loop-carried matrix accumulation, nested
+# matrix expressions and unrolled loop counters ship miscompiled. Links the
+# emitted source against the prebuilt MatlabRuntime archive.
+add_test(
+  NAME differential-tests
+  COMMAND ${CMAKE_SOURCE_DIR}/test/Differential/run_tests.sh
+          $<TARGET_FILE:matlabc> $<TARGET_FILE:MatlabRuntime>
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Differential
+)
 # REPL smoke tests — headline coverage is cross-turn user-function
 # persistence (a `function ... end` defined in REPL turn N can be
 # called from turn N+1; `loadStateChart` chart_tick functions work
