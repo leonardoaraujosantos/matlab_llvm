@@ -34,19 +34,24 @@ emit lane) that everything else builds on.
 
 ## 2. Transforms, hierarchy, lights, cameras, materials
 
-- [ ] 2.1 Actor parent/child: `parent = "<actorName>"` ⇒ the child's transform is relative to
-  the parent (composed in the timeline). Cycle detection is a sourced error.
-- [ ] 2.2 `signal_light3d`: `type = directional|point|spot`, `color`, `intensity`; input ports
-  `position` (3), `direction` (3), `intensity` (1). Ambient term on the world.
-- [ ] 2.3 `signal_camera3d`: `mode = static|follow`, `position`/`target` (static) or
-  `follow = "<actorName>"` + offset; emitted as the viewer's initial/active camera.
-- [ ] 2.4 Materials: per-actor `material` color/emissive/opacity; a ground `plane` and an
-  XYZ axis triad as world conveniences (`showGround`, `showAxes`).
-- [ ] 2.5 Example: `articulated_arm.mflow` — a 3-link chain via parent/child actors, each
-  joint angle driven by a `signal_sine`; a `follow` camera + a directional light.
-  `SimulateRun` checks the end-effector world transform equals the composed FK.
-- [ ] 2.6 Example: `quadrotor_flythrough.mflow` — reuse the quadrotor demo's pose signals to
-  drive a body actor + 4 rotor child actors; a chase camera. (Headline visual.)
+- [x] 2.1 Actor parent/child: `parent = "<actorName>"` ⇒ the child's recorded transform is its
+  local frame, composed with the parent via the viewer scene graph. An unknown parent or a
+  cycle in the chain is a sourced error (validated at lowering).
+- [x] 2.2 `signal_light3d`: `type = directional|point|spot`, `color`, `intensity`, `position`,
+  `direction` (static config block; the viewer adds a hemispheric fill + each light).
+  Signal-driven light pose/intensity is a documented follow-on.
+- [x] 2.3 `signal_camera3d`: `mode = static|follow`, `position`/`target` (static) or
+  `follow = "<actorName>"`; emitted as the viewer's active camera (first camera wins).
+- [x] 2.4 Materials: per-actor `color`/`emissive`/`opacity`; ground plane + XYZ axis triad as
+  world conveniences (`showGround`, `showAxes` — shipped in Tier 1).
+- [x] 2.5 Example: `articulated_arm.mflow` — a 3-link chain via parent/child actors, each joint
+  rotation driven by a `signal_sine`; a `follow` camera + a directional light. `SimulateRun`
+  asserts the emitted scene has the 3-link parent chain, the light, and the follow camera.
+  (World-pose composition is the viewer's scene-graph job per design D2; the analytic FK
+  golden moves to the URDF actor in Tier 3, which calls the robotics `getTransform`.)
+- [~] 2.6 Example: `quadrotor_flythrough.mflow` — reuse the quadrotor demo's pose signals to
+  drive a body actor + chase camera. Deferred to land with the Tier-3 mesh import so the body
+  is a glTF drone rather than a primitive (avoids a throwaway primitive-only version).
 
 ## 3. Mesh import — glTF/GLB + URDF (reuse robotics toolbox)
 

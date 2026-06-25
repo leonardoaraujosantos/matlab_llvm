@@ -316,16 +316,17 @@ golden — while the lock-step co-sim path (Tier 5) is the deterministic,
 golden-tested source of truth. `params` are camelCase (vector params accept
 `"x,y,z"`).
 
-Tier-1 blocks (shipped):
+Shipped blocks (Tiers 1–2):
 
 | Kind | Tier-C | Params | Notes |
 |---|---|---|---|
 | `signal_world3d` | ✓ | `gravity: "0,0,-9.81"`, `viewpoint: "8,8,6"`, `engine: "havok"`, `physics: false`, `showGround: true`, `showAxes: true`, `background: "0.07,0.08,0.1"`, `output: ""` | Singleton scene config — at most one per model (a second is a sourced error). No ports; the emit lane reads its params. |
-| `signal_actor3d` | ✓ | `name`, `shape: "box"` (`box`/`sphere`/`cylinder`/`cone`/`capsule`/`plane`), `size: "1,1,1"`, `radius: 0.5`, `height: 1.0`, `color: "0.6,0.6,0.6"`, `translation`/`rotation`/`scale` (static defaults), `physics`/`mass`/`friction`/`restitution`/`collisionShape` (Tier-4 viewer hints) | Kinematic actor. Input ports `translation`(3), `rotation`(3, rpy rad), `scale`(3) override the static param defaults element-wise; unconnected ⇒ identity (scale 1). Logs a width-9 group `<id>[tx,ty,tz,rx,ry,rz,sx,sy,sz]` — the per-step animation timeline the Babylon lane reads. |
+| `signal_actor3d` | ✓ | `name`, `shape: "box"` (`box`/`sphere`/`cylinder`/`cone`/`capsule`/`plane`), `size: "1,1,1"`, `radius: 0.5`, `height: 1.0`, `color`, `emissive: "0,0,0"`, `opacity: 1.0`, `parent`, `translation`/`rotation`/`scale` (static defaults), `physics`/`mass`/`friction`/`restitution`/`collisionShape` (Tier-4 viewer hints) | Kinematic actor. Input ports `translation`(3), `rotation`(3, rpy rad), `scale`(3) override the static param defaults element-wise; unconnected ⇒ identity (scale 1). `parent` names another actor — the child's recorded transform is its **local** frame, composed with the parent via the viewer scene graph (the parent chain must be acyclic and resolve to existing actors, else a sourced error). Logs a width-9 group `<id>[tx,ty,tz,rx,ry,rz,sx,sy,sz]`. |
+| `signal_light3d` | ✓ | `type: "directional"` (`directional`/`point`/`spot`), `color: "1,1,1"`, `intensity: 0.8`, `position: "0,0,10"`, `direction: "-0.5,-0.5,-1"` | Static light config (no ports). The viewer adds a dim hemispheric fill plus each configured light. Signal-driven intensity/pose is a follow-on. |
+| `signal_camera3d` | ✓ | `mode: "static"` (`static`/`follow`), `position: "8,8,6"`, `target: "0,0,0"`, `follow: "<actorName>"`, `fov: 0.8` | Static viewpoint or follow-actor camera (no ports). First camera in the model wins. |
 
 Reserved for later tiers (round-trip through the loader, rejected at lowering
-until shipped): `signal_light3d`, `signal_camera3d`, `signal_sensor3d`,
-`signal_collision3d`.
+until shipped): `signal_sensor3d`, `signal_collision3d`.
 
 **Emit lane.** `-emit-mflowlink-babylon` runs the simulation, then writes one
 HTML document with the scene-graph + keyframe timeline + viewer logic embedded

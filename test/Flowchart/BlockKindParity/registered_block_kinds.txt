@@ -4,6 +4,7 @@ signal_awgn
 signal_biquad
 signal_bus_creator
 signal_bus_selector
+signal_camera3d
 signal_chirp
 signal_clock
 signal_color_space
@@ -40,6 +41,7 @@ signal_inport
 signal_integrator
 signal_jkff
 signal_kalman
+signal_light3d
 signal_logical
 signal_lookup_1d
 signal_lookup_2d

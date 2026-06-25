@@ -1157,6 +1157,29 @@ check "falling_stack emits physics world" "[[ $FS_PHYS -ge 1 ]]" ""
 check "falling_stack has 4 actors" "[[ $FS_ACTORS -eq 4 ]]" "ground + 3 boxes"
 rm -f "$FS_HTML_F"
 
+# Tier 2 — hierarchy + lights + cameras + materials. articulated_arm: a 3-link
+# chain (base→link1→link2→link3), each joint rotation driven by a sine, with a
+# directional signal_light3d and a follow signal_camera3d on the tip link.
+AA_HTML_F=$(mktemp /tmp/aa.XXXX.html)
+"$MATLABC" -emit-mflowlink-babylon "$EX/3d/articulated_arm.mflow" -o "$AA_HTML_F"
+AA_ACTORS=$(grep -c '"shape":' "$AA_HTML_F")
+AA_LIGHTS=$(grep -o '"lights":\[[^]]*\]' "$AA_HTML_F" | grep -c '"type"')
+AA_FOLLOW=$(grep -c '"mode":"follow"' "$AA_HTML_F")
+AA_PARENTS=$(grep -o '"parent":' "$AA_HTML_F" | wc -l | tr -d ' ')
+check "arm has 4 actors" "[[ $AA_ACTORS -eq 4 ]]" "base + 3 links"
+check "arm has a directional light" "[[ $AA_LIGHTS -ge 1 ]]" "signal_light3d emitted"
+check "arm has a follow camera" "[[ $AA_FOLLOW -eq 1 ]]" "signal_camera3d mode=follow"
+check "arm has a 3-link parent chain" "[[ $AA_PARENTS -eq 3 ]]" "link1/link2/link3 each parented"
+rm -f "$AA_HTML_F"
+
+# Parent hierarchy guards: an unknown parent and a cycle are both sourced errors.
+UNK=$(mktemp /tmp/unkparent.XXXX.mflow)
+sed 's/"parent" : "base"/"parent" : "ghost"/' "$EX/3d/articulated_arm.mflow" > "$UNK"
+if "$MATLABC" -simulate "$UNK" --dry-run >/dev/null 2>&1; then
+  fail=$((fail+1)); echo "FAIL  unknown actor parent rejected"
+else pass=$((pass+1)); fi
+rm -f "$UNK"
+
 # At most one signal_world3d per model — a second is a sourced error.
 TW=$(mktemp /tmp/twoworld.XXXX.mflow)
 sed 's/"id": "world"/"id": "world"/' "$EX/3d/orbit_cube.mflow" > "$TW"

@@ -89,6 +89,12 @@ const std::map<std::string, KindInfo> &kindTable() {
     // Both ride the continuous step (FixedInMinor), like a scope.
     add("signal_world3d",      {true, true, false, false, false, FIM});
     add("signal_actor3d",      {true, true, false, false, false, FIM});
+    // mflow-3d-animation (Tier 2) — lights and cameras. Config blocks (no
+    // ports): the emit lane reads their static params and the viewer builds the
+    // matching Babylon light / camera. Signal-driven light/camera is a
+    // follow-on (would log a small port group like signal_actor3d does).
+    add("signal_light3d",      {true, true, false, false, false, FIM});
+    add("signal_camera3d",     {true, true, false, false, false, FIM});
     // From Workspace — replays an inline time-series `data` ([t v; …]) as a
     // source, linearly interpolated (or held) at the current sim time. The
     // mflowLink equivalent of Simulink's From Workspace (the data rides in the
@@ -1214,7 +1220,8 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
       B.OutShape = {9};
       B.OutRows = 1;
       B.OutCols = 9;
-    } else if (N.Kind == "signal_world3d") {
+    } else if (N.Kind == "signal_world3d" || N.Kind == "signal_light3d" ||
+               N.Kind == "signal_camera3d") {
       // Scene config — no ports, no log, no downstream. A nominal width-1
       // keeps width inference from leaving it at the inherit sentinel.
       B.OutWidth = 1;
@@ -1323,6 +1330,45 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
     if (KI->ZeroCrossing)
       M.ZeroCrossings.push_back({B.Id, B.Kind});
     M.Blocks.push_back(std::move(B));
+  }
+
+  // mflow-3d-animation (Tier 2) — validate the actor parent hierarchy: every
+  // `parent` must name an existing actor, and the parent chain must be acyclic
+  // (the viewer composes child∘parent transforms via scene-graph parenting, so
+  // a cycle would be an infinite transform loop).
+  {
+    std::map<std::string, const MflBlock *> ActorByName;
+    for (const auto &B : M.Blocks) {
+      if (B.Kind != "signal_actor3d") continue;
+      auto It = B.Params.find("name");
+      ActorByName[It != B.Params.end() ? It->second : B.Id] = &B;
+    }
+    for (const auto &B : M.Blocks) {
+      if (B.Kind != "signal_actor3d") continue;
+      auto PIt = B.Params.find("parent");
+      if (PIt == B.Params.end() || PIt->second.empty()) continue;
+      // Walk the parent chain; a revisited node (or > N hops) is a cycle.
+      std::set<const MflBlock *> Seen{&B};
+      const MflBlock *Cur = &B;
+      while (true) {
+        auto CP = Cur->Params.find("parent");
+        if (CP == Cur->Params.end() || CP->second.empty()) break;
+        auto Next = ActorByName.find(CP->second);
+        if (Next == ActorByName.end()) {
+          Diag.error(Cur->Loc, "signal_actor3d \"" + Cur->Id +
+                                   "\": parent \"" + CP->second +
+                                   "\" names no actor in the scene");
+          return std::nullopt;
+        }
+        if (!Seen.insert(Next->second).second) {
+          Diag.error(B.Loc, "signal_actor3d \"" + B.Id +
+                                "\": parent hierarchy has a cycle through \"" +
+                                CP->second + "\"");
+          return std::nullopt;
+        }
+        Cur = Next->second;
+      }
+    }
   }
 
   // Build the edge list.

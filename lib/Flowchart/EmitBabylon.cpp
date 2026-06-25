@@ -125,6 +125,8 @@ bool emitMflowLinkBabylon(const MflowLinkModel &M, const MflowLinkSim &Sim,
     Actors << ",\"radius\":" << paramNum(B, "radius", 0.5);
     Actors << ",\"height\":" << paramNum(B, "height", 1.0);
     Actors << ",\"color\":" << vecJson(B, "color", "[0.6,0.6,0.6]");
+    Actors << ",\"emissive\":" << vecJson(B, "emissive", "[0,0,0]");
+    Actors << ",\"opacity\":" << paramNum(B, "opacity", 1.0);
     if (const std::string *P = param(B, "parent"))
       Actors << ",\"parent\":" << jsonStr(*P);
     // Tier-4 (viewer physics) hints — emitted now so the scene contract is
@@ -156,6 +158,39 @@ bool emitMflowLinkBabylon(const MflowLinkModel &M, const MflowLinkSim &Sim,
     ++ActorCount;
   }
 
+  // Lights (Tier 2) — static config blocks read by the viewer.
+  std::ostringstream Lights;
+  size_t LightCount = 0;
+  for (const auto &B : M.Blocks) {
+    if (B.Kind != "signal_light3d") continue;
+    if (LightCount) Lights << ",";
+    Lights << "{\"id\":" << jsonStr(B.Id);
+    Lights << ",\"type\":" << jsonStr(paramOr(B, "type", "directional"));
+    Lights << ",\"color\":" << vecJson(B, "color", "[1,1,1]");
+    Lights << ",\"intensity\":" << paramNum(B, "intensity", 0.8);
+    Lights << ",\"position\":" << vecJson(B, "position", "[0,0,10]");
+    Lights << ",\"direction\":" << vecJson(B, "direction", "[-0.5,-0.5,-1]");
+    Lights << "}";
+    ++LightCount;
+  }
+
+  // Cameras (Tier 2) — static viewpoint or follow-actor.
+  std::ostringstream Cameras;
+  size_t CameraCount = 0;
+  for (const auto &B : M.Blocks) {
+    if (B.Kind != "signal_camera3d") continue;
+    if (CameraCount) Cameras << ",";
+    Cameras << "{\"id\":" << jsonStr(B.Id);
+    Cameras << ",\"mode\":" << jsonStr(paramOr(B, "mode", "static"));
+    Cameras << ",\"position\":" << vecJson(B, "position", "[8,8,6]");
+    Cameras << ",\"target\":" << vecJson(B, "target", "[0,0,0]");
+    if (const std::string *F = param(B, "follow"))
+      Cameras << ",\"follow\":" << jsonStr(*F);
+    Cameras << ",\"fov\":" << paramNum(B, "fov", 0.8);
+    Cameras << "}";
+    ++CameraCount;
+  }
+
   // The scene JSON.
   std::ostringstream Scene;
   Scene << "{\n";
@@ -175,6 +210,8 @@ bool emitMflowLinkBabylon(const MflowLinkModel &M, const MflowLinkSim &Sim,
   for (size_t I = 0; I < Times.size(); ++I)
     Scene << (I ? "," : "") << Times[I];
   Scene << "],\n";
+  Scene << "  \"lights\":[" << Lights.str() << "],\n";
+  Scene << "  \"cameras\":[" << Cameras.str() << "],\n";
   Scene << "  \"actors\":[\n" << Actors.str() << "\n  ]\n";
   Scene << "}";
 
@@ -229,10 +266,19 @@ const camera = new BABYLON.ArcRotateCamera('cam', -Math.PI/3, Math.PI/3,
 camera.wheelDeltaPercentage = 0.01;
 camera.attachControl(canvas, true);
 
-const hemi = new BABYLON.HemisphericLight('hemi', new BABYLON.Vector3(0,1,0), scene);
-hemi.intensity = 0.85;
-const dir = new BABYLON.DirectionalLight('dir', new BABYLON.Vector3(-0.5,-1,-0.3), scene);
-dir.intensity = 0.6;
+// Lights: a dim hemispheric fill always, plus each configured signal_light3d.
+const fill = new BABYLON.HemisphericLight('fill', new BABYLON.Vector3(0,1,0), scene);
+fill.intensity = (DATA.lights && DATA.lights.length) ? 0.35 : 0.85;
+function v3(p){ return new BABYLON.Vector3(p[0], p[1], p[2]); }
+for (const L of (DATA.lights || [])) {
+  let light;
+  if (L.type === 'point')      light = new BABYLON.PointLight(L.id, v3(L.position), scene);
+  else if (L.type === 'spot')  light = new BABYLON.SpotLight(L.id, v3(L.position), v3(L.direction), Math.PI/3, 2, scene);
+  else                         light = new BABYLON.DirectionalLight(L.id, v3(L.direction), scene);
+  light.intensity = L.intensity;
+  light.diffuse = new BABYLON.Color3(L.color[0], L.color[1], L.color[2]);
+  light.parent = root;
+}
 
 if (DATA.world.showGround) {
   const g = BABYLON.MeshBuilder.CreateGround('ground', {width:40, height:40}, scene);
@@ -256,19 +302,37 @@ function buildMesh(a){
   }
 }
 
-const meshById = {};
+const meshByKey = {}; // both id and name resolve to the mesh
 for (const a of DATA.actors) {
   const m = buildMesh(a);
   const mat = new BABYLON.StandardMaterial(a.id+'_m', scene);
   mat.diffuseColor = mkColor(a.color || [0.6,0.6,0.6]);
+  if (a.emissive) mat.emissiveColor = mkColor(a.emissive);
+  if (a.opacity !== undefined && a.opacity < 1) mat.alpha = a.opacity;
   m.material = mat;
   m.rotationQuaternion = BABYLON.Quaternion.Identity();
-  meshById[a.id] = m;
+  meshByKey[a.id] = m; if (a.name) meshByKey[a.name] = m;
 }
-// Resolve parenting (parent transform composes in the model frame).
+// Resolve parenting by parent NAME (or id); children compose via the scene
+// graph, so a child's recorded transform is its local frame.
 for (const a of DATA.actors) {
-  const m = meshById[a.id];
-  m.parent = (a.parent && meshById[a.parent]) ? meshById[a.parent] : root;
+  const m = meshByKey[a.id];
+  m.parent = (a.parent && meshByKey[a.parent]) ? meshByKey[a.parent] : root;
+}
+
+// Camera: first configured signal_camera3d wins. follow → track an actor.
+const camCfg = (DATA.cameras && DATA.cameras[0]) || null;
+let followMesh = null;
+if (camCfg) {
+  camera.fov = camCfg.fov || 0.8;
+  const tgt = camCfg.target || [0,0,0];
+  if (camCfg.mode === 'follow' && camCfg.follow && meshByKey[camCfg.follow]) {
+    followMesh = meshByKey[camCfg.follow];
+  } else {
+    const p = camCfg.position || [8,8,6];
+    camera.setPosition(new BABYLON.Vector3(p[0], p[2], p[1])); // model Z-up
+    camera.setTarget(new BABYLON.Vector3(tgt[0], tgt[2], tgt[1]));
+  }
 }
 
 const N = DATA.times.length;
@@ -281,6 +345,7 @@ function applyFrame(i){
     m.rotationQuaternion = BABYLON.Quaternion.RotationYawPitchRoll(k[5], k[4], k[3]);
     m.scaling.set(k[6], k[7], k[8]);
   }
+  if (followMesh) camera.setTarget(followMesh.getAbsolutePosition());
   const tEl = document.getElementById('t');
   tEl.textContent = 't = ' + (DATA.times[i]||0).toFixed(3);
 }

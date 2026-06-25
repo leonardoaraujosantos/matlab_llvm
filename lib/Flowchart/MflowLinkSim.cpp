@@ -1709,9 +1709,10 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       if (HasRef) Rr = inputOf(I, "r");
       else Rr = R_def;
       Out_[I] = Gain * (Rr - Ym);
-    } else if (K == "signal_world3d") {
-      // mflow-3d-animation — scene config. No ports, no output; the emit lane
-      // reads its params directly from the model. Nothing to evaluate.
+    } else if (K == "signal_world3d" || K == "signal_light3d" ||
+               K == "signal_camera3d") {
+      // mflow-3d-animation — scene config (world / light / camera). No ports,
+      // no output; the emit lane reads their params directly. Nothing to eval.
       Out_[I] = 0.0;
     } else if (K == "signal_actor3d") {
       // mflow-3d-animation — gather the actor's transform into a width-9

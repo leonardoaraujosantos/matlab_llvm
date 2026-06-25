@@ -1,0 +1,54 @@
+{
+  "entry" : "articulated_arm",
+  "flows" : [
+    {
+      "edges" : [
+        { "id" : "e1z", "kind" : "data", "from" : { "node" : "j1", "port" : "out" }, "to" : { "node" : "r1", "port" : "in3" } },
+        { "id" : "e1a", "kind" : "data", "from" : { "node" : "zero", "port" : "out" }, "to" : { "node" : "r1", "port" : "in1" } },
+        { "id" : "e1b", "kind" : "data", "from" : { "node" : "zero", "port" : "out" }, "to" : { "node" : "r1", "port" : "in2" } },
+        { "id" : "e1r", "kind" : "data", "from" : { "node" : "r1", "port" : "out" }, "to" : { "node" : "link1", "port" : "rotation" } },
+        { "id" : "e2z", "kind" : "data", "from" : { "node" : "j2", "port" : "out" }, "to" : { "node" : "r2", "port" : "in3" } },
+        { "id" : "e2a", "kind" : "data", "from" : { "node" : "zero", "port" : "out" }, "to" : { "node" : "r2", "port" : "in1" } },
+        { "id" : "e2b", "kind" : "data", "from" : { "node" : "zero", "port" : "out" }, "to" : { "node" : "r2", "port" : "in2" } },
+        { "id" : "e2r", "kind" : "data", "from" : { "node" : "r2", "port" : "out" }, "to" : { "node" : "link2", "port" : "rotation" } },
+        { "id" : "e3z", "kind" : "data", "from" : { "node" : "j3", "port" : "out" }, "to" : { "node" : "r3", "port" : "in3" } },
+        { "id" : "e3a", "kind" : "data", "from" : { "node" : "zero", "port" : "out" }, "to" : { "node" : "r3", "port" : "in1" } },
+        { "id" : "e3b", "kind" : "data", "from" : { "node" : "zero", "port" : "out" }, "to" : { "node" : "r3", "port" : "in2" } },
+        { "id" : "e3r", "kind" : "data", "from" : { "node" : "r3", "port" : "out" }, "to" : { "node" : "link3", "port" : "rotation" } }
+      ],
+      "id" : "flow_arm",
+      "kind" : "program",
+      "name" : "articulated_arm",
+      "nodes" : [
+        { "id" : "world", "kind" : "signal_world3d", "data" : { "params" : { "viewpoint" : "6,6,4", "showGround" : true, "showAxes" : true, "output" : "articulated_arm.html" } }, "ports" : { "in" : [], "out" : [] } },
+        { "id" : "sun", "kind" : "signal_light3d", "data" : { "params" : { "type" : "directional", "direction" : "-0.4,-0.5,-1", "intensity" : 0.9, "color" : "1,0.97,0.9" } }, "ports" : { "in" : [], "out" : [] } },
+        { "id" : "cam", "kind" : "signal_camera3d", "data" : { "params" : { "mode" : "follow", "follow" : "link3", "fov" : 0.9 } }, "ports" : { "in" : [], "out" : [] } },
+        { "id" : "zero", "kind" : "signal_constant", "data" : { "params" : { "value" : 0.0 } }, "ports" : { "in" : [], "out" : [ { "id" : "out" } ] } },
+        { "id" : "j1", "kind" : "signal_sine", "data" : { "log_signal" : true, "params" : { "amplitude" : 0.6, "frequency" : 0.8, "phase" : 0.0 } }, "ports" : { "in" : [], "out" : [ { "id" : "out" } ] } },
+        { "id" : "j2", "kind" : "signal_sine", "data" : { "log_signal" : true, "params" : { "amplitude" : 0.8, "frequency" : 1.3, "phase" : 0.5 } }, "ports" : { "in" : [], "out" : [ { "id" : "out" } ] } },
+        { "id" : "j3", "kind" : "signal_sine", "data" : { "log_signal" : true, "params" : { "amplitude" : 1.0, "frequency" : 1.9, "phase" : 1.0 } }, "ports" : { "in" : [], "out" : [ { "id" : "out" } ] } },
+        { "id" : "r1", "kind" : "signal_mux", "data" : { "params" : {} }, "ports" : { "in" : [ { "id" : "in1" }, { "id" : "in2" }, { "id" : "in3" } ], "out" : [ { "id" : "out" } ] } },
+        { "id" : "r2", "kind" : "signal_mux", "data" : { "params" : {} }, "ports" : { "in" : [ { "id" : "in1" }, { "id" : "in2" }, { "id" : "in3" } ], "out" : [ { "id" : "out" } ] } },
+        { "id" : "r3", "kind" : "signal_mux", "data" : { "params" : {} }, "ports" : { "in" : [ { "id" : "in1" }, { "id" : "in2" }, { "id" : "in3" } ], "out" : [ { "id" : "out" } ] } },
+        { "id" : "base", "kind" : "signal_actor3d", "data" : { "params" : { "name" : "base", "shape" : "cylinder", "radius" : 0.5, "height" : 0.4, "color" : "0.3,0.3,0.35" } }, "ports" : { "in" : [] } },
+        { "id" : "link1", "kind" : "signal_actor3d", "data" : { "params" : { "name" : "link1", "parent" : "base", "shape" : "box", "size" : "1.5,0.3,0.3", "translation" : "1.5,0,0.3", "color" : "0.8,0.3,0.3" } }, "ports" : { "in" : [ { "id" : "rotation" } ] } },
+        { "id" : "link2", "kind" : "signal_actor3d", "data" : { "params" : { "name" : "link2", "parent" : "link1", "shape" : "box", "size" : "1.3,0.25,0.25", "translation" : "1.4,0,0", "color" : "0.3,0.8,0.3" } }, "ports" : { "in" : [ { "id" : "rotation" } ] } },
+        { "id" : "link3", "kind" : "signal_actor3d", "data" : { "params" : { "name" : "link3", "parent" : "link2", "shape" : "box", "size" : "1.0,0.2,0.2", "translation" : "1.15,0,0", "color" : "0.3,0.4,0.9" } }, "ports" : { "in" : [ { "id" : "rotation" } ] } }
+      ],
+      "signature" : { "inputs" : [], "outputs" : [] }
+    }
+  ],
+  "schema" : "matforge.flowchart",
+  "settings" : {
+    "kind" : "signal_flow",
+    "solver" : {
+      "type" : "fixed_step",
+      "algorithm" : "ode4",
+      "startTime" : 0,
+      "stopTime" : 8,
+      "stepSize" : 0.02,
+      "zeroCrossing" : false
+    }
+  },
+  "version" : "0.1.0"
+}
