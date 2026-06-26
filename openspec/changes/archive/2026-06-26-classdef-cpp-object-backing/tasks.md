@@ -29,5 +29,5 @@
 ## 5. Docs & close-out
 
 - [x] 5.1 Update `docs/emit_cpp_classdef.md` with the object-backing model and the handle/lifetime/materialization rules
-- [ ] 5.2 `openspec validate classdef-cpp-object-backing`; close #411 and #412 referencing the change
+- [x] 5.2 `openspec validate` (valid); #411 + #412 closed by PR #416
 - [x] 5.3 Note in `examples/control/3d/README.md` + `examples/sim3d/README.md` that the suites now run compiled as well as interpreted
