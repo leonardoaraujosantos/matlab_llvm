@@ -81,7 +81,7 @@ jobs:
       - name: Smoke tests — frontend + runtime + flowchart-emit + gpu-emit + differential
         run: |
           ctest --test-dir build --output-on-failure -j $(nproc) \
-            -R 'frontend-tests|^runtime-tests|^flowchart-emit|^gpu-emit|^differential-tests'
+            -R 'frontend-tests|^runtime-tests|^flowchart-emit|^gpu-emit|^differential-tests|^differential-tests-cmode'
 
       # GPU emission lane — verifies `matlabc -emit-{cuda,metal,opencl}`
       # produces structurally-complete bundles without needing GPU hardware.
