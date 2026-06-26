@@ -1076,7 +1076,8 @@ static bool isDspSysObjClass(std::string_view Pkg, std::string_view Field) {
 // runtime/toolbox/sim3d/. A member not in this set keeps normal field access.
 static bool isSim3dMember(std::string_view Pkg, std::string_view Field) {
   if (Pkg != "sim3d") return false;
-  return Field == "World" || Field == "Actor" || Field == "export";
+  return Field == "World" || Field == "Actor" || Field == "export" ||
+         Field == "capture";
 }
 
 Expr *Parser::parsePostfix(Expr *LHS) {
@@ -1135,11 +1136,14 @@ Expr *Parser::parsePostfix(Expr *LHS) {
           }
           // sim3d package: constructors fold to the prelude classdef names
           // (sim3d.World -> sim3d_World, sim3d.Actor -> sim3d_Actor); the free
-          // function sim3d.export folds straight to the runtime builtin
-          // matlab_sim3d_export so no prelude wrapper function is needed.
+          // functions sim3d.export / sim3d.capture fold straight to the runtime
+          // builtins matlab_sim3d_export / matlab_sim3d_capture, so no prelude
+          // wrapper function is needed.
           if (isSim3dMember(BN->Name, cur().Text)) {
             std::string Flat = cur().Text == "export"
                                    ? "matlab_sim3d_export"
+                               : cur().Text == "capture"
+                                   ? "matlab_sim3d_capture"
                                    : "sim3d_" + std::string(cur().Text);
             ++Idx;  // consume the field identifier
             auto *N = Ctx.make<NameExpr>();

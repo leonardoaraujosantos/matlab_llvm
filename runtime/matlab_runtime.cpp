@@ -18757,6 +18757,37 @@ matlab_mat *matlab_load_mat(matlab_string *path) {
     return A;
 }
 
+/* writematrix(A, filename) / csvwrite(filename, A) — write a numeric
+ * matrix as comma-separated text, one matrix row per line. These are the
+ * standard MATLAB capture functions; they were previously unimplemented
+ * (silent no-ops), so a program that simulated and then called writematrix
+ * produced no file. `%.15g` keeps full double precision while trimming
+ * trailing zeros, so integers stay integer-looking. Returns 0 on success,
+ * -1 if the path can't be opened. Data is row-major: element (r,c) lives at
+ * data[r*cols + c]. csvwrite is the legacy alias with the (path, A) order. */
+static double matlab_write_csv_mat(const char *path, const matlab_mat *A) {
+    if (!path || !A) return -1.0;
+    FILE *f = fopen(path, "w");
+    if (!f) return -1.0;
+    pthread_mutex_lock(&matlab_io_mutex);
+    for (int64_t r = 0; r < A->rows; ++r) {
+        for (int64_t c = 0; c < A->cols; ++c)
+            fprintf(f, "%s%.15g", c ? "," : "", A->data[r * A->cols + c]);
+        fputc('\n', f);
+    }
+    pthread_mutex_unlock(&matlab_io_mutex);
+    fclose(f);
+    return 0.0;
+}
+
+double matlab_writematrix(matlab_mat *A, matlab_string *path) {
+    return matlab_write_csv_mat(path ? path->data : nullptr, A);
+}
+
+double matlab_csvwrite(matlab_string *path, matlab_mat *A) {
+    return matlab_write_csv_mat(path ? path->data : nullptr, A);
+}
+
 /*=========================================================================
  * Initial-value ODE solvers.
  *

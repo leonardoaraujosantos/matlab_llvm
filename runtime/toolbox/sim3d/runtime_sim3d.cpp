@@ -204,6 +204,27 @@ matlab_mat *matlab_sim3d_get_scale(void *actor_v) {
   return m;
 }
 
+// capture(world, actor): pull one actor's recorded keyframe timeline back into
+// the workspace as an N x 7 matrix [t, tx,ty,tz, rx,ry,rz] — time plus the
+// 6-DOF pose per frame, with N = the number of run() calls. Lets a program
+// reuse the simulated trajectory (save it, writematrix it, post-process it)
+// instead of only rendering it. The recorded keyframe carries scale too, but
+// the captured pose is the part programs nearly always want.
+matlab_mat *matlab_sim3d_capture(void *world_v, void *actor_v) {
+  auto Wi = g_worlds.find(reinterpret_cast<matlab_obj *>(world_v));
+  if (Wi == g_worlds.end() || !actor_v) return mat_alloc(0, 0);
+  const World &W = Wi->second;
+  const Actor &A = actorOf(reinterpret_cast<matlab_obj *>(actor_v));
+  int64_t n = static_cast<int64_t>(std::min(W.times.size(), A.keys.size()));
+  matlab_mat *m = mat_alloc(n, 7);
+  for (int64_t r = 0; r < n; ++r) {
+    m->data[r * 7 + 0] = W.times[static_cast<size_t>(r)];
+    for (int c = 0; c < 6; ++c)
+      m->data[r * 7 + 1 + c] = A.keys[static_cast<size_t>(r)][static_cast<size_t>(c)];
+  }
+  return m;
+}
+
 // add(world, actor): register the actor into the world's draw order.
 void matlab_sim3d_add(void *world_v, void *actor_v) {
   if (!world_v || !actor_v) return;

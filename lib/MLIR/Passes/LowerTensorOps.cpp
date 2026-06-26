@@ -3892,6 +3892,46 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Changed = true;
       continue;
     }
+    /* writematrix(A, filename) / csvwrite(filename, A) — write a numeric
+     * matrix as comma-separated text, one row per line. Both forward to the
+     * same runtime writer; they differ only in operand order (writematrix is
+     * matrix-then-path, csvwrite the legacy path-then-matrix). The filename
+     * may be a string variable (already PtrTy) or a char literal (coerced via
+     * toStrPtr). Return the runtime status as an f64 (discarded as a stmt). */
+    if (Name == "writematrix" && Call->getNumOperands() == 2 &&
+        Call->getOperand(0).getType() == PtrTy) {
+      if (Value Path = toStrPtr(Call->getOperand(1))) {
+        B.setInsertionPoint(Call);
+        auto Fn = rt("matlab_writematrix", F64, {PtrTy, PtrTy});
+        auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                        ValueRange{Call->getOperand(0), Path});
+        if (Call->getNumResults() == 1) {
+          if (Call->getResult(0).getType() != F64)
+            Call->getResult(0).setType(F64);
+          Call->getResult(0).replaceAllUsesWith(NC.getResult());
+        }
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+    }
+    if (Name == "csvwrite" && Call->getNumOperands() == 2 &&
+        Call->getOperand(1).getType() == PtrTy) {
+      if (Value Path = toStrPtr(Call->getOperand(0))) {
+        B.setInsertionPoint(Call);
+        auto Fn = rt("matlab_csvwrite", F64, {PtrTy, PtrTy});
+        auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                        ValueRange{Path, Call->getOperand(1)});
+        if (Call->getNumResults() == 1) {
+          if (Call->getResult(0).getType() != F64)
+            Call->getResult(0).setType(F64);
+          Call->getResult(0).replaceAllUsesWith(NC.getResult());
+        }
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+    }
     if (Name == "load" && Call->getNumOperands() == 1 &&
         Call->getNumResults() == 1 &&
         Call->getOperand(0).getType() == PtrTy) {
@@ -6531,6 +6571,9 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"matlab_sim3d_run",           "matlab_sim3d_run",           PtrTy, {PtrTy, F64}},
         {"matlab_sim3d_close",         "matlab_sim3d_close",         PtrTy, {PtrTy}},
         {"matlab_sim3d_export",        "matlab_sim3d_export",        PtrTy, {PtrTy, PtrTy}},
+        /* capture(world, actor) returns the recorded N x 7 keyframe matrix
+         * (PtrTy matlab_mat*) — time + 6-DOF pose per frame. */
+        {"matlab_sim3d_capture",       "matlab_sim3d_capture",       PtrTy, {PtrTy, PtrTy}},
         /* Tier-3 — adaptive filters. */
         {"matlab_dsp_lms_step",    "matlab_dsp_lms_step",    PtrTy, {PtrTy, PtrTy, PtrTy}},
         {"matlab_dsp_rls_step",    "matlab_dsp_rls_step",    PtrTy, {PtrTy, PtrTy, PtrTy}},

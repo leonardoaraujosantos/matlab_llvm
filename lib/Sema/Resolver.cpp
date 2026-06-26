@@ -442,7 +442,7 @@ void Resolver::registerBuiltins() {
     "matlab_sim3d_get_translation", "matlab_sim3d_get_rotation",
     "matlab_sim3d_get_scale", "matlab_sim3d_set_parent",
     "matlab_sim3d_add", "matlab_sim3d_open", "matlab_sim3d_run",
-    "matlab_sim3d_close", "matlab_sim3d_export",
+    "matlab_sim3d_close", "matlab_sim3d_export", "matlab_sim3d_capture",
     /* Tier-2 — filter design (function-form, user-facing). */
     "firpm", "firpmord", "firls", "kaiserord",
     "iirnotch", "iirpeak", "iircomb", "designfilt",
@@ -1039,6 +1039,7 @@ void Resolver::registerBuiltins() {
     "fopen", "fclose", "fgetl", "feof",
     "fread", "fwrite",
     "readtable", "readmatrix",
+    "writematrix", "csvwrite",
     "save", "load",
     // §17.5 #6 — cross-dialect composition: call a signal-flow
     // .mflow from a .m program. Lowers to `matlab_mflowlink_run`
