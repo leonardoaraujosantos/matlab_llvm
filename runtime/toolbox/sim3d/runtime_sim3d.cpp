@@ -21,7 +21,9 @@
 
 #include "matlab/Flowchart/BabylonDocument.h"
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
@@ -256,6 +258,13 @@ void matlab_sim3d_export(void *world_v, void *path_v) {
   if (Path.empty()) Path = "sim3d_scene.html";
   std::string Title = "sim3d";
 
+  // While emitting actors, accumulate the scene's content extent so the
+  // camera can be framed to it (a fixed far viewpoint makes a small tabletop
+  // scene — e.g. a 0.6 m cart-pole — render as a speck), and note whether the
+  // user supplied their own ground plane (so we can drop the viewer's large
+  // built-in ground, which otherwise shows as a big dark backdrop plane).
+  double extent = 0.0;
+  bool hasUserGround = false;
   std::ostringstream Actors;
   size_t Count = 0;
   for (auto *a : W.actorOrder) {
@@ -267,6 +276,19 @@ void matlab_sim3d_export(void *world_v, void *path_v) {
     static const double sdef[3] = {1, 1, 1};
     readVec(matlab_obj_get_mat(a, "Color", 5), A.color, 3, cdef);
     readVec(matlab_obj_get_mat(a, "Size", 4), A.size, 3, sdef);
+    // Content extent: how far actors travel (key translations) plus how big
+    // they are. A ground plane is excluded from the size term (it is meant to
+    // be large and would otherwise pull the camera too far back) but its
+    // presence suppresses the viewer's built-in ground.
+    if (A.shape == "plane") {
+      hasUserGround = true;
+    } else {
+      for (int d = 0; d < 3; ++d)
+        extent = std::max(extent, std::fabs(A.size[d]));
+    }
+    for (const auto &k : A.keys)
+      for (int d = 0; d < 3; ++d)
+        extent = std::max(extent, std::fabs(k[d]));
     if (Count) Actors << ",\n";
     Actors << "    {";
     Actors << "\"id\":" << jsonStr(A.id);
@@ -295,11 +317,25 @@ void matlab_sim3d_export(void *world_v, void *path_v) {
     ++Count;
   }
 
+  // Frame the orbit camera to the content. `extent` is the farthest the scene
+  // reaches from the origin; place the camera at ~2.4x that out along x/y and
+  // ~1.8x up, with a floor so a tiny scene isn't clipped by the near plane.
+  // Falls back to the historical [8,8,6] for an empty/degenerate scene.
+  if (extent < 0.8) extent = 0.8;
+  double vxy = extent * 2.4;
+  double vz = extent * 1.8;
   std::ostringstream Scene;
   Scene << "{\n";
-  Scene << "  \"world\":{\"gravity\":[0,0,-9.81],\"viewpoint\":[8,8,6]"
-           ",\"engine\":\"havok\",\"physics\":false,\"showGround\":true"
-           ",\"showAxes\":true,\"background\":[0.07,0.08,0.1]"
+  // When the user staged their own ground plane, drop both the viewer's
+  // built-in ground (the large dark backdrop plane) and the fixed length-2
+  // world axis gizmo (which dwarfs a sub-metre prop like a cart-pole). Bare
+  // scenes (no ground) keep both for spatial reference.
+  const char *GroundAxes = hasUserGround ? "false" : "true";
+  Scene << "  \"world\":{\"gravity\":[0,0,-9.81],\"viewpoint\":["
+        << vxy << "," << vxy << "," << vz << "]"
+           ",\"engine\":\"havok\",\"physics\":false,\"showGround\":"
+        << GroundAxes << ",\"showAxes\":" << GroundAxes
+        << ",\"background\":[0.07,0.08,0.1]"
            ",\"pacingRate\":1},\n";
   Scene << "  \"times\":[";
   for (size_t I = 0; I < W.times.size(); ++I) Scene << (I ? "," : "") << W.times[I];
