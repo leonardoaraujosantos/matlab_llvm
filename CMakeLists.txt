@@ -826,14 +826,13 @@ add_test(
           $<TARGET_FILE:matlabc> $<TARGET_FILE:MatlabRuntime>
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Differential
 )
-# Differential coverage for handle/object classdefs (sim3d.World/Actor, CST
-# `ss`) through the C lane (`-emit-c`), where the runtime-handle object model
-# is implemented. Guards the fix that lets the 3-D control / sim3d examples
-# run compiled as well as interpreted (#411/#412, C lane).
+# The same differential corpus through the C lane (`-emit-c`). Catches
+# C-vs-C++ emit divergence and covers the handle/object classdef fixtures
+# (sim3d.World/Actor, CST `ss`) in BOTH lanes — the runtime-handle object
+# model is now implemented for `-emit-c` AND `-emit-cpp` (#411/#412).
 add_test(
   NAME differential-tests-cmode
   COMMAND ${CMAKE_COMMAND} -E env MODE=c
-          FIXTURES=${CMAKE_SOURCE_DIR}/test/Differential/cmode
           ${CMAKE_SOURCE_DIR}/test/Differential/run_tests.sh
           $<TARGET_FILE:matlabc> $<TARGET_FILE:MatlabRuntime>
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Differential

@@ -11,13 +11,25 @@ Toolbox tours in [`../`](../README.md): the same `lqr` / `place` / `ctrb` /
 
 ## Run
 
+Interpreted:
+
 ```sh
 matlabc -repl < examples/control/3d/cartpole_lqr_3d.m
 xdg-open cartpole_lqr_3d.html        # open the emitted player in a browser
 ```
 
-Every program runs the same way interpreted or compiled, and writes one
-`<name>.html` next to the working directory.
+Compiled (C or C++ — the runtime-handle object model backs `sim3d` and the
+`ss` model objects in both lanes):
+
+```sh
+matlabc -emit-cpp examples/control/3d/cartpole_lqr_3d.m > cartpole_lqr_3d.cpp
+c++ -std=c++20 -I runtime cartpole_lqr_3d.cpp build/libMatlabRuntime.a -lm -o cartpole_lqr_3d
+./cartpole_lqr_3d                    # writes the same .html
+```
+
+Every program produces output identical across the interpreted and compiled
+lanes (gated by `test/Differential/`), and writes one `<name>.html` next to the
+working directory.
 
 ## The suite
 

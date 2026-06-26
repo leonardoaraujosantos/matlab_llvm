@@ -20,6 +20,15 @@ matlabc -repl < orbit_cube.m
 xdg-open orbit_cube.html
 ```
 
+They also compile and run — the `sim3d.World`/`Actor` handle classes are backed
+by the runtime object model in both the C and C++ lanes:
+
+```sh
+matlabc -emit-cpp orbit_cube.m > orbit_cube.cpp
+c++ -std=c++20 -I runtime orbit_cube.cpp build/libMatlabRuntime.a -lm -o orbit_cube
+./orbit_cube            # writes the same orbit_cube.html
+```
+
 ## API
 
 | Call | Meaning |

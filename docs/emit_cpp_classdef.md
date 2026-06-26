@@ -361,3 +361,32 @@ declarations (Python uses dynamic attributes), explicit type tracking
 for `BankAccount acc(...)` declarations (Python is dynamically typed),
 and `: Init(arg)` member-init-list synthesis (Python doesn't need
 this).
+
+## Handle classes over the runtime object model (#411/#412)
+
+Value classes (no `< handle`) are emitted as plain C++ classes with native
+`double` fields and a member-init-list ctor, as above. **Handle classes**
+(`classdef Foo < handle`) and toolbox classes backed by a C runtime
+(`sim3d.World`/`Actor`, Control System Toolbox `ss`/`tf`/`zpk`) instead carry a
+runtime object handle, because their identity lives on the heap and their
+property/runtime calls take a `void*` handle, not a struct:
+
+- The frontend tags them with `matlab.class_handle` (the resolver drops the
+  `< handle` SuperName, so the C/C++ backends can't see it otherwise). A
+  declared-handle class with no native scalar-field properties is emitted as a
+  runtime handle; one that *does* have scalar fields keeps the value-struct path.
+- C lane: `typedef void* Foo;` and `Foo self = matlab_obj_new(class_id);`.
+- C++ lane: the class holds `void* __h` and an `operator void*() const` that
+  returns it. The ctor runs `this->__h = matlab_obj_new(class_id);` first; the
+  receiver is bound to `(*this)` so `matlab_*(*this, ...)` runtime calls and
+  `matlab_obj_set_mat(*this, ...)` property writes convert through `operator
+  void*` to the real handle, while `(*this).method()` still dispatches in C++.
+- `__h` is a heap handle, so it stays valid even when the C++ wrapper is a
+  temporary — no special lifetime/inlining handling is required.
+- A no-argument constructor suppresses the defaulted `Foo() = default;` (else
+  the two collide), and a no-arg construction is emitted as `Foo name{};` to
+  avoid the most-vexing-parse.
+
+Both lanes produce output identical to the interpreter; the
+`examples/control/3d/*_3d.m` and `examples/sim3d/*.m` suites are gated this way
+by `test/Differential/` (cpp and c modes).
