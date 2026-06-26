@@ -1370,6 +1370,21 @@ else
 fi
 rm -f "$TW"
 
+#--- net_udp_loopback: constant -> signal_udp_send -> (127.0.0.1) ->
+#    signal_udp_recv -> scope. The value 42 makes a real round-trip over a
+#    UDP loopback socket, exchanged once per major step. Gated on loopback
+#    bind being permitted (some CI sandboxes forbid it) so the suite skips
+#    rather than fails where sockets are unavailable.
+if python3 -c 'import socket;s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.bind(("127.0.0.1",0));s.close()' >/dev/null 2>&1; then
+  NET="$("$MATLABC" -simulate "$EX/net_udp_loopback.mflow")"
+  NET_HEAD=$(printf '%s\n' "$NET" | head -1)
+  NET_LAST=$(printf '%s\n' "$NET" | tail -1 | awk -F, '{print $2}')
+  check "net_udp_loopback header"   "[[ '$NET_HEAD' == 't,scope' ]]" ""
+  check "net_udp_loopback delivers" "awk 'BEGIN{exit !($NET_LAST >= 41.9 && $NET_LAST <= 42.1)}'" ""
+else
+  echo "SKIP  net_udp_loopback (loopback UDP bind not permitted in this sandbox)"
+fi
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 exit $(( fail > 0 ? 1 : 0 ))

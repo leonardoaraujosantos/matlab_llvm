@@ -1,0 +1,10 @@
+{ "schema": "matforge.flowchart", "version": "0.1.0", "entry": "net_udp_loopback",
+  "settings": { "kind": "signal_flow", "solver": { "type": "fixed_step", "algorithm": "ode4", "startTime": 0.0, "stopTime": 0.05, "maxStep": "0.01" } },
+  "flows": [{ "id": "f", "kind": "function", "name": "net_udp_loopback", "signature": { "inputs": [], "outputs": [] },
+    "nodes": [
+      { "id": "src",  "kind": "signal_constant", "data": { "params": { "value": 42.0 } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "tx",   "kind": "signal_udp_send", "data": { "params": { "host": "127.0.0.1", "port": 51811.0 } }, "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+      { "id": "rx",   "kind": "signal_udp_recv", "data": { "params": { "port": 51811.0, "initialValue": 0.0 } }, "ports": { "in": [], "out": [{"id": "out"}] } },
+      { "id": "scope","kind": "signal_scope",    "data": { "params": {} }, "ports": { "in": [{"id": "in"}], "out": [] } } ],
+    "edges": [ { "id": "e0", "kind": "data", "from": {"node": "src", "port": "out"}, "to": {"node": "tx", "port": "in"} },
+               { "id": "e1", "kind": "data", "from": {"node": "rx", "port": "out"}, "to": {"node": "scope", "port": "in"} } ] }] }

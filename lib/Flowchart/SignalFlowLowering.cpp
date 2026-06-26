@@ -104,6 +104,17 @@ const std::map<std::string, KindInfo> &kindTable() {
     // the primitive scene each step → an N-D signal (depth/semantic [r,c],
     // rgb [r,c,3], lidar [N,3]) that feeds the image/CV blocks. Loop-breaker.
     add("signal_sensor3d",     {true, true, false, true, false, FIM});
+    // network-io (TCP/UDP) — socket blocks. A *_send reads its input wire and
+    // transmits it to a host:port at each major step (a sink). A *_recv drains
+    // the socket at each major step and outputs the latest value, holding the
+    // last value (or initialValue) on starvation; it is a loop-breaker (its
+    // output does not depend on this step's input) so it can sit in a feedback
+    // path. Socket I/O happens only at the major step, never in an RK4 minor
+    // stage, so the deterministic continuous integration is untouched.
+    add("signal_udp_send",     {true, true, false, false, false, FIM});
+    add("signal_udp_recv",     {true, true, false, true,  false, FIM});
+    add("signal_tcp_send",     {true, true, false, false, false, FIM});
+    add("signal_tcp_recv",     {true, true, false, true,  false, FIM});
     // From Workspace — replays an inline time-series `data` ([t v; …]) as a
     // source, linearly interpolated (or held) at the current sim time. The
     // mflowLink equivalent of Simulink's From Workspace (the data rides in the
