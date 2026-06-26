@@ -117,8 +117,8 @@ for k = 1:N
 
     dth = X(3) - X(2);
     cart.Translation = [X(1) 0 hinge];
-    hub0.Rotation = [0 X(2) 0];
-    hub1.Rotation = [0 dth 0];
+    hub0.Rotation = [0 0 X(2)];
+    hub1.Rotation = [0 0 dth];
     w.run(Ts);
 
     if mod(k, 30) == 0

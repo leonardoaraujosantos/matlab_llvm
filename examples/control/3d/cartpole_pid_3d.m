@@ -91,7 +91,7 @@ for k = 1:N
     end
 
     cart.Translation = [X(1) 0 hinge];
-    hub.Rotation = [0 X(3) 0];
+    hub.Rotation = [0 0 X(3)];
     w.run(Ts);
 
     if mod(k, 25) == 0
