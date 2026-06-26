@@ -55,6 +55,13 @@ struct CppClassDef {
   // the actual property storage on the heap.  Used for dlarray and any
   // other handle-style classdef (e.g. dlquantizer).
   bool IsHandleClass = false;
+  // The classdef is declared `< handle` (reference semantics). Recorded
+  // from the frontend's `matlab.class_handle` attr. A declared-handle class
+  // with no native scalar-field properties is emitted as a runtime handle
+  // (see the post-collection pass); one that DOES have scalar fields still
+  // uses the struct path for now (routing scalar property access through the
+  // runtime object is the remaining Option-A work — see #411/#412).
+  bool DeclaredHandle = false;
 };
 
 /// Metadata for an scf.while op that matched the canonical for-loop shape
@@ -1613,6 +1620,16 @@ void Emitter::collectClassdefs(mlir::ModuleOp M) {
     auto &CD = Classes[CN.getValue()];
     if (auto SC = F->getAttrOfType<mlir::StringAttr>("matlab.class_super"))
       if (CD.Super.empty()) CD.Super = SC.getValue().str();
+    // Record `< handle` reference semantics from the frontend's
+    // `matlab.class_handle` attr (the resolver drops the `handle` SuperName,
+    // so class_super alone can't reveal it). Whether the class is actually
+    // emitted as a runtime handle is decided after the full scan, in the
+    // post-collection pass below — it needs the complete property set, since
+    // a property-less handle class (e.g. `sim3d.World`) must become a `void*`
+    // handle while a handle class with native scalar fields keeps the struct
+    // path for now.
+    if (F->hasAttr("matlab.class_handle"))
+      CD.DeclaredHandle = true;
     if (Kind && Kind.getValue() == "ctor")
       CD.Ctors.push_back(F);
     else
@@ -1639,6 +1656,21 @@ void Emitter::collectClassdefs(mlir::ModuleOp M) {
       for (auto &P : CD.Properties) if (P == *Lit) return;
       CD.Properties.push_back(*Lit);
     });
+  }
+
+  // Post-collection: a `< handle` class with NO native scalar-field
+  // properties is emitted as a runtime handle (`void*` in C / handle-backed
+  // in C++) so its `void*` runtime ABI and reference identity are honoured —
+  // this covers property-less handle classes like `sim3d.World` that the
+  // matrix-property scan misses. A declared-handle class that DOES have
+  // native scalar fields keeps the struct path for now: its property access
+  // is emitted as struct-member access, so flipping it to `void*` would break
+  // compilation. Routing scalar property access through the runtime for such
+  // classes is the remaining Option-A work (#411/#412).
+  for (auto &KV : Classes) {
+    CppClassDef &CD = KV.second;
+    if (CD.DeclaredHandle && CD.Properties.empty())
+      CD.IsHandleClass = true;
   }
 }
 

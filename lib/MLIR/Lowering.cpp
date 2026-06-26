@@ -2091,6 +2091,13 @@ void Lowerer::lowerFunction(const Function &F, mlir::ModuleOp M,
       Fn->setAttr("matlab.class_super",
                   mlir::StringAttr::get(&MCtx,
                                          std::string(Owner->Super->Name)));
+    // Reference semantics flag for the emitters. The resolver drops the
+    // `< handle` SuperName, so handle-ness can't be recovered from
+    // class_super alone — a property-less handle class (e.g. sim3d.World)
+    // would look identical to a value struct. Record it explicitly so the
+    // C/C++ backends emit a runtime-handle object rather than a value type.
+    if (!isValueClass(Owner))
+      Fn->setAttr("matlab.class_handle", mlir::UnitAttr::get(&MCtx));
   }
   // Attach the MATLAB parameter name to each func arg as a discardable
   // attribute so downstream backends (EmitC) can print readable

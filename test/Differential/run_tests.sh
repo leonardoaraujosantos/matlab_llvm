@@ -30,9 +30,24 @@ if [[ ! -f "$RTLIB" ]]; then
   echo "       build the 'MatlabRuntime' target first." >&2
   exit 2
 fi
+# MODE selects the compiled lane: cpp (default) emits C++ and compiles with the
+# C++ compiler; c emits C and compiles with the C compiler (linking the C++
+# runtime via -lstdc++). FIXTURES is the directory of `*.m` fixtures (default:
+# this script's directory).
+MODE="${MODE:-cpp}"
 CXX="${CXX:-c++}"
+CC="${CC:-cc}"
 CXXSTD="${CXXSTD:--std=c++20}"
-DIR="$(cd "$(dirname "$0")" && pwd)"
+# LINK_SUFFIX goes AFTER the runtime archive (link order matters): the C lane
+# compiles with `cc` but the runtime is C++, so it needs libstdc++ pulled in
+# after the archive that references it.
+case "$MODE" in
+  cpp) EMIT_FLAG="-emit-cpp"; EXT=cpp; COMPILER=("$CXX" "$CXXSTD"); LINK_SUFFIX=() ;;
+  c)   EMIT_FLAG="-emit-c";   EXT=c;   COMPILER=("$CC");            LINK_SUFFIX=(-lstdc++) ;;
+  *)   echo "error: MODE must be 'c' or 'cpp'" >&2; exit 2 ;;
+esac
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+DIR="${FIXTURES:-$SELF_DIR}"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -51,13 +66,13 @@ for m in "$DIR"/*.m; do
     echo "FAIL  $name  (interpreter run failed)"; fail=$((fail+1)); failed_names+=("$name"); continue
   fi
 
-  # 2. Compiled lane: emit C++, compile against the runtime archive, run.
-  src="$TMP/$name.cpp"; bin="$TMP/$name.bin"; got="$TMP/$name.got"
-  if ! "$MATLABC" -emit-cpp "$m" > "$src" 2>"$TMP/$name.emit.err"; then
-    echo "FAIL  $name  (emit-cpp failed)"; sed 's/^/        /' "$TMP/$name.emit.err" | head -3
+  # 2. Compiled lane: emit C/C++, compile against the runtime archive, run.
+  src="$TMP/$name.$EXT"; bin="$TMP/$name.bin"; got="$TMP/$name.got"
+  if ! "$MATLABC" "$EMIT_FLAG" "$m" > "$src" 2>"$TMP/$name.emit.err"; then
+    echo "FAIL  $name  ($EMIT_FLAG failed)"; sed 's/^/        /' "$TMP/$name.emit.err" | head -3
     fail=$((fail+1)); failed_names+=("$name"); continue
   fi
-  if ! "$CXX" "$CXXSTD" -w -I "$ROOT/runtime" -I "$ROOT" "$src" "$RTLIB" -lm -o "$bin" 2>"$TMP/$name.cc.err"; then
+  if ! "${COMPILER[@]}" -w -I "$ROOT/runtime" -I "$ROOT" "$src" "$RTLIB" "${LINK_SUFFIX[@]}" -lm -o "$bin" 2>"$TMP/$name.cc.err"; then
     echo "FAIL  $name  (compile/link failed)"; sed 's/^/        /' "$TMP/$name.cc.err" | head -3
     fail=$((fail+1)); failed_names+=("$name"); continue
   fi
