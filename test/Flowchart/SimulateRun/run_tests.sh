@@ -1290,8 +1290,8 @@ check "lidar [24,3] point cloud on surface" "[[ '$LIDAR_OK' == ok* ]]" "forward 
 # parented rotors + follow cam), STL import, --babylon-inline, pacingRate.
 ST="$("$MATLABC" -simulate "$EX/3d/spin_top.mflow")"
 # yaw rz = 2π·t; at t=1 → 6.283.
-ST_RZ=$(printf '%s\n' "$ST" | awk -F, 'NR==1{for(i=1;i<=NF;i++)if($i=="top[rz]")z=i} NR>1 && $1>=0.99 && $1<=1.01 {print $z; exit}')
-check "spin_top yaw ramps" "awk 'BEGIN{exit !(($ST_RZ-6.283)^2 < (1e-1)^2)}'" "ramp drives rotation rz"
+ST_RX=$(printf '%s\n' "$ST" | awk -F, 'NR==1{for(i=1;i<=NF;i++)if($i=="top[rx]")z=i} NR>1 && $1>=0.99 && $1<=1.01 {print $z; exit}')
+check "spin_top stands upright" "awk 'BEGIN{exit !(($ST_RX-1.5708)^2 < (1e-2)^2)}'" "cone tilted upright (rx=pi/2)"
 QF_F=$(mktemp /tmp/qf.XXXX.html)
 "$MATLABC" -emit-mflowlink-babylon "$EX/3d/quadrotor_flythrough.mflow" -o "$QF_F"
 QF_ACTORS=$(grep -c '"shape":' "$QF_F")
