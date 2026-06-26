@@ -44,6 +44,24 @@ c++ -std=c++20 -I runtime orbit_cube.cpp build/libMatlabRuntime.a -lm -o orbit_c
 | `w.run(dt)` | Record one keyframe of every actor's current transform; advance time by `dt`. |
 | `w.close()` | Finish recording. |
 | `sim3d.export(w, 'scene.html')` | Write the self-contained Babylon.js HTML player. |
+| `M = sim3d.capture(w, a)` | Pull actor `a`'s recorded timeline back to the workspace as an `N`-by-7 matrix `[t, x,y,z, rx,ry,rz]` (time + 6-DOF pose per frame). |
+
+## Capturing data back to the workspace
+
+`sim3d` is not only a renderer — `sim3d.capture(world, actor)` returns the
+keyframe timeline the viewer recorded as a plain numeric matrix, so a program
+can **save and reuse** the simulated trajectory (plot it, fit it, hand it to
+another tool) rather than only watching it. Each row is one `run()` frame:
+
+```matlab
+M = sim3d.capture(w, ball);   % N x 7: [t, x, y, z, rx, ry, rz]
+writematrix(M, 'trajectory.csv');   % standard MATLAB CSV writer
+% csvwrite('trajectory.csv', M);    % legacy alias (filename first)
+```
+
+`writematrix(A, file)` and `csvwrite(file, A)` write a numeric matrix as
+comma-separated text (one matrix row per line). They work in the interpreted
+REPL and the compiled lanes alike.
 
 ## Rendering model
 
@@ -58,6 +76,11 @@ produce the file; open it in a browser to play.
   counterpart of `examples/mflowlink/3d/orbit_cube.mflow`).
 - **moving_vehicle.m** — a box "vehicle" driving forward over a ground plane
   (the sim3d moving-vehicle demo with primitive shapes).
+- **ball_capture.m** — a ball bouncing on a plane that both animates *and*
+  captures its trajectory: `sim3d.capture` pulls the recorded keyframes back
+  as a matrix, `writematrix` saves them to `ball_trajectory.csv`, and the
+  program post-processes the captured data (lowest height) to prove it is
+  real numbers, not a handle.
 
 ## Applied: 3-D control demos
 

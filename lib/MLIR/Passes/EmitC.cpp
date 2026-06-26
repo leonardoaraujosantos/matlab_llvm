@@ -1858,6 +1858,11 @@ static llvm::StringRef MatrixReturningFns[] = {
     "matlab_union", "matlab_unique", "matlab_ind2sub",
     "matlab_load_mat", "matlab_fread",
     "matlab_readmatrix",
+    // sim3d.capture(world, actor) -> recorded N x 7 keyframe matrix. (The
+    // transform getters also hand back a matlab_mat*, but they are reached
+    // through a classdef getter whose return is already typed as a Matrix,
+    // so only the free-function capture needs the wrapper here.)
+    "matlab_sim3d_capture",
     // Complex / FFT — runtime returns `matlab_mat_c *` or real
     // `matlab_mat *`, both representable as a Matrix wrapper since the
     // wrapper only holds a `void *`.
