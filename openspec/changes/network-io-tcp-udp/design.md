@@ -178,6 +178,26 @@ testable:
 
 Rollback is removing the additive files/registrations; nothing existing depends on them.
 
+## Implementation notes (discovered during build)
+
+- **Method dispatch is dot-syntax only.** This frontend dispatches classdef
+  methods via `obj.method(args)`, not the bare `method(obj, args)` function form
+  (the latter resolves `method` as a global name → "undefined name"). The
+  networking objects therefore document and use `c.write(data)` / `s.read(n)`.
+- **One class per prelude file.** A handle class whose method `count` param is
+  unused in a program mis-infers to `void*` in the C++ emitter and collides with
+  the runtime extern. Splitting `tcpclient`/`tcpserver`/`udpport` into one file
+  each (`instrument_class_*.m`) means a single-class program never drags in the
+  others' identically-named methods. (Same reason the loopback test and example
+  use `udpport` for both endpoints — a single class.)
+- **Compiled-lane text I/O is deferred.** `read(count)` (a matrix) is wrapped as
+  a Matrix in the emitter so it disp's correctly; `readline` returns a
+  `matlab_string*` through a classdef method, and the emitter's string-disp
+  rewrite only fires on a *direct* string-producing call, not a method return.
+  Numeric `write`/`read` have full interpreted↔compiled parity; `writeline`/
+  `readline` are interpreter-complete, with the compiled string path left to a
+  follow-on (it needs a "string-returning method" typing pass in EmitC).
+
 ## Open Questions
 
 - **Lock-step co-simulation?** Tier 1 runs each side at its own clock (hold-last-value). Do
