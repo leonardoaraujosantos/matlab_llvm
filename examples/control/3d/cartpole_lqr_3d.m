@@ -72,13 +72,15 @@ cart.Size = [0.5 0.3 cartH];
 cart.Color = [0.20 0.55 0.95];
 w.add(cart);
 
-% Pivot hub: a tiny sphere on the cart top. Rotating the hub swings every
+% Pivot hub: a tiny box joint on the cart top. Rotating the hub swings every
 % child about the hinge, so the pole pivots about its base (not its centre).
-hub = sim3d.Actor('hub', 'sphere');
+% Sized via Size (a box), NOT Scale — a parent's Scale is inherited by its
+% children, so scaling the hub would shrink the pole and bob with it.
+hub = sim3d.Actor('hub', 'box');
 hub.Color = [0.85 0.85 0.20];
+hub.Size = [0.06 0.06 0.06];
 w.add(hub);
 hub.setParent(cart);
-hub.Scale = [0.07 0.07 0.07];
 hub.Translation = [0 0 hinge];
 
 % Pole: thin box of length L standing along +Z, base at the hub.
@@ -142,7 +144,7 @@ for k = 1:N
 
     % --- Record one keyframe -----------------------------------------
     cart.Translation = [X(1) 0 hinge];
-    hub.Rotation = [0 X(3) 0];
+    hub.Rotation = [0 0 X(3)];
     w.run(Ts);
 
     if mod(k, 25) == 0

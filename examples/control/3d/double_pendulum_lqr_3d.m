@@ -66,16 +66,16 @@ cart = sim3d.Actor('cart', 'box');
 cart.Size = [0.5 0.3 cartH];  cart.Color = [0.20 0.55 0.95];
 w.add(cart);
 
-hub0 = sim3d.Actor('hub0', 'sphere');  hub0.Color = [0.85 0.85 0.20];
-w.add(hub0);  hub0.setParent(cart);  hub0.Scale = [0.07 0.07 0.07];
+hub0 = sim3d.Actor('hub0', 'box');  hub0.Color = [0.85 0.85 0.20];
+w.add(hub0);  hub0.setParent(cart);  hub0.Size = [0.06 0.06 0.06];
 hub0.Translation = [0 0 hinge];
 
 link1 = sim3d.Actor('link1', 'box');
 link1.Size = [0.04 0.04 L1];  link1.Color = [0.90 0.30 0.25];
 w.add(link1);  link1.setParent(hub0);  link1.Translation = [0 0 L1/2];
 
-hub1 = sim3d.Actor('hub1', 'sphere');  hub1.Color = [0.85 0.85 0.20];
-w.add(hub1);  hub1.setParent(hub0);  hub1.Scale = [0.06 0.06 0.06];
+hub1 = sim3d.Actor('hub1', 'box');  hub1.Color = [0.85 0.85 0.20];
+w.add(hub1);  hub1.setParent(hub0);  hub1.Size = [0.05 0.05 0.05];
 hub1.Translation = [0 0 L1];
 
 link2 = sim3d.Actor('link2', 'box');
@@ -136,8 +136,8 @@ for k = 1:N
     % --- Record one keyframe (absolute angles -> chained hub rotations) -
     cart.Translation = [X(1) 0 hinge];
     dth = X(3) - X(2);
-    hub0.Rotation = [0 X(2) 0];
-    hub1.Rotation = [0 dth 0];               % relative, so absolute = th2
+    hub0.Rotation = [0 0 X(2)];
+    hub1.Rotation = [0 0 dth];               % relative, so absolute = th2
     w.run(Ts);
 
     if mod(k, 30) == 0

@@ -59,8 +59,8 @@ cart = sim3d.Actor('cart', 'box');
 cart.Size = [0.5 0.3 cartH];  cart.Color = [0.30 0.75 0.45];
 w.add(cart);
 
-hub = sim3d.Actor('hub', 'sphere');  hub.Color = [0.85 0.85 0.20];
-w.add(hub);  hub.setParent(cart);  hub.Scale = [0.07 0.07 0.07];
+hub = sim3d.Actor('hub', 'box');  hub.Color = [0.85 0.85 0.20];
+w.add(hub);  hub.setParent(cart);  hub.Size = [0.06 0.06 0.06];
 hub.Translation = [0 0 hinge];
 
 pole = sim3d.Actor('pole', 'box');
@@ -110,7 +110,7 @@ for k = 1:N
     end
 
     cart.Translation = [X(1) 0 hinge];
-    hub.Rotation = [0 X(3) 0];
+    hub.Rotation = [0 0 X(3)];
     w.run(Ts);
 
     if mod(k, 25) == 0
