@@ -2631,7 +2631,7 @@ static std::string buildReplPrelude(const std::string &Src, bool ScanCwd) {
     "comm", "rf", "optim", "mpc", "ident", "gads", "pde", "prop", "sym",
     "stateflow", "antenna", "control", "stats", "images", "curvefit",
     "dsp", "gpu", "finance", "econ", "fusion", "robotics", "navigation",
-    "dlnet", "rl", "bioinfo", "sim3d",
+    "dlnet", "rl", "bioinfo", "sim3d", "instrument",
   };
   std::vector<std::string> Files;
   auto add = [&](const std::string &Leaf) {
@@ -3173,6 +3173,12 @@ static std::string buildReplPrelude(const std::string &Src, bool ScanCwd) {
     {false, "sim3d_World",  "sim3d_classdefs.m"},
     {false, "sim3d_Actor",  "sim3d_classdefs.m"},
     {false, "sim3d_export", "sim3d_classdefs.m"},
+    /* Instrument Control / base-MATLAB networking — bare class names, one
+     * class per file so a single-class program does not drag in the others'
+     * identically-named methods (which mis-type in the C++ emit lane). */
+    {false, "tcpclient",    "instrument_class_tcpclient.m"},
+    {false, "tcpserver",    "instrument_class_tcpserver.m"},
+    {false, "udpport",      "instrument_class_udpport.m"},
     /* DSP HDL Toolbox — Tier-7/8 simulation surface. */
     {false, "dsphdl.FIRFilter",    "dsphdl_classdefs.m"},
     {false, "dsphdl.BiquadFilter", "dsphdl_classdefs.m"},
@@ -12593,6 +12599,8 @@ int main(int Argc, char **Argv) {
       "dsphdl.FIRDecimator", "dsphdl.CICDecimator",
       /* Simulink 3D Animation — command-line sim3d.* surface. */
       "sim3d.World", "sim3d.Actor", "sim3d.export",
+      /* Instrument Control / base-MATLAB networking — bare class names. */
+      "tcpclient", "tcpserver", "udpport",
       "arx", "ar", "armax", "oe", "bj",
       "iv4", "delayest", "compare", "predict", "resid", "goodnessOfFit",
       /* GPU Coder host-side carriers — see gpu_classdefs.m. */
@@ -12856,6 +12864,10 @@ int main(int Argc, char **Argv) {
     /* Simulink 3D Animation umbrella — any `sim3d.*` member. */
     if (ClsName.starts_with("sim3d."))
       return "sim3d_classdefs.m";
+    /* Instrument Control / base-MATLAB networking — one class per file. */
+    if (ClsName == "tcpclient") return "instrument_class_tcpclient.m";
+    if (ClsName == "tcpserver") return "instrument_class_tcpserver.m";
+    if (ClsName == "udpport")   return "instrument_class_udpport.m";
     /* GPU Coder host-side carriers — single umbrella file holding
      * gpuArray + coder_gpuConfig classdefs and gather/existsOnGPU/
      * gpuDevice free functions.  See docs/gpu_coder_roadmap.md T1.4. */
@@ -13059,7 +13071,7 @@ int main(int Argc, char **Argv) {
       "comm", "rf", "optim", "mpc", "ident", "gads", "pde", "prop", "sym",
       "stateflow", "antenna", "control", "stats", "images", "curvefit",
       "dsp", "gpu", "finance", "econ", "fusion", "robotics", "navigation",
-      "dlnet", "rl", "bioinfo", "sim3d",
+      "dlnet", "rl", "bioinfo", "sim3d", "instrument",
     };
     std::vector<std::string> Cands;
     for (const char *Tb : kToolboxDirs) {

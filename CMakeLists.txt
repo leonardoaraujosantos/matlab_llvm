@@ -389,6 +389,8 @@ add_library(MatlabRuntime STATIC
     # document writer (include/matlab/Flowchart/BabylonDocument.h) with the
     # block-diagram emitter, so MatlabRuntime also needs the compiler include dir.
     runtime/toolbox/sim3d/runtime_sim3d.cpp
+    # Instrument Control / base-MATLAB networking — tcpclient/tcpserver/udpport.
+    runtime/toolbox/instrument/runtime_instrument.cpp
     # #50 Phase 3 — Symbolic Math Toolbox dlopen stub.  Always
     # compiled into MatlabRuntime; on first sym call the stub
     # dlopens libmatlab_sym.dylib (built when MATLAB_LLVM_WITH_SYM=ON).

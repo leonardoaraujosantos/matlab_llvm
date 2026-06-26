@@ -443,6 +443,13 @@ void Resolver::registerBuiltins() {
     "matlab_sim3d_get_scale", "matlab_sim3d_set_parent",
     "matlab_sim3d_add", "matlab_sim3d_open", "matlab_sim3d_run",
     "matlab_sim3d_close", "matlab_sim3d_export", "matlab_sim3d_capture",
+    /* ===== Instrument Control / base-MATLAB networking ===== *
+     * tcpclient / tcpserver / udpport handle objects forward `obj` (+ a
+     * matrix/string payload, host string, port) into these runtime sockets
+     * (runtime/toolbox/instrument/runtime_instrument.cpp). */
+    "matlab_tcpclient_new", "matlab_tcpserver_new", "matlab_udpport_new",
+    "matlab_net_write", "matlab_udp_write_to", "matlab_net_read",
+    "matlab_net_writeline", "matlab_net_readline", "matlab_net_flush",
     /* Tier-2 — filter design (function-form, user-facing). */
     "firpm", "firpmord", "firls", "kaiserord",
     "iirnotch", "iirpeak", "iircomb", "designfilt",

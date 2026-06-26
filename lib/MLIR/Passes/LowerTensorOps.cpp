@@ -6574,6 +6574,19 @@ bool TensorLowering::rewriteBuiltinCalls() {
         /* capture(world, actor) returns the recorded N x 7 keyframe matrix
          * (PtrTy matlab_mat*) — time + 6-DOF pose per frame. */
         {"matlab_sim3d_capture",       "matlab_sim3d_capture",       PtrTy, {PtrTy, PtrTy}},
+        /* ===== Instrument Control / base-MATLAB networking =====
+         * Constructors take the handle + host string (PtrTy) + port (F64);
+         * udpport just the local port. write/read forward a matrix (PtrTy) or
+         * a count (F64); read returns a matrix, readline a string (PtrTy). */
+        {"matlab_tcpclient_new",       "matlab_tcpclient_new",       PtrTy, {PtrTy, PtrTy, F64}},
+        {"matlab_tcpserver_new",       "matlab_tcpserver_new",       PtrTy, {PtrTy, PtrTy, F64}},
+        {"matlab_udpport_new",         "matlab_udpport_new",         PtrTy, {PtrTy, F64}},
+        {"matlab_net_write",           "matlab_net_write",           F64,   {PtrTy, PtrTy}},
+        {"matlab_udp_write_to",        "matlab_udp_write_to",        F64,   {PtrTy, PtrTy, PtrTy, F64}},
+        {"matlab_net_read",            "matlab_net_read",            PtrTy, {PtrTy, F64}},
+        {"matlab_net_writeline",       "matlab_net_writeline",       F64,   {PtrTy, PtrTy}},
+        {"matlab_net_readline",        "matlab_net_readline",        PtrTy, {PtrTy}},
+        {"matlab_net_flush",           "matlab_net_flush",           F64,   {PtrTy}},
         /* Tier-3 — adaptive filters. */
         {"matlab_dsp_lms_step",    "matlab_dsp_lms_step",    PtrTy, {PtrTy, PtrTy, PtrTy}},
         {"matlab_dsp_rls_step",    "matlab_dsp_rls_step",    PtrTy, {PtrTy, PtrTy, PtrTy}},
