@@ -2454,12 +2454,30 @@ void Emitter::emitCppClass(llvm::StringRef ClassName,
   OS << "class " << ClassName.str();
   if (!CD.Super.empty()) OS << " : public " << CD.Super;
   OS << " {\npublic:\n";
-  for (auto &P : Own) OS << "  double " << P.str() << ";\n";
-  if (!Own.empty() || !CD.Ctors.empty() || !CD.Methods.empty()) OS << "\n";
-  // Always emit a default ctor — needed when the parent class chain
-  // requires one for `Foo() = default;` style construction by main /
-  // by std::array etc. and to keep field zero-init explicit.
-  OS << "  " << ClassName.str() << "() = default;\n";
+  // Handle classdef: the object's identity lives on the runtime heap. The
+  // class carries an opaque `__h` handle (created by `matlab_obj_new` in the
+  // ctor) and converts to it implicitly, so `matlab_*(*this, ...)` runtime
+  // calls and property get/set operate on the real runtime object rather than
+  // on the C++ object's address. Native double fields are not used — every
+  // property is stored on the heap via the handle.
+  if (CD.IsHandleClass) {
+    OS << "  void* __h = nullptr;\n";
+    OS << "  operator void*() const { return __h; }\n";
+  } else {
+    for (auto &P : Own) OS << "  double " << P.str() << ";\n";
+  }
+  if (!Own.empty() || !CD.Ctors.empty() || !CD.Methods.empty() ||
+      CD.IsHandleClass)
+    OS << "\n";
+  // Emit a defaulted ctor — needed for `Foo() = default;` style construction
+  // and field zero-init. Suppress it when the classdef already has a
+  // zero-argument constructor method, otherwise the two collide
+  // ("`Foo()` cannot be overloaded").
+  bool HasNoArgCtor = false;
+  for (auto F : CD.Ctors)
+    if (F.getFunctionType().getNumInputs() == 0) { HasNoArgCtor = true; break; }
+  if (!HasNoArgCtor)
+    OS << "  " << ClassName.str() << "() = default;\n";
   for (auto F : CD.Ctors)  emitCppMethod(F, ClassName);
   for (auto F : CD.Methods) emitCppMethod(F, ClassName);
   OS << "};\n\n";
@@ -2506,10 +2524,21 @@ void Emitter::emitCppMethod(mlir::func::FuncOp F,
 
   auto &Entry = F.getBody().front();
 
+  // Handle classes carry a runtime `__h` handle and convert to it via
+  // `operator void*`. Bind the receiver to `(*this)` (an object lvalue) so a
+  // runtime call `matlab_*(*this, ...)` or a property `obj_set_mat(*this, ...)`
+  // triggers that conversion to the real handle, while a sibling method call
+  // `(*this).method()` still dispatches in C++. (`this` is a pointer and would
+  // decay straight to `void*` = the C++ object address, bypassing the
+  // operator.) Value classes keep `this`.
+  auto ClsIt0 = Classes.find(ClassName);
+  bool IsHandle = (ClsIt0 != Classes.end()) && ClsIt0->second.IsHandleClass;
+  const char *SelfName = IsHandle ? "(*this)" : "this";
+
   // Bind `self` (or `other` for binary ops). Static methods bind no
   // implicit receiver — every parameter is a real argument.
   if (!IsCtor && !IsStatic && FT.getNumInputs() >= 1) {
-    Names[Entry.getArgument(0)] = "this";
+    Names[Entry.getArgument(0)] = SelfName;
     InClassMethodBody = true;
     ClassMethodSelf = Entry.getArgument(0);
     ClassMethodClassName = ClassName.str();
@@ -2522,17 +2551,25 @@ void Emitter::emitCppMethod(mlir::func::FuncOp F,
     // on it should rewrite to `other.Field`.
     ClassValueType[Entry.getArgument(1)] = ClassName.str();
   }
-  // Constructor: locate `matlab_obj_new`, alias its result to `this`,
-  // suppress that call + the trailing `return obj_new_result`.
+  // Constructor: locate `matlab_obj_new`, alias its result to the receiver,
+  // suppress that call + the trailing `return obj_new_result`. For a handle
+  // class the call is re-emitted as `this->__h = matlab_obj_new(class_id);`
+  // in the body prologue (see below); for a value class it is dropped (the
+  // object is the C++ `this`).
   mlir::Operation *CtorObjNew = nullptr;
+  std::string CtorHandleInit;
   if (IsCtor) {
     F.getBody().walk([&](mlir::LLVM::CallOp C) {
       if (CtorObjNew) return;
       if (C.getCallee() && *C.getCallee() == "matlab_obj_new" &&
           C.getNumResults() == 1) {
         CtorObjNew = C.getOperation();
-        Names[C.getResult()] = "this";
+        Names[C.getResult()] = SelfName;
         SuppressedOps.insert(C.getOperation());
+        if (IsHandle && C.getNumOperands() >= 1)
+          CtorHandleInit =
+              "  this->__h = matlab_obj_new(" +
+              stmtExpr(C.getOperand(0)) + ");\n";
       }
     });
     if (CtorObjNew) {
@@ -2626,7 +2663,9 @@ void Emitter::emitCppMethod(mlir::func::FuncOp F,
   // emit `: Field(arg), Field(arg) {}` instead of body-assignment form.
   // For subclasses with inherited fields the leading stores can become
   // a base-ctor call when their order matches the parent ctor's params.
-  if (IsCtor && Cpp) {
+  // Handle classes have no native fields to init this way — their ctor body
+  // creates the runtime handle and runs the body — so skip the shortcut.
+  if (IsCtor && Cpp && !IsHandle) {
     auto ClsIt = Classes.find(ClassName);
     auto M = F->getParentOfType<mlir::ModuleOp>();
     if (ClsIt != Classes.end()) {
@@ -2782,6 +2821,10 @@ void Emitter::emitCppMethod(mlir::func::FuncOp F,
   }
 
   OS << " {\n";
+
+  // Handle-class ctor: create the runtime object first; the body's runtime
+  // calls / property sets then operate on `__h` via `(*this)`.
+  if (!CtorHandleInit.empty()) OS << CtorHandleInit;
 
   // Trivial body? Empty / just-return / ctor with only obj_new+return.
   bool BodyIsTrivial = true;
@@ -3200,7 +3243,10 @@ void Emitter::precomputeModuleProperties(mlir::ModuleOp M) {
         return CN ? CN.getValue() : llvm::StringRef();
       };
       auto isHandleCaller = [&]() -> bool {
-        if (Cpp) return false;
+        // Handle classes keep `matlab_obj_new` (and any obj property calls)
+        // live in BOTH C and C++ modes: C emits `void* self = matlab_obj_new`,
+        // C++ emits `this->__h = matlab_obj_new`. (Value classes in C++ still
+        // suppress obj_new — the object is the C++ `this`.)
         auto Cls = callerClass();
         if (Cls.empty()) return false;
         auto It = Classes.find(Cls);
@@ -4534,6 +4580,12 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
               std::string Args = Rewrite.substr(
                   CtorPrefix.size(),
                   Rewrite.size() - CtorPrefix.size() - 1);
+              if (Args.empty())
+                OS << ResultTy << " " << ResultName << "{};\n";
+              else
+                if (Args.empty())
+              OS << ResultTy << " " << ResultName << "{};\n";
+            else
               OS << ResultTy << " " << ResultName << "(" << Args << ");\n";
             } else {
               OS << ResultTy << " " << ResultName << " = "
@@ -4621,6 +4673,12 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
               std::string Args = Rewrite.substr(
                   CtorPrefix.size(),
                   Rewrite.size() - CtorPrefix.size() - 1);
+              if (Args.empty())
+                OS << ResultTy << " " << ResultName << "{};\n";
+              else
+                if (Args.empty())
+              OS << ResultTy << " " << ResultName << "{};\n";
+            else
               OS << ResultTy << " " << ResultName << "(" << Args << ");\n";
             } else {
               OS << ResultTy << " " << ResultName << " = "
@@ -4744,7 +4802,10 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
             std::string Args = Rewrite.substr(
                 CtorPrefix.size(),
                 Rewrite.size() - CtorPrefix.size() - 1);
-            OS << ResultTy << " " << ResultName << "(" << Args << ");\n";
+            if (Args.empty())
+              OS << ResultTy << " " << ResultName << "{};\n";
+            else
+              OS << ResultTy << " " << ResultName << "(" << Args << ");\n";
           } else {
             OS << ResultTy << " " << ResultName << " = "
                << Rewrite << ";\n";
@@ -4767,7 +4828,10 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
             std::string Args = Rewrite.substr(
                 CtorPrefix.size(),
                 Rewrite.size() - CtorPrefix.size() - 1);
-            OS << ResultTy << " " << ResultName << "(" << Args << ");\n";
+            if (Args.empty())
+              OS << ResultTy << " " << ResultName << "{};\n";
+            else
+              OS << ResultTy << " " << ResultName << "(" << Args << ");\n";
           } else {
             OS << ResultTy << " " << ResultName << " = "
                << Rewrite << ";\n";
