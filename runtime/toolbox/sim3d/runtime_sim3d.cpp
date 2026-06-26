@@ -263,7 +263,9 @@ void matlab_sim3d_export(void *world_v, void *path_v) {
   // scene — e.g. a 0.6 m cart-pole — render as a speck), and note whether the
   // user supplied their own ground plane (so we can drop the viewer's large
   // built-in ground, which otherwise shows as a big dark backdrop plane).
-  double extent = 0.0;
+  double sizeExtent = 0.0;
+  double minP[3] = {1e30, 1e30, 1e30}, maxP[3] = {-1e30, -1e30, -1e30};
+  bool haveBox = false;
   bool hasUserGround = false;
   std::ostringstream Actors;
   size_t Count = 0;
@@ -276,19 +278,27 @@ void matlab_sim3d_export(void *world_v, void *path_v) {
     static const double sdef[3] = {1, 1, 1};
     readVec(matlab_obj_get_mat(a, "Color", 5), A.color, 3, cdef);
     readVec(matlab_obj_get_mat(a, "Size", 4), A.size, 3, sdef);
-    // Content extent: how far actors travel (key translations) plus how big
-    // they are. A ground plane is excluded from the size term (it is meant to
-    // be large and would otherwise pull the camera too far back) but its
-    // presence suppresses the viewer's built-in ground.
+    // A ground plane is excluded from the framing (it is meant to be large and
+    // would otherwise pull the camera too far back) but its presence suppresses
+    // the viewer's built-in ground. Track the size of the visible props and the
+    // bounding box of the moving content (unparented, non-ground actors —
+    // parented children carry local keys, so they're skipped) to centre and
+    // size the camera.
     if (A.shape == "plane") {
       hasUserGround = true;
     } else {
       for (int d = 0; d < 3; ++d)
-        extent = std::max(extent, std::fabs(A.size[d]));
+        sizeExtent = std::max(sizeExtent, std::fabs(A.size[d]));
+      if (!A.parent) {
+        for (const auto &k : A.keys) {
+          haveBox = true;
+          for (int d = 0; d < 3; ++d) {
+            minP[d] = std::min(minP[d], k[d]);
+            maxP[d] = std::max(maxP[d], k[d]);
+          }
+        }
+      }
     }
-    for (const auto &k : A.keys)
-      for (int d = 0; d < 3; ++d)
-        extent = std::max(extent, std::fabs(k[d]));
     if (Count) Actors << ",\n";
     Actors << "    {";
     Actors << "\"id\":" << jsonStr(A.id);
@@ -317,13 +327,25 @@ void matlab_sim3d_export(void *world_v, void *path_v) {
     ++Count;
   }
 
-  // Frame the orbit camera to the content. `extent` is the farthest the scene
-  // reaches from the origin; place the camera at ~2.4x that out along x/y and
-  // ~1.8x up, with a floor so a tiny scene isn't clipped by the near plane.
-  // Falls back to the historical [8,8,6] for an empty/degenerate scene.
+  // Frame the orbit camera to the content's bounding box: orbit around its
+  // CENTRE (so a roaming actor — e.g. the moving-vehicle drive of tens of
+  // metres — stays in view instead of sliding off to one side) and size to the
+  // box's half-span. Cap the half-span relative to the prop size so a very
+  // long path doesn't shrink the prop to a speck (you then see the prop large
+  // as it passes through the middle of the path); small/tabletop scenes fall
+  // below the cap and are unaffected.
+  double center[3] = {0, 0, 0}, halfSpan = 0.0;
+  if (haveBox)
+    for (int d = 0; d < 3; ++d) {
+      center[d] = 0.5 * (minP[d] + maxP[d]);
+      halfSpan = std::max(halfSpan, 0.5 * (maxP[d] - minP[d]));
+    }
+  double spanCap = std::max(8.0, 4.0 * sizeExtent);
+  double extent = std::max(sizeExtent, std::min(halfSpan, spanCap));
   if (extent < 0.8) extent = 0.8;
   double vxy = extent * 2.4;
   double vz = extent * 1.8;
+  double camPos[3] = {center[0] + vxy, center[1] + vxy, center[2] + vz};
   std::ostringstream Scene;
   Scene << "{\n";
   // When the user staged their own ground plane, drop both the viewer's
@@ -341,7 +363,10 @@ void matlab_sim3d_export(void *world_v, void *path_v) {
   for (size_t I = 0; I < W.times.size(); ++I) Scene << (I ? "," : "") << W.times[I];
   Scene << "],\n";
   Scene << "  \"lights\":[],\n";
-  Scene << "  \"cameras\":[],\n";
+  // Orbit camera positioned at camPos looking at the content centre.
+  Scene << "  \"cameras\":[{\"target\":["
+        << center[0] << "," << center[1] << "," << center[2] << "],\"position\":["
+        << camPos[0] << "," << camPos[1] << "," << camPos[2] << "]}],\n";
   Scene << "  \"actors\":[\n" << Actors.str() << "\n  ]\n";
   Scene << "}";
 

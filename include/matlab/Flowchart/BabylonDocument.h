@@ -17,7 +17,10 @@
 //     "actors":[ {"id","name","shape","size","radius","height","color",
 //                 "emissive","opacity",..., "keys":[[tx,ty,tz,rx,ry,rz,sx,sy,sz,...]]} ] }
 // The viewer maps the right-handed Z-up metres frame onto Babylon by parenting
-// the scene under a root rotated -90 deg about X; rotations use yaw-pitch-roll.
+// the scene under a root rotated -90 deg about X. The rotation triple
+// [rx,ry,rz] is standard intrinsic roll-pitch-yaw about model [X,Y,Z]
+// (a cart-pole whose cart moves along X tilts with [0,theta,0]); the same
+// applies to URDF link/joint origin rpy.
 //===----------------------------------------------------------------------===//
 
 #include <ostream>
@@ -160,7 +163,7 @@ function buildUrdf(a, baseNode){
     vis.parent = n;
     const vo = L.vorigin||[0,0,0,0,0,0];
     vis.position.set(vo[0],vo[1],vo[2]);
-    vis.rotationQuaternion = BABYLON.Quaternion.RotationYawPitchRoll(vo[5],vo[4],vo[3]);
+    vis.rotationQuaternion = BABYLON.Quaternion.RotationYawPitchRoll(vo[4],vo[3],vo[5]);
     const mat = new BABYLON.StandardMaterial(n.name+'_m', scene);
     mat.diffuseColor = mkColor(a.color || [0.7,0.7,0.78]); vis.material = mat;
     nodes[L.name] = n;
@@ -172,7 +175,7 @@ function buildUrdf(a, baseNode){
     if (!cn || !pn) continue;
     cn.parent = pn;
     cn.position.set(J.origin[0],J.origin[1],J.origin[2]);
-    const baseQ = BABYLON.Quaternion.RotationYawPitchRoll(J.origin[5],J.origin[4],J.origin[3]);
+    const baseQ = BABYLON.Quaternion.RotationYawPitchRoll(J.origin[4],J.origin[3],J.origin[5]);
     cn.rotationQuaternion = baseQ.clone();
     roots.delete(J.child);
     if (J.q >= 0) joints.push({node:cn, axis:new BABYLON.Vector3(J.axis[0],J.axis[1],J.axis[2]), q:J.q, base:baseQ});
@@ -263,7 +266,7 @@ function applyFrame(i){
     const k = a.keys[i]; if (!k) continue;
     const m = meshByKey[a.id];
     m.position.set(k[0], k[1], k[2]);
-    m.rotationQuaternion = BABYLON.Quaternion.RotationYawPitchRoll(k[5], k[4], k[3]);
+    m.rotationQuaternion = BABYLON.Quaternion.RotationYawPitchRoll(k[4], k[3], k[5]);
     m.scaling.set(k[6], k[7], k[8]);
     // URDF joints: rotate each movable joint about its axis by jointAngles[q].
     const rig = urdfRigs[a.id];
