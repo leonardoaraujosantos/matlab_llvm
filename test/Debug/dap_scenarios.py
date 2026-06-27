@@ -693,15 +693,24 @@ def scn_evaluate_in_frame(matlabc, program):
         inner_id = inner["id"]
         outer_id = outer["id"]
 
-        # Without frameId — eval defaults to the script ws. The REPL
-        # JIT silently resolves an unknown name to an empty matrix
-        # (0x0 double) rather than erroring. The exact rendering
-        # ("0x0 double" today) is a runtime detail; what matters for
-        # the bridge test is that this baseline value is NOT "3", so
-        # we'll be sure the per-frame branch below changed something.
-        resp_no_frame = c.request("evaluate", {"expression": "a"})
-        assert resp_no_frame.get("result") != "3", \
-            f"sanity: 'a' without frameId must not be 3 (compute's value): {resp_no_frame!r}"
+        # Evaluate 'a' against the script workspace (no frameId), tolerating
+        # the post-#423 behavior: 'a' (a local of compute) is not in script
+        # scope, so the REPL now raises "Unrecognized function or variable"
+        # instead of silently resolving to an empty matrix. Return the result
+        # string, or None when it correctly reports the name as undefined.
+        # Either way it must not be compute's value ("3"), which is what proves
+        # the per-frame branch below actually changed the resolution.
+        def eval_script_a():
+            try:
+                return c.request("evaluate", {"expression": "a"}).get("result")
+            except DapError as e:
+                assert "Unrecognized function or variable" in str(e), \
+                    f"unexpected no-frame eval failure: {e!r}"
+                return None
+
+        a_before = eval_script_a()
+        assert a_before != "3", \
+            f"sanity: 'a' without frameId must not be 3 (compute's value): {a_before!r}"
 
         # With frameId pointing at the function frame: a/b/total must
         # all resolve and arithmetic on them must work.
@@ -726,16 +735,16 @@ def scn_evaluate_in_frame(matlabc, program):
             assert n not in vars_outer, \
                 f"frame-scoped eval leaked {n!r} into the script workspace: {vars_outer!r}"
 
-        # And explicit `evaluate` without frameId must NOT now resolve
-        # 'a' to 3 — the restore took the stamped value back out of ws.
-        resp = c.request("evaluate", {"expression": "a"})
-        assert resp.get("result") != "3", \
-            f"after frame-scoped eval the bridge should be reversed: {resp!r}"
-        # And the value must equal what we got before the bridge fired,
-        # i.e. nothing about the script ws view of 'a' has changed.
-        assert resp.get("result") == resp_no_frame.get("result"), \
+        # And explicit `evaluate` without frameId must NOT now resolve 'a' to 3
+        # — the restore took the stamped value back out of ws — and must match
+        # the pre-bridge script-scope view (both unavailable, or both the same
+        # value): nothing about the script ws view of 'a' changed.
+        a_after = eval_script_a()
+        assert a_after != "3", \
+            f"after frame-scoped eval the bridge should be reversed: {a_after!r}"
+        assert a_after == a_before, \
             f"script-scope evaluate('a') changed across the bridge: " \
-            f"before={resp_no_frame!r} after={resp!r}"
+            f"before={a_before!r} after={a_after!r}"
 
         # Pre-existing script-scope `seed` survives the eval round-trip
         # untouched.

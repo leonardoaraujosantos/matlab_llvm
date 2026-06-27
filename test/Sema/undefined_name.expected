@@ -11,6 +11,6 @@ TranslationUnit
           BinOp + [any]
             Name x (param) [any]
             Name undefined_thing (?) [any]
-Sema/undefined_name.m:2:13: error: undefined name 'undefined_thing'
+Sema/undefined_name.m:2:13: error: Unrecognized function or variable 'undefined_thing'.
       y = x + undefined_thing;
               ^

@@ -7956,6 +7956,11 @@ matlab_mat *matlab_atan2_m(matlab_mat *Y, matlab_mat *X) {
  * 0 (silently) — a proper implementation would abort or raise an error.
  *-------------------------------------------------------------------------*/
 
+/* #423 index validation — defined later in this TU (near the #405 raise
+ * helpers); forward-declare so the subscript readers below can call them. */
+void matlab_check_index(double i, int64_t total);
+void matlab_check_index_pos(double v, int64_t dimsize, int pos);
+
 double matlab_subscript2_s(matlab_mat *A, double i, double j) {
     int64_t ri = (int64_t)i - 1, cj = (int64_t)j - 1;
     /* Complex-aware companion to matlab_subscript1_s — see comment
@@ -7990,6 +7995,8 @@ double matlab_subscript2_s(matlab_mat *A, double i, double j) {
         }
         return m->data[off];
     }
+    matlab_check_index_pos(i, A->rows, 1);
+    matlab_check_index_pos(j, A->cols, 2);
     if (ri < 0 || ri >= A->rows || cj < 0 || cj >= A->cols) return 0.0;
     return A->data[ri * A->cols + cj];
 }
@@ -8025,6 +8032,7 @@ double matlab_subscript1_s(matlab_mat *A, double i) {
         return m->data[idx];
     }
     int64_t total = A->rows * A->cols;
+    matlab_check_index(i, total);
     if (idx < 0 || idx >= total) return 0.0;
     return A->data[idx];
 }
@@ -8176,6 +8184,64 @@ void matlab_raise(void) {
     matlab_set_error();
     matlab_eh_unwind_or_flag();
 }
+
+/* Raise with a plain C-string message (#423 indexing/bounds checks). Same
+ * halting contract as matlab_raise_str but without needing a matlab_string. */
+void matlab_raise_cmsg(const char *msg) {
+    matlab_set_error_id("", 0);
+    matlab_set_error_msg(msg, msg ? (int64_t)strlen(msg) : 0);
+    matlab_eh_unwind_or_flag();
+}
+
+/* MATLAB-style index validation for a scalar read subscript (#423). `i` is the
+ * 1-based index as the caller received it; `total` is the element count along
+ * the checked dimension (or the whole array for linear indexing). Raises and
+ * does not return when the index is non-positive, non-integer, or too large. */
+void matlab_check_index(double i, int64_t total) {
+    if (i < 1.0 || i != (double)(int64_t)i)
+        matlab_raise_cmsg(
+            "Array indices must be positive integers or logical values.");
+    if ((int64_t)i > total) {
+        char buf[160];
+        snprintf(buf, sizeof buf,
+                 "Index exceeds the number of array elements. "
+                 "Index must not exceed %lld.", (long long)total);
+        matlab_raise_cmsg(buf);
+    }
+}
+
+/* Cell brace-read index validation, e.g. c{i} (#423). */
+void matlab_check_cell_index(double i1, int64_t n) {
+    if (i1 < 1.0 || i1 != (double)(int64_t)i1)
+        matlab_raise_cmsg(
+            "Array indices must be positive integers or logical values.");
+    if ((int64_t)i1 > n) {
+        char buf[160];
+        snprintf(buf, sizeof buf,
+                 "Index exceeds the number of elements in the cell array. "
+                 "Index must not exceed %lld.", (long long)n);
+        matlab_raise_cmsg(buf);
+    }
+}
+
+/* Positional variant for multi-subscript reads, e.g. A(i,j) (#423). `pos` is
+ * the 1-based subscript position; `dimsize` is that dimension's extent. */
+void matlab_check_index_pos(double v, int64_t dimsize, int pos) {
+    if (v < 1.0 || v != (double)(int64_t)v)
+        matlab_raise_cmsg(
+            "Array indices must be positive integers or logical values.");
+    if ((int64_t)v > dimsize) {
+        char buf[160];
+        snprintf(buf, sizeof buf,
+                 "Index in position %d exceeds array bounds. "
+                 "Index must not exceed %lld.", pos, (long long)dimsize);
+        matlab_raise_cmsg(buf);
+    }
+}
+
+/* The string-typed raise entries (matlab_raise_str / matlab_raise_id_str) and
+ * the ME.message / ME.identifier readers need the full matlab_string layout,
+ * so they are defined after struct matlab_string_s (search "#405 raise"). */
 
 /* The string-typed raise entries (matlab_raise_str / matlab_raise_id_str) and
  * the ME.message / ME.identifier readers need the full matlab_string layout,
@@ -17975,6 +18041,7 @@ void matlab_cell_set_str(matlab_cell *c, double i1, void *str) {
 double matlab_cell_get_f64(matlab_cell *c, double i1) {
     if (!c) return 0.0;
     int32_t i = (int32_t)i1 - 1;
+    matlab_check_cell_index(i1, c->n);
     if (i < 0 || i >= c->n) return 0.0;
     if (c->kinds[i] == 0) return c->f64_vals[i];
     /* If the slot holds a 1x1 matrix, unbox to scalar. */
@@ -17988,6 +18055,7 @@ double matlab_cell_get_f64(matlab_cell *c, double i1) {
 matlab_mat *matlab_cell_get_mat(matlab_cell *c, double i1) {
     if (!c) return mat_alloc(0, 0);
     int32_t i = (int32_t)i1 - 1;
+    matlab_check_cell_index(i1, c->n);
     if (i < 0 || i >= c->n) return mat_alloc(0, 0);
     if (c->kinds[i] == 1 && c->ptr_vals[i])
         return (matlab_mat *)c->ptr_vals[i];
