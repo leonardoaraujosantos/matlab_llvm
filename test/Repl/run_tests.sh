@@ -975,6 +975,16 @@ run_case "assign_matched_ok" "$(printf 'x=[1 2 3]; x(1:2)=[5 6]; fprintf("A=%%d\
 run_case "assign_scalar_bcast_ok" "$(printf 'x=[1 2 3]; x(1:2)=9; fprintf("B=%%d\\n", sum(x));\nexit\n')" \
   "B=21"
 
+# Concatenation dimension mismatches error instead of returning a silent
+# empty; valid shapes still work. (matmul-mismatch is deferred — it exposes a
+# separate mpcmove 0x0 bug; see the tracking issue.)
+run_case "vertcat_mismatch" "$(printf '[ [1 2 3]; [1 2] ]\nexit\n')" \
+  "Dimensions of arrays being concatenated are not consistent."
+run_case "horzcat_mismatch" "$(printf '[ [1;2], [3;4;5] ]\nexit\n')" \
+  "Dimensions of arrays being concatenated are not consistent."
+run_case "concat_ok" "$(printf 'fprintf("C=%%d\\n", sum([[1 2],[3 4]]));\nexit\n')" \
+  "C=10"
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 if (( fail > 0 )); then
