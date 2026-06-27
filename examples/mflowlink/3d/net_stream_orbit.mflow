@@ -1,0 +1,31 @@
+{ "schema": "matforge.flowchart", "version": "0.1.0", "entry": "net_stream_orbit",
+  "settings": { "kind": "signal_flow", "solver": { "type": "fixed_step", "algorithm": "ode4", "startTime": 0.0, "stopTime": 6.283185307179586, "maxStep": "0.05" } },
+  "flows": [{ "id": "flow", "kind": "program", "name": "net_stream_orbit", "signature": { "inputs": [], "outputs": [] },
+    "nodes": [
+      { "id": "world", "kind": "signal_world3d",
+        "data": { "params": { "viewpoint": "8,8,6", "showGround": true, "showAxes": true, "output": "net_stream_orbit.html" } },
+        "ports": { "in": [], "out": [] } },
+      { "id": "sin_x", "kind": "signal_sine",
+        "data": { "log_signal": true, "params": { "amplitude": 3.0, "frequency": 1.0, "phase": 0.0, "bias": 0.0 } },
+        "ports": { "in": [], "out": [ { "id": "out" } ] } },
+      { "id": "cos_y", "kind": "signal_sine",
+        "data": { "log_signal": true, "params": { "amplitude": 3.0, "frequency": 1.0, "phase": 1.5707963267948966, "bias": 0.0 } },
+        "ports": { "in": [], "out": [ { "id": "out" } ] } },
+      { "id": "z0", "kind": "signal_constant", "data": { "params": { "value": 1.0 } },
+        "ports": { "in": [], "out": [ { "id": "out" } ] } },
+      { "id": "pos", "kind": "signal_mux", "data": { "params": {} },
+        "ports": { "in": [ { "id": "in1" }, { "id": "in2" }, { "id": "in3" } ], "out": [ { "id": "out" } ] } },
+      { "id": "cube", "kind": "signal_actor3d",
+        "data": { "params": { "name": "cube", "shape": "box", "size": "1,1,1", "color": "0.2,0.6,1.0" } },
+        "ports": { "in": [ { "id": "translation" }, { "id": "rotation" }, { "id": "scale" } ], "out": [] } },
+      { "id": "stream", "kind": "signal_udp_send",
+        "data": { "params": { "host": "127.0.0.1", "port": 51900.0 } },
+        "ports": { "in": [ { "id": "in" } ], "out": [ { "id": "out" } ] } }
+    ],
+    "edges": [
+      { "id": "e_x", "kind": "data", "from": { "node": "sin_x", "port": "out" }, "to": { "node": "pos", "port": "in1" } },
+      { "id": "e_y", "kind": "data", "from": { "node": "cos_y", "port": "out" }, "to": { "node": "pos", "port": "in2" } },
+      { "id": "e_z", "kind": "data", "from": { "node": "z0", "port": "out" }, "to": { "node": "pos", "port": "in3" } },
+      { "id": "e_pos", "kind": "data", "from": { "node": "pos", "port": "out" }, "to": { "node": "cube", "port": "translation" } },
+      { "id": "e_net", "kind": "data", "from": { "node": "pos", "port": "out" }, "to": { "node": "stream", "port": "in" } }
+    ] }] }

@@ -394,6 +394,28 @@ private:
   double Gravity_[3] = {0.0, 0.0, -9.81};
   std::vector<double> CosimContact_; // per-block ground-contact flag (1/0)
   void resolveCosimContacts();
+  // - network-io (TCP/UDP). One `NetSlot` per block; only the
+  //   signal_{udp,tcp}_{send,recv} blocks use theirs. A *_send transmits its
+  //   input wire; a *_recv drains the socket and latches the last value. All
+  //   socket I/O happens once per major step in commitNetworkIO() (never in an
+  //   RK4 minor stage), so the deterministic continuous integration is
+  //   untouched. The fd is held as an int (the sockaddr is rebuilt in the .cpp
+  //   from host/port, so the network headers stay out of this widely-included
+  //   header). Opened on reset(), closed in the destructor.
+  struct NetSlot {
+    bool active = false;    // a socket block?
+    bool isSend = false;    // send vs recv
+    bool isTcp = false;     // tcp vs udp
+    int fd = -1;            // data socket (udp socket, tcp client/accepted)
+    int listenFd = -1;      // tcp_recv: the listening socket
+    int port = 0;
+    std::string host;       // send: destination host; recv: bind host
+    double lastValue = 0.0; // recv: most recent received value (or initialValue)
+  };
+  std::vector<NetSlot> NetSlots_;
+  void openNetSockets();    // reset(): (re)open every socket block's socket
+  void closeNetSockets();   // destructor: close them
+  void commitNetworkIO();   // once per major step: send inputs, drain recvs
   // - `Kalman_[I]` is the per-block discrete Kalman-filter state for a
   //   `signal_kalman` block (#343): the parsed A/C/Q/R/B matrices (flat
   //   row-major) plus the running estimate `X` (length N) and error covariance

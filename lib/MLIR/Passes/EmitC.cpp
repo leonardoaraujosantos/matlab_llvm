@@ -1863,6 +1863,9 @@ static llvm::StringRef MatrixReturningFns[] = {
     // through a classdef getter whose return is already typed as a Matrix,
     // so only the free-function capture needs the wrapper here.)
     "matlab_sim3d_capture",
+    // tcpclient/tcpserver/udpport read(count) -> 1xN row of float64; the
+    // classdef `read` method forwards this matlab_mat* straight out.
+    "matlab_net_read",
     // Complex / FFT — runtime returns `matlab_mat_c *` or real
     // `matlab_mat *`, both representable as a Matrix wrapper since the
     // wrapper only holds a `void *`.

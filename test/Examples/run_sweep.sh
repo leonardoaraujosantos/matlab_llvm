@@ -103,6 +103,7 @@ RUNTIME_SRCS=(
   "$ROOT/runtime/gpu/runtime_gpu.cpp"
   "$ROOT/runtime/toolbox/gpu/runtime_gpu_helpers.cpp"
   "$ROOT/runtime/toolbox/sim3d/runtime_sim3d.cpp"
+  "$ROOT/runtime/toolbox/instrument/runtime_instrument.cpp"
 )
 
 WORK="$(mktemp -d -t mlc-sweep.XXXXXX)"
@@ -194,6 +195,9 @@ skip_scope() {
     mflowlink/*)  return 0 ;;  # cross-dialect fragments, run via mflowlink_run
     */mflowlink/*) return 0 ;;  # mflowLink companion scripts (e.g. trajectory plotters)
     stateflow/*)  return 0 ;;  # state-chart fragments
+    instrument/*) return 0 ;;  # network examples — need a live peer / two processes;
+                               # compile+run parity is covered by
+                               # test/Differential/net_udp_loopback.m
     *_hdl.m)      return 0 ;;  # HDL-targeted file outside hdl/
   esac
   # Pragma scan: head -20 keeps the cost bounded for files that don't match

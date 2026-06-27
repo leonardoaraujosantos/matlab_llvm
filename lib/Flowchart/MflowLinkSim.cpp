@@ -19,6 +19,14 @@
 #include <string>
 #include <unordered_map>
 
+// network-io (TCP/UDP) block sockets — POSIX, Linux/macOS.
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
 //===----------------------------------------------------------------------===//
 // MflowLinkSim — the Tier-C continuous-time simulation interpreter.
 //
@@ -698,6 +706,22 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
   Kalman_.assign(N, {});
   MatlabFcnCache_.resize(N);
   MatlabFnCache_.resize(N);
+  // network-io (TCP/UDP) — classify the socket blocks; sockets open on reset().
+  NetSlots_.assign(N, {});
+  for (size_t I = 0; I < M_.Blocks.size(); ++I) {
+    const std::string &K = M_.Blocks[I].Kind;
+    bool send = (K == "signal_udp_send" || K == "signal_tcp_send");
+    bool recv = (K == "signal_udp_recv" || K == "signal_tcp_recv");
+    if (!send && !recv) continue;
+    NetSlot &S = NetSlots_[I];
+    S.active = true;
+    S.isSend = send;
+    S.isTcp = (K == "signal_tcp_send" || K == "signal_tcp_recv");
+    S.port = static_cast<int>(paramD(M_.Blocks[I], "port", 5000.0));
+    const std::string *H = paramS(M_.Blocks[I], "host");
+    S.host = H ? *H : "127.0.0.1";
+    S.lastValue = paramD(M_.Blocks[I], "initialValue", 0.0);
+  }
   // §17.5 #8 — snapshot the currently installed JIT factory once.
   // Subsequent installs only affect later simulators.
   MatlabFcnJitOps_ = currentMatlabFcnJit();
@@ -1118,6 +1142,9 @@ void MflowLinkSim::reset() {
   // co-sim contact flags.
   Gravity_[0] = 0.0; Gravity_[1] = 0.0; Gravity_[2] = -9.81;
   CosimContact_.assign(M_.Blocks.size(), 0.0);
+
+  // network-io — (re)open every socket block's socket for this run.
+  openNetSockets();
   for (const auto &B : M_.Blocks) {
     if (B.Kind != "signal_world3d") continue;
     if (const std::string *G = paramS(B, "gravity")) {
@@ -2068,6 +2095,17 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       } else {
         Out_[I] = inputOf(I, "in");
       }
+    } else if (K == "signal_udp_send" || K == "signal_tcp_send") {
+      // A network sink: pass the input wire through to the output (so it can
+      // still be logged / chained). The actual transmit happens once per major
+      // step in commitNetworkIO(), never in this multiply-called evaluation.
+      Out_[I] = inputOf(I, "in");
+    } else if (K == "signal_udp_recv" || K == "signal_tcp_recv") {
+      // A loop-breaker source: publish the value latched by commitNetworkIO()
+      // (the most recent datagram/byte, or the initialValue before any). The
+      // output does NOT depend on this step's input, so it can sit in a
+      // feedback path without forming an algebraic loop.
+      Out_[I] = (I < NetSlots_.size()) ? NetSlots_[I].lastValue : 0.0;
     } else if (K == "signal_mux") {
       // Item-1 — concatenate input slices into a single vector
       // output. Scalar inputs contribute one element each; vector
@@ -4257,6 +4295,12 @@ double MflowLinkSim::stepMajor() {
   // just-integrated state before the final output refresh, so the clamped
   // pose + contact flag appear in this step's logged sample.
   resolveCosimContacts();
+  // network-io — once per major step (here, not in evalAll which runs several
+  // times per step): each *_send transmits its post-step input wire, each
+  // *_recv drains its socket and latches the freshest value. The refresh
+  // evalAll below then republishes a *_recv's new value into Out_ so it lands
+  // in this step's logged sample.
+  commitNetworkIO();
   evalAll(T_, Y_.data(), nullptr);
   // Tier F carve-out — snapshot the just-finished outputs as the
   // *previous* values for the next step's edge-trigger detection.
@@ -4661,6 +4705,130 @@ void MflowLinkSim::resolveCosimContacts() {
   }
 }
 
+// ---- network-io (TCP/UDP) block sockets ----------------------------------
+namespace {
+// Build a sockaddr_in from host + port. Returns false on a bad address.
+bool netFillAddr(sockaddr_in &a, const std::string &host, int port) {
+  std::memset(&a, 0, sizeof(a));
+  a.sin_family = AF_INET;
+  a.sin_port = htons(static_cast<uint16_t>(port));
+  std::string h = host.empty() ? "127.0.0.1" : host;
+  if (h == "localhost") h = "127.0.0.1";
+  if (h == "0.0.0.0") { a.sin_addr.s_addr = INADDR_ANY; return true; }
+  return ::inet_pton(AF_INET, h.c_str(), &a.sin_addr) == 1;
+}
+void netSetNonBlocking(int fd) {
+  int fl = ::fcntl(fd, F_GETFL, 0);
+  if (fl >= 0) ::fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+}
+} // namespace
+
+// reset(): (re)open every socket block's socket. A *_send connects (TCP) or
+// creates a datagram socket (UDP) toward host:port; a *_recv binds host:port
+// (UDP) or listens for one client (TCP). Non-blocking throughout so a missing
+// peer never stalls the solver.
+void MflowLinkSim::openNetSockets() {
+  closeNetSockets();
+  // Two passes so a same-process loopback works regardless of block order:
+  // open every receiver (bind / listen) first, then every sender (connect),
+  // so a TCP sender always finds its peer already listening.
+  for (int pass = 0; pass < 2; ++pass)
+  for (auto &S : NetSlots_) {
+    if (!S.active) continue;
+    if (S.isSend != (pass == 1)) continue; // pass 0: recv, pass 1: send
+    sockaddr_in a;
+    if (!netFillAddr(a, S.host, S.port)) continue;
+    if (S.isTcp) {
+      int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+      if (fd < 0) continue;
+      int yes = 1;
+      ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+      if (S.isSend) {
+        ::connect(fd, reinterpret_cast<sockaddr *>(&a), sizeof(a));
+        netSetNonBlocking(fd);
+        S.fd = fd;
+      } else {
+        if (::bind(fd, reinterpret_cast<sockaddr *>(&a), sizeof(a)) != 0 ||
+            ::listen(fd, 1) != 0) {
+          ::close(fd);
+          continue;
+        }
+        netSetNonBlocking(fd);
+        S.listenFd = fd; // data fd accepted lazily in commitNetworkIO()
+      }
+    } else { // UDP
+      int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+      if (fd < 0) continue;
+      int yes = 1;
+      ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+      if (!S.isSend) {
+        if (::bind(fd, reinterpret_cast<sockaddr *>(&a), sizeof(a)) != 0) {
+          ::close(fd);
+          continue;
+        }
+      }
+      netSetNonBlocking(fd);
+      S.fd = fd;
+    }
+  }
+}
+
+void MflowLinkSim::closeNetSockets() {
+  for (auto &S : NetSlots_) {
+    if (S.fd >= 0) { ::close(S.fd); S.fd = -1; }
+    if (S.listenFd >= 0) { ::close(S.listenFd); S.listenFd = -1; }
+  }
+}
+
+// Once per major step: each *_send transmits its current input wire value(s),
+// each *_recv drains its socket and latches the freshest scalar. Vector send
+// (a wide input, e.g. a signal_actor3d 9-wide transform) streams every element
+// as float64; recv latches the last scalar received this step.
+void MflowLinkSim::commitNetworkIO() {
+  for (size_t I = 0; I < M_.Blocks.size(); ++I) {
+    if (I >= NetSlots_.size() || !NetSlots_[I].active) continue;
+    NetSlot &S = NetSlots_[I];
+    if (S.isSend) {
+      if (S.fd < 0) continue;
+      // Gather the input wire — a vector source streams its full width.
+      size_t Src = static_cast<size_t>(-1);
+      for (auto &P : Inputs_[I])
+        if (P.DstPort == "in") { Src = P.SrcBlock; break; }
+      std::vector<double> payload;
+      if (Src != static_cast<size_t>(-1) && OutWidth_[Src] > 1 &&
+          !VecOut_[Src].empty())
+        payload = VecOut_[Src];
+      else
+        payload.push_back(Src == static_cast<size_t>(-1) ? 0.0 : Out_[Src]);
+      if (S.isTcp) {
+        ::send(S.fd, payload.data(), payload.size() * sizeof(double), 0);
+      } else {
+        sockaddr_in dst;
+        if (netFillAddr(dst, S.host, S.port))
+          ::sendto(S.fd, payload.data(), payload.size() * sizeof(double), 0,
+                   reinterpret_cast<sockaddr *>(&dst), sizeof(dst));
+      }
+    } else { // *_recv — drain available datagrams/bytes, latch the last double
+      if (S.isTcp && S.fd < 0 && S.listenFd >= 0) {
+        int fd = ::accept(S.listenFd, nullptr, nullptr);
+        if (fd >= 0) { netSetNonBlocking(fd); S.fd = fd; }
+      }
+      if (S.fd < 0) continue;
+      double v;
+      ssize_t n;
+      bool got = false;
+      // Drain everything currently ready; keep the most recent full double.
+      while ((n = (S.isTcp ? ::recv(S.fd, &v, sizeof(v), 0)
+                           : ::recvfrom(S.fd, &v, sizeof(v), 0, nullptr,
+                                        nullptr))) == (ssize_t)sizeof(double)) {
+        S.lastValue = v;
+        got = true;
+      }
+      (void)got;
+    }
+  }
+}
+
 void MflowLinkSim::logSample() {
   for (size_t Ci = 0; Ci < LogBlocks_.size(); ++Ci) {
     size_t I = LogBlocks_[Ci];
@@ -4875,6 +5043,7 @@ MflowLinkSim::~MflowLinkSim() {
       if (H) MatlabFcnJitOps_.Release(H);
     }
   }
+  closeNetSockets();
 }
 
 namespace {

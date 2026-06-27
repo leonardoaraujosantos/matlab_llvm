@@ -91,6 +91,8 @@ signal_subsystem
 signal_sum
 signal_switch
 signal_switch_case_action
+signal_tcp_recv
+signal_tcp_send
 signal_terminator
 signal_tff
 signal_threshold
@@ -99,6 +101,8 @@ signal_transfer_fcn
 signal_transport_delay
 signal_trig_fcn
 signal_triggered_subsystem
+signal_udp_recv
+signal_udp_send
 signal_unit_delay
 signal_window
 signal_world3d
