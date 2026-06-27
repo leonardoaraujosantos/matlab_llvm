@@ -964,6 +964,17 @@ run_case "ewise_equal_size_ok" "$(printf 'fprintf("S=%%d\\n", sum([1 2 3] + [4 5
 run_case "ewise_scalar_ok" "$(printf 'fprintf("S2=%%d\\n", sum([1 2 3] + 10));\nexit\n')" \
   "S2=36"
 
+# Indexed-assignment size mismatch errors instead of silently dropping/mis-
+# assigning; scalar broadcast and matched sizes still work.
+run_case "assign_size_mismatch" "$(printf 'x=[1 2 3]; x(1:2)=[5 6 7]\nexit\n')" \
+  "Unable to perform assignment because the size of the left side is 1-by-2 and the size of the right side is 1-by-3."
+run_case "assign_mask_mismatch" "$(printf 'v=[1 2 3 4]; v(v>2)=[10 20 30]\nexit\n')" \
+  "Unable to perform assignment because the size of the left side is 2-by-1 and the size of the right side is 1-by-3."
+run_case "assign_matched_ok" "$(printf 'x=[1 2 3]; x(1:2)=[5 6]; fprintf("A=%%d\\n", sum(x));\nexit\n')" \
+  "A=14"
+run_case "assign_scalar_bcast_ok" "$(printf 'x=[1 2 3]; x(1:2)=9; fprintf("B=%%d\\n", sum(x));\nexit\n')" \
+  "B=21"
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 if (( fail > 0 )); then

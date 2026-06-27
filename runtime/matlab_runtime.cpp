@@ -3035,16 +3035,36 @@ void matlab_slice_store2_scalar(matlab_mat *A, matlab_mat *rows,
     }
 }
 
+/* #423: MATLAB indexed-assignment size rule — a non-scalar RHS must have the
+ * same element count as the indexed region, else error rather than silently
+ * dropping / mis-assigning. */
+static void matlab_assign_size_error(int64_t lr, int64_t lc,
+                                     int64_t rr, int64_t rc) {
+    char buf[220];
+    snprintf(buf, sizeof buf,
+             "Unable to perform assignment because the size of the left side "
+             "is %lld-by-%lld and the size of the right side is %lld-by-%lld.",
+             (long long)lr, (long long)lc, (long long)rr, (long long)rc);
+    matlab_raise_cmsg(buf);
+}
+
 void matlab_slice_store1(matlab_mat *A, matlab_mat *idx, matlab_mat *V) {
     int64_t N = idx ? idx->rows * idx->cols : A->rows * A->cols;
     int64_t m = A->rows, n = A->cols;
     int bcast = (V->rows == 1 && V->cols == 1);
+    int64_t nV = V->rows * V->cols;
     /* Logical-mask store (`v(v>2) = w`): idx same-shape as A and all-0/1 is a
      * mask — assign successive V values (or the broadcast scalar) at each
      * non-zero position, column-major. A same-shape index with a value outside
      * {0,1} (e.g. `v([3 2 1]) = w`) is an index list, handled below. Mirrors
      * matlab_slice1's read heuristic. */
     if (idx_looks_like_mask(idx, m, n)) {
+        if (!bcast) {
+            int64_t nnz = 0;
+            for (int64_t t = 0; t < m * n; ++t)
+                if (idx->data[t] != 0.0) ++nnz;
+            if (nV != nnz) matlab_assign_size_error(nnz, 1, V->rows, V->cols);
+        }
         int64_t w = 0;
         for (int64_t j = 0; j < n; ++j)
             for (int64_t i = 0; i < m; ++i)
@@ -3058,6 +3078,9 @@ void matlab_slice_store1(matlab_mat *A, matlab_mat *idx, matlab_mat *V) {
                 }
         return;
     }
+    if (!bcast && nV != N)
+        matlab_assign_size_error(idx ? idx->rows : (m * n),
+                                 idx ? idx->cols : 1, V->rows, V->cols);
     for (int64_t k = 0; k < N; ++k) {
         int64_t lin = idx ? ((int64_t)idx->data[k] - 1) : k;
         if (lin < 0 || lin >= m * n) continue;
