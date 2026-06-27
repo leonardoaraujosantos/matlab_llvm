@@ -936,6 +936,15 @@ run_case "cell_oob" "$(printf 'c = {1, 2};\nc{5}\nexit\n')" \
 # Valid indexing and a defined var must still work (no over-eager raising).
 run_case "index_valid_still_works" "$(printf 'a = [10 20 30];\nfprintf("V=%%d\\n", a(2));\nexit\n')" \
   "V=20"
+# Bounds checks also cover complex and N-D reads (not just real 2-D).
+run_case "index_complex_oob" "$(printf 'z = complex([1 2 3], [4 5 6]);\nz(5)\nexit\n')" \
+  "Index exceeds the number of array elements. Index must not exceed 3."
+run_case "index_3d_linear_oob" "$(printf 'a = zeros(2,2,2);\na(9)\nexit\n')" \
+  "Index exceeds the number of array elements. Index must not exceed 8."
+run_case "index_3d_pos_oob" "$(printf 'a = zeros(2,2,2);\na(3,1,1)\nexit\n')" \
+  "Index in position 1 exceeds array bounds. Index must not exceed 2."
+run_case "index_nd_valid_works" "$(printf 'a = reshape(1:8, 2, 2, 2);\nfprintf("W=%%d\\n", a(8));\nexit\n')" \
+  "W=8"
 
 echo "----"
 echo "passed: $pass    failed: $fail"
