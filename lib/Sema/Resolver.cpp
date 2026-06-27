@@ -1045,6 +1045,7 @@ void Resolver::registerBuiltins() {
     "nargin", "nargout", "varargin", "varargout",
     "fopen", "fclose", "fgetl", "feof",
     "fread", "fwrite",
+    "exist",
     "readtable", "readmatrix",
     "writematrix", "csvwrite",
     "save", "load",

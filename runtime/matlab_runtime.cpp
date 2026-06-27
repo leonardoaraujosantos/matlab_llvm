@@ -16,9 +16,11 @@
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdint.h>
+#include <setjmp.h> /* setjmp/longjmp — error() unwinding (#405) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h> /* stat / S_ISDIR — exist(name,'file'|'dir') (#404) */
 #include <time.h>    /* clock_gettime / nanosleep — pause/tic/toc */
 #include <unistd.h>  /* for write(2), used by matlab_err_emit_traceback_to_stderr */
 
@@ -8100,6 +8102,86 @@ void matlab_err_disp_message(void) {
 }
 
 /* ---------------------------------------------------------------------- */
+/* matlab_string is fully defined later in this TU (struct matlab_string_s);
+ * forward-declare the tag + typedef so the #405 raise/getter entries can use
+ * it here. A redundant typedef to the same type is permitted in C++. */
+struct matlab_string_s;
+typedef struct matlab_string_s matlab_string;
+
+/* Exception identifier + halting error() (#405).
+ *
+ * `matlab_error_id` stores the message identifier (e.g. "myPkg:bad") from
+ * error(id, ...); empty for the plain error(msg) form.  The `matlab_raise_*`
+ * entries are what an explicit user error() call lowers to: unlike the
+ * internal soft-error helper matlab_set_error_msg (which only sets a flag so
+ * historical "limp past it" callers keep working), a raised error HALTS:
+ *
+ *   - inside an active try (matlab_eh_try_depth > 0): set the flag and return,
+ *     so the existing flag-based try/catch runs the catch body (and ME.* reads
+ *     the globals captured here);
+ *   - otherwise, if the REPL driver registered a setjmp landing, longjmp back
+ *     to it so the current turn unwinds (the traceback is already on stderr);
+ *   - otherwise (AOT top level), exit(1) — a top-level error aborts the
+ *     program, matching MATLAB.
+ *
+ * Single-threaded, mirroring the matlab_error_flag contract above. */
+char    matlab_error_id[256] = {0};
+int64_t matlab_error_id_len  = 0;
+
+static int       matlab_eh_try_depth = 0;
+static jmp_buf  *matlab_eh_landing   = NULL;
+
+void matlab_eh_register_landing(jmp_buf *buf) { matlab_eh_landing = buf; }
+void matlab_eh_try_enter(void) { matlab_eh_try_depth++; }
+void matlab_eh_try_leave(void) {
+    if (matlab_eh_try_depth > 0) matlab_eh_try_depth--;
+}
+
+void matlab_set_error_id(const char *id, int64_t len) {
+    int64_t n = len;
+    if (n < 0) n = 0;
+    if (n > 255) n = 255;
+    if (id && n > 0) memcpy(matlab_error_id, id, (size_t)n);
+    matlab_error_id[n] = '\0';
+    matlab_error_id_len = n;
+}
+
+/* Surface an uncaught error to stderr (the snapshot traceback above is gated
+ * on debug mode, so a plain run would otherwise abort silently). write(2)
+ * mirrors the traceback path's deadlock-avoidance. */
+static void matlab_err_print_uncaught(void) {
+    char buf[1300];
+    size_t off = 0;
+    const char pfx[] = "error: ";
+    memcpy(buf, pfx, sizeof pfx - 1); off = sizeof pfx - 1;
+    if (matlab_error_msg_len > 0) {
+        size_t mlen = (size_t)matlab_error_msg_len;
+        if (off + mlen > sizeof buf - 1) mlen = sizeof buf - 1 - off;
+        memcpy(buf + off, matlab_error_msg, mlen); off += mlen;
+    }
+    buf[off++] = '\n';
+    ssize_t w = write(2, buf, off); (void)w;
+}
+
+static void matlab_eh_unwind_or_flag(void) {
+    if (matlab_eh_try_depth > 0) { matlab_error_flag = 1; return; }
+    matlab_err_print_uncaught();
+    if (matlab_eh_landing) longjmp(*matlab_eh_landing, 1);
+    exit(1);
+}
+
+/* No-message error() (e.g. rethrow of an empty state) — keep the flag/halt
+ * behaviour without touching the message buffers. */
+void matlab_raise(void) {
+    matlab_set_error();
+    matlab_eh_unwind_or_flag();
+}
+
+/* The string-typed raise entries (matlab_raise_str / matlab_raise_id_str) and
+ * the ME.message / ME.identifier readers need the full matlab_string layout,
+ * so they are defined after struct matlab_string_s (search "#405 raise"). */
+
+/* ---------------------------------------------------------------------- */
 /* Struct storage — s.field = v with f64 and matlab_mat* field values.
  *
  * matlab_struct holds a parallel table of field name / value / kind
@@ -13586,6 +13668,40 @@ matlab_string *matlab_string_from_literal(const char *src, int64_t len) {
     return s;
 }
 
+/* #405 raise: string-typed error() entries + ME readers. Defined here (after
+ * struct matlab_string_s) because they dereference matlab_string; the EH
+ * globals/helpers (matlab_set_error_id, matlab_eh_unwind_or_flag) live earlier
+ * in this TU. The message arrives already-built (a literal via
+ * matlab_string_from_literal or a matlab_sprintf_* result), so identifier
+ * extraction and printf formatting both happen at lowering time. */
+extern char    matlab_error_msg[1024];
+extern int64_t matlab_error_msg_len;
+extern char    matlab_error_id[256];
+extern int64_t matlab_error_id_len;
+void matlab_set_error_id(const char *id, int64_t len);
+void matlab_set_error_msg(const char *msg, int64_t len);
+
+void matlab_raise_str(matlab_string *msg) {
+    matlab_set_error_id("", 0);
+    if (msg && msg->data) matlab_set_error_msg(msg->data, msg->len);
+    else                  matlab_set_error_msg("", 0);
+    matlab_eh_unwind_or_flag();
+}
+
+void matlab_raise_id_str(const char *id, int64_t idlen, matlab_string *msg) {
+    matlab_set_error_id(id, idlen);
+    if (msg && msg->data) matlab_set_error_msg(msg->data, msg->len);
+    else                  matlab_set_error_msg("", 0);
+    matlab_eh_unwind_or_flag();
+}
+
+matlab_string *matlab_err_get_message(void) {
+    return matlab_string_from_literal(matlab_error_msg, matlab_error_msg_len);
+}
+matlab_string *matlab_err_get_identifier(void) {
+    return matlab_string_from_literal(matlab_error_id, matlab_error_id_len);
+}
+
 /* pwd: the current working directory as a MATLAB string. In the in-process
  * JIT/REPL this reflects any prior `cd`, so it reports the folder that
  * current-folder function resolution is using. */
@@ -18571,6 +18687,46 @@ static void matlab_file_table_init(void) {
     matlab_file_table[0] = stdin;
     matlab_file_table[1] = stdout;
     matlab_file_table[2] = stderr;
+}
+
+/* exist(name [, kind]) -> numeric code (#404).
+ *
+ * MATLAB codes:  0 = not found, 1 = workspace variable, 2 = file,
+ * 5 = built-in, 7 = directory.  We support 'var', 'file', 'dir', and the
+ * no-kind form (variable first, then path → directory 7 / file 2).
+ * 'builtin'/'class' are accepted but report 0 — there is no runtime
+ * registry lookup yet.  Variable lookup consults the REPL workspace, so
+ * exist(name,'var') is meaningful under -repl; an AOT program has no live
+ * workspace and reports 0 for the 'var' kind.  String descriptors carry a
+ * null-terminated `data` buffer (same convention matlab_fopen relies on),
+ * so stat()/strcmp() on ->data are safe. */
+double matlab_ws_has(const char *name, int64_t len); /* runtime_debug.cpp */
+
+static double matlab_exist_path_code(const char *path) {
+    struct stat st;
+    if (stat(path, &st) != 0) return 0.0;
+    return S_ISDIR(st.st_mode) ? 7.0 : 2.0;
+}
+
+double matlab_exist_kind(matlab_string *name, matlab_string *kind) {
+    if (!name || !name->data) return 0.0;
+    const char *k = (kind && kind->data) ? kind->data : "";
+    if (strcmp(k, "var") == 0)
+        return matlab_ws_has(name->data, name->len) != 0.0 ? 1.0 : 0.0;
+    if (strcmp(k, "dir") == 0) {
+        struct stat st;
+        return (stat(name->data, &st) == 0 && S_ISDIR(st.st_mode)) ? 7.0 : 0.0;
+    }
+    if (strcmp(k, "file") == 0)
+        return matlab_exist_path_code(name->data);
+    /* 'builtin'/'class'/unknown: no registry lookup yet. */
+    return 0.0;
+}
+
+double matlab_exist(matlab_string *name) {
+    if (!name || !name->data) return 0.0;
+    if (matlab_ws_has(name->data, name->len) != 0.0) return 1.0;
+    return matlab_exist_path_code(name->data);
 }
 
 double matlab_fopen(matlab_string *path, matlab_string *mode) {

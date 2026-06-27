@@ -876,10 +876,15 @@ bool Lowerer::isStringExpr(const Expr *E) const {
            (N->Ref && N->Ref->Kind == BindingKind::Builtin && N->Name == "pwd");
   /* A char/string-valued struct field (#79.2: `s.name='hello'`). */
   if (auto *F = dynamic_cast<const FieldAccess *>(E))
-    if (auto *BN = dynamic_cast<const NameExpr *>(F->Base))
+    if (auto *BN = dynamic_cast<const NameExpr *>(F->Base)) {
       if (BN->Ref &&
           StringStructFields.count({BN->Ref, std::string(F->Field)}))
         return true;
+      /* Caught-exception string fields ME.message / ME.identifier (#405). */
+      if (BN->Ref && CatchBindings.count(BN->Ref) &&
+          (F->Field == "message" || F->Field == "identifier"))
+        return true;
+    }
   if (auto *C = dynamic_cast<const CallOrIndex *>(E)) {
     if (auto *NX = dynamic_cast<const NameExpr *>(C->Callee))
       if (NX->Ref && NX->Ref->Kind == BindingKind::Builtin &&
@@ -4855,7 +4860,20 @@ void Lowerer::lowerStmt(const Stmt &St) {
      * good enough for the common 'try; error_if_bad; catch; fallback'
      * idiom. */
     auto &T = static_cast<const TryStmt &>(St);
+    /* #405: mark an active try so a raised error() inside the body (or a
+     * callee) sets the error flag and returns instead of unwinding to the
+     * driver — the flag-based catch path below then runs. Balanced with a
+     * leave before the post-body flag check. */
+    auto emitEhTry = [&](const char *Callee) {
+      mlir::NamedAttribute Cal(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, Callee));
+      emitUnregOp("matlab.call_builtin", {},
+                  {mlir::NoneType::get(&MCtx)}, loc(T.Range), {Cal});
+    };
+    emitEhTry("matlab_eh_try_enter");
     if (T.TryBody) lowerBlock(*T.TryBody);
+    emitEhTry("matlab_eh_try_leave");
     if (T.CatchBody) {
       mlir::Location L = loc(T.Range);
       auto I32 = mlir::IntegerType::get(&MCtx, 32);
@@ -4882,6 +4900,14 @@ void Lowerer::lowerStmt(const Stmt &St) {
       if (T.CatchVarRef) CatchBindings.insert(T.CatchVarRef);
       lowerBlock(*T.CatchBody);
       if (T.CatchVarRef) CatchBindings.erase(T.CatchVarRef);
+    } else {
+      /* try ... end with no catch swallows a raised error; clear the flag so
+       * it can't leak into a later try's post-body check (#405). */
+      mlir::NamedAttribute Clr(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, "matlab_clear_error"));
+      emitUnregOp("matlab.call_builtin", {},
+                  {mlir::NoneType::get(&MCtx)}, loc(T.Range), {Clr});
     }
     return;
   }
@@ -12820,6 +12846,14 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         else if (dynamic_cast<const CellIndex *>(C.Args[0]) &&
                  isStringExpr(C.Args[0]))
           IsStr = true;
+        /* disp(ME.message) / disp(ME.identifier) — caught-exception string
+         * fields (#405). The FieldAccess lowering returns a matlab_string*. */
+        else if (auto *FA = dynamic_cast<const FieldAccess *>(C.Args[0])) {
+          if (auto *BN = dynamic_cast<const NameExpr *>(FA->Base))
+            if (BN->Ref && CatchBindings.count(BN->Ref) &&
+                (FA->Field == "message" || FA->Field == "identifier"))
+              IsStr = true;
+        }
         if (IsStr) {
           mlir::Value V = lowerExpr(*C.Args[0]);
           mlir::NamedAttribute Cal(
@@ -13063,25 +13097,8 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             return emitUnreg("matlab.call_builtin", {Carg, K},
                              F64, L, {Cal});
           }
-      /* disp(ME.message) inside a catch body — route to the dedicated
-       * matlab_err_disp_message runtime that prints the stored error
-       * text. We only recognise the single-arg 'message' field on a
-       * catch-var; other fields fall through to the generic struct
-       * get path (which returns 0.0 for missing fields). */
-      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
-          N->Name == "disp" && C.Args.size() == 1) {
-        if (auto *F = dynamic_cast<const FieldAccess *>(C.Args[0]))
-          if (auto *B0 = dynamic_cast<const NameExpr *>(F->Base))
-            if (B0->Ref && CatchBindings.count(B0->Ref) &&
-                F->Field == "message") {
-              mlir::NamedAttribute Cal(
-                  mlir::StringAttr::get(&MCtx, "callee"),
-                  mlir::StringAttr::get(&MCtx,
-                                         "matlab_err_disp_message"));
-              return emitUnreg("matlab.call_builtin", {},
-                               mlir::NoneType::get(&MCtx), L, {Cal});
-            }
-      }
+      /* (disp(ME.message)/disp(ME.identifier) are handled generically by the
+       * string-routing above + the ME.* FieldAccess lowering — #405.) */
       /* isstruct(x): compile-time fold based on whether x's binding
        * has been initialised as a struct. Any other ptr (matrix) or
        * scalar returns 0.0. */
@@ -14959,6 +14976,20 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     auto &F = static_cast<const FieldAccess &>(E);
     auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
     auto F64 = mlir::Float64Type::get(&MCtx);
+    /* Caught-exception fields: ME.message / ME.identifier (#405). Return a
+     * matlab_string* read from the error globals captured at error() time,
+     * so they work anywhere a string does — disp, fprintf('%s', ...),
+     * assignment, comparison. */
+    if (auto *BN = dynamic_cast<const NameExpr *>(F.Base))
+      if (BN->Ref && CatchBindings.count(BN->Ref) &&
+          (F.Field == "message" || F.Field == "identifier")) {
+        const char *Cn = (F.Field == "message") ? "matlab_err_get_message"
+                                                : "matlab_err_get_identifier";
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, Cn));
+        return emitUnreg("matlab.call_builtin", {}, PtrTy, L, {Cal});
+      }
     /* Fixed-Point Designer property access: `n.WordLength` / `.FractionLength`
      * / `.Signed` / `.IntegerLength` are compile-time constants drawn from
      * the FixedSpec. `n.Value` (real-world double) and `n.bin/hex/dec` are

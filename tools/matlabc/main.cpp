@@ -29,6 +29,7 @@
 #include "mlir/IR/Location.h"
 
 #include <cerrno>
+#include <csetjmp>
 /* MC layer for the DAP `disassemble` request — host-triple's
  * disassembler tables turn JIT-emitted bytes back into text
  * without a full lldb integration. */
@@ -839,6 +840,9 @@ std::string formatDiagnostics(const SourceManager &SM,
 /* Resolver workspace-kind hook — defined further down (after the
  * runtime-introspection externs), forward-declared here so the REPL
  * compile entries below can install it on their Resolver. */
+/* #405: register/clear the REPL's uncaught-error setjmp landing. */
+extern "C" void matlab_eh_register_landing(jmp_buf *buf);
+
 extern "C" int replWorkspaceKindHook(const char *name, int64_t len);
 /* Companion hook for kind=2 bindings — returns the class name of the
  * runtime obj stored under `name` (or null when the binding isn't a
@@ -1371,7 +1375,18 @@ int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id,
   }
   using Thunk = int (*)(void);
   auto Fn = reinterpret_cast<Thunk>(*FnOrErr);
-  (void)Fn();
+  /* #405: register a setjmp landing so an uncaught error() inside the JIT'd
+   * turn unwinds back here (instead of running past the error or aborting the
+   * whole REPL). The traceback is already emitted to stderr by the runtime;
+   * we just discard the rest of the turn and keep the session alive. The
+   * abandoned JIT stack frames leak any heap they held — acceptable for an
+   * interactive turn. */
+  static jmp_buf ReplEhBuf;
+  matlab_eh_register_landing(&ReplEhBuf);
+  if (setjmp(ReplEhBuf) == 0) {
+    (void)Fn();
+  }
+  matlab_eh_register_landing(nullptr);
   /* Keep this turn's ExecutionEngine alive for the rest of the REPL
    * session.  A turn that does `f = @(x) ...` stores a function
    * pointer into *this* turn's JIT'd code in the workspace; a later

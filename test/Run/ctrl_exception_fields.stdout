@@ -1,0 +1,5 @@
+id=myPkg:bad
+msg=value was 42
+id2=[]
+msg2=plain boom
+done

@@ -1008,61 +1008,160 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Changed = true;
       continue;
     }
-    /* Rewrite @error(...) calls. If the first arg is a const_char we
-     * route through matlab_set_error_msg(ptr, len) so 'catch ME;
-     * disp(ME.message)' gets back the user's text. Otherwise fall
-     * back to matlab_set_error with no message. Extra args are
-     * ignored in v1 (no printf-style formatting yet). */
+    /* try/catch scope markers (#405): void, no operands. */
+    if ((Name == "matlab_eh_try_enter" || Name == "matlab_eh_try_leave") &&
+        Call->getNumOperands() == 0) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, VoidTy, {});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{});
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    /* ME.message / ME.identifier readers (#405): matlab_string* (ptr), no
+     * operands. */
+    if ((Name == "matlab_err_get_message" ||
+         Name == "matlab_err_get_identifier") &&
+        Call->getNumResults() == 1 && Call->getNumOperands() == 0) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, PtrTy, {});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{});
+      if (Call->getResult(0).getType() != PtrTy)
+        Call->getResult(0).setType(PtrTy);
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    /* Rewrite @error(...) calls (#405). MATLAB forms:
+     *   error(msg)                — message only
+     *   error(id, msg)            — id (comp:comp[:...]) + message
+     *   error(fmt, args...)       — printf-style message
+     *   error(id, fmt, args...)   — id + printf-style message
+     * Identifier extraction and printf formatting happen here; the message
+     * is materialised as a matlab_string* (literal via
+     * matlab_string_from_literal, or formatted via matlab_sprintf_*) and
+     * handed to matlab_raise_*, which HALTS (unwind / exit) unless inside an
+     * active try, where it sets the flag so the existing catch path runs and
+     * ME.identifier / ME.message read the captured globals. */
     if (Name == "error") {
       B.setInsertionPoint(Call);
-      Value MsgPtr;
-      int64_t MsgLen = 0;
-      if (Call->getNumOperands() >= 1) {
-        Operation *Def = Call->getOperand(0).getDefiningOp();
-        if (isMatlabOp(Def, "matlab.const_char")) {
-          auto VA = Def->getAttrOfType<StringAttr>("value");
-          if (VA) {
-            StringRef Text = VA.getValue();
-            MsgLen = (int64_t)Text.size();
-            LLVM::GlobalOp Found;
-            for (auto G : Mod.getOps<LLVM::GlobalOp>()) {
-              if (!G.getConstant()) continue;
-              auto Attr =
-                  mlir::dyn_cast_or_null<StringAttr>(G.getValueAttr());
-              if (Attr && Attr.getValue() == Text) { Found = G; break; }
-            }
-            if (!Found) {
-              OpBuilder::InsertionGuard G(B);
-              B.setInsertionPointToStart(Mod.getBody());
-              auto ArrayTy = LLVM::LLVMArrayType::get(
-                  IntegerType::get(Ctx, 8),
-                  static_cast<unsigned>(Text.size()));
-              unsigned N = 0;
-              std::string SymName;
-              do { SymName = ("__matlab_err_msg" + std::to_string(N++)); }
-              while (Mod.lookupSymbol(SymName));
-              Found = LLVM::GlobalOp::create(
-                  B, Mod.getLoc(), ArrayTy, /*isConstant=*/true,
-                  LLVM::Linkage::Internal, SymName,
-                  StringAttr::get(Ctx, Text));
-            }
-            B.setInsertionPoint(Call);
-            MsgPtr = LLVM::AddressOfOp::create(
-                B, Call->getLoc(), PtrTy, Found.getSymName());
-            Def->getResult(0).replaceAllUsesWith(MsgPtr);
+
+      /* Materialise a string literal's bytes as an i8 global, return its ptr.
+       * Reuses any identical existing constant (dedup). */
+      auto charGlobalPtr = [&](StringRef Text) -> Value {
+        LLVM::GlobalOp Found;
+        for (auto G : Mod.getOps<LLVM::GlobalOp>()) {
+          if (!G.getConstant()) continue;
+          auto Attr = mlir::dyn_cast_or_null<StringAttr>(G.getValueAttr());
+          if (Attr && Attr.getValue() == Text) { Found = G; break; }
+        }
+        if (!Found) {
+          OpBuilder::InsertionGuard G(B);
+          B.setInsertionPointToStart(Mod.getBody());
+          auto ArrayTy = LLVM::LLVMArrayType::get(
+              IntegerType::get(Ctx, 8), static_cast<unsigned>(Text.size()));
+          unsigned N = 0;
+          std::string SymName;
+          do { SymName = ("__matlab_err_msg" + std::to_string(N++)); }
+          while (Mod.lookupSymbol(SymName));
+          Found = LLVM::GlobalOp::create(
+              B, Mod.getLoc(), ArrayTy, /*isConstant=*/true,
+              LLVM::Linkage::Internal, SymName, StringAttr::get(Ctx, Text));
+        }
+        B.setInsertionPoint(Call);
+        return LLVM::AddressOfOp::create(
+            B, Call->getLoc(), PtrTy, Found.getSymName()).getResult();
+      };
+
+      /* Build a matlab_string* from a literal's bytes. */
+      auto literalStr = [&](StringRef Text) -> Value {
+        Value P = charGlobalPtr(Text);
+        Value L = LLVM::ConstantOp::create(
+            B, Call->getLoc(), I64, B.getI64IntegerAttr((int64_t)Text.size()));
+        auto Fn = rt("matlab_string_from_literal", PtrTy, {PtrTy, I64});
+        return LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                    ValueRange{P, L}).getResult();
+      };
+
+      /* MATLAB message identifier? comp(:comp)+ with each comp [A-Za-z_]\w* */
+      auto isErrId = [](StringRef s) -> bool {
+        if (s.empty()) return false;
+        bool sawColon = false, compStart = true;
+        for (char c : s) {
+          if (c == ':') { if (compStart) return false;
+                          sawColon = true; compStart = true; continue; }
+          bool alpha = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                       c == '_';
+          bool num = (c >= '0' && c <= '9');
+          if (compStart) { if (!alpha) return false; compStart = false; }
+          else if (!alpha && !num) return false;
+        }
+        return sawColon && !compStart;
+      };
+
+      unsigned nOps = Call->getNumOperands();
+      llvm::SmallVector<Operation *, 2> ConsumedChars;
+
+      /* Identifier + message-operand start index. */
+      Value IdPtr; int64_t IdLen = 0; unsigned msgStart = 0;
+      if (nOps >= 2) {
+        Operation *D0 = Call->getOperand(0).getDefiningOp();
+        if (isMatlabOp(D0, "matlab.const_char")) {
+          auto VA = D0->getAttrOfType<StringAttr>("value");
+          if (VA && isErrId(VA.getValue())) {
+            IdPtr = charGlobalPtr(VA.getValue());
+            IdLen = (int64_t)VA.getValue().size();
+            msgStart = 1;
+            ConsumedChars.push_back(D0);
           }
         }
       }
-      if (MsgPtr) {
-        auto Fn = rt("matlab_set_error_msg", VoidTy, {PtrTy, I64});
-        Value LenV = LLVM::ConstantOp::create(
-            B, Call->getLoc(), I64, B.getI64IntegerAttr(MsgLen));
+
+      /* Message string. */
+      Value MsgStr;
+      if (msgStart < nOps) {
+        Value MOp = Call->getOperand(msgStart);
+        Operation *MD = MOp.getDefiningOp();
+        if (isMatlabOp(MD, "matlab.const_char")) {
+          auto VA = MD->getAttrOfType<StringAttr>("value");
+          StringRef Fmt = VA ? VA.getValue() : StringRef();
+          unsigned nArgs = nOps - msgStart - 1;
+          if (nArgs == 1 &&
+              Call->getOperand(msgStart + 1).getType() == F64) {
+            Value FmtS = literalStr(Fmt);
+            auto SF = rt("matlab_sprintf_f64", PtrTy, {PtrTy, F64});
+            MsgStr = LLVM::CallOp::create(
+                B, Call->getLoc(), SF,
+                ValueRange{FmtS, Call->getOperand(msgStart + 1)}).getResult();
+          } else {
+            /* 0 args, or arg shapes the f64 fast-path can't format: use the
+             * format text verbatim (printf vararg formatting beyond a single
+             * scalar is a follow-up). */
+            MsgStr = literalStr(Fmt);
+          }
+          ConsumedChars.push_back(MD);
+        } else if (MOp.getType() == PtrTy) {
+          /* error(strVar) — a runtime string is already the message. */
+          MsgStr = MOp;
+        }
+      }
+
+      if (IdPtr && MsgStr) {
+        Value IdLenV = LLVM::ConstantOp::create(
+            B, Call->getLoc(), I64, B.getI64IntegerAttr(IdLen));
+        auto Fn = rt("matlab_raise_id_str", VoidTy, {PtrTy, I64, PtrTy});
         LLVM::CallOp::create(B, Call->getLoc(), Fn,
-                              ValueRange{MsgPtr, LenV});
+                             ValueRange{IdPtr, IdLenV, MsgStr});
+      } else if (MsgStr) {
+        auto Fn = rt("matlab_raise_str", VoidTy, {PtrTy});
+        LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{MsgStr});
       } else {
-        auto Fn = rt("matlab_set_error", VoidTy, {});
+        auto Fn = rt("matlab_raise", VoidTy, {});
         LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{});
       }
+
       for (auto R : Call->getResults())
         if (!R.use_empty()) {
           Value Z = LLVM::ConstantOp::create(
@@ -1070,6 +1169,10 @@ bool TensorLowering::rewriteBuiltinCalls() {
           R.replaceAllUsesWith(Z);
         }
       Call->erase();
+      /* Drop the const_char ops we consumed by value so they don't survive
+       * as unconverted matlab.* ops. */
+      for (Operation *Op : ConsumedChars)
+        if (Op && Op->use_empty()) Op->erase();
       Changed = true;
       continue;
     }
@@ -3814,6 +3917,31 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Call->erase();
       Changed = true;
       continue;
+    }
+    /* exist(name [, kind]) -> f64 status code (#404). Arguments are
+     * matlab_string* pointers; a char literal arrives as matlab.const_char
+     * and is materialised via toStrPtr (same as the other string builtins).
+     * Sema leaves the result untyped, so retype to F64 before RAUW. */
+    if (Name == "exist" && Call->getNumResults() == 1 &&
+        (Call->getNumOperands() == 1 || Call->getNumOperands() == 2)) {
+      bool TwoArg = Call->getNumOperands() == 2;
+      Value NameP = toStrPtr(Call->getOperand(0));
+      Value KindP = TwoArg ? toStrPtr(Call->getOperand(1)) : Value{};
+      if (NameP && (!TwoArg || KindP)) {
+        B.setInsertionPoint(Call);
+        auto Fn = TwoArg ? rt("matlab_exist_kind", F64, {PtrTy, PtrTy})
+                         : rt("matlab_exist", F64, {PtrTy});
+        llvm::SmallVector<Value, 2> Args{NameP};
+        if (TwoArg) Args.push_back(KindP);
+        auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn, Args);
+        if (Call->getResult(0).getType() != F64)
+          Call->getResult(0).setType(F64);
+        carryName(Call, NC);
+        Call->getResult(0).replaceAllUsesWith(NC.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
     }
     /* fread(fid, n) -> matlab_mat* (n-by-1). Binary reads: n doubles. */
     if (Name == "fread" && Call->getNumOperands() == 2 &&
