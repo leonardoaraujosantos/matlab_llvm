@@ -915,6 +915,28 @@ exit
 EOF
 )" "F_AFTER"
 
+# #423 — interpreter raises MATLAB-style errors instead of silently returning
+# 0/empty: undefined names, and out-of-bounds / invalid indexing.
+run_case "undef_var_read" "$(printf 'nope_var\nexit\n')" \
+  "Unrecognized function or variable 'nope_var'."
+run_case "undef_fn_call" "$(printf 'nope_fn(3)\nexit\n')" \
+  "Unrecognized function or variable 'nope_fn'."
+run_case "undef_in_expr" "$(printf 'y = missing_thing + 1\nexit\n')" \
+  "Unrecognized function or variable 'missing_thing'."
+run_case "index_oob" "$(printf 'a = [1 2 3];\na(5)\nexit\n')" \
+  "Index exceeds the number of array elements. Index must not exceed 3."
+run_case "index_zero" "$(printf 'a = [1 2 3];\na(0)\nexit\n')" \
+  "Array indices must be positive integers or logical values."
+run_case "index_frac" "$(printf 'a = [1 2 3];\na(1.5)\nexit\n')" \
+  "Array indices must be positive integers or logical values."
+run_case "index_2d_oob" "$(printf 'm = [1 2; 3 4];\nm(3,1)\nexit\n')" \
+  "Index in position 1 exceeds array bounds. Index must not exceed 2."
+run_case "cell_oob" "$(printf 'c = {1, 2};\nc{5}\nexit\n')" \
+  "Index exceeds the number of elements in the cell array. Index must not exceed 2."
+# Valid indexing and a defined var must still work (no over-eager raising).
+run_case "index_valid_still_works" "$(printf 'a = [10 20 30];\nfprintf("V=%%d\\n", a(2));\nexit\n')" \
+  "V=20"
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 if (( fail > 0 )); then

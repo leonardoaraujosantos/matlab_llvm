@@ -2555,14 +2555,32 @@ void Resolver::resolveExpr(Expr &E, Scope *S) {
        * through the runtime workspace, which holds values produced by
        * earlier REPL inputs. This is the right trade-off for an
        * interactive session where each input is its own TU but the
-       * user expects identifiers to persist. */
+       * user expects identifiers to persist.
+       *
+       * #423: but a name that is neither a builtin/function (B was null),
+       * nor a cwd/cross-turn function (those are injected into the prelude
+       * as Function bindings, so they never reach here), nor a live
+       * workspace variable is genuinely undefined — auto-declaring it would
+       * silently read back 0/empty. The workspace kind hook returns -1 for
+       * names absent from the live workspace, so use that to raise MATLAB's
+       * "Unrecognized function or variable" instead. A name assigned earlier
+       * in this same TU resolves to its in-TU binding and never reaches the
+       * auto-declare path, so this won't fire on legitimate local writes. */
+      if (ReplMode && WorkspaceKindHook &&
+          WorkspaceKindHook(N.Name.data(), (int64_t)N.Name.size()) < 0) {
+        Diag.error(N.Range.Begin,
+                   std::string("Unrecognized function or variable '") +
+                   std::string(N.Name) + "'.");
+        return;
+      }
       if (ReplMode) {
         Binding *NB = Sema.newBinding();
         B = S->getOrDeclareVar(N.Name, NB);
         applyWorkspaceKind(NB, N.Name, S);
       } else {
         Diag.error(N.Range.Begin,
-                   std::string("undefined name '") + std::string(N.Name) + "'");
+                   std::string("Unrecognized function or variable '") +
+                   std::string(N.Name) + "'.");
         return;
       }
     }
