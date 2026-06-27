@@ -7967,6 +7967,8 @@ double matlab_subscript2_s(matlab_mat *A, double i, double j) {
      * there. Reads the real part of an indexed complex element. */
     if (mat_is_complex(A)) {
         matlab_mat_c *C = (matlab_mat_c *)A;
+        matlab_check_index_pos(i, C->rows, 1);
+        matlab_check_index_pos(j, C->cols, 2);
         if (ri < 0 || ri >= C->rows || cj < 0 || cj >= C->cols) return 0.0;
         return C->re[ri * C->cols + cj];
     }
@@ -7977,6 +7979,8 @@ double matlab_subscript2_s(matlab_mat *A, double i, double j) {
     if (mat_is_3d(A)) {
         matlab_mat3 *m = (matlab_mat3 *)A;
         int64_t M = m->rows, N = m->cols, P = m->depth;
+        matlab_check_index_pos(i, M, 1);
+        matlab_check_index_pos(j, N * P, 2);
         if (ri < 0 || ri >= M || cj < 0 || cj >= N * P) return 0.0;
         int64_t n = cj % N, k = cj / N;
         return m->data[k * M * N + ri * N + n];
@@ -7987,6 +7991,8 @@ double matlab_subscript2_s(matlab_mat *A, double i, double j) {
         matlab_matN *m = (matlab_matN *)A;
         int64_t d0 = m->dims[0], rest = 1;
         for (uint32_t k = 1; k < m->ndims; ++k) rest *= m->dims[k];
+        matlab_check_index_pos(i, d0, 1);
+        matlab_check_index_pos(j, rest, 2);
         if (ri < 0 || ri >= d0 || cj < 0 || cj >= rest) return 0.0;
         int64_t off = ri * m->strides[0], rem = cj;
         for (uint32_t k = 1; k < m->ndims; ++k) {
@@ -8011,6 +8017,7 @@ double matlab_subscript1_s(matlab_mat *A, double i) {
     if (mat_is_complex(A)) {
         matlab_mat_c *C = (matlab_mat_c *)A;
         int64_t total = C->rows * C->cols;
+        matlab_check_index(i, total);
         if (idx < 0 || idx >= total) return 0.0;
         return C->re[idx];
     }
@@ -8022,12 +8029,14 @@ double matlab_subscript1_s(matlab_mat *A, double i) {
         matlab_matN *m = (matlab_matN *)A;
         int64_t total = 1;
         for (uint32_t k = 0; k < m->ndims; ++k) total *= m->dims[k];
+        matlab_check_index(i, total);
         if (idx < 0 || idx >= total) return 0.0;
         return m->data[idx];
     }
     if (mat_is_3d(A)) {
         matlab_mat3 *m = (matlab_mat3 *)A;
         int64_t total = m->rows * m->cols * m->depth;
+        matlab_check_index(i, total);
         if (idx < 0 || idx >= total) return 0.0;
         return m->data[idx];
     }
@@ -9943,6 +9952,8 @@ double matlab_subscriptN_s(void *Av, int64_t nidx, const int64_t *idx_1based) {
         for (uint32_t k = 0; k < kmax; ++k) idx[k] = 0;
         int64_t use = nidx < (int64_t)kmax ? nidx : (int64_t)kmax;
         for (int64_t k = 0; k < use; ++k) {
+            matlab_check_index_pos((double)idx_1based[k], A->dims[k],
+                                   (int)(k + 1));
             int64_t v = idx_1based[k] - 1;
             if (v < 0 || v >= A->dims[k]) return 0.0;
             idx[k] = v;
@@ -10601,9 +10612,14 @@ double matlab_subscript3_s(matlab_mat3 *A, double i1, double j1, double k1) {
     int64_t i = (int64_t)i1 - 1, j = (int64_t)j1 - 1, k = (int64_t)k1 - 1;
     if (!mat_is_3d(A)) {                       /* 2-D: A(i,j,1) */
         matlab_mat *m = (matlab_mat *)A;
+        matlab_check_index_pos(i1, m->rows, 1);
+        matlab_check_index_pos(j1, m->cols, 2);
         if (k != 0 || i < 0 || i >= m->rows || j < 0 || j >= m->cols) return 0.0;
         return m->data[i * m->cols + j];
     }
+    matlab_check_index_pos(i1, A->rows, 1);
+    matlab_check_index_pos(j1, A->cols, 2);
+    matlab_check_index_pos(k1, A->depth, 3);
     if (i < 0 || i >= A->rows || j < 0 || j >= A->cols || k < 0 || k >= A->depth) return 0.0;
     return A->data[mat3_offset(A, i, j, k)];
 }
