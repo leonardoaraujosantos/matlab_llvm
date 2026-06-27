@@ -946,6 +946,24 @@ run_case "index_3d_pos_oob" "$(printf 'a = zeros(2,2,2);\na(3,1,1)\nexit\n')" \
 run_case "index_nd_valid_works" "$(printf 'a = reshape(1:8, 2, 2, 2);\nfprintf("W=%%d\\n", a(8));\nexit\n')" \
   "W=8"
 
+# Element-wise binary ops on incompatible sizes raise instead of silently
+# reading past the shorter operand and returning garbage.
+run_case "ewise_add_mismatch" "$(printf '[1 2 3] + [1 2]\nexit\n')" \
+  "Arrays have incompatible sizes for this operation."
+run_case "ewise_cmp_mismatch" "$(printf '[1 2 3] == [1 2]\nexit\n')" \
+  "Arrays have incompatible sizes for this operation."
+run_case "ewise_pow_mismatch" "$(printf '[1 2 3] .^ [1 2]\nexit\n')" \
+  "Arrays have incompatible sizes for this operation."
+run_case "ewise_mod_mismatch" "$(printf 'mod([1 2 3], [1 2])\nexit\n')" \
+  "Arrays have incompatible sizes for this operation."
+run_case "ewise_max_mismatch" "$(printf 'max([1 2 3], [1 2])\nexit\n')" \
+  "Arrays have incompatible sizes for this operation."
+# Equal-size and scalar-broadcast element-wise ops still work.
+run_case "ewise_equal_size_ok" "$(printf 'fprintf("S=%%d\\n", sum([1 2 3] + [4 5 6]));\nexit\n')" \
+  "S=21"
+run_case "ewise_scalar_ok" "$(printf 'fprintf("S2=%%d\\n", sum([1 2 3] + 10));\nexit\n')" \
+  "S2=36"
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 if (( fail > 0 )); then

@@ -121,6 +121,11 @@ static inline int64_t lapack_threshold(void) {
 
 extern "C" {
 
+/* Raise a MATLAB-style error with a C-string message and halt (defined later
+ * in this TU, near the #405 raise helpers). Forward-declared here so the
+ * elementwise / size-check call sites throughout the file can use it (#423). */
+void matlab_raise_cmsg(const char *msg);
+
 /* A single global mutex serializes all stdout I/O so parfor bodies that call
  * disp/fprintf don't interleave mid-line. This is a tiny concession to
  * predictability; real MATLAB uses per-worker stdout aggregation.
@@ -2695,8 +2700,15 @@ matlab_mat *matlab_rot90(matlab_mat *A) {
     }).release();
 }
 
-/* Element-wise min/max of two matrices with the usual broadcast. */
+/* Element-wise min/max of two matrices. Sizes must match (or one be 1) — a
+ * genuine clash errors rather than reading past the shorter operand (#423). */
+static void matlab_check_ewise_sizes(matlab_mat *A, matlab_mat *B) {
+    if (!((A->rows == B->rows || A->rows == 1 || B->rows == 1) &&
+          (A->cols == B->cols || A->cols == 1 || B->cols == 1)))
+        matlab_raise_cmsg("Arrays have incompatible sizes for this operation.");
+}
 matlab_mat *matlab_min_mm(matlab_mat *A, matlab_mat *B) {
+    matlab_check_ewise_sizes(A, B);
     int64_t m = A->rows, n = A->cols;
     matlab_mat *C = mat_alloc(m, n);
     for (int64_t k = 0; k < m * n; ++k) {
@@ -2706,6 +2718,7 @@ matlab_mat *matlab_min_mm(matlab_mat *A, matlab_mat *B) {
     return C;
 }
 matlab_mat *matlab_max_mm(matlab_mat *A, matlab_mat *B) {
+    matlab_check_ewise_sizes(A, B);
     int64_t m = A->rows, n = A->cols;
     matlab_mat *C = mat_alloc(m, n);
     for (int64_t k = 0; k < m * n; ++k) {
@@ -7470,6 +7483,14 @@ static matlab_mat_c *to_mat_c(void *p) {
         } \
         matlab_mat *A = (matlab_mat *)Ap; \
         matlab_mat *B = (matlab_mat *)Bp; \
+        /* #423: MATLAB implicit-expansion compatibility — each dimension must \
+         * be equal or one of them 1. Scalar (1x1) operands take the _ms/_sm \
+         * path, so a genuine size clash here (e.g. [1 2 3] + [1 2]) was \
+         * silently reading past B and returning garbage; error instead. */ \
+        if (!((A->rows == B->rows || A->rows == 1 || B->rows == 1) && \
+              (A->cols == B->cols || A->cols == 1 || B->cols == 1))) \
+            matlab_raise_cmsg( \
+                "Arrays have incompatible sizes for this operation."); \
         int64_t m = A->rows, n = A->cols; \
         matlab_mat *C = mat_alloc(m, n); \
         double * __restrict__ Cd = C->data; \
@@ -7573,6 +7594,7 @@ BINARY_MM(ediv, A->data[k] / B->data[k])
  * provided — complex pow is rarer than the other ops and its real-only
  * path keeps the ABI stable. */
 matlab_mat *matlab_epow_mm(matlab_mat *A, matlab_mat *B) {
+    matlab_check_ewise_sizes(A, B);
     int64_t m = A->rows, n = A->cols;
     matlab_mat *C = mat_alloc(m, n);
     double * __restrict__ Cd = C->data;
@@ -7615,6 +7637,10 @@ matlab_mat *matlab_epow_sm(double s, matlab_mat *A) {
                 C3->data[k] = (A3->data[k] op B3->data[k]) ? 1.0 : 0.0; \
             return (matlab_mat *)C3; \
         } \
+        if (!((A->rows == B->rows || A->rows == 1 || B->rows == 1) && \
+              (A->cols == B->cols || A->cols == 1 || B->cols == 1))) \
+            matlab_raise_cmsg( \
+                "Arrays have incompatible sizes for this operation."); \
         int64_t m = A->rows, n = A->cols; \
         matlab_mat *C = mat_alloc(m, n); \
         for (int64_t k = 0; k < m * n; ++k) \
@@ -7888,6 +7914,7 @@ double matlab_or_s(double a, double b)  { return (a != 0.0 || b != 0.0) ? 1.0 : 
  * the dividend when the divisor is 0) are preserved. */
 #define ELT_BINARY(name, scalarfn) \
     matlab_mat *matlab_##name##_mm(matlab_mat *A, matlab_mat *B) { \
+        matlab_check_ewise_sizes(A, B); \
         int64_t m = A->rows, n = A->cols; \
         matlab_mat *C = mat_alloc(m, n); \
         for (int64_t k = 0; k < m * n; ++k) C->data[k] = scalarfn(A->data[k], B->data[k]); \
