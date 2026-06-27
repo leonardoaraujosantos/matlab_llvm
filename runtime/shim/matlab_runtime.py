@@ -2145,19 +2145,61 @@ def isequal_2s(a, b): return 1.0 if float(a) == float(b) else 0.0
 
 # --- subscripting ---------------------------------------------------------
 
+# MATLAB-style index validation (#423 parity with the C runtime). Raises so
+# an out-of-range / invalid read errors instead of silently wrapping (numpy
+# negative indexing) or truncating. Note: transpiled try/catch is flag-based
+# and will not catch these Python exceptions — they surface as an uncaught
+# error, matching the "halt on bad index" intent for the common case.
+def _check_index(i, total):
+    if i < 1 or i != int(i):
+        raise IndexError(
+            "Array indices must be positive integers or logical values.")
+    if int(i) > total:
+        raise IndexError(
+            "Index exceeds the number of array elements. "
+            f"Index must not exceed {int(total)}.")
+
+
+def _check_index_pos(v, dimsize, pos):
+    if v < 1 or v != int(v):
+        raise IndexError(
+            "Array indices must be positive integers or logical values.")
+    if int(v) > dimsize:
+        raise IndexError(
+            f"Index in position {pos} exceeds array bounds. "
+            f"Index must not exceed {int(dimsize)}.")
+
+
+def _check_cell_index(i, n):
+    if i < 1 or i != int(i):
+        raise IndexError(
+            "Array indices must be positive integers or logical values.")
+    if int(i) > n:
+        raise IndexError(
+            "Index exceeds the number of elements in the cell array. "
+            f"Index must not exceed {int(n)}.")
+
+
 def subscript1_s(A, i):
     a = _m(A)
-    idx = int(i) - 1
-    return float(a.flatten(order='F')[idx])
+    flat = a.flatten(order='F')
+    _check_index(i, flat.size)
+    return float(flat[int(i) - 1])
 
 
 def subscript2_s(A, i, j):
     a = _m(A)
+    _check_index_pos(i, a.shape[0], 1)
+    _check_index_pos(j, a.shape[1], 2)
     return float(a[int(i) - 1, int(j) - 1])
 
 
 def subscript3_s(A, i, j, k):
-    return float(np.asarray(A)[int(i) - 1, int(j) - 1, int(k) - 1])
+    a = np.asarray(A)
+    _check_index_pos(i, a.shape[0], 1)
+    _check_index_pos(j, a.shape[1] if a.ndim > 1 else 1, 2)
+    _check_index_pos(k, a.shape[2] if a.ndim > 2 else 1, 3)
+    return float(a[int(i) - 1, int(j) - 1, int(k) - 1])
 
 
 def subscript3_store(A, i, j, k, v):
@@ -3038,14 +3080,17 @@ def cell_set_str(c, i, s):  # string cell element (#206)
     c[idx - 1] = s
 
 def cell_get_f64(c, i):
+    _check_cell_index(i, len(c))
     v = c[int(i) - 1]
     try: return float(v)
     except Exception: return 0.0
 
 def cell_get_mat(c, i):
+    _check_cell_index(i, len(c))
     return c[int(i) - 1]
 
 def cell_get_str(c, i):
+    _check_cell_index(i, len(c))
     return c[int(i) - 1]  # string element returned as-is (#206)
 
 def cell_numel(c):
