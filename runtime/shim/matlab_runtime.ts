@@ -3174,6 +3174,25 @@ export function err_disp_message(): void { console.log(_error_msg ?? ""); }
 export function err_msg0(): string { return _error_msg; }
 export function err_msg1(): string { return _error_msg; }
 
+// error()/try-catch (#405). The transpiled model is flag-based (the emitter
+// wraps the try body with eh_try_enter/leave and checks the flag afterwards),
+// so raise_* set the flag + message/identifier rather than unwinding — the
+// post-try check_error runs the catch body. eh_try_enter/leave are no-ops here.
+let _error_id = "";
+export function set_error_id(eid: string, _n?: number): void {
+  _error_id = typeof eid === "string" ? eid : String(eid);
+}
+export function eh_try_enter(): void {}
+export function eh_try_leave(): void {}
+export function raise_str(msg: string): void { set_error_id("", 0); set_error_msg(msg); }
+export function raise_id_str(eid: string, _idlen?: number, msg?: string): void {
+  set_error_id(eid);
+  set_error_msg(msg === undefined ? "" : msg);
+}
+export function raise(): void { set_error(); }
+export function err_get_message(): string { return _error_msg; }
+export function err_get_identifier(): string { return _error_id; }
+
 // --- globals (persistent / global vars) -----------------------------------
 
 const _globals = new Map<number, number>();

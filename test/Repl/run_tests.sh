@@ -822,6 +822,99 @@ if [[ ! -e "$HOME/.matlabc_history" ]]; then
   fi
 fi
 
+# #404 — exist(name [, kind]) status codes. Variable lookup uses the live
+# REPL workspace; file/dir consult the filesystem. A private temp file/dir
+# keeps the assertions deterministic.
+exist_dir="$(mktemp -d)"
+exist_file="$exist_dir/probe.txt"
+printf 'x\n' > "$exist_file"
+run_case "exist_var" "$(cat <<EOF
+myvar = 42;
+fprintf('EXIST_VAR=%d\n', exist('myvar','var'));
+exit
+EOF
+)" "EXIST_VAR=1"
+run_case "exist_var_missing" "$(cat <<EOF
+fprintf('EXIST_NOVAR=%d\n', exist('no_such_var','var'));
+exit
+EOF
+)" "EXIST_NOVAR=0"
+run_case "exist_file" "$(cat <<EOF
+fprintf('EXIST_FILE=%d\n', exist('$exist_file','file'));
+exit
+EOF
+)" "EXIST_FILE=2"
+run_case "exist_file_missing" "$(cat <<EOF
+fprintf('EXIST_NOFILE=%d\n', exist('$exist_dir/nope.txt','file'));
+exit
+EOF
+)" "EXIST_NOFILE=0"
+run_case "exist_dir" "$(cat <<EOF
+fprintf('EXIST_DIR=%d\n', exist('$exist_dir','dir'));
+exit
+EOF
+)" "EXIST_DIR=7"
+run_case "exist_no_kind_var" "$(cat <<EOF
+zz = 1;
+fprintf('EXIST_NOKIND=%d\n', exist('zz'));
+exit
+EOF
+)" "EXIST_NOKIND=1"
+rm -rf "$exist_dir"
+
+# #405 — error()/try-catch: identifier + printf-formatted message on the
+# caught MException, plain-message form, and error() halting its function.
+run_case "err_id_and_message" "$(cat <<'EOF'
+try
+  error('myPkg:bad', 'value was %d', 42);
+catch ME
+  fprintf('EID=%s\n', ME.identifier);
+end
+exit
+EOF
+)" "EID=myPkg:bad"
+run_case "err_message_formatted" "$(cat <<'EOF'
+try
+  error('myPkg:bad', 'value was %d', 42);
+catch ME
+  fprintf('EMSG=%s\n', ME.message);
+end
+exit
+EOF
+)" "EMSG=value was 42"
+run_case "err_plain_message" "$(cat <<'EOF'
+try
+  error('simple boom');
+catch ME
+  fprintf('PID=[%s] PMSG=%s\n', ME.identifier, ME.message);
+end
+exit
+EOF
+)" "PID=[] PMSG=simple boom"
+# error() halts the enclosing function: the line after error() must not run.
+run_case "err_halts_before" "$(cat <<'EOF'
+function r = ff()
+  fprintf('F_BEFORE\n');
+  error('stop');
+  fprintf('F_AFTER\n');
+  r = 1;
+end
+ff()
+exit
+EOF
+)" "F_BEFORE"
+run_case_absent "err_halts_skips_after" "$(cat <<'EOF'
+function r = ff()
+  fprintf('F_BEFORE\n');
+  error('stop');
+  fprintf('F_AFTER\n');
+  r = 1;
+end
+ff()
+exit
+EOF
+)" "F_AFTER"
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 if (( fail > 0 )); then

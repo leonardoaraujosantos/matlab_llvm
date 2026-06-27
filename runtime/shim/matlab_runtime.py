@@ -2890,6 +2890,34 @@ def err_disp_message():
 def err_msg0(): return _error_msg
 def err_msg1(): return _error_msg
 
+# error()/try-catch (#405). The transpiled model is flag-based (the emitter
+# wraps the try body with eh_try_enter/leave and checks the flag afterwards),
+# so raise_* set the flag + message/identifier rather than unwinding — the
+# post-try check_error runs the catch body. eh_try_enter/leave are no-ops here.
+_error_id = ""
+
+def set_error_id(eid, n=None):
+    global _error_id
+    _error_id = eid if isinstance(eid, str) else str(eid)
+
+def eh_try_enter(): pass
+def eh_try_leave(): pass
+
+def raise_str(msg):
+    set_error_id("", 0)
+    set_error_msg(msg if isinstance(msg, str) else str(msg))
+
+def raise_id_str(eid, idlen=None, msg=None):
+    set_error_id(eid if isinstance(eid, str) else str(eid))
+    set_error_msg(msg if isinstance(msg, str) else ("" if msg is None else str(msg)))
+
+# Note: no-arg matlab_raise() is intentionally not defined here — `raise` is a
+# Python keyword, so `rt.raise()` cannot be emitted as valid Python. error()
+# with no message is rare; such a program should carry a .skip-emit-python.
+
+def err_get_message(): return _error_msg
+def err_get_identifier(): return _error_id
+
 
 # --- globals (persistent / global vars) -----------------------------------
 
