@@ -2522,7 +2522,9 @@ matlab_mat *matlab_horzcat(matlab_mat *A, matlab_mat *B) {
      * checks above miss it and the row-count guard below would wrongly bail. */
     if (A->rows == 0 || A->cols == 0) return B;
     if (B->rows == 0 || B->cols == 0) return A;
-    if (A->rows != B->rows) return mat_alloc(0, 0);
+    if (A->rows != B->rows)
+        matlab_raise_cmsg(
+            "Dimensions of arrays being concatenated are not consistent.");
     int64_t m = A->rows, na = A->cols, nb = B->cols;
     matlab_mat *_a = A, *_b = B;
     return matlab::runtime::shape_op(m, na + nb,
@@ -2555,7 +2557,9 @@ matlab_mat *matlab_vertcat(matlab_mat *A, matlab_mat *B) {
     /* MATLAB drops an empty operand in concatenation: [[]; X] == X, [X; []] == X. */
     if (A->rows == 0 || A->cols == 0) return B;
     if (B->rows == 0 || B->cols == 0) return A;
-    if (A->cols != B->cols) return mat_alloc(0, 0);
+    if (A->cols != B->cols)
+        matlab_raise_cmsg(
+            "Dimensions of arrays being concatenated are not consistent.");
     int64_t n = A->cols, ma = A->rows, mb = B->rows;
     matlab::runtime::MatPtr R = matlab::runtime::make_mat(ma + mb, n);
     memcpy(R->data,            A->data, (size_t)(ma * n) * sizeof(double));
