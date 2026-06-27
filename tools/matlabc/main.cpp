@@ -4845,7 +4845,16 @@ void *workerMain(void *) {
     G.MainAddr = (void *)*FnOrErr;
     using Thunk = int (*)(void);
     auto Fn = reinterpret_cast<Thunk>(*FnOrErr);
-    (void)Fn();
+    /* #405: an uncaught error() must unwind to here (not exit(1)) so the
+     * monitor still emits a graceful DAP `terminated` event. The runtime has
+     * already snapshotted + printed the backtrace before unwinding. longjmp
+     * stays within this worker thread, which is the only one running JIT code. */
+    static jmp_buf DapEhBuf;
+    matlab_eh_register_landing(&DapEhBuf);
+    if (setjmp(DapEhBuf) == 0) {
+      (void)Fn();
+    }
+    matlab_eh_register_landing(nullptr);
   } else {
     std::cerr << "matlabc -dap: lookup(\"main\") failed: "
               << llvm::toString(FnOrErr.takeError()) << "\n";
