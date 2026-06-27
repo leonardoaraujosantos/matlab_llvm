@@ -2263,8 +2263,35 @@ export function isequal_2s(a: number, b: number): number { return +a === +b ? 1 
 
 // --- subscripting (1-indexed, MATLAB convention) --------------------------
 
+// MATLAB-style index validation (#423 parity with the C runtime). Throws so an
+// out-of-range / invalid read errors instead of silently returning undefined.
+// Note: transpiled try/catch is flag-based and will not catch these throws —
+// they surface as an uncaught error, matching the "halt on bad index" intent.
+function _checkIndex(i: number, total: number): void {
+  if (i < 1 || i !== Math.trunc(i))
+    throw new Error("Array indices must be positive integers or logical values.");
+  if (Math.trunc(i) > total)
+    throw new Error("Index exceeds the number of array elements. " +
+                    `Index must not exceed ${total}.`);
+}
+function _checkIndexPos(v: number, dimsize: number, pos: number): void {
+  if (v < 1 || v !== Math.trunc(v))
+    throw new Error("Array indices must be positive integers or logical values.");
+  if (Math.trunc(v) > dimsize)
+    throw new Error(`Index in position ${pos} exceeds array bounds. ` +
+                    `Index must not exceed ${dimsize}.`);
+}
+function _checkCellIndex(i: number, n: number): void {
+  if (i < 1 || i !== Math.trunc(i))
+    throw new Error("Array indices must be positive integers or logical values.");
+  if (Math.trunc(i) > n)
+    throw new Error("Index exceeds the number of elements in the cell array. " +
+                    `Index must not exceed ${n}.`);
+}
+
 export function subscript1_s(A: any, i: number): number {
   const a = asArray(A);
+  _checkIndex(i, a.rows * a.cols);
   // MATLAB linear index is column-major.
   const idx = (i | 0) - 1;
   const col = Math.floor(idx / a.rows);
@@ -2274,6 +2301,8 @@ export function subscript1_s(A: any, i: number): number {
 
 export function subscript2_s(A: any, i: number, j: number): number {
   const a = asArray(A);
+  _checkIndexPos(i, a.rows, 1);
+  _checkIndexPos(j, a.cols, 2);
   return a.data[((i | 0) - 1) * a.cols + ((j | 0) - 1)];
 }
 
@@ -2281,6 +2310,9 @@ export function subscript3_s(A: any, i: number, j: number, k: number): number {
   const a = asArray(A);
   // Treat 3-D as flat row-major across all dims.
   const [m, n, p] = [a.shape[0], a.shape[1], a.shape[2] ?? 1];
+  _checkIndexPos(i, m, 1);
+  _checkIndexPos(j, n, 2);
+  _checkIndexPos(k, p, 3);
   const idx = ((i | 0) - 1) * n * p + ((j | 0) - 1) * p + ((k | 0) - 1);
   return a.data[idx];
 }
@@ -3292,14 +3324,17 @@ export function cell_set_str(c: any[], i: number, s: any): void {  // (#206)
   c[(i | 0) - 1] = s;
 }
 export function cell_get_f64(c: any[], i: number): number {
+  _checkCellIndex(i, c.length);
   const v = c[(i | 0) - 1];
   const f = Number(v);
   return Number.isNaN(f) ? 0 : f;
 }
 export function cell_get_mat(c: any[], i: number): any {
+  _checkCellIndex(i, c.length);
   return c[(i | 0) - 1];
 }
 export function cell_get_str(c: any[], i: number): any {
+  _checkCellIndex(i, c.length);
   return c[(i | 0) - 1];  // string element returned as-is (#206)
 }
 export function cell_numel(c: any[]): number { return c.length; }
