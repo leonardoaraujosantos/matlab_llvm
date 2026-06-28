@@ -14870,6 +14870,23 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           }
         }
     }
+    /* #431: c(i) cell paren-index (scalar) — route to a cell-aware getter that
+     * bounds-checks and returns a 1x1 sub-cell. Without this the cell base
+     * falls through to matlab.subscript -> matlab_subscript1_s, which reads the
+     * cell pointer as a matlab_mat and yields a garbage value / garbage-bound
+     * error. */
+    if (C.Args.size() == 1 && Idx.size() == 2 &&
+        Idx[1].getType() == mlir::Float64Type::get(&MCtx)) {
+      if (auto *BN = dynamic_cast<const NameExpr *>(C.Callee))
+        if (BN->Ref && CellBindings.count(BN->Ref)) {
+          auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_cell_paren_get"));
+          return emitUnreg("matlab.call_builtin", {Idx[0], Idx[1]}, PtrTy, L,
+                           {Cal});
+        }
+    }
     mlir::NamedAttribute NA(
         mlir::StringAttr::get(&MCtx, "nindices"),
         mlir::IntegerAttr::get(mlir::IntegerType::get(&MCtx, 64),

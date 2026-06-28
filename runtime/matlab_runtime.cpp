@@ -18122,6 +18122,23 @@ double matlab_cell_get_f64(matlab_cell *c, double i1) {
     return 0.0;
 }
 
+/* c(i) paren-index (#431): returns a 1x1 cell holding element i (shallow copy
+ * of the slot), bounds-checked like c{i}. Distinct from c{i}, which returns the
+ * element itself. The lowering routes a cell-base paren-index here so it does
+ * not fall through to the matrix subscript path (which would read the cell
+ * pointer as a matlab_mat and yield garbage). */
+matlab_cell *matlab_cell_paren_get(matlab_cell *c, double i1) {
+    matlab_cell *out = matlab_cell_new(1);
+    if (!c) { out->n = 0; out->cols = 0; return out; }
+    matlab_check_cell_index(i1, c->n);   /* raises on OOB / invalid index */
+    int32_t i = (int32_t)i1 - 1;
+    out->kinds[0]    = c->kinds[i];
+    out->f64_vals[0] = c->f64_vals[i];
+    out->ptr_vals[0] = c->ptr_vals[i];
+    out->n = 1;
+    return out;
+}
+
 matlab_mat *matlab_cell_get_mat(matlab_cell *c, double i1) {
     if (!c) return mat_alloc(0, 0);
     int32_t i = (int32_t)i1 - 1;
