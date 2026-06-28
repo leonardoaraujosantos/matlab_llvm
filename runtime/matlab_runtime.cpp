@@ -891,6 +891,17 @@ matlab_mat *matlab_inv(matlab_mat *A) {
 /* A \ B: solve A*X = B (MATLAB left divide). B may have multiple columns.
  * Phase-4 RAII migration — same scratch shape as matlab_inv. */
 matlab_mat *matlab_mldivide_mm(matlab_mat *A, matlab_mat *B) {
+    /* #433: A\B requires size(A,1)==size(B,1); MATLAB raises "Matrix
+     * dimensions must agree." on a row mismatch (we used to return empty
+     * silently). mrdivide reaches here transposed, so this also enforces the
+     * column rule for `/`. Fire ONLY on the genuine row mismatch so valid
+     * square solves — and rows-agree-but-non-square cases the runtime doesn't
+     * yet solve (left as empty) — are untouched. An empty operand (0xN) is
+     * an internal/degenerate artifact (e.g. a tf->ss conversion that produced
+     * an empty matrix) rather than a user dimension error, so the raise is
+     * gated to non-empty operands to avoid surfacing those as user errors. */
+    if (A && B && A->rows > 0 && B->rows > 0 && A->rows != B->rows)
+        matlab_raise_cmsg("Matrix dimensions must agree.");
     if (!A || !B || A->rows != A->cols || A->rows != B->rows)
         return mat_alloc(0, 0);
     int64_t n = A->rows;
