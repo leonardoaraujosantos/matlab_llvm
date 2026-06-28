@@ -933,6 +933,16 @@ run_case "index_2d_oob" "$(printf 'm = [1 2; 3 4];\nm(3,1)\nexit\n')" \
   "Index in position 1 exceeds array bounds. Index must not exceed 2."
 run_case "cell_oob" "$(printf 'c = {1, 2};\nc{5}\nexit\n')" \
   "Index exceeds the number of elements in the cell array. Index must not exceed 2."
+# Cell PAREN-index (c(i) returns a 1x1 sub-cell) is bounds-checked too — it
+# used to mis-route to the matrix subscript and yield a garbage-bound value.
+# Single-turn (one input) so `c` is a cell binding in the same TU; cross-turn
+# REPL re-tagging of a cell from the workspace is a separate gap (see #431).
+run_case "cell_paren_oob" "$(printf 'c = {1, 2}; c(3)\nexit\n')" \
+  "Index exceeds the number of elements in the cell array. Index must not exceed 2."
+run_case "cell_paren_zero" "$(printf 'c = {1, 2}; c(0)\nexit\n')" \
+  "Array indices must be positive integers or logical values."
+run_case "cell_paren_ok" "$(printf 'c = {10, 20}; d = c(1); fprintf("P=%%d\\n", d{1});\nexit\n')" \
+  "P=10"
 # Valid indexing and a defined var must still work (no over-eager raising).
 run_case "index_valid_still_works" "$(printf 'a = [10 20 30];\nfprintf("V=%%d\\n", a(2));\nexit\n')" \
   "V=20"
