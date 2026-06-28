@@ -847,7 +847,11 @@ static void lu_solve_column(const double *LU, int64_t n, const int64_t *piv,
  * matlab_mat * across the C ABI via .release(), so the symbol shape
  * is unchanged. */
 matlab_mat *matlab_inv(matlab_mat *A) {
-    if (!A || A->rows != A->cols) return mat_alloc(0, 0);
+    if (!A) return mat_alloc(0, 0);
+    if (A->rows != A->cols) {  /* #433: inv requires a square matrix; singular-square still 0x0 via LU below. */
+        matlab_raise_cmsg("Matrix must be square.");
+        return mat_alloc(0, 0);
+    }
     int64_t n = A->rows;
 #ifdef MATLAB_LLVM_WITH_BLAS
     if (n >= lapack_threshold()) {
@@ -1690,7 +1694,10 @@ matlab_mat *matlab_eig_D(matlab_mat *A_in) {
 
 /* det(A): product of LU diagonal times permutation sign. */
 double matlab_det(matlab_mat *A) {
-    if (A->rows != A->cols) return 0.0;
+    if (A->rows != A->cols) {  /* #433: det requires a square matrix; singular-square still 0.0 via LU below. */
+        matlab_raise_cmsg("Matrix must be square.");
+        return 0.0;
+    }
     int64_t n = A->rows;
     double *LU = (double *)malloc((size_t)(n * n) * sizeof(double));
     memcpy(LU, A->data, (size_t)(n * n) * sizeof(double));
@@ -1757,7 +1764,7 @@ matlab_mat *matlab_reshape(matlab_mat *A, double m, double n) {
     if (mat_is_nd(A)) { matlab_matN *An = (matlab_matN *)A; src = 1; for (uint32_t k = 0; k < An->ndims; ++k) src *= An->dims[k]; sd = An->data; }  /* #93: reshape(matN, m, n) -> 2-D */
     else if (mat_is_3d(A)) { matlab_mat3 *A3 = (matlab_mat3 *)A; src = A3->rows * A3->cols * A3->depth; sd = A3->data; }
     else              { src = A->rows * A->cols; sd = A->data; }
-    if (rm * cn != src) return mat_alloc(0, 0);
+    if (rm * cn != src) { matlab_raise_cmsg("Number of elements must not change. Use [] as one of the size inputs to automatically calculate the appropriate size for that dimension."); return mat_alloc(0, 0); }
     matlab_mat *B = mat_alloc(rm, cn);
     memcpy(B->data, sd, (size_t)(rm * cn) * sizeof(double));
     return B;
@@ -1775,7 +1782,7 @@ matlab_mat3 *matlab_reshape3(matlab_mat *A, double m, double n, double p) {
     } else if (mat_is_3d(A)) {
         matlab_mat3 *A3 = (matlab_mat3 *)A; src = A3->rows * A3->cols * A3->depth; sd = A3->data;
     } else { src = A->rows * A->cols; sd = A->data; }
-    if (rm * cn * pp != src) return (matlab_mat3 *)mat_alloc(0, 0);
+    if (rm * cn * pp != src) { matlab_raise_cmsg("Number of elements must not change. Use [] as one of the size inputs to automatically calculate the appropriate size for that dimension."); return (matlab_mat3 *)mat_alloc(0, 0); }
     if (pp == 1) { matlab_mat *B = mat_alloc(rm, cn); memcpy(B->data, sd, (size_t)(rm * cn) * sizeof(double)); return (matlab_mat3 *)B; }
     matlab_mat3 *B = mat3_alloc(rm, cn, pp);
     memcpy(B->data, sd, (size_t)(rm * cn * pp) * sizeof(double));
@@ -1797,7 +1804,7 @@ void *matlab_reshape4(matlab_mat *A, double d1, double d2, double d3, double d4)
     } else if (mat_is_3d(A)) {
         matlab_mat3 *A3 = (matlab_mat3 *)A; src = A3->rows * A3->cols * A3->depth; sd = A3->data;
     } else { src = A->rows * A->cols; sd = A->data; }
-    if (totalOut != src) return mat_alloc(0, 0);
+    if (totalOut != src) { matlab_raise_cmsg("Number of elements must not change. Use [] as one of the size inputs to automatically calculate the appropriate size for that dimension."); return mat_alloc(0, 0); }
     void *R = matN_alloc(4, dims);
     if (!R) return mat_alloc(0, 0);
     double *dst = nullptr;
@@ -10132,7 +10139,7 @@ void *matlab_reshapeN(void *A, matlab_mat *target) {
         totalIn = p->rows * p->cols;
         src = p->data;
     }
-    if (totalIn != totalOut) return mat_alloc(0, 0);
+    if (totalIn != totalOut) { matlab_raise_cmsg("Number of elements must not change. Use [] as one of the size inputs to automatically calculate the appropriate size for that dimension."); return mat_alloc(0, 0); }
     void *R = matN_alloc(ndims, dims);
     if (!R) return mat_alloc(0, 0);
     double *dst = nullptr;

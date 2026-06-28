@@ -3610,6 +3610,33 @@ void Lowerer::lowerStmt(const Stmt &St) {
         }
       }
       if (IsBuiltin) {
+        /* #433: requesting more outputs than a strictly single-output builtin
+         * produces — `[a, b] = sin(1)` — must raise, not silently no-op.
+         * Gated on an allowlist of element-wise math / type-cast builtins that
+         * are NEVER multi-output in MATLAB, so genuine multi-output builtins
+         * (eig/size/sort/min/max/...) and method/handle dispatch are untouched.
+         * Emitted as @error (reuses the existing error lowering arm). */
+        static const llvm::StringSet<> SingleOutputBuiltins = {
+          "sin","cos","tan","asin","acos","atan",
+          "sinh","cosh","tanh","asinh","acosh","atanh",
+          "sind","cosd","tand","asind","acosd","atand",
+          "exp","log","log2","log10","log1p","expm1",
+          "sqrt","abs","sign","floor","ceil","round","fix",
+          "real","imag","conj","angle",
+          "double","single","logical",
+          "int8","int16","int32","int64",
+          "uint8","uint16","uint32","uint64",
+        };
+        if (A.LHS.size() >= 2 && SingleOutputBuiltins.contains(Callee->Name)) {
+          std::string Msg = "Error using " + std::string(Callee->Name) +
+                            "\nToo many output arguments.";
+          mlir::Value MsgC = emitFieldNameChar(Msg, loc(A.Range));
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "error"));
+          emitUnregOp("matlab.call_builtin", {MsgC}, {}, loc(A.Range), {Cal});
+          return;
+        }
         llvm::SmallVector<mlir::Value, 4> Args;
         for (const Expr *Arg : C->Args)
           if (Arg) Args.push_back(lowerExpr(*Arg));
