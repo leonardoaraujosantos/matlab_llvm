@@ -995,6 +995,14 @@ run_case "horzcat_mismatch" "$(printf '[ [1;2], [3;4;5] ]\nexit\n')" \
 run_case "concat_ok" "$(printf 'fprintf("C=%%d\\n", sum([[1 2],[3 4]]));\nexit\n')" \
   "C=10"
 
+# #431 item 1: reading a field that does not exist on a struct raises
+# "Unrecognized field name" instead of silently returning 0; present fields
+# still read fine.
+run_case "struct_unknown_field" "$(printf 's.a = 1; s.b\nexit\n')" \
+  "Unrecognized field name \"b\"."
+run_case "struct_known_field_ok" "$(printf 's.a = 1; s.b = 2; fprintf("F=%%d\\n", s.a + s.b);\nexit\n')" \
+  "F=3"
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 if (( fail > 0 )); then

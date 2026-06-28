@@ -3259,6 +3259,22 @@ export function struct_get_mat(s: any, name: string, _n?: number): any {
 export function struct_has_field(s: any, name: string, _n?: number): number {
   return s != null && Object.prototype.hasOwnProperty.call(s, name) ? 1 : 0;
 }
+// #431: user `s.field` reads use the checked getters — an absent field throws
+// "Unrecognized field name" instead of returning 0/null. Internal reads keep
+// the lenient struct_get_* above.
+function _structFieldMissing(s: any, name: string): boolean {
+  return s == null || !Object.prototype.hasOwnProperty.call(s, name);
+}
+export function struct_get_f64_checked(s: any, name: string, n?: number): number {
+  if (_structFieldMissing(s, name))
+    throw new Error(`Unrecognized field name "${name}".`);
+  return struct_get_f64(s, name, n);
+}
+export function struct_get_mat_checked(s: any, name: string, n?: number): any {
+  if (_structFieldMissing(s, name))
+    throw new Error(`Unrecognized field name "${name}".`);
+  return struct_get_mat(s, name, n);
+}
 export function struct_get_child_struct(s: any, name: string, _n?: number): any {
   if (s[name] == null || typeof s[name] !== "object") s[name] = {};
   return s[name];

@@ -8540,6 +8540,30 @@ double matlab_struct_has_field(matlab_struct *s, const char *name, int64_t len) 
     return struct_find_field(s, name, (int32_t)len) >= 0 ? 1.0 : 0.0;
 }
 
+/* #431: "checked" field reads used for USER `s.field` reads on a known struct.
+ * A read of a field that doesn't exist raises MATLAB's "Unrecognized field
+ * name" instead of silently returning 0/empty. The plain matlab_struct_get_*
+ * stay lenient for internal/runtime callers that read optional fields. */
+static void matlab_struct_field_error(const char *name, int64_t len) {
+    char buf[160];
+    int n = (int)(len < 0 ? 0 : (len > 120 ? 120 : len));
+    snprintf(buf, sizeof buf, "Unrecognized field name \"%.*s\".",
+             n, name ? name : "");
+    matlab_raise_cmsg(buf);
+}
+double matlab_struct_get_f64_checked(matlab_struct *s, const char *name,
+                                     int64_t len) {
+    if (!s || struct_find_field(s, name, (int32_t)len) < 0)
+        matlab_struct_field_error(name, len);
+    return matlab_struct_get_f64(s, name, len);
+}
+matlab_mat *matlab_struct_get_mat_checked(matlab_struct *s, const char *name,
+                                          int64_t len) {
+    if (!s || struct_find_field(s, name, (int32_t)len) < 0)
+        matlab_struct_field_error(name, len);
+    return matlab_struct_get_mat(s, name, len);
+}
+
 /* Return the storage KIND of a struct field (0=f64, 1=mat, 2=obj, 3=string,
  * 6=table, 12=struct, …), or -1 if the field is absent.  Lets a caller tell
  * a struct-shaped field from a string/scalar one without re-deriving the

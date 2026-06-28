@@ -15314,8 +15314,23 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             !StructBindings.count(BN->Ref) &&
             !StructInitialised.count(BN->Ref))
           WantMat = true;
-    llvm::StringRef Callee = WantMat ? "matlab_struct_get_mat"
-                                      : "matlab_struct_get_f64";
+    /* #431 item 1: a user read of a field that doesn't exist on a known
+     * struct raises "Unrecognized field name" instead of returning 0/empty.
+     * Gated to a *same-TU plain struct* base (StructBindings / StructInitialised)
+     * so it can't fire on a class-instance whose property read is routed through
+     * this generic struct path in the cross-turn / REPL case (where Sema lost
+     * the obj type) — those keep the lenient getter. Cross-turn plain structs
+     * also stay lenient. Internal C callers always use the lenient getter. */
+    bool PlainStructBase = false;
+    if (auto *BN = dynamic_cast<const NameExpr *>(F.Base))
+      if (BN->Ref && !BN->Ref->PinnedClass &&
+          (StructBindings.count(BN->Ref) || StructInitialised.count(BN->Ref)))
+        PlainStructBase = true;
+    llvm::StringRef Callee =
+        PlainStructBase ? (WantMat ? "matlab_struct_get_mat_checked"
+                                   : "matlab_struct_get_f64_checked")
+                        : (WantMat ? "matlab_struct_get_mat"
+                                   : "matlab_struct_get_f64");
     mlir::NamedAttribute Cal(
         mlir::StringAttr::get(&MCtx, "callee"),
         mlir::StringAttr::get(&MCtx, Callee));
