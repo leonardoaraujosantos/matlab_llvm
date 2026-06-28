@@ -1025,6 +1025,13 @@ run_case "anon_too_many_args" "$(printf 'g = @(a) a; g(1,2)\nexit\n')" \
 run_case "anon_arity_ok" "$(printf 'f = @(a,b) a + b; fprintf("S=%%d\\n", f(3,4));\nexit\n')" \
   "S=7"
 
+# #433: mldivide (\) row mismatch raises "Matrix dimensions must agree."
+# (rows-agree underdetermined / non-square solves are a separate gap, untouched).
+run_case "mldivide_row_mismatch" "$(printf '[1 2; 3 4] \\ [1 2 3]\nexit\n')" \
+  "Matrix dimensions must agree."
+run_case "mldivide_ok" "$(printf 'x = [1 2;3 4] \\ [5;6]; fprintf("X=%%.1f\\\\n", sum(x));\nexit\n')" \
+  "X=0.5"
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 if (( fail > 0 )); then

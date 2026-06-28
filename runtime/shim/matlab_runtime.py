@@ -484,7 +484,11 @@ def reshape(A, m, n):
 
 def matmul_mm(A, B): return _m(A) @ _m(B)
 def inv(A):           return np.linalg.inv(_m(A))
-def mldivide_mm(A, B): return np.linalg.solve(_m(A), _m(B))
+def mldivide_mm(A, B):
+    A, B = _m(A), _m(B)
+    if A.shape[0] != B.shape[0]:  # #433 parity with the C runtime
+        raise ValueError("Matrix dimensions must agree.")
+    return np.linalg.solve(A, B)
 def mrdivide_mm(A, B): return _m(A) @ np.linalg.inv(_m(B))
 def det(A):            return float(np.linalg.det(_m(A)))
 def norm_p(A, p):

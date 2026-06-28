@@ -386,7 +386,12 @@ export function reshape(A: any, m: number, n: number): NDArray {
 
 export function matmul_mm(A: any, B: any): NDArray { return np.matmul(A, B); }
 export function inv(A: any): NDArray { return np.linalg.inv(A); }
-export function mldivide_mm(A: any, B: any): NDArray { return np.linalg.solve(A, B); }
+export function mldivide_mm(A: any, B: any): NDArray {
+  const a = asArray(A), b = asArray(B);
+  if (a.rows !== b.rows)  // #433 parity with the C runtime
+    throw new Error("Matrix dimensions must agree.");
+  return np.linalg.solve(A, B);
+}
 export function mrdivide_mm(A: any, B: any): NDArray {
   return np.matmul(asArray(A), np.linalg.inv(B));
 }
