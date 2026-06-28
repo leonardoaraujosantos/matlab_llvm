@@ -3011,6 +3011,25 @@ def struct_has_field(s, name, n=None):
     return 1.0 if hasattr(s, name) else 0.0
 
 
+# #431: user `s.field` reads use the checked getters — an absent field raises
+# "Unrecognized field name" instead of returning 0/empty. Internal reads keep
+# the lenient struct_get_* above.
+def _struct_field_missing(s, name):
+    if hasattr(s, '__contains__'):
+        return name not in s
+    return not hasattr(s, name)
+
+def struct_get_f64_checked(s, name, n=None):
+    if s is None or _struct_field_missing(s, name):
+        raise KeyError('Unrecognized field name "%s".' % name)
+    return struct_get_f64(s, name, n)
+
+def struct_get_mat_checked(s, name, n=None):
+    if s is None or _struct_field_missing(s, name):
+        raise KeyError('Unrecognized field name "%s".' % name)
+    return struct_get_mat(s, name, n)
+
+
 def struct_get_child_struct(s, name, n=None):
     v = s.get(name) if hasattr(s, 'get') else getattr(s, name, None)
     if v is None:

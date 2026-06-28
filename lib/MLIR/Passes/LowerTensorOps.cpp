@@ -2028,6 +2028,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
     }
     if ((Name == "matlab_struct_get_f64" ||
          Name == "matlab_struct_get_mat" ||
+         Name == "matlab_struct_get_f64_checked" ||
+         Name == "matlab_struct_get_mat_checked" ||
          Name == "matlab_struct_get_child_struct" ||
          Name == "matlab_struct_has_field") &&
         Call->getNumOperands() == 2 && Call->getNumResults() == 1) {
@@ -2038,6 +2040,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Value Ptr = fieldNameAddr(NameV, Len);
       if (!Ptr) continue;
       bool IsPtr = Name == "matlab_struct_get_mat" ||
+                   Name == "matlab_struct_get_mat_checked" ||
                    Name == "matlab_struct_get_child_struct";
       Type Ret = IsPtr ? (Type)PtrTy : (Type)F64;
       B.setInsertionPoint(Call);
