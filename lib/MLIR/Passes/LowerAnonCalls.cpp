@@ -514,6 +514,54 @@ bool rewriteUserCallIndirect(ModuleOp M) {
 
 } // namespace
 
+/* #433: an anonymous-function call whose argument count doesn't match the
+ * outlined function's arity must raise MATLAB's "Not enough input arguments."
+ * / "Too many input arguments." instead of surviving as an unlowered
+ * matlab.call_indirect (reported as the generic "indirect call to an undefined
+ * name"). matlab_raise_cmsg never returns (longjmp in -repl, exit(1) AOT).
+ * Only the bare-call form (result unused) is rewritten. */
+static void emitAnonArityError(OpBuilder &B, ModuleOp M, Operation *Call,
+                               StringRef Msg) {
+  MLIRContext *Ctx = M.getContext();
+  auto PtrTy = LLVM::LLVMPointerType::get(Ctx);
+  auto VoidTy = LLVM::LLVMVoidType::get(Ctx);
+  auto RaiseFn = M.lookupSymbol<LLVM::LLVMFuncOp>("matlab_raise_cmsg");
+  if (!RaiseFn) {
+    OpBuilder::InsertionGuard G(B);
+    B.setInsertionPointToStart(M.getBody());
+    RaiseFn = LLVM::LLVMFuncOp::create(
+        B, M.getLoc(), "matlab_raise_cmsg",
+        LLVM::LLVMFunctionType::get(VoidTy, {PtrTy}));
+    RaiseFn.setLinkage(LLVM::Linkage::External);
+  }
+  std::string Text(Msg);
+  Text.push_back('\0');
+  LLVM::GlobalOp Found;
+  for (auto G : M.getOps<LLVM::GlobalOp>()) {
+    if (!G.getConstant()) continue;
+    auto A = mlir::dyn_cast_or_null<StringAttr>(G.getValueAttr());
+    if (A && A.getValue() == Text) { Found = G; break; }
+  }
+  if (!Found) {
+    OpBuilder::InsertionGuard G(B);
+    B.setInsertionPointToStart(M.getBody());
+    auto ArrTy = LLVM::LLVMArrayType::get(IntegerType::get(Ctx, 8),
+                                          (unsigned)Text.size());
+    unsigned N = 0;
+    std::string Sym;
+    do { Sym = ("__matlab_anon_arity_" + llvm::Twine(N++)).str(); }
+    while (M.lookupSymbol(Sym));
+    Found = LLVM::GlobalOp::create(B, M.getLoc(), ArrTy, /*isConstant=*/true,
+                                   LLVM::Linkage::Internal, Sym,
+                                   StringAttr::get(Ctx, Text));
+  }
+  B.setInsertionPoint(Call);
+  Value MsgPtr =
+      LLVM::AddressOfOp::create(B, Call->getLoc(), PtrTy, Found.getSymName());
+  LLVM::CallOp::create(B, Call->getLoc(), RaiseFn, ValueRange{MsgPtr});
+  Call->erase();
+}
+
 /* Second-chance rewrite for matlab.call_indirect ops that survived the
  * first LowerAnonCalls run because their operand types hadn't yet been
  * retyped from tensor to ptr. By the time LowerTensorOps has run, the
@@ -572,7 +620,35 @@ bool runLowerAnonCallsPost(ModuleOp M) {
     auto Fn = M.lookupSymbol<LLVM::LLVMFuncOp>(FnName);
     if (!Fn) continue;
     auto FnType = Fn.getFunctionType();
-    if (Call->getNumOperands() - 1 != FnType.getNumParams()) continue;
+    unsigned Provided = Call->getNumOperands() - 1;
+    unsigned Declared = FnType.getNumParams();
+    if (Provided != Declared) {
+      /* #433: arity-mismatched anonymous-function call (only __anon_ targets;
+       * named-handle funcs keep the old skip). Only the bare-call form (result
+       * unused) is rewritten. */
+      bool ResultUnused = Call->getNumResults() == 0 ||
+                          Call->getResult(0).use_empty();
+      if (FnName.starts_with("__anon_") && ResultUnused) {
+        bool TooMany = Provided > Declared;
+        bool Emit = TooMany;
+        if (!TooMany && !Fn.getBody().empty()) {
+          /* "Not enough" only when a MISSING positional arg is referenced in
+           * the body — `@(a,b)a; f(1)` is fine, `@(a,b)a+b; f(1)` errors. */
+          mlir::Block &EB = Fn.getBody().front();
+          for (unsigned i = Provided;
+               i < Declared && i < EB.getNumArguments(); ++i)
+            if (!EB.getArgument(i).use_empty()) { Emit = true; break; }
+        }
+        if (Emit) {
+          emitAnonArityError(B, M, Call,
+                             TooMany ? "Too many input arguments."
+                                     : "Not enough input arguments.");
+          Changed = true;
+          continue;
+        }
+      }
+      continue;
+    }
     bool OK = true;
     SmallVector<Value> Args;
     B.setInsertionPoint(Call);

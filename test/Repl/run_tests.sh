@@ -1003,6 +1003,28 @@ run_case "struct_unknown_field" "$(printf 's.a = 1; s.b\nexit\n')" \
 run_case "struct_known_field_ok" "$(printf 's.a = 1; s.b = 2; fprintf("F=%%d\\n", s.a + s.b);\nexit\n')" \
   "F=3"
 
+# #433: reshape count mismatch, non-square inv/det, too-many-outputs, and
+# anonymous-function arity all raise MATLAB-style errors instead of silently
+# returning wrong/empty values; valid forms still work.
+run_case "reshape_count_mismatch" "$(printf 'reshape([1 2 3 4],2,3)\nexit\n')" \
+  "Number of elements must not change."
+run_case "reshape_ok" "$(printf 'B=reshape([1 2 3 4 5 6],2,3); fprintf("R=%%d\\n", sum(B(:)));\nexit\n')" \
+  "R=21"
+run_case "inv_nonsquare" "$(printf 'inv([1 2 3])\nexit\n')" \
+  "Matrix must be square."
+run_case "det_nonsquare" "$(printf 'det([1 2 3])\nexit\n')" \
+  "Matrix must be square."
+run_case "det_square_ok" "$(printf 'fprintf("D=%%d\\n", det([1 2;3 4]));\nexit\n')" \
+  "D=-2"
+run_case "too_many_outputs" "$(printf '[a,b] = sin(1)\nexit\n')" \
+  "Too many output arguments."
+run_case "anon_too_few_args" "$(printf 'f = @(a,b) a + b; f(1)\nexit\n')" \
+  "Not enough input arguments."
+run_case "anon_too_many_args" "$(printf 'g = @(a) a; g(1,2)\nexit\n')" \
+  "Too many input arguments."
+run_case "anon_arity_ok" "$(printf 'f = @(a,b) a + b; fprintf("S=%%d\\n", f(3,4));\nexit\n')" \
+  "S=7"
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 if (( fail > 0 )); then
